@@ -1,0 +1,63 @@
+{
+  "projectName": "Decentralized Personal Context (D-PC)",
+  "version": "3.0.0",
+  "lastUpdated": "2025-11-02",
+  "mission": "To build the foundational protocol for a future where AI assistants securely and privately exchange both knowledge (context) and computational power on behalf of their users.",
+  "vision": "In the future, all users will interact through local AI assistants. D-PC aims to become the 'SMTP for AI', an open standard that enables communication and resource sharing across different platforms and ecosystems, creating a decentralized collaborative intelligence.",
+  "strategy": {
+    "name": "The Pragmatic Visionary's Path (The Bridge Strategy)",
+    "summary": "This strategy adopts a two-track plan. Track 1: Achieve product-market fit with a pragmatic, federated MVP that provides a dual value proposition: 1) AI-mediated knowledge sharing and 2) decentralized compute sharing. Track 2: Develop the open D-PC protocol in parallel, positioning it as the long-term standard.",
+    "metaphor": "We are building a 'helipad' (a useful, federated service for today) that is designed to be expandable into an 'airport' (the fully decentralized D-PC network) when the 'flying cars' (mass adoption of local AI assistants) arrive."
+  },
+  "coreMechanisms": {
+    "contextStorage": {
+      "model": "Multi-File, Local-First",
+      "description": "A user's full context is split into multiple domain-specific files and is never uploaded in its entirety to a central server."
+    },
+    "contextFirewall": {
+      "name": ".dpc_access",
+      "description": "A user-managed configuration file that acts as a unified firewall, defining granular access rules for both context data and computational resources for all entities (local AI, hubs, peers)."
+    },
+    "computeSharing": {
+      "name": "Decentralized Compute Pool",
+      "description": "Allows users to securely offer their local AI inference capabilities to trusted peers. Requests are sent via a `REMOTE_INFERENCE` command over a direct P2P channel, enabling users with less powerful hardware to access high-end models while preserving privacy."
+    }
+  },
+  "active_phase": "phase_2_federated_mvp",
+  "phase_1_poc": {
+    "name": "P2P Technical Proof-of-Concept",
+    "status": "Completed & Archived",
+    "conclusion": "The PoC proved the technical viability of secure, cross-platform P2P channels, which are a prerequisite for both private context exchange and remote inference."
+  },
+  "phase_2_federated_mvp": {
+    "name": "The AI-Powered Expert & Compute Network",
+    "status": "Planning",
+    "timeline": "6-9 months",
+    "goal": "Validate the dual killer use cases (knowledge and compute sharing) in a user-friendly, hub-assisted environment.",
+    "architecture": "Hybrid Model: A central Federation Hub for user/resource discovery and P2P signaling, coupled with a local D-PC client that manages all private data, direct connections, and acts as a compute provider/consumer.",
+    "user_flow": "1) A user publishes their expertise profile and available compute resources to the Hub. 2) A querent's AI finds the expert/resource on the Hub. 3) The Hub facilitates a P2P connection. 4) The exchange of sensitive context or the execution of a remote inference job happens directly between the two users' local clients.",
+    "immediate_actions": [
+      "1. Formalize the syntax for the `.dpc_access` file, including rules for compute sharing.",
+      "2. Implement the core logic for the 'Context Firewall'.",
+      "3. Design the `REMOTE_INFERENCE` command within the D-PC Transport Protocol.",
+      "4. Develop the local D-PC client application with capabilities to both request and serve remote inference jobs.",
+      "5. Design and build the minimal Federation Hub service, now acting as both a user directory and a resource broker."
+    ]
+  },
+  "long_term_vision_track": {
+    "name": "D-PC as an Open Standard",
+    "status": "Ongoing R&D",
+    "goal": "To position D-PC as the industry standard for interoperable AI-to-AI communication and resource sharing.",
+    "activities": [
+      "Maintaining and refining the Whitepaper to reflect the dual value proposition.",
+      "Developing formal specifications for the DPTP (including `REMOTE_INFERENCE`) and the Context Firewall.",
+      "Creating a lightweight SDK for AI assistant developers to integrate D-PC capabilities."
+    ]
+  },
+  "acknowledged_risks": {
+    "summary": "This section addresses the critical risks raised by external analysis.",
+    "timing_risk": "The primary risk. The AI-mediated future may be 5-10 years away. The two-track strategy mitigates this by creating a sustainable business in the interim.",
+    "configuration_complexity": "The `.dpc_access` file is powerful but potentially complex. The success of the project critically depends on the ability of the AI assistant to manage this file on the user's behalf via natural language commands.",
+    "adoption_risk_and_competition": "Incumbent giants will create closed protocols. D-PC's value proposition is interoperability, privacy, and resource sharing, positioning it as a 'bridge' between walled gardens."
+  }
+}
