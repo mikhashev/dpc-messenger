@@ -1,0 +1,208 @@
+# dpc-client/core/dpc_client_core/llm_manager.py
+
+import os
+import toml
+import asyncio
+from pathlib import Path
+from typing import Dict, Any
+
+# Import client libraries
+from openai import AsyncOpenAI
+from anthropic import AsyncAnthropic
+import ollama
+
+# --- Abstract Base Class for all Providers ---
+
+class AIProvider:
+    """Abstract base class for all AI providers."""
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        self.alias = alias
+        self.config = config
+        self.model = config.get("model")
+
+    async def generate_response(self, prompt: str) -> str:
+        """Generates a response from the AI model."""
+        raise NotImplementedError
+
+# --- Concrete Provider Implementations ---
+
+class OllamaProvider(AIProvider):
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        super().__init__(alias, config)
+        self.client = ollama.AsyncClient(host=config.get("host"))
+
+    async def generate_response(self, prompt: str) -> str:
+        try:
+            message = {'role': 'user', 'content': prompt}
+            response = await self.client.chat(model=self.model, messages=[message])
+            return response['message']['content']
+        except Exception as e:
+            raise RuntimeError(f"Ollama provider '{self.alias}' failed: {e}") from e
+
+class OpenAICompatibleProvider(AIProvider):
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        super().__init__(alias, config)
+        api_key = config.get("api_key")
+        if not api_key:
+            api_key_env = config.get("api_key_env")
+            if api_key_env:
+                api_key = os.getenv(api_key_env)
+        
+        if not api_key:
+            raise ValueError(f"API key not found for OpenAI compatible provider '{self.alias}'")
+
+        self.client = AsyncOpenAI(base_url=config.get("base_url"), api_key=api_key)
+
+    async def generate_response(self, prompt: str) -> str:
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise RuntimeError(f"OpenAI compatible provider '{self.alias}' failed: {e}") from e
+
+class AnthropicProvider(AIProvider):
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        super().__init__(alias, config)
+        api_key_env = config.get("api_key_env")
+        api_key = os.getenv(api_key_env) if api_key_env else None
+        
+        if not api_key:
+            raise ValueError(f"API key environment variable not set for Anthropic provider '{self.alias}'")
+
+        self.client = AsyncAnthropic(api_key=api_key)
+
+    async def generate_response(self, prompt: str) -> str:
+        try:
+            message = await self.client.messages.create(
+                model=self.model,
+                max_tokens=2048, # Anthropic requires max_tokens
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return message.content[0].text
+        except Exception as e:
+            raise RuntimeError(f"Anthropic provider '{self.alias}' failed: {e}") from e
+
+
+# --- The Manager Class ---
+
+PROVIDER_MAP = {
+    "ollama": OllamaProvider,
+    "openai_compatible": OpenAICompatibleProvider,
+    "anthropic": AnthropicProvider,
+}
+
+class LLMManager:
+    """
+    Manages all configured AI providers.
+    """
+    def __init__(self, config_path: Path = Path.home() / ".dpc" / "providers.toml"):
+        self.config_path = config_path
+        self.providers: Dict[str, AIProvider] = {}
+        self.default_provider: str | None = None
+        self._load_providers_from_config()
+
+    def _load_providers_from_config(self):
+        """Reads the config file and initializes all defined providers."""
+        print(f"Loading AI providers from {self.config_path}...")
+        if not self.config_path.exists():
+            print(f"Warning: Provider config file not found at {self.config_path}. No providers loaded.")
+            return
+
+        try:
+            config = toml.load(self.config_path)
+            self.default_provider = config.get("default_provider")
+
+            for provider_config in config.get("providers", []):
+                alias = provider_config.get("alias")
+                provider_type = provider_config.get("type")
+
+                if not alias or not provider_type:
+                    print(f"Warning: Skipping invalid provider config: {provider_config}")
+                    continue
+
+                if provider_type in PROVIDER_MAP:
+                    provider_class = PROVIDER_MAP[provider_type]
+                    try:
+                        self.providers[alias] = provider_class(alias, provider_config)
+                        print(f"  - Successfully loaded provider '{alias}' of type '{provider_type}'.")
+                    except (ValueError, KeyError) as e:
+                        print(f"  - Error loading provider '{alias}': {e}")
+                else:
+                    print(f"Warning: Unknown provider type '{provider_type}' for alias '{alias}'.")
+            
+            if self.default_provider and self.default_provider not in self.providers:
+                print(f"Warning: Default provider '{self.default_provider}' not found in loaded providers.")
+                self.default_provider = None
+
+        except Exception as e:
+            print(f"Error parsing provider config file: {e}")
+
+    async def query(self, prompt: str, provider_alias: str | None = None) -> str:
+        """
+        Routes a query to the specified provider, or the default provider if None.
+        """
+        alias_to_use = provider_alias or self.default_provider
+        if not alias_to_use:
+            raise ValueError("No provider specified and no default provider is set.")
+        
+        if alias_to_use not in self.providers:
+            raise ValueError(f"Provider '{alias_to_use}' is not configured or failed to load.")
+        
+        provider = self.providers[alias_to_use]
+        print(f"Routing query to provider '{alias_to_use}' with model '{provider.model}'...")
+        return await provider.generate_response(prompt)
+
+# --- Self-testing block ---
+async def main_test():
+    print("--- Testing LLMManager ---")
+    
+    # Create a dummy providers.toml for testing
+    dummy_config_content = """
+default_provider = "local_ollama"
+
+[[providers]]
+  alias = "local_ollama"
+  type = "ollama"
+  model = "llama3.1:8b"
+  host = "http://127.0.0.1:11434"
+"""
+    config_file = Path("test_providers.toml")
+    # We need to place it where the manager expects to find it, or pass the path
+    # For simplicity, let's assume it's in the user's home .dpc directory
+    dpc_dir = Path.home() / ".dpc"
+    dpc_dir.mkdir(exist_ok=True)
+    test_config_path = dpc_dir / "providers.toml"
+    test_config_path.write_text(dummy_config_content)
+
+    try:
+        manager = LLMManager(config_path=test_config_path)
+        
+        if not manager.providers:
+            print("\nNo providers were loaded. Cannot run test query.")
+            return
+
+        print("\nTesting query with default provider...")
+        response = await manager.query("What is the capital of France?")
+        print(f"  -> Response: {response}")
+
+        print("\nTesting query with specified provider...")
+        response = await manager.query("What is the capital of Germany?", provider_alias="local_ollama")
+        print(f"  -> Response: {response}")
+
+    except Exception as e:
+        print(f"\nAn error occurred during testing: {e}")
+    finally:
+        # Clean up the dummy config
+        if test_config_path.exists():
+            test_config_path.unlink()
+        print("\n--- Test finished ---")
+
+if __name__ == '__main__':
+    # To run this test:
+    # 1. Make sure Ollama is running.
+    # 2. Navigate to `dpc-client/core/`
+    # 3. Run: `poetry run python dpc_client_core/llm_manager.py`
+    asyncio.run(main_test())

@@ -10,7 +10,10 @@ requires-python = ">=3.12"
 dependencies = [
     "ollama (>=0.6.0,<0.7.0)",
     "websockets (>=15.0.1,<16.0.0)",
-    "dpc-protocol @ file:///C:/Users/mike/Documents/dpc-messenger/dpc-protocol"
+    "dpc-protocol @ file:///C:/Users/mike/Documents/dpc-messenger/dpc-protocol",
+    "toml (>=0.10.2,<0.11.0)",
+    "openai (>=2.6.1,<3.0.0)",
+    "anthropic (>=0.72.0,<0.73.0)"
 ]
 
 
