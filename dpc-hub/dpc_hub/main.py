@@ -1,6 +1,8 @@
 # dpc-hub/dpc_hub/main.py
 import traceback
+from typing import List, Optional
 from fastapi import FastAPI, Depends, Request, HTTPException
+from pydantic import BaseModel
 from starlette.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from authlib.integrations.starlette_client import OAuth
@@ -16,6 +18,16 @@ app = FastAPI(
     description="The central discovery and signaling server for the D-PC network.",
     debug=False
 )
+
+# This is the schema for the search result item
+class SearchResult(BaseModel):
+    node_id: str
+    name: str
+    description: Optional[str] = None
+
+# This is the schema for the full search response
+class SearchResponse(BaseModel):
+    results: List[SearchResult]
 
 @app.exception_handler(Exception)
 async def debug_exception_handler(request: Request, exc: Exception):
@@ -117,3 +129,30 @@ async def read_profile(
         "updated_at": profile.updated_at
     }
     return response_data
+
+@app.get("/discovery/search", response_model=SearchResponse)
+async def search_profiles(
+    q: str,
+    min_level: int = 1,
+    db: AsyncSession = Depends(get_db),
+    _current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Searches for users based on their advertised expertise.
+    """
+    if not q:
+        raise HTTPException(status_code=400, detail="Query parameter 'q' cannot be empty.")
+
+    profiles = await crud.search_profiles_by_expertise(db, topic=q.lower(), min_level=min_level)
+    
+    # Format the results to match the SearchResult schema
+    results = [
+        SearchResult(
+            node_id=profile.user.node_id,
+            name=profile.profile_data.get('name'),
+            description=profile.profile_data.get('description')
+        )
+        for profile in profiles
+    ]
+    
+    return {"results": results}
