@@ -1,10 +1,15 @@
 # dpc-hub/dpc_hub/crud.py
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from . import models
+from sqlalchemy.orm import joinedload
+from . import models, schemas
 
 async def get_user_by_email(db: AsyncSession, email: str):
-    result = await db.execute(select(models.User).filter(models.User.email == email))
+    result = await db.execute(
+        select(models.User)
+        .options(joinedload(models.User.profile))
+        .filter(models.User.email == email)
+    )
     return result.scalars().first()
 
 async def create_user(db: AsyncSession, email: str, provider: str):
@@ -17,3 +22,29 @@ async def create_user(db: AsyncSession, email: str, provider: str):
     await db.commit()
     await db.refresh(db_user)
     return db_user
+
+async def upsert_profile(db: AsyncSession, user: models.User, profile_in: schemas.PublicProfileCreate):
+    """
+    "Upsert" = UPdate or inSERT.
+    """
+    if user.profile:
+        user.profile.profile_data = profile_in.model_dump() # Pydantic v2
+    else:
+        db_profile = models.PublicProfile(
+            user_id=user.id,
+            profile_data=profile_in.model_dump() # Pydantic v2
+        )
+        db.add(db_profile)
+        user.profile = db_profile
+    
+    await db.commit()
+    await db.refresh(user)
+    return user.profile
+
+async def get_profile_by_node_id(db: AsyncSession, node_id: str):
+    result = await db.execute(
+        select(models.PublicProfile)
+        .join(models.User)
+        .filter(models.User.node_id == node_id)
+    )
+    return result.scalars().first()

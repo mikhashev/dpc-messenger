@@ -1,5 +1,7 @@
 # dpc-hub/dpc_hub/main.py
-from fastapi import FastAPI, Depends, Request
+import traceback
+from fastapi import FastAPI, Depends, Request, HTTPException
+from starlette.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from authlib.integrations.starlette_client import OAuth
 from starlette.middleware.sessions import SessionMiddleware
@@ -11,8 +13,23 @@ from .settings import settings
 app = FastAPI(
     title="D-PC Federation Hub",
     version="1.0.0",
-    description="The central discovery and signaling server for the D-PC network."
+    description="The central discovery and signaling server for the D-PC network.",
+    debug=False
 )
+
+@app.exception_handler(Exception)
+async def debug_exception_handler(request: Request, exc: Exception):
+    """
+    Перехватывает все ошибки, печатает стектрейс в консоль
+    и возвращает стандартный ответ 500.
+    """
+    print("--- Unhandled Exception ---")
+    traceback.print_exc()
+    print("-------------------------")
+    return JSONResponse(
+        status_code=500,
+        content={"message": "Internal Server Error"},
+    )
 
 app.add_middleware(SessionMiddleware, secret_key=settings.SECRET_KEY)
 
@@ -45,7 +62,7 @@ async def auth_google(request: Request, db: AsyncSession = Depends(get_db)):
     user_info = token.get('userinfo')
     
     if not user_info or not user_info.get('email'):
-        return {"error": "Could not retrieve user info from Google"}
+        raise HTTPException(status_code=400, detail="Could not retrieve user info from Google")
 
     email = user_info['email']
     db_user = await crud.get_user_by_email(db, email=email)
@@ -61,3 +78,42 @@ async def auth_google(request: Request, db: AsyncSession = Depends(get_db)):
 async def read_users_me(current_user: models.User = Depends(auth.get_current_user)):
     """A protected endpoint to test authentication."""
     return current_user
+
+@app.put("/profile", response_model=schemas.PublicProfile)
+async def update_profile(
+    profile_in: schemas.PublicProfileCreate,
+    current_user: models.User = Depends(auth.get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Creates or updates the public profile for the currently authenticated user.
+    """
+    profile = await crud.upsert_profile(db=db, user=current_user, profile_in=profile_in)
+    
+    response_data = {
+        **profile.profile_data,
+        "user_id": profile.user_id,
+        "updated_at": profile.updated_at
+    }
+    return response_data
+
+@app.get("/profile/{node_id}", response_model=schemas.PublicProfile)
+async def read_profile(
+    node_id: str,
+    db: AsyncSession = Depends(get_db),
+    _current_user: models.User = Depends(auth.get_current_user)
+):
+    """
+    Retrieves the public profile for a given node_id.
+    Requires authentication to view profiles.
+    """
+    profile = await crud.get_profile_by_node_id(db, node_id=node_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="Profile not found")
+        
+    response_data = {
+        **profile.profile_data,
+        "user_id": profile.user_id,
+        "updated_at": profile.updated_at
+    }
+    return response_data

@@ -31,7 +31,6 @@ async def get_current_user(token: str = Depends(oauth2_scheme), db: AsyncSession
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        # Извлекаем сам токен из объекта
         token_str = token.credentials
         payload = jwt.decode(token_str, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
