@@ -13,7 +13,8 @@ dependencies = [
     "dpc-protocol @ file:///C:/Users/mike/Documents/dpc-messenger/dpc-protocol",
     "toml (>=0.10.2,<0.11.0)",
     "openai (>=2.6.1,<3.0.0)",
-    "anthropic (>=0.72.0,<0.73.0)"
+    "anthropic (>=0.72.0,<0.73.0)",
+    "httpx (>=0.28.1,<0.29.0)"
 ]
 
 
