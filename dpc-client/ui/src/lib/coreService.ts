@@ -1,22 +1,23 @@
 // dpc-client/ui/src/lib/coreService.ts
 
-import { writable } from 'svelte/store';
+import { writable, get } from 'svelte/store';
 
-// This store will hold the connection status
 export const connectionStatus = writable<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
-
-// This store will hold the last received status from the backend
 export const nodeStatus = writable<any>(null);
 
 let socket: WebSocket | null = null;
-
 const API_URL = "ws://127.0.0.1:9999";
 
+// --- THE CORE FIX: Singleton Pattern ---
+// This flag prevents multiple connection attempts.
+let isConnectingOrConnected = false;
+
 export function connectToCoreService() {
-    if (socket && socket.readyState === WebSocket.OPEN) {
-        console.log("Already connected.");
+    // If we are already connected or in the process of connecting, do nothing.
+    if (isConnectingOrConnected) {
         return;
     }
+    isConnectingOrConnected = true;
 
     connectionStatus.set('connecting');
     console.log(`Attempting to connect to Core Service at ${API_URL}...`);
@@ -26,7 +27,6 @@ export function connectToCoreService() {
     socket.onopen = () => {
         console.log("Successfully connected to Core Service.");
         connectionStatus.set('connected');
-        // Automatically request status on connect
         sendCommand("get_status");
     };
 
@@ -35,12 +35,13 @@ export function connectToCoreService() {
         console.log("Received message from Core Service:", message);
 
         if (message.event) {
-            // Handle broadcast events
-            if (message.event === "peer_status_changed") {
-                // In the future, update a peer list store
+            if (message.event === "status_update") {
+                nodeStatus.set(message.payload);
             }
         } else if (message.id) {
-            // Handle responses to our commands
+            // Check if the response is for a get_status command
+            // This is a bit brittle, a better way would be to check the original command
+            // but for now, we assume any response with a node_id is a status update.
             if (message.payload && message.payload.node_id) {
                 nodeStatus.set(message.payload);
             }
@@ -50,27 +51,41 @@ export function connectToCoreService() {
     socket.onclose = () => {
         console.log("Disconnected from Core Service.");
         connectionStatus.set('disconnected');
+        nodeStatus.set(null);
         socket = null;
+        isConnectingOrConnected = false; // Allow reconnection attempts
     };
 
     socket.onerror = (error) => {
         console.error("WebSocket error:", error);
         connectionStatus.set('error');
         socket = null;
+        isConnectingOrConnected = false; // Allow reconnection attempts
     };
 }
 
-// A simple function to send commands
 export function sendCommand(command: string, payload: any = {}) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-        console.error("Cannot send command: WebSocket is not connected.");
+        // If not connected, try to connect first, then send the command.
+        // This makes the system more resilient.
+        if (!isConnectingOrConnected) {
+            connectToCoreService();
+        }
+        // We can't send the command now, but the connection attempt has started.
+        console.error(`Cannot send command '${command}': WebSocket is not connected.`);
         return;
     }
     const message = {
-        id: crypto.randomUUID(), // Generate a unique ID for each command
+        id: crypto.randomUUID(),
         command,
         payload,
     };
     console.log("Sending command to Core Service:", message);
     socket.send(JSON.stringify(message));
+}
+
+// --- Automatically connect on application load ---
+// This code runs once when the module is first imported.
+if (typeof window !== 'undefined') { // Ensure this only runs in the browser
+    connectToCoreService();
 }

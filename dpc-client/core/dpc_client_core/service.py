@@ -12,6 +12,7 @@ from .llm_manager import LLMManager
 from .local_api import LocalApiServer
 from .context_cache import ContextCache
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
+from dpc_protocol.utils import parse_dpc_uri
 
 # Define the path to the user's D-PC configuration directory
 DPC_HOME_DIR = Path.home() / ".dpc"
@@ -46,7 +47,6 @@ class CoreService:
 
         print("Starting D-PC Core Service...")
         
-        # This future will be used to keep the service alive.
         self._shutdown_event = asyncio.Event()
 
         # Start all background tasks
@@ -64,8 +64,6 @@ class CoreService:
         self._is_running = True
         print("D-PC Core Service started successfully. Awaiting UI connection...")
         
-        # --- THE CORE FIX ---
-        # Wait indefinitely until the shutdown event is set.
         await self._shutdown_event.wait()
 
     async def stop(self):
@@ -75,10 +73,8 @@ class CoreService:
             
         print("Stopping D-PC Core Service...")
         
-        # Set the event to release the `start` method's loop
         self._shutdown_event.set()
         
-        # ... (the rest of the stop method is mostly the same)
         for task in self._background_tasks:
             task.cancel()
         
@@ -87,7 +83,7 @@ class CoreService:
         except asyncio.CancelledError:
             pass
         
-        await self.p2p_manager.shutdown()
+        await self.p2p_manager.shutdown_all()
         await self.hub_client.close()
         await self.local_api.stop()
 
@@ -99,30 +95,54 @@ class CoreService:
         while self._is_running and self.hub_client.websocket and not self.hub_client.websocket.closed:
             try:
                 signal = await self.hub_client.receive_signal()
-                # When a signal arrives, pass it to the P2PManager to handle
                 await self.p2p_manager.handle_incoming_signal(signal, self.hub_client)
+                # After handling a signal that might change peer status, broadcast update
+                await self.local_api.broadcast_event("status_update", await self.get_status())
             except Exception as e:
                 print(f"Error in Hub signal listener: {e}. Disconnecting from Hub.")
-                break # Exit the loop if the connection is lost
+                await self.local_api.broadcast_event("status_update", await self.get_status())
+                break
 
     # --- High-level methods (API for the UI) ---
 
     async def get_status(self) -> Dict[str, Any]:
         """Aggregates status from all components."""
         
-        # --- THE CORE FIX ---
-        # The correct way to check the connection state is via the 'state' enum.
         hub_connected = (
             self.hub_client.websocket is not None and
             self.hub_client.websocket.state == websockets.State.OPEN
         )
-        # --------------------
-
         return {
             "node_id": self.p2p_manager.node_id,
             "hub_status": "Connected" if hub_connected else "Disconnected",
             "p2p_peers": list(self.p2p_manager.peers.keys()),
         }
+    
+    async def connect_to_peer(self, uri: str):
+        """
+        Orchestrates a P2P connection to a peer using its URI.
+        Called by the UI.
+        """
+        print(f"Orchestrating connection to {uri}...")
+        _, _, target_node_id = parse_dpc_uri(uri)
+        
+        await self.p2p_manager.connect_to_peer(
+            target_node_id=target_node_id,
+            hub_client=self.hub_client
+        )
+        # After attempting connection, broadcast the new status to the UI
+        await asyncio.sleep(2) # Give a moment for connection to establish
+        await self.local_api.broadcast_event("status_update", await self.get_status())
+
+    async def disconnect_from_peer(self, node_id: str):
+        """Disconnects from a specific peer."""
+        await self.p2p_manager.shutdown_peer_connection(node_id) # We'll rename this in p2p_manager
+        # After disconnecting, broadcast the new status to the UI
+        await self.local_api.broadcast_event("status_update", await self.get_status())
+
+    async def execute_ai_query(self, prompt: str, context_ids: list, compute_host_id: str | None = None):
+        # ... (this remains placeholder for now)
+        pass
 
     async def connect_to_peer_by_id(self, node_id: str):
         """Orchestrates a P2P connection to a peer using its node_id."""

@@ -55,8 +55,6 @@ class P2PManager:
                 peer.data_channel = channel
                 asyncio.create_task(self.handle_data_channel(sender_node_id, channel))
 
-            # ... (ICE candidate handling is implicitly managed by aiortc after setting descriptions)
-
             await pc.setRemoteDescription(RTCSessionDescription(sdp=payload["sdp"], type=payload["type"]))
             answer = await pc.createAnswer()
             await pc.setLocalDescription(answer)
@@ -166,4 +164,20 @@ class P2PManager:
             if peer.pc.connectionState != "closed":
                 await peer.pc.close()
         self.peers.clear()
+        print("All P2P connections closed.")
+
+    async def shutdown_peer_connection(self, peer_id: str):
+        """Closes a single peer connection."""
+        if peer_id in self.peers:
+            print(f"Closing connection with {peer_id}...")
+            peer = self.peers[peer_id]
+            if peer.pc.connectionState != "closed":
+                await peer.pc.close()
+            # The on_close handler in handle_data_channel will remove it from the dict
+            
+    async def shutdown_all(self):
+        """Closes all active P2P connections."""
+        print("Shutting down P2P Manager and closing all peer connections...")
+        for peer_id in list(self.peers.keys()):
+            await self.shutdown_peer_connection(peer_id)
         print("All P2P connections closed.")
