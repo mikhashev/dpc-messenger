@@ -29,12 +29,22 @@ class P2PManager:
         self.peers: Dict[str, Peer] = {}
         self.node_id, _, _ = load_identity()
         self.local_context = PCMCore().load_context()
+        self.on_peer_list_change = None 
         print("P2PManager initialized.")
 
     async def start_server(self):
         """In the hub-assisted model, the server is always 'ready'."""
         print("P2PManager is ready to accept brokered connections.")
         pass
+
+    def set_on_peer_list_change(self, callback):
+        """Allows the CoreService to register a callback function."""
+        self.on_peer_list_change = callback
+
+    async def _notify_peer_change(self):
+        """Calls the registered callback if it exists."""
+        if self.on_peer_list_change and asyncio.iscoroutinefunction(self.on_peer_list_change):
+            await self.on_peer_list_change()
 
     async def handle_incoming_signal(self, signal: Dict[str, Any], hub_client: HubClient):
         """Processes a signaling message from the Hub, typically an 'offer'."""
@@ -99,6 +109,7 @@ class P2PManager:
             # Send the HELLO message to confirm the protocol layer is ready
             hello_msg = {"command": "HELLO", "payload": {"node_id": self.node_id}}
             channel.send(json.dumps(hello_msg))
+            await self._notify_peer_change()
 
         @channel.on("message")
         async def on_message(message_str: str):
@@ -149,12 +160,13 @@ class P2PManager:
                     pass
 
         @channel.on("close")
-        def on_close():
+        async def on_close():
             print(f"Data channel with {peer_node_id} closed.")
             if peer_node_id in self.peers:
-                # Clean up the connection
-                asyncio.create_task(self.peers[peer_node_id].pc.close())
+                await self.peers[peer_node_id].pc.close()
                 del self.peers[peer_node_id]
+            # After a peer disconnects, notify the service
+            await self._notify_peer_change()
 
     async def shutdown(self):
         """Closes all active P2P connections."""

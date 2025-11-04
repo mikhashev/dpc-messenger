@@ -34,8 +34,14 @@ class OllamaProvider(AIProvider):
     async def generate_response(self, prompt: str) -> str:
         try:
             message = {'role': 'user', 'content': prompt}
-            response = await self.client.chat(model=self.model, messages=[message])
+            # Add a timeout to the request
+            response = await asyncio.wait_for(
+                self.client.chat(model=self.model, messages=[message]),
+                timeout=60.0 # 60 second timeout
+            )
             return response['message']['content']
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"Ollama provider '{self.alias}' timed out after 60 seconds.")
         except Exception as e:
             raise RuntimeError(f"Ollama provider '{self.alias}' failed: {e}") from e
 

@@ -1,8 +1,37 @@
-<!-- dpc-client/ui/src/App.svelte -->
-
 <script lang="ts">
-  import { connectionStatus, nodeStatus, connectToCoreService, sendCommand } from "$lib/coreService";
+  import { onMount } from "svelte";
+  import { connectionStatus, nodeStatus, coreMessages, sendCommand } from "$lib/coreService";
+  import { tick } from "svelte";
 
+  // --- CHAT STATE ---
+  type Message = {
+    sender: 'user' | 'ai' | 'system';
+    text: string;
+  };
+  let messages: Message[] = [
+    { sender: 'ai', text: 'Hello! How can I help you today?' }
+  ];
+  let currentInput: string = "";
+  let isLoading: boolean = false;
+  let chatWindow: HTMLElement;
+
+  async function handleSendMessage() {
+    if (!currentInput.trim() || isLoading) return;
+
+    const text = currentInput;
+    messages = [...messages, { sender: 'user', text }];
+    
+    messages = [...messages, { sender: 'ai', text: 'Thinking...' }];
+    isLoading = true;
+    currentInput = "";
+
+    await tick(); // Wait for the DOM to update
+    chatWindow.scrollTop = chatWindow.scrollHeight; // Scroll to bottom
+
+    sendCommand("execute_ai_query", { prompt: text });
+  }
+
+  // --- CONNECTION MANAGEMENT STATE ---
   let peerUri: string = "";
 
   function handleConnect() {
@@ -11,7 +40,7 @@
       return;
     }
     sendCommand("connect_to_peer", { uri: peerUri });
-    peerUri = ""; // Clear the input
+    peerUri = "";
   }
 
   function handleDisconnect(nodeId: string) {
@@ -21,8 +50,34 @@
   }
 
   function handleReconnect() {
-    sendCommand("get_status"); // This will trigger a reconnect if needed
+    // This will trigger a reconnect if needed by the singleton logic
+    sendCommand("get_status"); 
   }
+
+  // --- WebSocket Message Handling ---
+  coreMessages.subscribe(async message => {
+    if (!message) return;
+
+    if (message.command === "execute_ai_query") {
+      isLoading = false;
+      if (message.status === "OK") {
+        messages = messages.map(m => 
+          m.sender === 'ai' && m.text === 'Thinking...' 
+            ? { sender: 'ai', text: message.payload.content }
+            : m
+        );
+      } else { // Handle ERROR status
+        messages = messages.map(m => 
+          m.sender === 'ai' && m.text === 'Thinking...' 
+            ? { sender: 'system', text: `Error: ${message.payload.message}` }
+            : m
+        );
+      }
+      await tick();
+      chatWindow.scrollTop = chatWindow.scrollHeight;
+    }
+  });
+
 </script>
 
 <main class="container">
@@ -32,7 +87,6 @@
     <strong>Core Service Status:</strong>
     <span class="status-{$connectionStatus}">{$connectionStatus}</span>
     {#if $connectionStatus !== 'connected'}
-      <!-- The button now just tries to send a command, which will trigger a reconnect -->
       <button on:click={handleReconnect}>Retry Connection</button>
     {/if}
   </div>
@@ -79,11 +133,27 @@
       {/if}
     </div>
 
-    <!-- Right Panel: Chat Interface (Placeholder for now) -->
+    <!-- Right Panel: Chat Interface -->
     <div class="panel">
-      <h2>Chat</h2>
-      <div class="chat-window">
-        <p>Chat interface will be implemented in the next epic.</p>
+      <h2>Chat with Local AI</h2>
+      <div class="chat-window" bind:this={chatWindow}>
+        {#each messages as msg, i (i)}
+          <div class="message {msg.sender}">
+            <strong>{msg.sender.toUpperCase()}:</strong>
+            <p>{msg.text}</p>
+          </div>
+        {/each}
+      </div>
+      <div class="chat-input">
+        <textarea
+          bind:value={currentInput}
+          placeholder="Type your message..."
+          on:keydown={(e) => e.key === 'Enter' && !e.shiftKey && (e.preventDefault(), handleSendMessage())}
+          disabled={isLoading}
+        ></textarea>
+        <button on:click={handleSendMessage} disabled={isLoading}>
+          {#if isLoading}Sending...{:else}Send{/if}
+        </button>
       </div>
     </div>
   </div>
@@ -91,74 +161,28 @@
 </main>
 
 <style>
-  .container {
-    padding: 2rem;
-    font-family: sans-serif;
-    text-align: center;
-  }
-  .status-bar {
-    margin-bottom: 2rem;
-    padding: 1rem;
-    border: 1px solid #ccc;
-    border-radius: 8px;
-    background-color: #f9f9f9;
-  }
+  .container { padding: 2rem; font-family: sans-serif; }
+  h1, h2, h3 { text-align: center; }
+  h2, h3 { text-align: left; }
+  .status-bar { margin-bottom: 2rem; padding: 1rem; border: 1px solid #ccc; border-radius: 8px; background-color: #f9f9f9; text-align: center; }
   .status-connected { color: green; font-weight: bold; }
-  .status-disconnected { color: red; font-weight: bold; }
+  .status-disconnected, .status-error { color: red; font-weight: bold; }
   .status-connecting { color: orange; font-weight: bold; }
-  .status-error { color: red; font-weight: bold; }
-  .node-info {
-    text-align: left;
-    max-width: 600px;
-    margin: 0 auto;
-    padding: 1rem;
-    border: 1px solid #eee;
-    border-radius: 8px;
-  }
-  .error {
-    color: red;
-  }
-  .grid {
-    display: grid;
-    grid-template-columns: 1fr 2fr;
-    gap: 2rem;
-    margin-top: 2rem;
-  }
-  .panel {
-    border: 1px solid #eee;
-    border-radius: 8px;
-    padding: 1rem;
-    text-align: left;
-  }
-  .connection-manager input {
-    width: 100%;
-    padding: 0.5rem;
-    margin-bottom: 0.5rem;
-  }
-  .peer-list ul {
-    list-style: none;
-    padding: 0;
-  }
-  .peer-list li {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    padding: 0.5rem;
-    border-bottom: 1px solid #eee;
-  }
-  .peer-list li span {
-    word-break: break-all;
-  }
-  .disconnect-btn {
-    background-color: #ffcccc;
-    border: 1px solid red;
-    color: red;
-    cursor: pointer;
-  }
-  .chat-window {
-    height: 300px;
-    border: 1px solid #ccc;
-    padding: 1rem;
-    background-color: #f9f9f9;
-  }
+  .grid { display: grid; grid-template-columns: 1fr 2fr; gap: 2rem; margin-top: 2rem; }
+  .panel { border: 1px solid #eee; border-radius: 8px; padding: 1rem; text-align: left; }
+  .connection-manager input { width: 100%; box-sizing: border-box; padding: 0.5rem; margin-bottom: 0.5rem; }
+  .peer-list ul { list-style: none; padding: 0; }
+  .peer-list li { display: flex; justify-content: space-between; align-items: center; padding: 0.5rem; border-bottom: 1px solid #eee; }
+  .peer-list li span { word-break: break-all; margin-right: 1rem; }
+  .disconnect-btn { background-color: #ffcccc; border: 1px solid red; color: red; cursor: pointer; }
+  .error { color: red; }
+  .chat-window { height: 400px; border: 1px solid #ccc; padding: 1rem; background-color: #f9f9f9; overflow-y: auto; display: flex; flex-direction: column; }
+  .message { margin-bottom: 1rem; padding: 0.5rem 1rem; border-radius: 8px; max-width: 80%; }
+  .message p { margin: 0; white-space: pre-wrap; }
+  .message.user { background-color: #dcf8c6; align-self: flex-end; }
+  .message.ai { background-color: #fff; align-self: flex-start; }
+  .message.system { background-color: #fdd; align-self: center; font-style: italic; }
+  .chat-input { display: flex; margin-top: 1rem; }
+  .chat-input textarea { flex-grow: 1; padding: 0.5rem; resize: none; border-radius: 4px; border: 1px solid #ccc; }
+  .chat-input button { margin-left: 0.5rem; padding: 0.5rem 1rem; }
 </style>

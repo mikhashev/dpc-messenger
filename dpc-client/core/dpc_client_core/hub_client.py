@@ -156,8 +156,10 @@ class HubClient:
 
     async def send_signal(self, target_node_id: str, payload: Dict[str, Any]):
         """Sends a signaling message to a target peer via the Hub."""
-        if not self.websocket or not self.websocket.open:
+        # --- THE CORE FIX ---
+        if not self.websocket or self.websocket.state != websockets.State.OPEN:
             raise ConnectionError("Signaling socket is not connected.")
+        # --------------------
         
         message = {
             "type": "signal",
@@ -168,8 +170,10 @@ class HubClient:
 
     async def receive_signal(self) -> Dict[str, Any]:
         """Waits for and returns the next signaling message from the Hub."""
-        if not self.websocket or not self.websocket.open:
+        # --- PROACTIVE FIX ---
+        if not self.websocket or self.websocket.state != websockets.State.OPEN:
             raise ConnectionError("Signaling socket is not connected.")
+        # ---------------------
         
         message_str = await self.websocket.recv()
         return json.loads(message_str)

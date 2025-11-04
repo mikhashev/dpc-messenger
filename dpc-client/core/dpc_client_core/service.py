@@ -1,6 +1,8 @@
 # dpc-client/core/dpc_client_core/service.py
 
 import asyncio
+from dataclasses import asdict
+import json
 import websockets
 from pathlib import Path
 from typing import Dict, Any
@@ -32,6 +34,7 @@ class CoreService:
         self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
         self.hub_client = HubClient(api_base_url="http://127.0.0.1:8000")
         self.p2p_manager = P2PManager(firewall=self.firewall)
+        self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
         self.cache = ContextCache()
         
         self.local_api = LocalApiServer(core_service=self)
@@ -118,31 +121,26 @@ class CoreService:
             "p2p_peers": list(self.p2p_manager.peers.keys()),
         }
     
+    async def on_peer_list_change(self):
+        """Callback function that is triggered by P2PManager."""
+        print("Peer list changed, broadcasting status update to UI.")
+        await self.local_api.broadcast_event("status_update", await self.get_status())
+    
     async def connect_to_peer(self, uri: str):
-        """
-        Orchestrates a P2P connection to a peer using its URI.
-        Called by the UI.
-        """
+        # This method now only needs to start the process.
+        # The callback will handle the UI update.
         print(f"Orchestrating connection to {uri}...")
         _, _, target_node_id = parse_dpc_uri(uri)
-        
         await self.p2p_manager.connect_to_peer(
             target_node_id=target_node_id,
             hub_client=self.hub_client
         )
-        # After attempting connection, broadcast the new status to the UI
-        await asyncio.sleep(2) # Give a moment for connection to establish
-        await self.local_api.broadcast_event("status_update", await self.get_status())
+        # We no longer need to broadcast here.
 
     async def disconnect_from_peer(self, node_id: str):
-        """Disconnects from a specific peer."""
-        await self.p2p_manager.shutdown_peer_connection(node_id) # We'll rename this in p2p_manager
-        # After disconnecting, broadcast the new status to the UI
-        await self.local_api.broadcast_event("status_update", await self.get_status())
-
-    async def execute_ai_query(self, prompt: str, context_ids: list, compute_host_id: str | None = None):
-        # ... (this remains placeholder for now)
-        pass
+        # This method now only needs to start the process.
+        await self.p2p_manager.shutdown_peer_connection(node_id)
+        # The on_close handler will trigger the callback.
 
     async def connect_to_peer_by_id(self, node_id: str):
         """Orchestrates a P2P connection to a peer using its node_id."""
@@ -153,32 +151,58 @@ class CoreService:
             hub_client=self.hub_client
         )
 
-    async def execute_ai_query(self, prompt: str, context_ids: list, compute_host_id: str | None = None):
-        """Orchestrates a complex AI query."""
-        print("Orchestrating AI query...")
+    async def execute_ai_query(self, command_id: str, prompt: str, **kwargs):
+        """
+        Orchestrates an AI query and sends the response directly back to the UI
+        via the LocalApiServer.
+        """
+        print(f"Orchestrating AI query for command_id {command_id}: '{prompt[:50]}...'")
         
-        # 1. Aggregate contexts
-        aggregated_contexts: Dict[str, PersonalContext] = {'local': self.p2p_manager.local_context}
-        for alias in context_ids:
-            context = self.cache.get(alias)
-            if context:
-                aggregated_contexts[alias] = context
-                continue
-            
-            # TODO: Request context from peer if not in cache
-            print(f"Requesting context for {alias} (not yet implemented)...")
+        # ... (context aggregation and prompt assembly are the same)
+        aggregated_contexts = {'local': self.p2p_manager.local_context}
+        final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt)
 
-        # 2. Assemble the prompt
-        # TODO: Create a real `assemble_final_prompt` function
-        final_prompt = f"Contexts: {list(aggregated_contexts.keys())}\n\nQuery: {prompt}"
+        response_payload = {}
+        status = "OK"
 
-        # 3. Route the query to the correct compute host
-        if compute_host_id and compute_host_id != self.p2p_manager.node_id:
-            # This is a remote inference request
-            # TODO: Implement remote inference call via P2PManager
-            print(f"Routing query to remote host {compute_host_id} (not yet implemented)...")
-            return "Remote inference result placeholder."
-        else:
-            # This is a local inference request
-            response = await self.llm_manager.query(prompt=final_prompt)
-            return response
+        try:
+            response_content = await self.llm_manager.query(prompt=final_prompt)
+            response_payload = {"type": "full_response", "content": response_content}
+            print(f"  - Successfully received response from LLM.")
+        except Exception as e:
+            print(f"  - Error during local inference: {e}")
+            status = "ERROR"
+            response_payload = {"message": str(e)}
+
+        # --- THE CORE FIX ---
+        # Use the LocalApiServer to send the final response back to the UI.
+        await self.local_api.send_response_to_all(
+            command_id=command_id,
+            command="execute_ai_query",
+            status=status,
+            payload=response_payload
+        )
+
+    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str) -> str:
+        """Helper method to assemble the final prompt for the LLM."""
+        # This logic is moved from the old cli.py
+        system_instruction = (
+            "You are a helpful AI assistant. Your task is to answer the user's query based on the provided JSON data blobs inside <CONTEXT> tags. "
+            "The 'source' attribute of each tag indicates who the context belongs to. The source 'local' refers to the user asking the query. "
+            "Analyze all provided contexts to formulate your answer."
+        )
+        context_blocks = []
+        for source_id, context_obj in contexts.items():
+            context_dict = asdict(context_obj)
+            json_string = json.dumps(context_dict, indent=2, ensure_ascii=False)
+            block = f'<CONTEXT source="{source_id}">\n{json_string}\n</CONTEXT>'
+            context_blocks.append(block)
+        
+        final_prompt = (
+            f"{system_instruction}\n\n"
+            f"--- CONTEXTUAL DATA ---\n"
+            f'{"\n\n".join(context_blocks)}\n'
+            f"--- END OF CONTEXTUAL DATA ---\n\n"
+            f"USER QUERY: {clean_prompt}"
+        )
+        return final_prompt
