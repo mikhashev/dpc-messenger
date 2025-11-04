@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from .crypto import DPC_HOME_DIR
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional
 
@@ -66,12 +67,44 @@ class PCMCore:
     Handles all operations with the personal_context.json file:
     reading, writing, and template creation.
     """
-    def __init__(self, file_path: str | Path = "personal_context.json"):
-        self.file_path = Path(file_path)
+    def __init__(self, file_path: str | Path | None = None):
+        """
+        Initializes the manager.
+        If file_path is None, it defaults to 'personal.json' in the user's DPC home directory.
+        """
+        if file_path:
+            self.file_path = Path(file_path)
+        else:
+            # Default to the main context file in the user's DPC dir
+            # We will manage multiple contexts later, for now, one main file.
+            self.file_path = DPC_HOME_DIR / "personal.json"
+
+    def ensure_context_file_exists(self):
+        """
+        Checks if the context file exists. If not, creates a default template.
+        """
+        if not self.file_path.exists():
+            print(f"Warning: Context file not found at {self.file_path}.")
+            print("Creating a default template...")
+            
+            # Create parent directory if it doesn't exist
+            self.file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            template_profile = Profile(
+                name="New User",
+                description="My personal context for D-PC.",
+                core_values=[]
+            )
+            template_context = PersonalContext(profile=template_profile)
+            self.save_context(template_context)
+            print(f"Template context file created at {self.file_path}")
 
     def load_context(self) -> PersonalContext:
-        if not self.file_path.exists():
-            raise FileNotFoundError(f"Context file not found at {self.file_path}")
+        """
+        Loads, parses, and validates the context file.
+        Ensures the file exists before trying to load it.
+        """
+        self.ensure_context_file_exists()
         
         with open(self.file_path, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)

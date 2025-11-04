@@ -104,8 +104,32 @@ class LLMManager:
         self.default_provider: str | None = None
         self._load_providers_from_config()
 
+    def _ensure_config_exists(self):
+        """Creates a default providers.toml file if one doesn't exist."""
+        if not self.config_path.exists():
+            print(f"Warning: Provider config file not found at {self.config_path}.")
+            print("Creating a default template with a local Ollama provider...")
+            
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            default_config = """
+# Default AI provider configuration for D-PC.
+# You can add more providers here (e.g., for LM Studio, OpenAI, Anthropic).
+
+default_provider = "ollama_local"
+
+[[providers]]
+  alias = "ollama_local"
+  type = "ollama"
+  model = "llama3.1:8b"
+  host = "http://127.0.0.1:11434"
+"""
+            self.config_path.write_text(default_config)
+            print(f"Default provider config created at {self.config_path}")
+
     def _load_providers_from_config(self):
         """Reads the config file and initializes all defined providers."""
+        self._ensure_config_exists() # Call the new method
         print(f"Loading AI providers from {self.config_path}...")
         if not self.config_path.exists():
             print(f"Warning: Provider config file not found at {self.config_path}. No providers loaded.")

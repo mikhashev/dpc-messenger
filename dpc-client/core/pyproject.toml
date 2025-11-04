@@ -1,33 +1,32 @@
-[project]
+[tool.poetry]
 name = "dpc-client-core"
 version = "0.1.0"
 description = ""
-authors = [
-    {name = "Mike Shevchenko",email = "mikhashev@yandex.ru"}
-]
+authors = ["Mike Shevchenko <mikhashev@yandex.ru>"]
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    "ollama (>=0.6.0,<0.7.0)",
-    "websockets (>=15.0.1,<16.0.0)",
-    "dpc-protocol @ file:///C:/Users/mike/Documents/dpc-messenger/dpc-protocol",
-    "toml (>=0.10.2,<0.11.0)",
-    "openai (>=2.6.1,<3.0.0)",
-    "anthropic (>=0.72.0,<0.73.0)",
-    "httpx (>=0.28.1,<0.29.0)",
-    "aiortc (>=1.14.0,<2.0.0)"
-]
-
-
-[build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+license = "GPL-3.0-or-later" # Указываем лицензию компонента
 
 [tool.poetry.dependencies]
-dpc-protocol = {develop = true}
+python = ">=3.12"
+ollama = ">=0.6.0,<0.7.0"
+websockets = ">=11.0" # Указываем минимально необходимую версию
+toml = ">=0.10.2,<0.11.0"
+openai = ">=1.0.0,<2.0.0" # Обновим до актуальной версии API
+anthropic = ">=0.20.0,<0.21.0" # Обновим до актуальной версии
+httpx = ">=0.27.0,<0.28.0"
+aiortc = ">=1.6.0,<2.0.0"
+fastapi = { version = "*", optional = true } # FastAPI нужен только для разработки/тестов
 
-[dependency-groups]
-dev = [
-    "pytest (>=8.4.2,<9.0.0)",
-    "pytest-asyncio (>=1.2.0,<2.0.0)"
-]
+# Зависимость от локальной библиотеки dpc-protocol
+dpc-protocol = { path = "../../dpc-protocol", develop = true }
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.4.2,<9.0.0"
+pytest-asyncio = ">=0.23.0,<0.24.0"
+
+[tool.poetry.extras]
+dev = ["fastapi"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

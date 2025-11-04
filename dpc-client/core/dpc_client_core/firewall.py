@@ -10,8 +10,8 @@ class ContextFirewall:
     Parses and evaluates .dpc_access rules to control access to context data.
     """
     def __init__(self, access_file_path: Path):
-        if not access_file_path.exists():
-            raise FileNotFoundError(f"Access control file not found: {access_file_path}")
+        self.access_file_path = access_file_path
+        self._ensure_file_exists() # Call the new method
         
         # --- THE CORE FIX IS HERE ---
         # We explicitly tell the parser to only use '=' as a delimiter.
@@ -28,6 +28,33 @@ class ContextFirewall:
         if self.rules.has_section('file_groups'):
             for group_name, files_str in self.rules.items('file_groups'):
                 self.file_groups[group_name] = [f.strip() for f in files_str.split(',')]
+
+    def _ensure_file_exists(self):
+        """Creates a default, secure .dpc_access file if one doesn't exist."""
+        if not self.access_file_path.exists():
+            print(f"Warning: Access control file not found at {self.access_file_path}.")
+            print("Creating a default, secure template...")
+            
+            self.access_file_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            default_rules = """
+# D-PC Access Control File
+# This file controls who can access your context data.
+# By default, all access is denied.
+
+[hub]
+# Allow the hub to see your name and description for discovery.
+personal.json:profile.name = allow
+personal.json:profile.description = allow
+
+# Add rules for friends, colleagues, etc. below.
+# Example for a friend:
+# [node:dpc-node-friend-id-here]
+# personal.json:profile.* = allow
+"""
+
+            self.access_file_path.write_text(default_rules)
+            print(f"Default access control file created at {self.access_file_path}")
 
     def _get_rule_for_resource(self, section: str, resource_path: str) -> str | None:
         """

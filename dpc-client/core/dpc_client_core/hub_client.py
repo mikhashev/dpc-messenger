@@ -124,7 +124,7 @@ class HubClient:
 
     async def connect_signaling_socket(self):
         """Connects to the Hub's WebSocket and authenticates via query parameter."""
-        if self.websocket and not self.websocket.close:
+        if self.websocket and not self.websocket.closed:
             print("Signaling socket is already connected.")
             return
         
@@ -176,10 +176,12 @@ class HubClient:
 
     async def close(self):
         """Closes all network connections."""
-        if self.websocket and not self.websocket.close: # <-- CORRECT CHECK
+        if self.websocket and self.websocket.state == websockets.State.OPEN:
             await self.websocket.close()
+        
         if not self.http_client.is_closed:
             await self.http_client.aclose()
+            
         print("HubClient connections closed.")
 
 # --- Self-testing block ---

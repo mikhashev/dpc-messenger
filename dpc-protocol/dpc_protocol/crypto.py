@@ -11,10 +11,10 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives import serialization
 
-DPC_DIR = Path.home() / ".dpc"
-KEY_FILE = DPC_DIR / "node.key"
-CERT_FILE = DPC_DIR / "node.crt"
-NODE_ID_FILE = DPC_DIR / "node.id"
+DPC_HOME_DIR = Path.home() / ".dpc"
+KEY_FILE = DPC_HOME_DIR / "node.key"
+CERT_FILE = DPC_HOME_DIR / "node.crt"
+NODE_ID_FILE = DPC_HOME_DIR / "node.id"
 
 def generate_node_id(public_key: rsa.RSAPublicKey) -> str:
     public_bytes = public_key.public_bytes(
@@ -55,7 +55,7 @@ def generate_identity():
         private_key=private_key, algorithm=hashes.SHA256(),
     )
 
-    DPC_DIR.mkdir(exist_ok=True)
+    DPC_HOME_DIR.mkdir(exist_ok=True)
 
     with open(KEY_FILE, "wb") as f:
         f.write(private_key.private_bytes(
@@ -74,7 +74,7 @@ def generate_identity():
     print(f"  - Node ID saved to {NODE_ID_FILE}")
 
 def load_identity() -> Tuple[str, Path, Path]:
-    if not all([DPC_DIR.exists(), KEY_FILE.exists(), CERT_FILE.exists(), NODE_ID_FILE.exists()]):
+    if not all([DPC_HOME_DIR.exists(), KEY_FILE.exists(), CERT_FILE.exists(), NODE_ID_FILE.exists()]):
         raise FileNotFoundError("Identity not found. Please run 'dpc init' first.")
     
     node_id = NODE_ID_FILE.read_text().strip()

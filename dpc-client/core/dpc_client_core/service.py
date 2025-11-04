@@ -1,6 +1,7 @@
 # dpc-client/core/dpc_client_core/service.py
 
 import asyncio
+import websockets
 from pathlib import Path
 from typing import Dict, Any
 
@@ -38,25 +39,24 @@ class CoreService:
         self._background_tasks = set()
 
     async def start(self):
-        """Starts all background services and connects to the Hub."""
+        """Starts all background services and runs indefinitely."""
         if self._is_running:
             print("Core Service is already running.")
             return
 
         print("Starting D-PC Core Service...")
         
-        # 1. Start the local API server for the UI
-        local_api_task = asyncio.create_task(self.local_api.start())
-        self._background_tasks.add(local_api_task)
+        # This future will be used to keep the service alive.
+        self._shutdown_event = asyncio.Event()
 
-        # 2. Authenticate with the Federation Hub
+        # Start all background tasks
+        self._background_tasks.add(asyncio.create_task(self.p2p_manager.start_server()))
+        self._background_tasks.add(asyncio.create_task(self.local_api.start()))
+        
         try:
             await self.hub_client.login()
-            # After login, connect to the signaling WebSocket
             await self.hub_client.connect_signaling_socket()
-            # Start listening for signals in the background
-            hub_listen_task = asyncio.create_task(self._listen_for_hub_signals())
-            self._background_tasks.add(hub_listen_task)
+            self._background_tasks.add(asyncio.create_task(self._listen_for_hub_signals()))
             print("Successfully connected to Federation Hub.")
         except Exception as e:
             print(f"Warning: Could not connect to Hub. Running in offline mode. Error: {e}")
@@ -64,8 +64,9 @@ class CoreService:
         self._is_running = True
         print("D-PC Core Service started successfully. Awaiting UI connection...")
         
-        # Keep the service alive by awaiting the tasks
-        await asyncio.gather(*self._background_tasks)
+        # --- THE CORE FIX ---
+        # Wait indefinitely until the shutdown event is set.
+        await self._shutdown_event.wait()
 
     async def stop(self):
         """Gracefully stops all services."""
@@ -74,6 +75,10 @@ class CoreService:
             
         print("Stopping D-PC Core Service...")
         
+        # Set the event to release the `start` method's loop
+        self._shutdown_event.set()
+        
+        # ... (the rest of the stop method is mostly the same)
         for task in self._background_tasks:
             task.cancel()
         
@@ -91,7 +96,7 @@ class CoreService:
 
     async def _listen_for_hub_signals(self):
         """A background task to listen for signaling messages from the Hub."""
-        while self._is_running and self.hub_client.websocket and not self.hub_client.websocket.close:
+        while self._is_running and self.hub_client.websocket and not self.hub_client.websocket.closed:
             try:
                 signal = await self.hub_client.receive_signal()
                 # When a signal arrives, pass it to the P2PManager to handle
@@ -104,9 +109,18 @@ class CoreService:
 
     async def get_status(self) -> Dict[str, Any]:
         """Aggregates status from all components."""
+        
+        # --- THE CORE FIX ---
+        # The correct way to check the connection state is via the 'state' enum.
+        hub_connected = (
+            self.hub_client.websocket is not None and
+            self.hub_client.websocket.state == websockets.State.OPEN
+        )
+        # --------------------
+
         return {
             "node_id": self.p2p_manager.node_id,
-            "hub_status": "Connected" if self.hub_client.websocket and not self.hub_client.websocket.close else "Disconnected",
+            "hub_status": "Connected" if hub_connected else "Disconnected",
             "p2p_peers": list(self.p2p_manager.peers.keys()),
         }
 
