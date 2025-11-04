@@ -9,8 +9,8 @@ from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager
 from .local_api import LocalApiServer
-from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from .context_cache import ContextCache
+from dpc_protocol.pcm_core import PCMCore, PersonalContext
 
 # Define the path to the user's D-PC configuration directory
 DPC_HOME_DIR = Path.home() / ".dpc"
@@ -28,7 +28,7 @@ class CoreService:
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / ".dpc_access")
         self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
-        self.hub_client = HubClient(api_base_url="http://127.0.0.1:8000/api/v1")
+        self.hub_client = HubClient(api_base_url="http://127.0.0.1:8000")
         self.p2p_manager = P2PManager(firewall=self.firewall)
         self.cache = ContextCache()
         
@@ -91,7 +91,7 @@ class CoreService:
 
     async def _listen_for_hub_signals(self):
         """A background task to listen for signaling messages from the Hub."""
-        while self._is_running and self.hub_client.websocket and not self.hub_client.websocket.closed:
+        while self._is_running and self.hub_client.websocket and not self.hub_client.websocket.close:
             try:
                 signal = await self.hub_client.receive_signal()
                 # When a signal arrives, pass it to the P2PManager to handle
@@ -106,7 +106,7 @@ class CoreService:
         """Aggregates status from all components."""
         return {
             "node_id": self.p2p_manager.node_id,
-            "hub_status": "Connected" if self.hub_client.websocket and not self.hub_client.websocket.closed else "Disconnected",
+            "hub_status": "Connected" if self.hub_client.websocket and not self.hub_client.websocket.close else "Disconnected",
             "p2p_peers": list(self.p2p_manager.peers.keys()),
         }
 
