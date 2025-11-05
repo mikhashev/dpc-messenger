@@ -51,12 +51,14 @@ class CoreService:
         print("Starting D-PC Core Service...")
         self._shutdown_event = asyncio.Event()
 
-        # --- THE CORE FIX ---
-        # Start the P2PManager's own server for direct connections
+        # Start background tasks that DON'T require authentication
         self._background_tasks.add(asyncio.create_task(self.p2p_manager.start_server()))
-        # --------------------
-        
         self._background_tasks.add(asyncio.create_task(self.local_api.start()))
+
+        self._is_running = True
+        print("D-PC Core Service started successfully. Awaiting UI connection and login command.")
+        
+        await self._shutdown_event.wait()
 
     async def stop(self):
         """Gracefully stops all services."""
