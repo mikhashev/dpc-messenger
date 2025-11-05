@@ -44,11 +44,16 @@ class P2PManager:
         self.node_id, self.key_file, self.cert_file = load_identity()
         self.local_context = PCMCore().load_context()
         self.on_peer_list_change: Callable | None = None
+        self.on_message_received: Callable | None = None
         self._server_task = None
+
         print("P2PManager initialized for Direct TLS connections.")
 
     def set_on_peer_list_change(self, callback: Callable):
         self.on_peer_list_change = callback
+
+    def set_on_message_received(self, callback: Callable):
+        self.on_message_received = callback
 
     async def _notify_peer_change(self):
         if self.on_peer_list_change:
@@ -143,21 +148,33 @@ class P2PManager:
             raise # Re-raise the exception for the CoreService to handle
 
     async def _listen_to_peer(self, peer: PeerConnection):
-        """Background task to listen for messages from a single peer."""
+        """Background task to listen for and process messages from a single peer."""
         try:
             while True:
                 message = await peer.read()
                 if message is None:
                     break # Connection closed
                 
-                # TODO: Process incoming messages (SEND_TEXT, GET_CONTEXT, etc.)
-                print(f"Received message from {peer.node_id}: {message}")
+                # --- THE CORE FIX ---
+                # Route the message to the CoreService via the callback
+                if self.on_message_received:
+                    # We run this as a task so it doesn't block the listener loop
+                    asyncio.create_task(self.on_message_received(peer.node_id, message))
+                # --------------------
 
         except (asyncio.IncompleteReadError, ConnectionResetError):
             pass # Normal disconnection
         finally:
             print(f"Connection with peer {peer.node_id} was lost.")
             await self.shutdown_peer_connection(peer.node_id)
+
+    async def send_message_to_peer(self, node_id: str, message: Dict[str, Any]):
+        """Sends a message to a specific connected peer."""
+        if node_id not in self.peers:
+            raise ConnectionError(f"Not connected to peer {node_id}.")
+        
+        peer = self.peers[node_id]
+        await peer.send(message)
 
     # --- Hub-Assisted WebRTC (Placeholder for now) ---
 

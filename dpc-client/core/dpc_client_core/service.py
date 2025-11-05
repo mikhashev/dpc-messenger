@@ -15,6 +15,7 @@ from .local_api import LocalApiServer
 from .context_cache import ContextCache
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
+from dpc_protocol.protocol import create_send_text_message
 
 # Define the path to the user's D-PC configuration directory
 DPC_HOME_DIR = Path.home() / ".dpc"
@@ -35,6 +36,7 @@ class CoreService:
         self.hub_client = HubClient(api_base_url="http://127.0.0.1:8000")
         self.p2p_manager = P2PManager(firewall=self.firewall)
         self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
+        self.p2p_manager.set_on_message_received(self.on_p2p_message)
         self.cache = ContextCache()
         
         self.local_api = LocalApiServer(core_service=self)
@@ -246,3 +248,27 @@ class CoreService:
             self.hub_connected.clear() # <-- NEW: Ensure flag is clear on failure
             print(f"Hub login failed: {e}")
             raise
+
+        # --- NEW METHODS FOR CHAT ---
+
+    async def on_p2p_message(self, sender_node_id: str, message: Dict[str, Any]):
+        """Callback function that is triggered by P2PManager for any incoming message."""
+        print(f"CoreService received message from {sender_node_id}: {message}")
+        
+        command = message.get("command")
+        if command == "SEND_TEXT":
+            # This is a chat message. Broadcast it to the UI.
+            await self.local_api.broadcast_event(
+                "new_p2p_message",
+                {
+                    "sender_node_id": sender_node_id,
+                    "text": message.get("payload", {}).get("text")
+                }
+            )
+
+    async def send_p2p_message(self, target_node_id: str, text: str):
+        """Sends a text message to a peer. Called by the UI."""
+        print(f"Sending text message to {target_node_id}: {text}")
+        # We use a placeholder chat_id for now
+        message = create_send_text_message(chat_id="direct", text=text)
+        await self.p2p_manager.send_message_to_peer(target_node_id, message)

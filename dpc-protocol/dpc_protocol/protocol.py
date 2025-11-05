@@ -19,6 +19,9 @@ def create_ok_response(message: str) -> Dict[str, Any]:
 def create_error_response(message: str) -> Dict[str, Any]:
     return {"status": "ERROR", "message": message}
 
+def create_send_text_message(chat_id: str, text: str) -> Dict[str, Any]:
+    """Creates a message for sending text to a peer."""
+    return {"command": "SEND_TEXT", "payload": {"chat_id": chat_id, "text": text}}
 
 async def read_message(reader: asyncio.StreamReader) -> dict | None:
     try:
