@@ -14,7 +14,10 @@ node_modules/
 *.env
 .env.*
 # The user's primary context file. The repository should only contain an example.
+personal.json
 personal_context.json
+dpc_project_plan_phase2.json
+dpc_project_plan_phase3.json
 # The user's private access control rules.
 .dpc_access
 # The user's cryptographic identity. CRITICAL to ignore.

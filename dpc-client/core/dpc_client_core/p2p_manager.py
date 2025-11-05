@@ -7,7 +7,7 @@ from typing import Dict, Any, Callable, Tuple
 
 from cryptography import x509
 
-from dpc_protocol.crypto import generate_node_id, load_identity
+from dpc_protocol.crypto import generate_node_id, load_identity, generate_identity
 from dpc_protocol.protocol import read_message, write_message, create_hello_message
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
@@ -41,12 +41,19 @@ class P2PManager:
     def __init__(self, firewall: ContextFirewall):
         self.firewall = firewall
         self.peers: Dict[str, PeerConnection] = {}
-        self.node_id, self.key_file, self.cert_file = load_identity()
+        
+        try:
+            self.node_id, self.key_file, self.cert_file = load_identity()
+            print("Existing node identity loaded.")
+        except FileNotFoundError:
+            print("Node identity not found. Generating a new one...")
+            generate_identity()
+            self.node_id, self.key_file, self.cert_file = load_identity()
+            print("New node identity generated and loaded.")
+
         self.local_context = PCMCore().load_context()
         self.on_peer_list_change: Callable | None = None
-        self.on_message_received: Callable | None = None
         self._server_task = None
-
         print("P2PManager initialized for Direct TLS connections.")
 
     def set_on_peer_list_change(self, callback: Callable):

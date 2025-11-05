@@ -1,0 +1,14 @@
+{
+  "profile": {
+    "name": "Bob",
+    "description": "A Linux enthusiast and network engineer.",
+    "core_values": ["Open Source", "Simplicity"]
+  },
+  "knowledge": {
+    "linux_networking": {
+      "summary": "I have experience with iptables and BGP.",
+      "favorite_tool": "Wireshark"
+    }
+  },
+  "preferences": null
+}

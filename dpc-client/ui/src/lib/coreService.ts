@@ -1,94 +1,195 @@
 // dpc-client/ui/src/lib/coreService.ts
+// PRODUCTION VERSION - Clean, no excessive logging
 
 import { writable, get } from 'svelte/store';
 
-// This store holds the general connection status to the backend service
 export const connectionStatus = writable<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
-
-// This store holds the full status object received from the backend (node_id, peers, etc.)
 export const nodeStatus = writable<any>(null);
-
-// This store is a "firehose" for all messages from the backend, used for command responses
 export const coreMessages = writable<any>(null);
-
-// This store is specifically for incoming P2P chat messages
 export const p2pMessages = writable<any>(null);
 
 let socket: WebSocket | null = null;
+let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+let reconnectAttempts = 0;
+let pollingInterval: ReturnType<typeof setInterval> | null = null;
+const MAX_RECONNECT_ATTEMPTS = 5;
+const RECONNECT_DELAY = 3000;
 const API_URL = "ws://127.0.0.1:9999";
 
+function startPolling() {
+    if (pollingInterval) {
+        clearInterval(pollingInterval);
+    }
+
+    pollingInterval = setInterval(() => {
+        if (!socket) {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+            }
+            return;
+        }
+
+        // Check if connection opened
+        if (socket.readyState === WebSocket.OPEN && get(connectionStatus) !== 'connected') {
+            console.log("✅ WebSocket connection established");
+            connectionStatus.set('connected');
+            reconnectAttempts = 0;
+            sendCommand("get_status");
+            
+            // Stop polling once connected
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+            }
+        }
+
+        // Check if connection closed
+        if (socket.readyState === WebSocket.CLOSED || socket.readyState === WebSocket.CLOSING) {
+            console.log("❌ WebSocket connection closed");
+            
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+            }
+
+            const currentStatus = get(connectionStatus);
+            if (currentStatus !== 'error') {
+                connectionStatus.set('disconnected');
+            }
+            
+            nodeStatus.set(null);
+            socket = null;
+
+            // Attempt reconnection
+            if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS && currentStatus !== 'error') {
+                reconnectAttempts++;
+                console.log(`Reconnecting... (Attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+                
+                reconnectTimeout = setTimeout(() => {
+                    connectToCoreService();
+                }, RECONNECT_DELAY);
+            } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                console.error(`Failed to reconnect after ${MAX_RECONNECT_ATTEMPTS} attempts`);
+                connectionStatus.set('error');
+            }
+        }
+    }, 200); // Poll every 200ms
+}
+
 export function connectToCoreService() {
-    // Prevent duplicate connection attempts if one is already in progress or open
     if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
-        console.log("Connection attempt ignored: already connected or connecting.");
         return;
     }
 
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
+
+    if (pollingInterval) {
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+    }
+
     connectionStatus.set('connecting');
-    console.log(`Attempting to connect to Core Service at ${API_URL}...`);
+    console.log(`Connecting to Core Service at ${API_URL}...`);
 
-    socket = new WebSocket(API_URL);
+    try {
+        socket = new WebSocket(API_URL);
 
-    socket.onopen = () => {
-        console.log("Successfully connected to Core Service.");
-        connectionStatus.set('connected');
-        // Automatically request the initial status as soon as we connect
-        sendCommand("get_status");
-    };
+        // Start polling for state changes
+        startPolling();
 
-    socket.onmessage = (event) => {
-        const message = JSON.parse(event.data);
-        console.log("Received from Core Service:", message);
-        
-        // Push ALL messages to the coreMessages store for command-specific handling
-        coreMessages.set(message);
-
-        // Handle specific events and update dedicated stores
-        if (message.event) {
-            if (message.event === "status_update") {
-                // By using the spread operator, we create a NEW object.
-                // This guarantees that Svelte detects a change and re-renders the UI.
-                nodeStatus.set({ ...message.payload });
+        // Set up event listeners (belt and suspenders)
+        socket.addEventListener('open', () => {
+            console.log("✅ WebSocket opened via event");
+            connectionStatus.set('connected');
+            reconnectAttempts = 0;
+            sendCommand("get_status");
+            
+            // Stop polling
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
             }
-            else if (message.event === "new_p2p_message") {
-                p2pMessages.set(message.payload);
+        });
+
+        socket.addEventListener('message', (event) => {
+            try {
+                const message = JSON.parse(event.data);
+                coreMessages.set(message);
+
+                if (message.event === "status_update" || 
+                    (message.id && message.command === "get_status" && message.status === "OK")) {
+                    nodeStatus.set({ ...message.payload });
+                } else if (message.event === "new_p2p_message") {
+                    p2pMessages.set(message.payload);
+                }
+            } catch (error) {
+                console.error("Error parsing message:", error);
             }
-        } 
-        // Also update status from direct command responses
-        else if (message.id && message.command === "get_status" && message.status === "OK") {
-            nodeStatus.set({ ...message.payload });
-        }
-    };
+        });
 
-    socket.onclose = (event) => {
-        console.log(`Disconnected from Core Service. Code: ${event.code}, Reason: ${event.reason}`);
-        // Only set to 'disconnected' if it wasn't an explicit error.
-        if (get(connectionStatus) !== 'error') {
-            connectionStatus.set('disconnected');
-        }
-        nodeStatus.set(null); // Clear the status on disconnect
-        socket = null; // CRITICAL: Set socket to null on close to allow reconnection
-    };
+        socket.addEventListener('error', (error) => {
+            console.error("WebSocket error:", error);
+            connectionStatus.set('error');
+        });
 
-    socket.onerror = (error) => {
-        console.error("WebSocket error:", error);
+        socket.addEventListener('close', (event) => {
+            console.log("WebSocket closed:", event.code, event.reason);
+        });
+
+    } catch (error) {
+        console.error("Failed to create WebSocket:", error);
         connectionStatus.set('error');
-        // The onclose event will be called immediately after, so we don't need to nullify the socket here.
-    };
+    }
+}
+
+export function disconnectFromCoreService() {
+    console.log("Disconnecting from Core Service...");
+    
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
+
+    if (pollingInterval) {
+        clearInterval(pollingInterval);
+        pollingInterval = null;
+    }
+    
+    reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+    
+    if (socket) {
+        socket.close(1000, "Manual disconnect");
+        socket = null;
+    }
+    
+    connectionStatus.set('disconnected');
+    nodeStatus.set(null);
+}
+
+export function resetReconnection() {
+    reconnectAttempts = 0;
+    if (reconnectTimeout) {
+        clearTimeout(reconnectTimeout);
+        reconnectTimeout = null;
+    }
 }
 
 export function sendCommand(command: string, payload: any = {}) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
-        console.error(`Cannot send command '${command}': WebSocket is not connected.`);
-        return;
+        console.error(`Cannot send command '${command}': WebSocket not connected`);
+        return false;
     }
     
-    const message = {
-        id: crypto.randomUUID(), // Generate a unique ID for each command to track responses
-        command,
-        payload,
-    };
-
-    console.log("Sending command to Core Service:", message);
-    socket.send(JSON.stringify(message));
+    try {
+        const message = { id: crypto.randomUUID(), command, payload };
+        socket.send(JSON.stringify(message));
+        return true;
+    } catch (error) {
+        console.error(`Error sending command '${command}':`, error);
+        return false;
+    }
 }

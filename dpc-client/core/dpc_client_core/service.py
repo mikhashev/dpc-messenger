@@ -34,7 +34,7 @@ class CoreService:
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / ".dpc_access")
         self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
-        self.hub_client = HubClient(api_base_url="http://127.0.0.1:8000/api/v1")
+        self.hub_client = HubClient(api_base_url="http://127.0.0.1:8000")
         self.p2p_manager = P2PManager(firewall=self.firewall)
         self.cache = ContextCache()
         
