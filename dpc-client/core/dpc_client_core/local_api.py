@@ -60,6 +60,8 @@ class LocalApiServer:
                     else:
                         raise ValueError(f"Unknown or non-async command: {command}")
 
+                except websockets.exceptions.ConnectionClosed:
+                    print("UI client connection closed normally.")
                 except Exception as e:
                     print(f"Error processing command: {e}")
                     error_response = {
