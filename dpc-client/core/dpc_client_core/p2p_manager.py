@@ -86,17 +86,38 @@ class P2PManager:
 
         print(f"Initiating P2P connection to {target_node_id}...")
         pc = RTCPeerConnection()
-        channel = pc.createDataChannel("dpc-channel")
-        peer = Peer(pc=pc, data_channel=channel)
-        self.peers[target_node_id] = peer
+        
+        # --- THE CORE FIX ---
+        # Add the peer to the dictionary ONLY after we are sure we can proceed.
+        # And wrap the entire process in a try/except/finally block for cleanup.
+        try:
+            channel = pc.createDataChannel("dpc-channel")
+            peer = Peer(pc=pc, data_channel=channel)
+            self.peers[target_node_id] = peer # Add to peers dict
 
-        asyncio.create_task(self.handle_data_channel(target_node_id, channel))
+            # Setup event handlers
+            asyncio.create_task(self.handle_data_channel(target_node_id, channel))
 
-        offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
+            @pc.on("iceconnectionstatechange")
+            async def on_iceconnectionstatechange():
+                print(f"ICE connection state for {target_node_id} is {pc.iceConnectionState}")
+                if pc.iceConnectionState == "failed":
+                    await self.shutdown_peer_connection(target_node_id)
 
-        await hub_client.send_signal(target_node_id, {"type": "offer", "sdp": pc.localDescription.sdp})
-        print(f"Sent offer to {target_node_id}")
+            # Create and send the offer
+            offer = await pc.createOffer()
+            await pc.setLocalDescription(offer)
+
+            await hub_client.send_signal(target_node_id, {"type": "offer", "sdp": pc.localDescription.sdp})
+            print(f"Sent offer to {target_node_id}")
+
+        except Exception as e:
+            print(f"Failed to initiate connection to {target_node_id}: {e}")
+            # If anything fails, remove the peer from the dictionary
+            if target_node_id in self.peers:
+                del self.peers[target_node_id]
+            await pc.close()
+            raise # Re-raise the exception to inform the CoreService
 
     async def handle_data_channel(self, peer_node_id: str, channel):
         """

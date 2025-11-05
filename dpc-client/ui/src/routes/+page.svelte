@@ -98,7 +98,12 @@
         <div class="node-info">
           <h2>Your Node</h2>
           <p><strong>Node ID:</strong> {$nodeStatus.node_id}</p>
-          <p><strong>Hub Status:</strong> {$nodeStatus.hub_status}</p>
+          <p>
+            <strong>Hub Status:</strong> {$nodeStatus.hub_status}
+            {#if $nodeStatus.hub_status === 'Disconnected'}
+              <button on:click={() => sendCommand('login_to_hub')}>Login to Hub</button>
+            {/if}
+          </p>
         </div>
 
         <div class="connection-manager">

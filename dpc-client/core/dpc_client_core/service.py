@@ -41,31 +41,22 @@ class CoreService:
         
         self._is_running = False
         self._background_tasks = set()
+        self.hub_connected = asyncio.Event()
 
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
-            print("Core Service is already running.")
             return
 
         print("Starting D-PC Core Service...")
-        
         self._shutdown_event = asyncio.Event()
 
-        # Start all background tasks
+        # Start background tasks that DON'T require authentication
         self._background_tasks.add(asyncio.create_task(self.p2p_manager.start_server()))
         self._background_tasks.add(asyncio.create_task(self.local_api.start()))
-        
-        try:
-            await self.hub_client.login()
-            await self.hub_client.connect_signaling_socket()
-            self._background_tasks.add(asyncio.create_task(self._listen_for_hub_signals()))
-            print("Successfully connected to Federation Hub.")
-        except Exception as e:
-            print(f"Warning: Could not connect to Hub. Running in offline mode. Error: {e}")
 
         self._is_running = True
-        print("D-PC Core Service started successfully. Awaiting UI connection...")
+        print("D-PC Core Service started successfully. Awaiting UI connection and login command.")
         
         await self._shutdown_event.wait()
 
@@ -127,15 +118,29 @@ class CoreService:
         await self.local_api.broadcast_event("status_update", await self.get_status())
     
     async def connect_to_peer(self, uri: str):
-        # This method now only needs to start the process.
-        # The callback will handle the UI update.
+        """Orchestrates a P2P connection to a peer using its URI."""
+        if not self.hub_connected.is_set():
+            raise ConnectionError(
+                "Hub connection is required to find and connect to peers. "
+                "Please use the 'Login to Hub' button first."
+            )
+        # --- THE CORE FIX ---
+        # Wait for the hub connection to be ready before proceeding.
+        try:
+            await asyncio.wait_for(self.hub_connected.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            raise ConnectionError("Cannot connect to peer: Hub is not connected. Please log in first.")
+        # --------------------
+
         print(f"Orchestrating connection to {uri}...")
         _, _, target_node_id = parse_dpc_uri(uri)
+        
+        # The rest of the logic is now safe to run
         await self.p2p_manager.connect_to_peer(
             target_node_id=target_node_id,
             hub_client=self.hub_client
         )
-        # We no longer need to broadcast here.
+        # The UI will be updated via the callback system
 
     async def disconnect_from_peer(self, node_id: str):
         # This method now only needs to start the process.
@@ -206,3 +211,28 @@ class CoreService:
             f"USER QUERY: {clean_prompt}"
         )
         return final_prompt
+    
+    async def login_to_hub(self, provider: str = "google"):
+        """
+        Initiates the Hub login flow. Called by the UI.
+        """
+        if self.hub_client.jwt_token:
+            print("Already logged into Hub.")
+            return await self.get_status()
+
+        try:
+            await self.hub_client.login(provider)
+            await self.hub_client.connect_signaling_socket()
+            
+            hub_listen_task = asyncio.create_task(self._listen_for_hub_signals())
+            self._background_tasks.add(hub_listen_task)
+            
+            self.hub_connected.set() # <-- NEW: Set the flag on successful login
+            
+            print("Successfully connected to Federation Hub.")
+            await self.local_api.broadcast_event("status_update", await self.get_status())
+            return await self.get_status()
+        except Exception as e:
+            self.hub_connected.clear() # <-- NEW: Ensure flag is clear on failure
+            print(f"Hub login failed: {e}")
+            raise
