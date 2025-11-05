@@ -118,29 +118,39 @@ class CoreService:
         await self.local_api.broadcast_event("status_update", await self.get_status())
     
     async def connect_to_peer(self, uri: str):
-        """Orchestrates a P2P connection to a peer using its URI."""
+        """
+        Orchestrates a P2P connection using the "Smart Connect" strategy.
+        """
+        try:
+            host, port, target_node_id = parse_dpc_uri(uri)
+        except ValueError as e:
+            raise ValueError(f"Invalid URI provided: {e}")
+
+        # --- "Ultimate Smart Connect" Logic ---
+
+        # 1. Attempt Direct Connection (Plan A)
+        try:
+            print(f"Smart Connect: Attempting Direct P2P connection to {target_node_id}...")
+            await self.p2p_manager.connect_directly(host, port, target_node_id)
+            print(f"✅ Smart Connect: Direct P2P connection successful!")
+            return # Success!
+        except Exception as e:
+            print(f"⚠️ Smart Connect: Direct connection failed ({e}). Falling back to Hub-assisted connection.")
+
+        # 2. Fallback to Hub-Assisted Connection (Plan B)
         if not self.hub_connected.is_set():
             raise ConnectionError(
-                "Hub connection is required to find and connect to peers. "
-                "Please use the 'Login to Hub' button first."
+                "Direct connection failed and Hub is not connected. "
+                "Please log in to a Hub to connect to peers behind firewalls."
             )
-        # --- THE CORE FIX ---
-        # Wait for the hub connection to be ready before proceeding.
-        try:
-            await asyncio.wait_for(self.hub_connected.wait(), timeout=10.0)
-        except asyncio.TimeoutError:
-            raise ConnectionError("Cannot connect to peer: Hub is not connected. Please log in first.")
-        # --------------------
-
-        print(f"Orchestrating connection to {uri}...")
-        _, _, target_node_id = parse_dpc_uri(uri)
         
-        # The rest of the logic is now safe to run
-        await self.p2p_manager.connect_to_peer(
-            target_node_id=target_node_id,
-            hub_client=self.hub_client
-        )
-        # The UI will be updated via the callback system
+        print(f"Smart Connect: Attempting Hub-assisted P2P connection to {target_node_id}...")
+        try:
+            await self.p2p_manager.connect_via_hub(target_node_id, self.hub_client)
+            print(f"✅ Smart Connect: Hub-assisted P2P connection successful!")
+        except Exception as e:
+            print(f"🔴 Smart Connect: Hub-assisted connection also failed: {e}")
+            raise
 
     async def disconnect_from_peer(self, node_id: str):
         # This method now only needs to start the process.
