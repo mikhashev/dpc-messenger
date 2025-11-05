@@ -176,6 +176,14 @@ class P2PManager:
         peer = self.peers[node_id]
         await peer.send(message)
 
+    async def send_message_to_peer(self, node_id: str, message: Dict[str, Any]):
+        """Sends a message to a specific connected peer."""
+        if node_id not in self.peers:
+            raise ConnectionError(f"Not connected to peer {node_id}.")
+        
+        peer = self.peers[node_id]
+        await peer.send(message)
+
     # --- Hub-Assisted WebRTC (Placeholder for now) ---
 
     async def connect_via_hub(self, target_node_id: str, hub_client: HubClient):

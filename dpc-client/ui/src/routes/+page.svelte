@@ -108,7 +108,7 @@
 
         <div class="connection-manager">
           <h3>Connect to Peer</h3>
-          <input type="text" bind:value={peerUri} placeholder="dpc://..." />
+          <input type="text" bind:value={peerUri} placeholder="dpc://0.0.0.0:port." />
           <button on:click={handleConnect}>Connect</button>
         </div>
 

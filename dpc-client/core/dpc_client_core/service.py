@@ -183,16 +183,27 @@ class CoreService:
         await self.local_api.broadcast_event("status_update", await self.get_status())
 
     async def on_p2p_message(self, sender_node_id: str, message: Dict[str, Any]):
-        """Callback function for incoming P2P messages."""
+        """Callback function that is triggered by P2PManager for any incoming message."""
         print(f"CoreService received message from {sender_node_id}: {message}")
+        
         command = message.get("command")
         if command == "SEND_TEXT":
-            await self.local_api.broadcast_event("new_p2p_message", {"sender_node_id": sender_node_id, "text": message.get("payload", {}).get("text")})
+            # This is a chat message. Broadcast it to the UI.
+            await self.local_api.broadcast_event(
+                "new_p2p_message",
+                {
+                    "sender_node_id": sender_node_id,
+                    "text": message.get("payload", {}).get("text")
+                }
+            )
+        elif command == "GET_CONTEXT":
+            # In the future, we would handle GET_CONTEXT here
+            pass
 
-    async def send_p2p_message(self, target_node_id: str, text: str):
+    async def send_p2p_message(self, target_node_id: str, text: str, **kwargs):
         """Sends a text message to a peer. Called by the UI."""
         print(f"Sending text message to {target_node_id}: {text}")
-        message = create_send_text_message(chat_id="direct", text=text)
+        message = create_send_text_message(text=text)
         await self.p2p_manager.send_message_to_peer(target_node_id, message)
 
     async def execute_ai_query(self, command_id: str, prompt: str, **kwargs):
