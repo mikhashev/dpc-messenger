@@ -3,7 +3,9 @@
 import configparser
 from pathlib import Path
 from typing import List, Dict
-import fnmatch # For wildcard matching
+import fnmatch
+
+from dpc_protocol.pcm_core import PersonalContext # For wildcard matching
 
 class ContextFirewall:
     """
@@ -13,13 +15,11 @@ class ContextFirewall:
         self.access_file_path = access_file_path
         self._ensure_file_exists() # Call the new method
         
-        # --- THE CORE FIX IS HERE ---
         # We explicitly tell the parser to only use '=' as a delimiter.
         self.rules = configparser.ConfigParser(
             allow_no_value=True,
             delimiters=('=',) 
         )
-        # ---------------------------
 
         self.rules.optionxform = str # Make parser case-sensitive
         self.rules.read(access_file_path)
@@ -51,6 +51,9 @@ personal.json:profile.description = allow
 # Example for a friend:
 # [node:dpc-node-friend-id-here]
 # personal.json:profile.* = allow
+# personal.json:name = allow
+# personal.json:bio = allow
+# personal.json:skills = allow
 """
 
             self.access_file_path.write_text(default_rules)
@@ -73,7 +76,6 @@ personal.json:profile.description = allow
         # Get all rules for the section
         section_rules = self.rules.items(section)
 
-        # --- THE CORE FIX IS HERE ---
         best_match_rule = None
         best_match_specificity = -1
 
@@ -131,6 +133,60 @@ personal.json:profile.description = allow
 
         # 4. Default to deny if no specific allow rule is found
         return False
+    
+    def filter_context_for_peer(self, context: PersonalContext, peer_id: str, query: str = None) -> PersonalContext:
+        """
+        Filters a PersonalContext based on firewall rules for a specific peer.
+        Returns a new PersonalContext with only allowed fields.
+        
+        Args:
+            context: The full PersonalContext to filter
+            peer_id: The node_id of the requesting peer
+            query: Optional query string (for context-aware filtering)
+        
+        Returns:
+            Filtered PersonalContext with only allowed fields
+        """
+        from dataclasses import asdict, fields
+        from copy import deepcopy
+        
+        # Convert context to dict for manipulation
+        context_dict = asdict(context)
+        filtered_dict = {}
+        
+        # Check each field against firewall rules
+        for field in fields(context):
+            field_name = field.name
+            field_value = context_dict.get(field_name)
+            
+            # Skip if field is None or empty
+            if field_value is None:
+                filtered_dict[field_name] = None
+                continue
+            
+            # Check if peer can access this field
+            resource_path = f"personal.json:{field_name}"
+            
+            if self.can_access(peer_id, resource_path):
+                # Peer has access to this field
+                filtered_dict[field_name] = deepcopy(field_value)
+            else:
+                # Check for wildcard access (e.g., personal.json:*)
+                wildcard_path = "personal.json:*"
+                if self.can_access(peer_id, wildcard_path):
+                    filtered_dict[field_name] = deepcopy(field_value)
+                else:
+                    # No access - set to None or empty value
+                    if isinstance(field_value, list):
+                        filtered_dict[field_name] = []
+                    elif isinstance(field_value, dict):
+                        filtered_dict[field_name] = {}
+                    else:
+                        filtered_dict[field_name] = None
+        
+        # Create new PersonalContext from filtered dict
+        from dpc_protocol.pcm_core import PersonalContext
+        return PersonalContext(**filtered_dict)
 
 # --- Self-testing block ---
 if __name__ == '__main__':

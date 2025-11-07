@@ -41,6 +41,7 @@ class P2PManager:
     def __init__(self, firewall: ContextFirewall):
         self.firewall = firewall
         self.peers: Dict[str, PeerConnection] = {}
+        self.display_name: str | None = None
         
         try:
             self.node_id, self.key_file, self.cert_file = load_identity()
@@ -61,6 +62,19 @@ class P2PManager:
 
     def set_on_message_received(self, callback: Callable):
         self.on_message_received = callback
+    
+    def set_core_service_ref(self, core_service):
+        """Set reference to CoreService for storing peer metadata."""
+        self._core_service_ref = core_service
+
+    def set_display_name(self, name: str):
+        """Set the display name that will be shared with peers during handshake."""
+        self.display_name = name
+        print(f"Display name set to: {name}")
+    
+    def get_display_name(self) -> str | None:
+        """Get the current display name."""
+        return self.display_name
 
     async def _notify_peer_change(self):
         if self.on_peer_list_change:
@@ -84,7 +98,7 @@ class P2PManager:
         peer_node_id = None
         try:
             print("Received a direct TLS connection attempt...")
-            await asyncio.sleep(0.01) # Grace period for handshake
+            await asyncio.sleep(0.01)
 
             # Perform HELLO handshake (server side)
             hello_msg = await read_message(reader)
@@ -92,8 +106,21 @@ class P2PManager:
                 raise ConnectionError("Invalid HELLO message received.")
             
             peer_node_id = hello_msg["payload"]["node_id"]
-            print(f"Received HELLO from {peer_node_id}. Sending response.")
-            await write_message(writer, {"status": "OK", "message": "HELLO received"})
+            peer_name = hello_msg["payload"].get("name")  # ← Get peer name
+            
+            print(f"Received HELLO from {peer_node_id}" + (f" (name: {peer_name})" if peer_name else ""))
+            
+            # Send response with our name
+            response = {
+                "status": "OK",
+                "message": "HELLO received",
+                "name": self.display_name  # ← Include our name
+            }
+            await write_message(writer, response)
+
+            # Store peer name if CoreService is available
+            if hasattr(self, '_core_service_ref') and self._core_service_ref and peer_name:
+                self._core_service_ref.set_peer_metadata(peer_node_id, name=peer_name)
 
             # Create and register the peer connection
             peer = PeerConnection(node_id=peer_node_id, reader=reader, writer=writer)
@@ -119,12 +146,12 @@ class P2PManager:
         
         ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE # Disable standard verification
+        ssl_context.verify_mode = ssl.CERT_NONE
 
         reader, writer = await asyncio.open_connection(host, port, ssl=ssl_context)
         
         try:
-            # Perform our custom identity verification
+            # Verify node identity
             ssl_object = writer.get_extra_info('ssl_object')
             peer_cert_bytes = ssl_object.getpeercert(binary_form=True)
             peer_cert = x509.load_der_x509_certificate(peer_cert_bytes)
@@ -133,11 +160,27 @@ class P2PManager:
             if verified_node_id != target_node_id:
                 raise ConnectionRefusedError(f"Security alert! Node ID mismatch.")
 
-            # Perform HELLO handshake (client side)
-            await write_message(writer, create_hello_message(self.node_id))
+            # Perform HELLO handshake with our name
+            hello = {
+                "command": "HELLO",
+                "payload": {
+                    "node_id": self.node_id,
+                    "name": self.display_name  # ← Include our name
+                }
+            }
+            await write_message(writer, hello)
+            
             response = await read_message(reader)
             if not response or response.get("status") != "OK":
                 raise ConnectionError(f"Peer did not acknowledge HELLO.")
+            
+            # Get peer's name from response
+            peer_name = response.get("name")
+            if peer_name:
+                print(f"  - Peer name: {peer_name}")
+                # Store peer name if CoreService is available
+                if hasattr(self, '_core_service_ref') and self._core_service_ref:
+                    self._core_service_ref.set_peer_metadata(target_node_id, name=peer_name)
 
             # Create and register the peer connection
             peer = PeerConnection(node_id=target_node_id, reader=reader, writer=writer)
@@ -152,7 +195,7 @@ class P2PManager:
             print(f"Failed to establish direct connection with {target_node_id}: {e}")
             writer.close()
             await writer.wait_closed()
-            raise # Re-raise the exception for the CoreService to handle
+            raise
 
     async def _listen_to_peer(self, peer: PeerConnection):
         """Background task to listen for and process messages from a single peer."""

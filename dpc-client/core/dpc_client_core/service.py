@@ -35,6 +35,7 @@ class CoreService:
         self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
         self.hub_client = HubClient(api_base_url="http://127.0.0.1:8000")
         self.p2p_manager = P2PManager(firewall=self.firewall)
+        self.p2p_manager.set_core_service_ref(self)
         self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)  # Add message handler
         self.cache = ContextCache()
@@ -200,9 +201,14 @@ class CoreService:
         """
         print(f"  - Handling context request from {peer_id} (request_id: {request_id})")
         
-        # Apply firewall to filter context based on peer and query
-        # For now, return local context (firewall filtering to be implemented)
-        filtered_context = self.p2p_manager.local_context
+        # Apply firewall to filter context based on peer
+        filtered_context = self.firewall.filter_context_for_peer(
+            context=self.p2p_manager.local_context,
+            peer_id=peer_id,
+            query=query
+        )
+        
+        print(f"  - Context filtered by firewall for {peer_id}")
         
         # Convert to dict for JSON serialization
         from dataclasses import asdict
@@ -220,7 +226,7 @@ class CoreService:
         
         try:
             await self.p2p_manager.send_message_to_peer(peer_id, response)
-            print(f"  - Sent context response to {peer_id}")
+            print(f"  - Sent filtered context response to {peer_id}")
         except Exception as e:
             print(f"  - Error sending context response to {peer_id}: {e}")
     
@@ -461,3 +467,16 @@ class CoreService:
         self.peer_metadata[peer_id].update(metadata)
         
         print(f"Updated metadata for peer {peer_id}: {self.peer_metadata[peer_id]}")
+    
+    async def set_my_name(self, name: str):
+        """
+        Set your display name that will be shared with peers.
+        Can be called from UI.
+        """
+        self.p2p_manager.display_name = name
+        print(f"Your display name set to: {name}")
+        
+        # Broadcast status update to UI
+        await self.local_api.broadcast_event("status_update", await self.get_status())
+        
+        return {"name": name, "status": "success"}
