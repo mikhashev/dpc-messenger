@@ -178,14 +178,18 @@ export function resetReconnection() {
     }
 }
 
-export function sendCommand(command: string, payload: any = {}) {
+export function sendCommand(command: string, payload: any = {}, commandId?: string) {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
         console.error(`Cannot send command '${command}': WebSocket not connected`);
         return false;
     }
     
     try {
-        const message = { id: crypto.randomUUID(), command, payload };
+        const message = { 
+            id: commandId || crypto.randomUUID(),  // Use provided commandId or generate new one
+            command, 
+            payload 
+        };
         socket.send(JSON.stringify(message));
         return true;
     } catch (error) {

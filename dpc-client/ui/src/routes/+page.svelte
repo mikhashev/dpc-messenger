@@ -7,9 +7,15 @@
   console.log("Full D-PC Messenger loading...");
   
   // --- STATE ---
-  type Message = { sender: string; text: string; timestamp: number };
+  type Message = { 
+    id: string; 
+    sender: string; 
+    text: string; 
+    timestamp: number;
+    commandId?: string;  // For matching AI query responses
+  };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
-    ['local_ai', [{ sender: 'ai', text: 'Hello! I am your local AI assistant. How can I help you today?', timestamp: Date.now() }]]
+    ['local_ai', [{ id: crypto.randomUUID(), sender: 'ai', text: 'Hello! I am your local AI assistant. How can I help you today?', timestamp: Date.now() }]]
   ]));
   
   let activeChatId: string = 'local_ai';
@@ -18,6 +24,23 @@
   let chatWindow: HTMLElement;
   let peerUri: string = "";
   
+  // Helper function to check if user is near the bottom of the chat
+  function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
+    if (!element) return true;
+    const { scrollTop, scrollHeight, clientHeight } = element;
+    return scrollHeight - scrollTop - clientHeight < threshold;
+  }
+  
+  // Auto-scroll function - always scrolls for active conversation
+  // (user sending message, receiving AI response, or receiving P2P message)
+  function autoScroll() {
+    setTimeout(() => {
+      if (chatWindow) {
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+      }
+    }, 100);
+  }
+  
   // --- CHAT FUNCTIONS ---
   function handleSendMessage() {
     if (!currentInput.trim()) return;
@@ -25,31 +48,47 @@
     const text = currentInput.trim();
     currentInput = "";
     
-    // Add user message
+    // Add user message with unique ID - CREATE NEW MAP
     chatHistories.update(h => {
-      const hist = h.get(activeChatId) || [];
-      h.set(activeChatId, [...hist, { sender: 'user', text, timestamp: Date.now() }]);
-      return h;
+      const newMap = new Map(h);
+      const hist = newMap.get(activeChatId) || [];
+      newMap.set(activeChatId, [...hist, { id: crypto.randomUUID(), sender: 'user', text, timestamp: Date.now() }]);
+      return newMap;
     });
     
     if (activeChatId === 'local_ai') {
       // AI query
       isLoading = true;
+      
+      // Generate command_id for this specific query
+      const commandId = crypto.randomUUID();
+      
+      // Add "Thinking..." message with unique ID and command_id
       chatHistories.update(h => {
-        const hist = h.get(activeChatId)!;
-        h.set(activeChatId, [...hist, { sender: 'ai', text: 'Thinking...', timestamp: Date.now() }]);
-        return h;
+        const newMap = new Map(h);
+        const hist = newMap.get(activeChatId)!;
+        newMap.set(activeChatId, [...hist, { 
+          id: crypto.randomUUID(), 
+          sender: 'ai', 
+          text: 'Thinking...', 
+          timestamp: Date.now(),
+          commandId: commandId  // Store command_id to match response later
+        }]);
+        return newMap;
       });
       
-      const success = sendCommand("execute_ai_query", { prompt: text });
+      // Send command with explicit command_id
+      const success = sendCommand("execute_ai_query", { prompt: text }, commandId);
       if (!success) {
         isLoading = false;
+        // CREATE NEW MAP for error state
         chatHistories.update(h => {
-          const hist = h.get('local_ai') || [];
-          h.set('local_ai', hist.map(m => 
-            m.text === 'Thinking...' ? { sender: 'system', text: 'Error: Not connected', timestamp: Date.now() } : m
+          const newMap = new Map(h);
+          const hist = newMap.get('local_ai') || [];
+          newMap.set('local_ai', hist.map(m => 
+            m.commandId === commandId ? { ...m, sender: 'system', text: 'Error: Not connected' } : m
           ));
-          return h;
+          return newMap;
         });
       }
     } else {
@@ -57,12 +96,8 @@
       sendCommand("send_p2p_message", { target_node_id: activeChatId, text });
     }
     
-    // Auto-scroll
-    setTimeout(() => {
-      if (chatWindow) {
-        chatWindow.scrollTop = chatWindow.scrollHeight;
-      }
-    }, 100);
+    // Always auto-scroll when user sends a message
+    autoScroll();
   }
   
   // --- PEER CONNECTION FUNCTIONS ---
@@ -99,20 +134,22 @@
         : `Error: ${message.payload?.message || 'Unknown error'}`;
       const newSender = message.status === "OK" ? 'ai' : 'system';
       
+      // Match response to the correct "Thinking..." message using command_id
+      const responseCommandId = message.id;
+      
+      // CREATE NEW MAP to trigger reactivity
       chatHistories.update(h => {
-        const hist = h.get('local_ai') || [];
-        h.set('local_ai', hist.map(m => 
-          m.text === 'Thinking...' ? { sender: newSender, text: newText, timestamp: Date.now() } : m
+        const newMap = new Map(h);
+        const hist = newMap.get('local_ai') || [];
+        newMap.set('local_ai', hist.map(m => 
+          // Match by commandId instead of text
+          m.commandId === responseCommandId ? { ...m, sender: newSender, text: newText } : m
         ));
-        return h;
+        return newMap;
       });
       
-      // Auto-scroll
-      setTimeout(() => {
-        if (chatWindow) {
-          chatWindow.scrollTop = chatWindow.scrollHeight;
-        }
-      }, 100);
+      // Always auto-scroll when AI responds
+      autoScroll();
     }
   }
   
@@ -121,22 +158,20 @@
     const { sender_node_id, text } = message;
     
     if (sender_node_id && text) {
+      // CREATE NEW MAP to trigger reactivity
       chatHistories.update(h => {
-        if (!h.has(sender_node_id)) {
-          h.set(sender_node_id, []);
+        const newMap = new Map(h);
+        if (!newMap.has(sender_node_id)) {
+          newMap.set(sender_node_id, []);
         }
-        const hist = h.get(sender_node_id)!;
-        h.set(sender_node_id, [...hist, { sender: sender_node_id, text, timestamp: Date.now() }]);
-        return h;
+        const hist = newMap.get(sender_node_id)!;
+        newMap.set(sender_node_id, [...hist, { id: crypto.randomUUID(), sender: sender_node_id, text, timestamp: Date.now() }]);
+        return newMap;
       });
       
-      // Auto-scroll if this is the active chat
+      // Always auto-scroll if this is the active chat when peer sends message
       if (activeChatId === sender_node_id) {
-        setTimeout(() => {
-          if (chatWindow) {
-            chatWindow.scrollTop = chatWindow.scrollHeight;
-          }
-        }, 100);
+        autoScroll();
       }
     }
   }
@@ -261,7 +296,7 @@
 
       <div class="chat-window" bind:this={chatWindow}>
         {#if activeMessages.length > 0}
-          {#each activeMessages as msg (msg.timestamp)}
+          {#each activeMessages as msg (msg.id)}
             <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'}>
               <div class="message-header">
                 <strong>{msg.sender === 'user' ? 'You' : msg.sender}</strong>
