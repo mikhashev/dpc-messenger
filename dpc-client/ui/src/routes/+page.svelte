@@ -44,6 +44,33 @@
     }, 100);
   }
   
+  // Helper function to get display name for a peer
+  function getPeerDisplayName(peerId: string): string {
+    if (!$nodeStatus || !$nodeStatus.peer_info) {
+      return peerId;
+    }
+    
+    const peerInfo = $nodeStatus.peer_info.find(p => p.node_id === peerId);
+    if (peerInfo && peerInfo.name) {
+      return `${peerInfo.name} | ${peerId}`;
+    }
+    
+    return peerId;
+  }
+  
+  // Helper function to get active AI model display
+  function getAIModelDisplay(): string {
+    if (!$nodeStatus) {
+      return '🤖 Local AI Assistant';
+    }
+    
+    if ($nodeStatus.active_ai_model) {
+      return `🤖 Local AI Assistant (${$nodeStatus.active_ai_model})`;
+    }
+    
+    return '🤖 Local AI Assistant';
+  }
+  
   // --- CHAT FUNCTIONS ---
   function handleSendMessage() {
     if (!currentInput.trim()) return;
@@ -264,7 +291,7 @@
                 class:active={activeChatId === 'local_ai'}
                 on:click={() => activeChatId = 'local_ai'}
               >
-                🤖 Local AI Assistant
+                {getAIModelDisplay()}
               </button>
             </li>
             
@@ -277,7 +304,7 @@
                     on:click={() => activeChatId = peerId}
                     title={peerId}
                   >
-                    👤 {peerId}
+                    👤 {getPeerDisplayName(peerId)}
                   </button>
                   <button 
                     class="disconnect-btn" 
@@ -310,10 +337,9 @@
       <div class="chat-header">
         <h2>
           {#if activeChatId === 'local_ai'}
-            🤖 Local AI Assistant
-            <!-- TODO: Show active model name here -->
+            {getAIModelDisplay()}
           {:else}
-            👤 Chat with {activeChatId}
+            👤 Chat with {getPeerDisplayName(activeChatId)}
           {/if}
         </h2>
       </div>

@@ -170,6 +170,40 @@ default_provider = "ollama_local"
         except Exception as e:
             print(f"Error parsing provider config file: {e}")
 
+    def get_active_model_name(self) -> str:
+        """
+        Returns the name of the currently active AI model.
+        
+        Returns:
+            String like "llama3.1:8b" or None if no model is loaded
+        """
+        # Use default_provider (not active_provider)
+        if not self.default_provider:
+            return None
+        
+        # Get the provider object (not a dict, but an AIProvider instance)
+        provider = self.providers.get(self.default_provider)
+        if not provider:
+            return None
+        
+        # Get the model name from the provider object
+        model = provider.model
+        if not model:
+            return None
+        
+        # Get provider type from config
+        provider_type = provider.config.get('type', '')
+        
+        # Format based on provider type
+        if provider_type == 'ollama':
+            return model  # e.g., "llama3.1:8b"
+        elif provider_type == 'openai_compatible':
+            return f"OpenAI {model}"
+        elif provider_type == 'anthropic':
+            return f"Claude {model}"
+        else:
+            return model
+
     async def query(self, prompt: str, provider_alias: str | None = None) -> str:
         """
         Routes a query to the specified provider, or the default provider if None.
