@@ -24,6 +24,9 @@
   let chatWindow: HTMLElement;
   let peerUri: string = "";
   
+  // Track processed P2P messages to prevent duplicates
+  let processedMessageIds = new Set<string>();
+  
   // Helper function to check if user is near the bottom of the chat
   function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
     if (!element) return true;
@@ -158,20 +161,28 @@
     const { sender_node_id, text } = message;
     
     if (sender_node_id && text) {
-      // CREATE NEW MAP to trigger reactivity
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        if (!newMap.has(sender_node_id)) {
-          newMap.set(sender_node_id, []);
-        }
-        const hist = newMap.get(sender_node_id)!;
-        newMap.set(sender_node_id, [...hist, { id: crypto.randomUUID(), sender: sender_node_id, text, timestamp: Date.now() }]);
-        return newMap;
-      });
+      // Create unique message identifier based on content (not timestamp)
+      const messageId = `${sender_node_id}:${text}`;
       
-      // Always auto-scroll if this is the active chat when peer sends message
-      if (activeChatId === sender_node_id) {
-        autoScroll();
+      // Only process if we haven't seen this message before
+      if (!processedMessageIds.has(messageId)) {
+        processedMessageIds.add(messageId);
+        
+        // CREATE NEW MAP to trigger reactivity
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          if (!newMap.has(sender_node_id)) {
+            newMap.set(sender_node_id, []);
+          }
+          const hist = newMap.get(sender_node_id)!;
+          newMap.set(sender_node_id, [...hist, { id: crypto.randomUUID(), sender: sender_node_id, text, timestamp: Date.now() }]);
+          return newMap;
+        });
+        
+        // Always auto-scroll if this is the active chat when peer sends message
+        if (activeChatId === sender_node_id) {
+          autoScroll();
+        }
       }
     }
   }
@@ -198,9 +209,21 @@
         <!-- Node Info -->
         <div class="node-info">
           <h2>Your Node</h2>
-          <p class="node-id" title={$nodeStatus.node_id}>
-            <strong>ID:</strong> {$nodeStatus.node_id.slice(0, 20)}...
-          </p>
+          <div class="node-id-container">
+            <p class="node-id" title={$nodeStatus.node_id}>
+              <strong>ID:</strong> {$nodeStatus.node_id}
+            </p>
+            <button 
+              class="copy-btn" 
+              on:click={() => {
+                navigator.clipboard.writeText($nodeStatus.node_id);
+                alert('Node ID copied to clipboard!');
+              }}
+              title="Copy Node ID"
+            >
+              📋
+            </button>
+          </div>
           <p>
             <strong>Hub:</strong> 
             <span class:hub-connected={$nodeStatus.hub_status === 'Connected'}>
@@ -254,7 +277,7 @@
                     on:click={() => activeChatId = peerId}
                     title={peerId}
                   >
-                    👤 {peerId.slice(0, 12)}...
+                    👤 {peerId}
                   </button>
                   <button 
                     class="disconnect-btn" 
@@ -288,8 +311,9 @@
         <h2>
           {#if activeChatId === 'local_ai'}
             🤖 Local AI Assistant
+            <!-- TODO: Show active model name here -->
           {:else}
-            👤 Chat with {activeChatId.slice(0, 15)}...
+            👤 Chat with {activeChatId}
           {/if}
         </h2>
       </div>
@@ -416,6 +440,30 @@
     font-size: 0.85rem;
     color: #555;
     word-break: break-all;
+    margin: 0;
+  }
+  
+  .node-id-container {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+  
+  .copy-btn {
+    width: auto;
+    min-width: auto;
+    padding: 0.3rem 0.5rem;
+    font-size: 1rem;
+    background: transparent;
+    border: 1px solid #ddd;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.2s;
+  }
+  
+  .copy-btn:hover {
+    background: #f0f0f0;
+    border-color: #007bff;
   }
   
   .hub-connected {
@@ -498,6 +546,10 @@
     border: 1px solid transparent;
     padding: 0.6rem;
     transition: all 0.2s;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
   }
   
   .chat-button:hover {
