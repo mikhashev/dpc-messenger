@@ -4,20 +4,20 @@ version = "0.1.0"
 description = ""
 authors = ["Mike Shevchenko <mikhashev@yandex.ru>"]
 readme = "README.md"
-license = "GPL-3.0-or-later" # Указываем лицензию компонента
+license = "GPL-3.0-or-later"
 
 [tool.poetry.dependencies]
 python = ">=3.12"
 ollama = ">=0.6.0,<0.7.0"
-websockets = ">=11.0" # Указываем минимально необходимую версию
+websockets = ">=11.0"
 toml = ">=0.10.2,<0.11.0"
-openai = ">=1.0.0,<2.0.0" # Обновим до актуальной версии API
-anthropic = ">=0.20.0,<0.21.0" # Обновим до актуальной версии
+openai = ">=1.0.0,<2.0.0"
+anthropic = ">=0.20.0,<0.21.0"
 httpx = ">=0.27.0,<0.28.0"
 aiortc = ">=1.6.0,<2.0.0"
-fastapi = { version = "*", optional = true } # FastAPI нужен только для разработки/тестов
+fastapi = { version = "*", optional = true }
 
-# Зависимость от локальной библиотеки dpc-protocol
+# Dependency from local library dpc-protocol
 dpc-protocol = { path = "../../dpc-protocol", develop = true }
 
 [tool.poetry.group.dev.dependencies]

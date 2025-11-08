@@ -1,84 +1,427 @@
 # D-PC Messenger
 
-> **Status:** 🚧 In Development 🚧 | **Version:** 0.1.0 (Federated MVP)
+> **Status:** 🚧 In Active Development 🚧 | **Version:** 0.2.0 (Federated MVP + WebRTC)
 
-D-PC Messenger is a proof-of-concept for a transactional, privacy-first messenger designed for the AI era. It is the reference implementation of the **Decentralized Personal Context (D-PC)** protocol.
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![License: LGPL v3](https://img.shields.io/badge/License-LGPLv3-blue.svg)](https://www.gnu.org/licenses/lgpl-3.0)
 
-Our vision is a future where users interact with each other through the medium of local AI assistants. D-PC aims to become the **"SMTP for AI"**: an open, interoperable standard that enables these assistants to securely exchange knowledge and share computational resources on behalf of their users.
+D-PC Messenger is a proof-of-concept for a privacy-first, AI-powered messenger designed for the collaborative intelligence era. It is the reference implementation of the **Decentralized Personal Context (D-PC)** protocol.
 
-This repository contains the active development of our **Federated MVP**, a pragmatic, user-friendly application designed to prove the value of this vision.
+Our vision is a future where users interact through local AI assistants that can securely exchange knowledge and share computational resources. D-PC aims to become the **"SMTP for AI"**: an open, interoperable standard enabling these assistants to communicate on behalf of their users.
+
+---
+
+## ✨ What's New in v0.2.0
+
+- 🌐 **WebRTC P2P Connections** - Connect to peers anywhere in the world with automatic NAT traversal
+- 🔒 **End-to-End Encrypted Channels** - All communications use DTLS encryption
+- 🚀 **Hub-Assisted Signaling** - Seamless connection establishment through Federation Hub
+- 📡 **Dual Connection Modes** - Both Direct TLS (local network) and WebRTC (internet) supported
+- 🎯 **Production Ready** - Complete deployment guides for VPS hosting
 
 ---
 
 ## 💡 Core Concepts
 
-D-PC is built on three core ideas that differentiate it from traditional platforms:
+D-PC is built on three revolutionary ideas:
 
-1.  **Transactional Communication:** We treat conversations not as an endless history to be stored, but as a transaction to produce a result. The outcome of a chat is a "Knowledge Commit"—a structured, verified update to the participants' knowledge bases. We extract the **signal** (knowledge) and discard the **noise** (chatter).
+### 1. **Transactional Communication**
+We treat conversations as transactions to produce results, not endless histories. The outcome is a "Knowledge Commit"—a structured update to participants' knowledge bases. We extract the **signal** (knowledge) and discard the **noise** (chatter).
 
-2.  **The Contextual Knowledge Graph:** The network is modeled as a graph where users are nodes and relationships are edges. This allows a user's AI assistant to intelligently traverse their social graph to find relevant knowledge from trusted sources, replacing AI "guesses" with verifiable facts.
+### 2. **The Contextual Knowledge Graph**
+The network models users as nodes in a social graph. AI assistants intelligently traverse this graph to find relevant knowledge from trusted sources, replacing AI "hallucinations" with verifiable facts.
 
-3.  **The Decentralized Compute Pool:** Users can securely and privately share their local AI inference capabilities with trusted peers. This democratizes access to powerful AI models, allowing a user with a laptop to "borrow" the GPU of a friend with a powerful desktop, all over an end-to-end encrypted channel.
+### 3. **The Decentralized Compute Pool**
+Users securely share their local AI inference capabilities with trusted peers. Someone with a laptop can "borrow" a friend's powerful GPU—all over an end-to-end encrypted channel, with full privacy.
 
-For a deep dive into the project's philosophy and long-term architecture, please read our [**Whitepaper**](./whitepaper.md).
+**Read our [Whitepaper](./whitepaper.md) for the full vision.**
 
 ---
 
-## 🏛️ Architecture: The Pragmatic Path to Decentralization
+## 🏗️ Architecture: WebRTC-Enabled Federation
 
-Based on a critical analysis of the challenges in P2P adoption, we are following a phased "Bridge Strategy":
+```
+┌─────────────────────────────────────────────────────────────┐
+│                D-PC Messenger Architecture                   │
+└─────────────────────────────────────────────────────────────┘
 
-1.  **Phase 1 (Current): Federated MVP.** We are building a user-friendly desktop application that uses a central "Hub" for discovery and connection brokering. This allows us to deliver value immediately without the UX friction of pure P2P.
-2.  **Phase 2: Federation.** We will open the Hub protocol, allowing anyone to run their own interoperable Hubs.
-3.  **Phase 3: P2P.** We will integrate a pure P2P mode for users who require maximum sovereignty.
+User A (Behind NAT)              Hub Server              User B (Behind NAT)
+┌──────────────┐                (Public VPS)            ┌──────────────┐
+│  Desktop App │                                        │  Desktop App │
+│              │                                        │              │
+│ - Local AI   │         1. WebSocket Signaling        │ - Local AI   │
+│ - Context DB │    ┌────────────────────────────┐     │ - Context DB │
+│ - WebRTC     │◄───┤  - OAuth (Google/GitHub)  │────►│ - WebRTC     │
+│              │    │  - User Discovery          │     │              │
+└──────┬───────┘    │  - P2P Signaling (ICE/SDP)│     └──────┬───────┘
+       │            └────────────────────────────┘            │
+       │                                                       │
+       │        2. Direct P2P WebRTC Data Channel            │
+       │◄══════════════════════════════════════════════════►│
+       │          (End-to-End Encrypted DTLS)                │
+       │                                                      │
+       └──────────────────────────────────────────────────────┘
+                    • Context Exchange
+                    • AI Model Inference
+                    • Compute Sharing
+```
 
-This repository is focused on **Phase 1**.
+### Connection Modes
+
+1. **Direct TLS** - For peers on the same local network
+2. **WebRTC + STUN** - For peers behind NAT (most common)
+3. **WebRTC + TURN** - For restrictive corporate firewalls (future)
+
+---
+
+## 🎯 Key Features
+
+### Privacy-First
+- ✅ **Local AI Processing** - Your data never leaves your device
+- ✅ **E2E Encryption** - All P2P communications use DTLS
+- ✅ **Context Firewall** - Granular control via `.dpc_access` file
+- ✅ **No Message History** - Ephemeral by design
+
+### WebRTC Connectivity
+- ✅ **Automatic NAT Traversal** - Works behind routers without port forwarding
+- ✅ **Global Reach** - Connect to anyone, anywhere
+- ✅ **Low Latency** - Direct P2P minimizes hops
+- ✅ **Fallback Support** - Graceful degradation to Direct TLS
+
+### AI Integration
+- ✅ **Multiple Providers** - Ollama (local), OpenAI, Anthropic
+- ✅ **Context Aggregation** - Query multiple peers' knowledge
+- ✅ **Remote Inference** - Share GPU resources (coming soon)
+
+---
 
 ## 📦 Project Structure (Monorepo)
 
-This repository is a monorepo containing several distinct but related sub-projects:
-
--   [`dpc-hub/`](./dpc-hub/): The server-side **Federation Hub** (FastAPI, PostgreSQL).
--   [`dpc-client/`](./dpc-client/): The cross-platform **Desktop Messenger Client** (Tauri, SvelteKit, Python).
--   [`dpc-protocol/`](./dpc-protocol/): A shared Python library containing the core data structures and protocol logic.
--   [`specs/`](./specs/): Formal specifications for the D-PC protocols and APIs.
-
-Each sub-project has its own `README.md` with specific setup and development instructions.
+```
+dpc-messenger/
+├── dpc-hub/              # Federation Hub (FastAPI + PostgreSQL)
+│   ├── dpc_hub/          # Server application
+│   ├── alembic/          # Database migrations
+│   └── README.md         # Hub setup guide
+│
+├── dpc-client/           # Desktop Client Application
+│   ├── core/             # Python backend (WebRTC, P2P, AI)
+│   │   ├── dpc_client_core/
+│   │   │   ├── service.py        # Main orchestrator
+│   │   │   ├── p2p_manager.py    # WebRTC & TLS connections
+│   │   │   ├── webrtc_peer.py    # WebRTC peer connection
+│   │   │   ├── hub_client.py     # Hub communication
+│   │   │   └── llm_manager.py    # AI provider integration
+│   │   └── README.md
+│   │
+│   └── ui/               # Frontend (Tauri + SvelteKit)
+│       ├── src/          # Svelte components
+│       └── README.md
+│
+├── dpc-protocol/         # Shared protocol library (LGPL)
+│   ├── dpc_protocol/
+│   │   ├── crypto.py     # Identity & encryption
+│   │   ├── protocol.py   # Message serialization
+│   │   └── pcm_core.py   # Personal Context Model
+│   └── README.md
+│
+├── specs/                # Protocol specifications (CC0)
+│   ├── hub_api_v1.md
+│   └── dptp_v1.md
+│
+├── docs/                 # Additional documentation
+│   ├── QUICK_START.md           # 5-minute setup
+│   ├── WEBRTC_SETUP_GUIDE.md    # Production deployment
+│   └── README_WEBRTC_INTEGRATION.md
+│
+├── whitepaper.md         # Project vision & philosophy
+├── LICENSE.md            # Multi-license explanation
+└── README.md             # This file
+```
 
 ---
 
-## 🚀 Getting Started (Running the MVP)
-
-To run the full D-PC Messenger MVP, you will need to run both the Hub and the Client.
+## 🚀 Quick Start
 
 ### Prerequisites
--   Python `3.12+` & Poetry
--   Node.js `18+` & npm
--   Rust (install via [rustup.rs](https://rustup.rs/))
--   Docker
 
-### Quick Start
-1.  **Run the Hub:** Follow the instructions in [`dpc-hub/README.md`](./dpc-hub/README.md).
-2.  **Run the Client:** Follow the instructions in [`dpc-client/README.md`](./dpc-client/README.md).
+- **Python** 3.12+ with Poetry
+- **Node.js** 18+ with npm
+- **Rust** (install via [rustup.rs](https://rustup.rs/))
+- **Docker** (for Hub database)
+
+### Option 1: Local Testing (No Hub)
+
+Test Direct TLS connections on your local network:
+
+```bash
+# Terminal 1: Start Client 1
+cd dpc-client/core
+poetry install
+poetry run python run_service.py
+
+# Terminal 2: Start UI for Client 1
+cd dpc-client/ui
+npm install
+npm run tauri dev
+
+# Repeat for Client 2 on another machine (same network)
+# Connect using dpc:// URI displayed in the app
+```
+
+### Option 2: Full Setup with Hub (WebRTC)
+
+Enable internet-wide connections:
+
+**1. Start the Hub:**
+```bash
+cd dpc-hub
+docker-compose up -d              # Start PostgreSQL
+cp .env.example .env              # Configure (edit SECRET_KEY)
+poetry install
+poetry run alembic upgrade head   # Run migrations
+poetry run uvicorn dpc_hub.main:app --host 0.0.0.0
+```
+
+**2. Start the Client:**
+```bash
+cd dpc-client/core
+poetry install
+poetry run python run_service.py
+
+# In another terminal
+cd dpc-client/ui
+npm run tauri dev
+```
+
+**3. Connect to peers:**
+- Enter their `node_id` in the UI
+- Click "Connect via Hub"
+- WebRTC will automatically establish a direct P2P connection!
+
+📖 **See [docs/QUICK_START.md](./docs/QUICK_START.md) for detailed instructions.**
+
+---
+
+## 🌐 Production Deployment
+
+### Deploy Hub to VPS
+
+For production use, deploy the Hub on a public server:
+
+```bash
+# On your VPS (Ubuntu 22.04+)
+git clone https://github.com/mikhashev/dpc-messenger.git
+cd dpc-messenger/dpc-hub
+
+# Configure production settings
+cp .env.example .env
+nano .env  # Add production credentials
+
+# Deploy with Docker Compose
+docker-compose -f docker-compose.prod.yml up -d
+
+# Set up Nginx + SSL
+# See docs/WEBRTC_SETUP_GUIDE.md for complete instructions
+```
+
+📖 **Full guide: [docs/WEBRTC_SETUP_GUIDE.md](./docs/WEBRTC_SETUP_GUIDE.md)**
+
+---
+
+## 📚 Documentation
+
+### Getting Started
+- **[QUICK_START.md](./docs/QUICK_START.md)** - 5-minute setup guide
+- **[dpc-client/README.md](./dpc-client/README.md)** - Client setup & development
+- **[dpc-hub/README.md](./dpc-hub/README.md)** - Hub deployment guide
+
+### WebRTC & Networking
+- **[WEBRTC_SETUP_GUIDE.md](./docs/WEBRTC_SETUP_GUIDE.md)** - Complete WebRTC setup
+- **[README_WEBRTC_INTEGRATION.md](./docs/README_WEBRTC_INTEGRATION.md)** - Technical overview
+
+### Protocol & Vision
+- **[whitepaper.md](./whitepaper.md)** - Project vision & philosophy
+- **[specs/hub_api_v1.md](./specs/hub_api_v1.md)** - Hub API specification
+- **[LICENSE.md](./LICENSE.md)** - Licensing explained
+
+---
+
+## 🛣️ Roadmap
+
+### Phase 1: Federated MVP ✅ (Current)
+- ✅ Direct TLS P2P connections
+- ✅ WebRTC with NAT traversal
+- ✅ Federation Hub for discovery
+- ✅ OAuth authentication
+- ✅ Local AI integration
+- ⏳ Remote inference (in progress)
+
+### Phase 2: Enhanced Federation (Q1-Q2 2025)
+- 🔲 Multi-hub federation
+- 🔲 Advanced context firewall
+- 🔲 Remote inference MVP
+- 🔲 Mobile clients (Android, iOS)
+- 🔲 TURN server support
+
+### Phase 3: True P2P (2025-2026)
+- 🔲 DHT-based peer discovery
+- 🔲 Hub-free operation mode
+- 🔲 Blockchain-based identity (optional)
+- 🔲 Full decentralization
 
 ---
 
 ## 🤝 Contributing
 
-We are building an open standard and welcome contributions of all kinds!
+We welcome contributions of all kinds!
 
-1.  **Read our Vision:** Start with the [**Whitepaper**](./whitepaper.md) to understand our long-term goals.
-2.  **Contributor Agreement:** All code contributions require signing our [**Contributor License Agreement (CLA)**](./CLA.md). This is automatically handled by the CLA Assistant bot on your first pull request.
-3.  **Find an Issue:** Check out the [Issues tab](https://github.com/mikhashev/dpc-messenger/issues) to find good first issues.
-4.  **Discuss:** For larger changes, please open a [Discussion](https://github.com/mikhashev/dpc-messenger/discussions) first to propose your idea.
+### How to Contribute
+
+1. **Read the Vision** - Start with our [Whitepaper](./whitepaper.md)
+2. **Sign the CLA** - Required for code contributions ([CLA.md](./CLA.md))
+3. **Find an Issue** - Check [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues)
+4. **Submit a PR** - Follow our contribution guidelines
+
+### Areas We Need Help
+
+- 🐛 Bug fixes and testing
+- 📝 Documentation improvements
+- 🌍 Internationalization (i18n)
+- 🎨 UI/UX enhancements
+- 🔐 Security audits
+- 🧪 Protocol implementation
+
+### Community
+
+- **Discussions:** [GitHub Discussions](https://github.com/mikhashev/dpc-messenger/discussions)
+- **Issues:** [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues)
+- **Email:** legoogmiha@gmail.com
+
+---
 
 ## 📜 Licensing
 
-D-PC uses a **Progressive Copyleft** licensing strategy to protect user privacy, ensure the protocol remains open, and enable a sustainable development model.
+D-PC uses a **Progressive Copyleft** strategy:
 
--   **Messenger Client:** `GPL v3`
--   **Protocol Libraries:** `LGPL v3`
--   **Federation Hub:** `AGPL v3`
--   **Protocol Specifications:** `CC0`
+| Component | License | Can I... |
+|-----------|---------|----------|
+| **Desktop Client** | GPL v3 | Use freely, must share modifications |
+| **Protocol Libraries** | LGPL v3 | Use in proprietary apps, share modifications to libs |
+| **Federation Hub** | AGPL v3 | Run as service, must share if modified |
+| **Protocol Specs** | CC0 | Use freely, no restrictions |
 
-For a detailed explanation of this choice, please see our main [**LICENSE.md**](./LICENSE.md) file. Commercial licenses are also available for enterprises that require proprietary modifications.
+**TL;DR for most users:**
+- ✅ Use the app freely (no strings attached)
+- ✅ Use protocol libraries in your app (LGPL is friendly)
+- ✅ Run your own Hub (source required if modified)
+- ❌ Can't create proprietary messenger fork (or buy Commercial License)
+
+📖 **See [LICENSE.md](./LICENSE.md) for detailed information.**
+
+---
+
+## 🔒 Security
+
+### Reporting Vulnerabilities
+
+**Please DO NOT open public issues for security vulnerabilities.**
+
+Email: legoogmiha@gmail.com
+
+We take security seriously and will respond within 48 hours.
+
+### Security Features
+
+- 🔒 End-to-end encryption (DTLS in WebRTC)
+- 🔑 Cryptographic node identities
+- 🛡️ Context firewall (.dpc_access)
+- 🔐 JWT authentication with Hub
+- ✅ No message persistence by default
+
+---
+
+## 🙏 Acknowledgments
+
+D-PC Messenger builds on the shoulders of giants:
+
+- **[aiortc](https://github.com/aiortc/aiortc)** - WebRTC implementation
+- **[Tauri](https://tauri.app/)** - Desktop app framework
+- **[FastAPI](https://fastapi.tiangolo.com/)** - Hub server framework
+- **[Ollama](https://ollama.ai/)** - Local AI inference
+
+Special thanks to all contributors and early testers!
+
+---
+
+## 📊 Project Status
+
+| Metric | Status |
+|--------|--------|
+| **Architecture** | ✅ Stable |
+| **Core Protocol** | ✅ v1.0 |
+| **WebRTC** | ✅ Working |
+| **Direct TLS** | ✅ Working |
+| **Hub Server** | ✅ MVP Ready |
+| **Desktop Client** | 🚧 Beta |
+| **Mobile Clients** | 🔲 Planned |
+| **Test Coverage** | 🚧 In Progress |
+| **Documentation** | ✅ Good |
+
+---
+
+## 📞 Support & Contact
+
+- **GitHub Issues:** [Report bugs](https://github.com/mikhashev/dpc-messenger/issues)
+- **GitHub Discussions:** [Ask questions](https://github.com/mikhashev/dpc-messenger/discussions)
+- **Email:** legoogmiha@gmail.com
+- **Documentation:** [docs/](./docs/)
+
+---
+
+## 📈 Statistics
+
+![GitHub Stars](https://img.shields.io/github/stars/mikhashev/dpc-messenger?style=social)
+![GitHub Forks](https://img.shields.io/github/forks/mikhashev/dpc-messenger?style=social)
+![GitHub Issues](https://img.shields.io/github/issues/mikhashev/dpc-messenger)
+![GitHub Pull Requests](https://img.shields.io/github/issues-pr/mikhashev/dpc-messenger)
+
+---
+
+## 🎯 Vision
+
+> **"In the future, all users will interact through local AI assistants. D-PC will be the SMTP for AI—an open standard enabling these assistants to securely exchange knowledge and share computational resources."**
+
+We're building the infrastructure for **collaborative intelligence** where:
+- Your AI assistant can access your friends' expertise
+- You can lend your GPU to help a colleague
+- All communications are private and encrypted
+- No corporation controls your data or relationships
+
+**Join us in building the future of human-AI collaboration!**
+
+---
+
+## 📄 License
+
+Copyright © 2025 Mike Shevchenko and D-PC Contributors
+
+This project uses multiple licenses. See [LICENSE.md](./LICENSE.md) for details.
+
+- Client: GPL v3
+- Hub: AGPL v3
+- Protocol Libraries: LGPL v3
+- Specifications: CC0
+
+---
+
+<div align="center">
+
+**[🌟 Star us on GitHub](https://github.com/mikhashev/dpc-messenger)** | **[📖 Read the Docs](./docs/)** | **[💬 Join Discussion](https://github.com/mikhashev/dpc-messenger/discussions)**
+
+*Building the future of collaborative intelligence, openly.*
+
+Made with ❤️ by the D-PC community
+
+</div>

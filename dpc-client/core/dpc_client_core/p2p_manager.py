@@ -1,9 +1,10 @@
-# dpc-client/core/dpc_client_core/p2p_manager.py
+# dpc-client/core/dpc_client_core/p2p_manager_webrtc.py
+# Обновленная версия P2PManager с поддержкой WebRTC
 
 import asyncio
 import ssl
 import json
-from typing import Dict, Any, Callable, Tuple
+from typing import Dict, Any, Callable, Tuple, Union
 
 from cryptography import x509
 
@@ -14,6 +15,8 @@ from dpc_protocol.utils import parse_dpc_uri
 
 from .firewall import ContextFirewall
 from .hub_client import HubClient
+from .webrtc_peer import WebRTCPeerConnection
+
 
 class PeerConnection:
     """A unified wrapper for a direct TLS P2P connection."""
@@ -21,6 +24,7 @@ class PeerConnection:
         self.node_id = node_id
         self.reader = reader
         self.writer = writer
+        self.connection_type = "direct_tls"
 
     async def send(self, message: Dict[str, Any]):
         """Sends a message over the TLS stream."""
@@ -36,12 +40,18 @@ class PeerConnection:
             self.writer.close()
             await self.writer.wait_closed()
 
+
 class P2PManager:
-    """Manages all direct P2P connections."""
+    """Manages all P2P connections (both direct TLS and WebRTC)."""
+    
     def __init__(self, firewall: ContextFirewall):
         self.firewall = firewall
-        self.peers: Dict[str, PeerConnection] = {}
+        self.peers: Dict[str, Union[PeerConnection, WebRTCPeerConnection]] = {}
         self.display_name: str | None = None
+        
+        # WebRTC connection state tracking
+        self._pending_webrtc: Dict[str, WebRTCPeerConnection] = {}
+        self._ice_candidates_buffer: Dict[str, list] = {}
         
         try:
             self.node_id, self.key_file, self.cert_file = load_identity()
@@ -54,8 +64,9 @@ class P2PManager:
 
         self.local_context = PCMCore().load_context()
         self.on_peer_list_change: Callable | None = None
+        self.on_message_received: Callable | None = None
         self._server_task = None
-        print("P2PManager initialized for Direct TLS connections.")
+        print("P2PManager initialized with WebRTC support.")
 
     def set_on_peer_list_change(self, callback: Callable):
         self.on_peer_list_change = callback
@@ -80,7 +91,7 @@ class P2PManager:
         if self.on_peer_list_change:
             await self.on_peer_list_change()
 
-    # --- Direct TLS Connection (PoC Method) ---
+    # --- Direct TLS Connection Methods (existing code) ---
 
     async def start_server(self, host: str = "0.0.0.0", port: int = 8888):
         """Starts the raw TLS server to listen for direct connections."""
@@ -100,72 +111,61 @@ class P2PManager:
             print("Received a direct TLS connection attempt...")
             await asyncio.sleep(0.01)
 
-            # Perform HELLO handshake (server side)
             hello_msg = await read_message(reader)
             if not hello_msg or hello_msg.get("command") != "HELLO":
                 raise ConnectionError("Invalid HELLO message received.")
-            
-            peer_node_id = hello_msg["payload"]["node_id"]
-            peer_name = hello_msg["payload"].get("name")  # ← Get peer name
-            
-            print(f"Received HELLO from {peer_node_id}" + (f" (name: {peer_name})" if peer_name else ""))
-            
-            # Send response with our name
-            response = {
+
+            payload = hello_msg.get("payload", {})
+            peer_node_id = payload.get("node_id")
+            peer_name = payload.get("name")
+
+            if not peer_node_id:
+                raise ValueError("Peer did not provide a node_id.")
+
+            print(f"Connection from node: {peer_node_id}")
+            if peer_name:
+                print(f"  - Peer name: {peer_name}")
+                if hasattr(self, '_core_service_ref') and self._core_service_ref:
+                    self._core_service_ref.set_peer_metadata(peer_node_id, name=peer_name)
+
+            ack = {
+                "command": "HELLO_ACK",
                 "status": "OK",
-                "message": "HELLO received",
-                "name": self.display_name  # ← Include our name
+                "name": self.display_name
             }
-            await write_message(writer, response)
+            await write_message(writer, ack)
 
-            # Store peer name if CoreService is available
-            if hasattr(self, '_core_service_ref') and self._core_service_ref and peer_name:
-                self._core_service_ref.set_peer_metadata(peer_node_id, name=peer_name)
-
-            # Create and register the peer connection
             peer = PeerConnection(node_id=peer_node_id, reader=reader, writer=writer)
             self.peers[peer_node_id] = peer
             await self._notify_peer_change()
-            print(f"✅ Direct connection established with {peer_node_id}")
+            print(f"✅ Direct TLS connection established with {peer_node_id}")
 
-            # Start listening for messages from this peer
-            await self._listen_to_peer(peer)
+            asyncio.create_task(self._listen_to_peer(peer))
 
         except Exception as e:
-            print(f"Direct connection failed with {peer_node_id or 'unknown'}: {e}")
-            writer.close()
-            await writer.wait_closed()
+            print(f"Error handling direct connection: {e}")
+            if peer_node_id and peer_node_id in self.peers:
+                await self.shutdown_peer_connection(peer_node_id)
+            else:
+                writer.close()
+                await writer.wait_closed()
 
     async def connect_directly(self, host: str, port: int, target_node_id: str):
-        """Attempts a direct TLS connection to a peer (Client-side)."""
-        if target_node_id in self.peers:
-            print(f"Already connected to {target_node_id}")
-            return
+        """Initiates a direct TLS connection to a peer (Client-side)."""
+        print(f"Initiating direct connection to {target_node_id} at {host}:{port}...")
 
-        print(f"Attempting direct TLS connection to {target_node_id} at {host}:{port}...")
-        
         ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE
 
-        reader, writer = await asyncio.open_connection(host, port, ssl=ssl_context)
-        
         try:
-            # Verify node identity
-            ssl_object = writer.get_extra_info('ssl_object')
-            peer_cert_bytes = ssl_object.getpeercert(binary_form=True)
-            peer_cert = x509.load_der_x509_certificate(peer_cert_bytes)
-            verified_node_id = generate_node_id(peer_cert.public_key())
-            
-            if verified_node_id != target_node_id:
-                raise ConnectionRefusedError(f"Security alert! Node ID mismatch.")
+            reader, writer = await asyncio.open_connection(host, port, ssl=ssl_context)
 
-            # Perform HELLO handshake with our name
             hello = {
                 "command": "HELLO",
                 "payload": {
                     "node_id": self.node_id,
-                    "name": self.display_name  # ← Include our name
+                    "name": self.display_name
                 }
             }
             await write_message(writer, hello)
@@ -174,89 +174,258 @@ class P2PManager:
             if not response or response.get("status") != "OK":
                 raise ConnectionError(f"Peer did not acknowledge HELLO.")
             
-            # Get peer's name from response
             peer_name = response.get("name")
             if peer_name:
                 print(f"  - Peer name: {peer_name}")
-                # Store peer name if CoreService is available
                 if hasattr(self, '_core_service_ref') and self._core_service_ref:
                     self._core_service_ref.set_peer_metadata(target_node_id, name=peer_name)
 
-            # Create and register the peer connection
             peer = PeerConnection(node_id=target_node_id, reader=reader, writer=writer)
             self.peers[target_node_id] = peer
             await self._notify_peer_change()
             print(f"✅ Direct connection established with {target_node_id}")
 
-            # Start listening for messages from this peer
             asyncio.create_task(self._listen_to_peer(peer))
 
         except Exception as e:
             print(f"Failed to establish direct connection with {target_node_id}: {e}")
-            writer.close()
-            await writer.wait_closed()
             raise
 
     async def _listen_to_peer(self, peer: PeerConnection):
-        """Background task to listen for and process messages from a single peer."""
+        """Background task to listen for messages from a TLS peer."""
         try:
             while True:
                 message = await peer.read()
                 if message is None:
-                    break # Connection closed
+                    break
                 
-                # --- THE CORE FIX ---
-                # Route the message to the CoreService via the callback
                 if self.on_message_received:
-                    # We run this as a task so it doesn't block the listener loop
                     asyncio.create_task(self.on_message_received(peer.node_id, message))
-                # --------------------
 
         except (asyncio.IncompleteReadError, ConnectionResetError):
-            pass # Normal disconnection
+            pass
         finally:
             print(f"Connection with peer {peer.node_id} was lost.")
             await self.shutdown_peer_connection(peer.node_id)
 
-    async def send_message_to_peer(self, node_id: str, message: Dict[str, Any]):
-        """Sends a message to a specific connected peer."""
-        if node_id not in self.peers:
-            raise ConnectionError(f"Not connected to peer {node_id}.")
-        
-        peer = self.peers[node_id]
-        await peer.send(message)
-
-    async def send_message_to_peer(self, node_id: str, message: Dict[str, Any]):
-        """Sends a message to a specific connected peer."""
-        if node_id not in self.peers:
-            raise ConnectionError(f"Not connected to peer {node_id}.")
-        
-        peer = self.peers[node_id]
-        await peer.send(message)
-
-    # --- Hub-Assisted WebRTC (Placeholder for now) ---
+    # --- WebRTC Connection Methods (NEW) ---
 
     async def connect_via_hub(self, target_node_id: str, hub_client: HubClient):
-        print("Hub-assisted WebRTC connection not yet implemented.")
-        raise NotImplementedError("WebRTC connection not fully implemented yet.")
+        """
+        Initiates a WebRTC connection to a peer via Hub signaling.
+        This is the INITIATOR side (Alice).
+        """
+        print(f"Initiating WebRTC connection to {target_node_id} via Hub...")
+        
+        if target_node_id in self.peers:
+            print(f"Already connected to {target_node_id}")
+            return
+        
+        try:
+            # Create WebRTC peer connection
+            webrtc_peer = WebRTCPeerConnection(node_id=target_node_id, is_initiator=True)
+            self._pending_webrtc[target_node_id] = webrtc_peer
+            
+            # Set up ICE candidate handler
+            async def handle_ice(candidate_dict):
+                await hub_client.send_signal(target_node_id, {
+                    "type": "ice-candidate",
+                    "candidate": candidate_dict
+                })
+            
+            webrtc_peer.on_ice_candidate = handle_ice
+            
+            # Set up message handler
+            async def handle_message(message):
+                if self.on_message_received:
+                    asyncio.create_task(self.on_message_received(target_node_id, message))
+            
+            webrtc_peer.on_message = handle_message
+            
+            # Create and send offer
+            offer = await webrtc_peer.create_offer()
+            await hub_client.send_signal(target_node_id, {
+                "type": "offer",
+                "offer": offer
+            })
+            
+            print(f"WebRTC offer sent to {target_node_id}, waiting for answer...")
+            
+        except Exception as e:
+            print(f"Failed to initiate WebRTC connection to {target_node_id}: {e}")
+            self._pending_webrtc.pop(target_node_id, None)
+            raise
 
     async def handle_incoming_signal(self, signal: Dict[str, Any], hub_client: HubClient):
-        print("WebRTC signal handling not yet implemented.")
-        pass
+        """
+        Handles incoming WebRTC signaling messages from the Hub.
+        Routes to appropriate handler based on signal type.
+        """
+        signal_type = signal.get("type")
+        from_node = signal.get("from_node_id")
+        payload = signal.get("payload", {})
+        
+        print(f"Received WebRTC signal '{signal_type}' from {from_node}")
+        
+        try:
+            if signal_type == "offer":
+                await self._handle_webrtc_offer(from_node, payload, hub_client)
+            
+            elif signal_type == "answer":
+                await self._handle_webrtc_answer(from_node, payload)
+            
+            elif signal_type == "ice-candidate":
+                await self._handle_ice_candidate(from_node, payload)
+            
+            else:
+                print(f"Unknown signal type: {signal_type}")
+        
+        except Exception as e:
+            print(f"Error handling signal from {from_node}: {e}")
+
+    async def _handle_webrtc_offer(self, from_node: str, payload: Dict[str, Any], hub_client: HubClient):
+        """Handle incoming WebRTC offer (ANSWERER side - Bob)."""
+        print(f"Handling WebRTC offer from {from_node}")
+        
+        if from_node in self.peers:
+            print(f"Already connected to {from_node}, ignoring offer")
+            return
+        
+        # Create WebRTC peer connection as answerer
+        webrtc_peer = WebRTCPeerConnection(node_id=from_node, is_initiator=False)
+        self._pending_webrtc[from_node] = webrtc_peer
+        
+        # Set up ICE candidate handler
+        async def handle_ice(candidate_dict):
+            await hub_client.send_signal(from_node, {
+                "type": "ice-candidate",
+                "candidate": candidate_dict
+            })
+        
+        webrtc_peer.on_ice_candidate = handle_ice
+        
+        # Set up message handler
+        async def handle_message(message):
+            if self.on_message_received:
+                asyncio.create_task(self.on_message_received(from_node, message))
+        
+        webrtc_peer.on_message = handle_message
+        
+        # Handle offer and create answer
+        offer_sdp = payload.get("offer")
+        answer = await webrtc_peer.handle_offer(offer_sdp)
+        
+        # Send answer back
+        await hub_client.send_signal(from_node, {
+            "type": "answer",
+            "answer": answer
+        })
+        
+        print(f"WebRTC answer sent to {from_node}")
+        
+        # Process any buffered ICE candidates
+        if from_node in self._ice_candidates_buffer:
+            for candidate in self._ice_candidates_buffer[from_node]:
+                await webrtc_peer.add_ice_candidate(candidate)
+            del self._ice_candidates_buffer[from_node]
+
+    async def _handle_webrtc_answer(self, from_node: str, payload: Dict[str, Any]):
+        """Handle incoming WebRTC answer (INITIATOR side - Alice)."""
+        print(f"Handling WebRTC answer from {from_node}")
+        
+        webrtc_peer = self._pending_webrtc.get(from_node)
+        if not webrtc_peer:
+            print(f"No pending WebRTC connection for {from_node}")
+            return
+        
+        # Set remote description with answer
+        answer_sdp = payload.get("answer")
+        await webrtc_peer.handle_answer(answer_sdp)
+        
+        # Process any buffered ICE candidates
+        if from_node in self._ice_candidates_buffer:
+            for candidate in self._ice_candidates_buffer[from_node]:
+                await webrtc_peer.add_ice_candidate(candidate)
+            del self._ice_candidates_buffer[from_node]
+        
+        # Wait for connection to be ready, then move to active peers
+        asyncio.create_task(self._finalize_webrtc_connection(from_node))
+
+    async def _handle_ice_candidate(self, from_node: str, payload: Dict[str, Any]):
+        """Handle incoming ICE candidate."""
+        candidate = payload.get("candidate")
+        
+        webrtc_peer = self._pending_webrtc.get(from_node) or self.peers.get(from_node)
+        
+        if webrtc_peer and isinstance(webrtc_peer, WebRTCPeerConnection):
+            await webrtc_peer.add_ice_candidate(candidate)
+        else:
+            # Buffer ICE candidates if connection not yet established
+            if from_node not in self._ice_candidates_buffer:
+                self._ice_candidates_buffer[from_node] = []
+            self._ice_candidates_buffer[from_node].append(candidate)
+            print(f"Buffered ICE candidate from {from_node} (total: {len(self._ice_candidates_buffer[from_node])})")
+
+    async def _finalize_webrtc_connection(self, node_id: str):
+        """Wait for WebRTC connection to be ready and move to active peers."""
+        webrtc_peer = self._pending_webrtc.get(node_id)
+        if not webrtc_peer:
+            return
+        
+        try:
+            # Wait for connection to be ready
+            await webrtc_peer.wait_ready(timeout=30.0)
+            
+            # Move from pending to active peers
+            self._pending_webrtc.pop(node_id, None)
+            self.peers[node_id] = webrtc_peer
+            
+            await self._notify_peer_change()
+            print(f"✅ WebRTC connection established with {node_id}")
+            
+        except Exception as e:
+            print(f"Failed to finalize WebRTC connection with {node_id}: {e}")
+            self._pending_webrtc.pop(node_id, None)
+            await webrtc_peer.close()
 
     # --- Unified Connection Management ---
 
+    async def send_message_to_peer(self, node_id: str, message: Dict[str, Any]):
+        """Sends a message to a specific connected peer (works for both TLS and WebRTC)."""
+        if node_id not in self.peers:
+            raise ConnectionError(f"Not connected to peer {node_id}.")
+        
+        peer = self.peers[node_id]
+        await peer.send(message)
+
     async def shutdown_peer_connection(self, peer_id: str):
+        """Close connection with a peer."""
         if peer_id in self.peers:
             peer = self.peers.pop(peer_id)
             await peer.close()
             print(f"Connection with {peer_id} closed.")
             await self._notify_peer_change()
+        
+        # Also clean up pending WebRTC connections
+        if peer_id in self._pending_webrtc:
+            webrtc_peer = self._pending_webrtc.pop(peer_id)
+            await webrtc_peer.close()
+        
+        # Clean up buffered ICE candidates
+        self._ice_candidates_buffer.pop(peer_id, None)
 
     async def shutdown_all(self):
+        """Shutdown all connections."""
         print("Shutting down P2P Manager...")
+        
         if self._server_task:
             self._server_task.cancel()
+        
         for peer_id in list(self.peers.keys()):
             await self.shutdown_peer_connection(peer_id)
+        
+        for peer_id in list(self._pending_webrtc.keys()):
+            webrtc_peer = self._pending_webrtc.pop(peer_id)
+            await webrtc_peer.close()
+        
         print("P2P Manager shut down.")

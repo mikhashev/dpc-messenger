@@ -1,0 +1,32 @@
+version: '3.8'
+
+# Docker Compose for local development of D-PC Hub
+# Usage: docker-compose up -d
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: dpc-hub-db-dev
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: dpc_hub
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_dev_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d dpc_hub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_dev_data:
+    driver: local
+
+# INSTRUCTIONS:
+# 1. Run: docker-compose up -d
+# 2. Create a .env file with settings (see .env.example)
+# 3. Run migrations: poetry run alembic upgrade head
+# 4. Start the Hub: poetry run uvicorn dpc_hub.main:app --reload

@@ -35,9 +35,6 @@ class CoreService:
         self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
         self.hub_client = HubClient(api_base_url="http://127.0.0.1:8000")
         self.p2p_manager = P2PManager(firewall=self.firewall)
-        self.p2p_manager.set_core_service_ref(self)
-        self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
-        self.p2p_manager.set_on_message_received(self.on_p2p_message_received)  # Add message handler
         self.cache = ContextCache()
         
         self.local_api = LocalApiServer(core_service=self)
@@ -50,6 +47,11 @@ class CoreService:
         
         # Track pending context requests (for request-response matching)
         self._pending_context_requests: Dict[str, asyncio.Future] = {}
+        
+        # Set up callbacks AFTER all components are initialized
+        self.p2p_manager.set_core_service_ref(self)
+        self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
+        self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
 
     async def start(self):
         """Starts all background services and runs indefinitely."""
@@ -65,95 +67,75 @@ class CoreService:
         self._background_tasks.add(asyncio.create_task(self.p2p_manager.start_server()))
         self._background_tasks.add(asyncio.create_task(self.local_api.start()))
         
-        # Optional: Try to connect to Hub (comment out if you don't want auto-connect)
-        # try:
-        #     await self.hub_client.login()
-        #     await self.hub_client.connect_signaling_socket()
-        #     self._background_tasks.add(asyncio.create_task(self._listen_for_hub_signals()))
-        #     print("Successfully connected to Federation Hub.")
-        # except Exception as e:
-        #     print(f"Warning: Could not connect to Hub. Running in offline mode. Error: {e}")
+        # Try to connect to Hub for WebRTC signaling
+        try:
+            await self.hub_client.login()
+            await self.hub_client.connect_signaling_socket()
+            
+            # Start listening for incoming WebRTC signals
+            self._background_tasks.add(asyncio.create_task(self._listen_for_hub_signals()))
+            
+            print("✅ Successfully connected to Federation Hub for WebRTC signaling.")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not connect to Hub. WebRTC connections unavailable.")
+            print(f"   Error: {e}")
+            print(f"   You can still use direct connections via dpc:// URIs.")
 
         self._is_running = True
-        print("D-PC Core Service is running in offline mode.")
-        print("To connect to Hub, click 'Login to Hub' button in the UI.")
-        print("Awaiting UI connection...")
-        
-        await self._shutdown_event.wait()
-
-    async def stop(self):
-        """Gracefully stops all services."""
-        if not self._is_running:
-            return
-            
-        print("Stopping D-PC Core Service...")
-        
-        self._shutdown_event.set()
-        
-        for task in self._background_tasks:
-            task.cancel()
+        print(f"D-PC Core Service started. Node ID: {self.p2p_manager.node_id}")
         
         try:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+            await self._shutdown_event.wait()
         except asyncio.CancelledError:
             pass
-        
-        await self.p2p_manager.shutdown_all()
-        await self.hub_client.close()
-        await self.local_api.stop()
+        finally:
+            await self.shutdown()
 
+    async def stop(self):
+        """Signals the service to stop and waits for a clean shutdown."""
+        if not self._is_running:
+            return
+        print("Stopping D-PC Core Service...")
+        self._shutdown_event.set()
+
+    async def shutdown(self):
+        """Performs a clean shutdown of all components."""
         self._is_running = False
-        print("D-PC Core Service stopped.")
+        print("Shutting down components...")
+        await self.p2p_manager.shutdown_all()
+        await self.local_api.stop()
+        await self.hub_client.close()
+        print("D-PC Core Service shut down.")
 
     async def _listen_for_hub_signals(self):
-        """A background task to listen for signaling messages from the Hub."""
-        while self._is_running and self.hub_client.websocket and not self.hub_client.websocket.closed:
-            try:
-                signal = await self.hub_client.receive_signal()
-                await self.p2p_manager.handle_incoming_signal(signal, self.hub_client)
-                # After handling a signal that might change peer status, broadcast update
-                await self.local_api.broadcast_event("status_update", await self.get_status())
-            except Exception as e:
-                print(f"Error in Hub signal listener: {e}. Disconnecting from Hub.")
-                await self.local_api.broadcast_event("status_update", await self.get_status())
-                break
-
-    # --- High-level methods (API for the UI) ---
-
-    async def get_status(self) -> Dict[str, Any]:
-        """Aggregates status from all components."""
+        """
+        Background task that listens for incoming WebRTC signaling messages from Hub.
+        Runs continuously while connected to Hub.
+        """
+        print("Started listening for Hub WebRTC signals...")
         
-        hub_connected = (
-            self.hub_client.websocket is not None and
-            self.hub_client.websocket.state == websockets.State.OPEN
-        )
-        
-        # Get peer info with names
-        peer_info = []
-        for peer_id in self.p2p_manager.peers.keys():
-            peer_data = {
-                "node_id": peer_id,
-                "name": self.peer_metadata.get(peer_id, {}).get("name", None)
-            }
-            peer_info.append(peer_data)
-        
-        # Get active model name safely
         try:
-            active_model = self.llm_manager.get_active_model_name()
-        except (AttributeError, Exception):
-            # Fallback if method doesn't exist or fails
-            active_model = None
+            while self._is_running:
+                try:
+                    # Wait for next signal from Hub
+                    signal = await self.hub_client.receive_signal()
+                    
+                    # Handle the signal
+                    await self.p2p_manager.handle_incoming_signal(signal, self.hub_client)
+                    
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    print(f"Error receiving Hub signal: {e}")
+                    await asyncio.sleep(1)  # Brief pause before retry
         
-        return {
-            "node_id": self.p2p_manager.node_id,
-            "hub_status": "Connected" if hub_connected else "Disconnected",
-            "p2p_peers": list(self.p2p_manager.peers.keys()),  # Keep for backward compatibility
-            "peer_info": peer_info,  # Detailed peer info with names
-            "active_ai_model": active_model,  # Add active model
-        }
-    
+        finally:
+            print("Stopped listening for Hub signals.")
+
+    # --- Callback Methods (called by P2PManager) ---
+
     async def on_peer_list_change(self):
-        """Callback function that is triggered by P2PManager."""
+        """Callback function that is triggered by P2PManager when peer list changes."""
         print("Peer list changed, broadcasting status update to UI.")
         await self.local_api.broadcast_event("status_update", await self.get_status())
     
@@ -165,7 +147,7 @@ class CoreService:
         command = message.get("command")
         payload = message.get("payload", {})
         
-        print(f"CoreService received message from {sender_node_id}: {message}")
+        print(f"CoreService received message from {sender_node_id}: {command}")
         
         if command == "SEND_TEXT":
             # Text message from peer - forward to UI
@@ -193,7 +175,98 @@ class CoreService:
         
         else:
             print(f"Unknown P2P message command: {command}")
+
+    # --- High-level methods (API for the UI) ---
+
+    async def get_status(self) -> Dict[str, Any]:
+        """Aggregates status from all components."""
+        
+        hub_connected = (
+            self.hub_client.websocket is not None and
+            self.hub_client.websocket.state == websockets.State.OPEN
+        )
+        
+        # Get peer info with names
+        peer_info = []
+        for peer_id in self.p2p_manager.peers.keys():
+            peer_data = {
+                "node_id": peer_id,
+                "name": self.peer_metadata.get(peer_id, {}).get("name", None)
+            }
+            peer_info.append(peer_data)
+        
+        # Get active model name safely
+        try:
+            active_model = self.llm_manager.get_active_model_name()
+        except (AttributeError, Exception):
+            active_model = None
+        
+        return {
+            "node_id": self.p2p_manager.node_id,
+            "hub_status": "Connected" if hub_connected else "Disconnected",
+            "p2p_peers": list(self.p2p_manager.peers.keys()),
+            "peer_info": peer_info,
+            "active_ai_model": active_model,
+        }
     
+    def set_peer_metadata(self, node_id: str, **kwargs):
+        """Store metadata for a peer (name, etc)."""
+        if node_id not in self.peer_metadata:
+            self.peer_metadata[node_id] = {}
+        self.peer_metadata[node_id].update(kwargs)
+
+    # --- P2P Connection Methods ---
+
+    async def connect_to_peer(self, uri: str):
+        """Connect to a peer using a dpc:// URI (Direct TLS)."""
+        print(f"Orchestrating direct connection to {uri}...")
+        
+        # Parse the URI to extract host, port, and node_id
+        host, port, target_node_id = parse_dpc_uri(uri)
+        
+        # Use connect_directly from P2PManager
+        await self.p2p_manager.connect_directly(host, port, target_node_id)
+
+    async def connect_to_peer_by_id(self, node_id: str):
+        """
+        Orchestrates a P2P connection to a peer using its node_id via Hub.
+        Uses WebRTC with NAT traversal.
+        """
+        print(f"Orchestrating WebRTC connection to {node_id} via Hub...")
+        
+        # Check if Hub is connected
+        if not self.hub_client.websocket or self.hub_client.websocket.state != websockets.State.OPEN:
+            raise ConnectionError("Not connected to Hub. Cannot establish WebRTC connection.")
+        
+        # Use WebRTC connection via Hub
+        await self.p2p_manager.connect_via_hub(
+            target_node_id=node_id,
+            hub_client=self.hub_client
+        )
+
+    async def disconnect_from_peer(self, node_id: str):
+        """Disconnect from a peer."""
+        await self.p2p_manager.shutdown_peer_connection(node_id)
+
+    async def send_p2p_message(self, target_node_id: str, text: str):
+        """Send a text message to a connected peer."""
+        print(f"Sending text message to {target_node_id}: {text}")
+        
+        message = {
+            "command": "SEND_TEXT",
+            "payload": {
+                "text": text
+            }
+        }
+        
+        try:
+            await self.p2p_manager.send_message_to_peer(target_node_id, message)
+        except Exception as e:
+            print(f"Error sending message to {target_node_id}: {e}")
+            raise
+
+    # --- Context Request Methods ---
+
     async def _handle_context_request(self, peer_id: str, query: str, request_id: str):
         """
         Handle incoming context request from a peer.
@@ -211,14 +284,13 @@ class CoreService:
         print(f"  - Context filtered by firewall for {peer_id}")
         
         # Convert to dict for JSON serialization
-        from dataclasses import asdict
         context_dict = asdict(filtered_context)
         
         # Send response back to peer with request_id
         response = {
             "command": "CONTEXT_RESPONSE",
             "payload": {
-                "request_id": request_id,  # Include request_id for matching
+                "request_id": request_id,
                 "context": context_dict,
                 "query": query
             }
@@ -229,54 +301,6 @@ class CoreService:
             print(f"  - Sent filtered context response to {peer_id}")
         except Exception as e:
             print(f"  - Error sending context response to {peer_id}: {e}")
-    
-    async def send_p2p_message(self, target_node_id: str, text: str):
-        """
-        Send a text message to a connected peer.
-        """
-        print(f"Sending text message to {target_node_id}: {text}")
-        
-        message = {
-            "command": "SEND_TEXT",
-            "payload": {
-                "text": text
-            }
-        }
-        
-        try:
-            await self.p2p_manager.send_message_to_peer(target_node_id, message)
-        except Exception as e:
-            print(f"Error sending message to {target_node_id}: {e}")
-            raise
-    
-    async def connect_to_peer(self, uri: str):
-        """Connect to a peer using a dpc:// URI."""
-        print(f"Orchestrating connection to {uri}...")
-        
-        # Parse the URI to extract host, port, and node_id
-        host, port, target_node_id = parse_dpc_uri(uri)
-        
-        # Use connect_directly from P2PManager
-        await self.p2p_manager.connect_directly(host, port, target_node_id)
-        
-        # The callback will handle the UI update
-
-    async def disconnect_from_peer(self, node_id: str):
-        # This method now only needs to start the process.
-        await self.p2p_manager.shutdown_peer_connection(node_id)
-        # The on_close handler will trigger the callback.
-
-    async def connect_to_peer_by_id(self, node_id: str):
-        """
-        Orchestrates a P2P connection to a peer using its node_id via Hub.
-        Note: WebRTC via hub is not yet implemented.
-        """
-        print(f"Orchestrating connection to {node_id} via Hub...")
-        # This would use WebRTC signaling via hub
-        await self.p2p_manager.connect_via_hub(
-            target_node_id=node_id,
-            hub_client=self.hub_client
-        )
 
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """
@@ -301,7 +325,7 @@ class CoreService:
             request_message = {
                 "command": "REQUEST_CONTEXT",
                 "payload": {
-                    "request_id": request_id,  # Include request ID
+                    "request_id": request_id,
                     "query": query,
                     "requestor_id": self.p2p_manager.node_id
                 }
@@ -341,142 +365,118 @@ class CoreService:
                      If None, requests from all connected peers.
         
         Returns:
-            Dictionary mapping source_id to PersonalContext
+            Dictionary mapping node_id to PersonalContext
         """
-        print(f"Aggregating contexts for query: '{query[:50]}...'")
+        contexts = {}
         
-        aggregated_contexts = {
-            'local': self.p2p_manager.local_context
-        }
+        # Always include local context
+        contexts[self.p2p_manager.node_id] = self.p2p_manager.local_context
         
-        # Determine which peers to request from
+        # Determine which peers to query
         if peer_ids is None:
             peer_ids = list(self.p2p_manager.peers.keys())
         
-        if not peer_ids:
-            print("  - No connected peers to request context from.")
-            return aggregated_contexts
+        # Request context from each peer in parallel
+        if peer_ids:
+            tasks = [self._request_context_from_peer(peer_id, query) for peer_id in peer_ids]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for peer_id, result in zip(peer_ids, results):
+                if isinstance(result, PersonalContext):
+                    contexts[peer_id] = result
+                elif result is not None:
+                    print(f"  - Error getting context from {peer_id}: {result}")
         
-        print(f"  - Requesting contexts from {len(peer_ids)} peer(s)...")
-        
-        # Request contexts from all peers concurrently
-        context_tasks = [
-            self._request_context_from_peer(peer_id, query)
-            for peer_id in peer_ids
-        ]
-        
-        peer_contexts = await asyncio.gather(*context_tasks, return_exceptions=True)
-        
-        # Add successful peer contexts to aggregated results
-        for peer_id, context in zip(peer_ids, peer_contexts):
-            if isinstance(context, PersonalContext):
-                aggregated_contexts[peer_id] = context
-                print(f"  - Successfully received context from {peer_id}")
-            elif isinstance(context, Exception):
-                print(f"  - Error getting context from {peer_id}: {context}")
-        
-        print(f"  - Total contexts aggregated: {len(aggregated_contexts)}")
-        return aggregated_contexts
+        return contexts
 
-    async def execute_ai_query(self, command_id: str, prompt: str, peer_ids: List[str] = None, **kwargs):
+    # --- AI Query Methods ---
+
+    async def execute_ai_query(self, query: str, use_context_from: List[str] = None, 
+                               compute_host: str = None, command_id: str = None):
         """
-        Orchestrates an AI query with context aggregation from peers and sends 
-        the response directly back to the UI via the LocalApiServer.
+        Execute an AI query, optionally using context from peers and/or remote computation.
         
         Args:
-            command_id: Unique identifier for this command
-            prompt: The user's query
-            peer_ids: Optional list of peer IDs to request context from.
-                     If None, requests from all connected peers.
+            query: The user's query
+            use_context_from: List of peer node_ids to request context from
+            compute_host: node_id of peer to run inference on (None = local)
+            command_id: Command ID for sending streaming responses to UI
         """
-        print(f"Orchestrating AI query for command_id {command_id}: '{prompt[:50]}...'")
+        print(f"Executing AI query: {query}")
+        print(f"  - Context from: {use_context_from}")
+        print(f"  - Compute host: {compute_host or 'local'}")
         
-        # Aggregate contexts from local and peers
-        aggregated_contexts = await self._aggregate_contexts(prompt, peer_ids)
-        
-        # Assemble final prompt with all contexts
-        final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt)
-
-        response_payload = {}
-        status = "OK"
-
         try:
-            response_content = await self.llm_manager.query(prompt=final_prompt)
-            response_payload = {"type": "full_response", "content": response_content}
-            print(f"  - Successfully received response from LLM.")
+            # Aggregate contexts
+            contexts = await self._aggregate_contexts(query, peer_ids=use_context_from)
+            
+            # Build combined prompt
+            combined_prompt = self._build_combined_prompt(query, contexts)
+            
+            # Execute inference
+            if compute_host and compute_host != self.p2p_manager.node_id:
+                # Remote inference (not yet implemented)
+                result = "Remote inference not yet implemented"
+            else:
+                # Local inference
+                result = await self.llm_manager.query(combined_prompt)
+            
+            # Send result to UI
+            if command_id:
+                await self.local_api.broadcast_response(command_id, {
+                    "result": result,
+                    "contexts_used": list(contexts.keys())
+                })
+            
+            return result
+            
         except Exception as e:
-            print(f"  - Error during local inference: {e}")
-            status = "ERROR"
-            response_payload = {"message": str(e)}
+            print(f"Error executing AI query: {e}")
+            if command_id:
+                await self.local_api.broadcast_response(command_id, {
+                    "error": str(e)
+                }, status="ERROR")
+            raise
 
-        # Send the final response back to the UI
-        await self.local_api.send_response_to_all(
-            command_id=command_id,
-            command="execute_ai_query",
-            status=status,
-            payload=response_payload
-        )
+    def _build_combined_prompt(self, query: str, contexts: Dict[str, PersonalContext]) -> str:
+        """Build a prompt that combines the query with multiple contexts."""
+        prompt_parts = ["Context information:"]
+        
+        for node_id, context in contexts.items():
+            source = "You" if node_id == self.p2p_manager.node_id else f"Peer {node_id}"
+            prompt_parts.append(f"\n[From {source}]")
+            prompt_parts.append(f"Name: {context.profile.get('name', 'Unknown')}")
+            if context.profile.get('description'):
+                prompt_parts.append(f"Description: {context.profile['description']}")
+        
+        prompt_parts.append(f"\nUser Query: {query}")
+        
+        return "\n".join(prompt_parts)
 
-    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str) -> str:
-        """Helper method to assemble the final prompt for the LLM."""
-        system_instruction = (
-            "You are a helpful AI assistant. Your task is to answer the user's query based on the provided JSON data blobs inside <CONTEXT> tags. "
-            "The 'source' attribute of each tag indicates who the context belongs to. The source 'local' refers to the user asking the query. "
-            "Other sources are peer nodes who have shared their context to help answer the query. "
-            "Analyze all provided contexts to formulate your answer. When relevant, cite which source provided specific information."
-        )
-        context_blocks = []
-        for source_id, context_obj in contexts.items():
-            context_dict = asdict(context_obj)
-            json_string = json.dumps(context_dict, indent=2, ensure_ascii=False)
-            
-            # Add peer name if available
-            source_label = source_id
-            if source_id != 'local' and source_id in self.peer_metadata:
-                peer_name = self.peer_metadata[source_id].get('name')
-                if peer_name:
-                    source_label = f"{peer_name} ({source_id})"
-            
-            block = f'<CONTEXT source="{source_label}">\n{json_string}\n</CONTEXT>'
-            context_blocks.append(block)
+    # --- Hub Methods ---
+
+    async def login_to_hub(self, provider: str = "google"):
+        """Login to Hub using OAuth."""
+        await self.hub_client.login(provider=provider)
+        await self.hub_client.connect_signaling_socket()
         
-        final_prompt = (
-            f"{system_instruction}\n\n"
-            f"--- CONTEXTUAL DATA ---\n"
-            f'{"\n\n".join(context_blocks)}\n'
-            f"--- END OF CONTEXTUAL DATA ---\n\n"
-            f"USER QUERY: {clean_prompt}"
-        )
-        return final_prompt
-    
-    def set_peer_metadata(self, peer_id: str, name: str = None, **metadata):
-        """
-        Store metadata about a peer (name, profile, etc.)
+        # Start listening for signals if not already
+        if not any(task.get_name() == "hub_signals" for task in self._background_tasks):
+            task = asyncio.create_task(self._listen_for_hub_signals())
+            task.set_name("hub_signals")
+            self._background_tasks.add(task)
         
-        Args:
-            peer_id: The peer's node ID
-            name: Optional display name for the peer
-            **metadata: Additional metadata fields
-        """
-        if peer_id not in self.peer_metadata:
-            self.peer_metadata[peer_id] = {}
+        print("Successfully logged in to Hub.")
+
+    async def disconnect_from_hub(self):
+        """Disconnect from Hub."""
+        # Cancel the signal listening task
+        for task in self._background_tasks:
+            if task.get_name() == "hub_signals":
+                task.cancel()
+                self._background_tasks.remove(task)
+                break
         
-        if name:
-            self.peer_metadata[peer_id]['name'] = name
-        
-        self.peer_metadata[peer_id].update(metadata)
-        
-        print(f"Updated metadata for peer {peer_id}: {self.peer_metadata[peer_id]}")
-    
-    async def set_my_name(self, name: str):
-        """
-        Set your display name that will be shared with peers.
-        Can be called from UI.
-        """
-        self.p2p_manager.display_name = name
-        print(f"Your display name set to: {name}")
-        
-        # Broadcast status update to UI
+        await self.hub_client.close()
+        print("Disconnected from Hub.")
         await self.local_api.broadcast_event("status_update", await self.get_status())
-        
-        return {"name": name, "status": "success"}
