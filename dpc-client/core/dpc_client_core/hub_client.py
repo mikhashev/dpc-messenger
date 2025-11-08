@@ -43,7 +43,6 @@ class HubClient:
         token_future = asyncio.Future()
         
         # --- THE CORE FIX ---
-        # The handler now expects a path like /callback?access_token=...
         class OAuthCallbackHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 parsed_path = urlparse(self.path)
@@ -64,7 +63,6 @@ class HubClient:
                         self.wfile.write(b"<p>Token not found in callback. Please try again.</p>")
                         self.server.loop.call_soon_threadsafe(token_future.set_exception, Exception("Token not found in callback"))
                 else:
-                    # Handle other requests (like favicon.ico) gracefully
                     self.send_response(404)
                     self.end_headers()
                     self.wfile.write(b"Not Found")
@@ -83,14 +81,12 @@ class HubClient:
         webbrowser.open(login_url)
 
         try:
-            # Wait for the callback handler to set the result on the future
             self.jwt_token = await asyncio.wait_for(token_future, timeout=180) # 3 minute timeout
             print("Authentication successful, JWT received.")
         except asyncio.TimeoutError:
             print("Authentication timed out.")
             raise
         finally:
-            # Cleanly shut down the temporary server
             server.shutdown()
             thread.join()
             print("Local callback server stopped.")
@@ -105,7 +101,7 @@ class HubClient:
             json=profile_data,
             headers=self._get_auth_headers()
         )
-        response.raise_for_status() # Will raise an exception for 4xx/5xx responses
+        response.raise_for_status()
         print("Profile updated successfully.")
         return response.json()
 
@@ -124,22 +120,19 @@ class HubClient:
 
     async def connect_signaling_socket(self):
         """Connects to the Hub's WebSocket and authenticates via query parameter."""
-        if self.websocket and not self.websocket.closed:
+        if self.websocket and self.websocket.state == websockets.State.OPEN:
             print("Signaling socket is already connected.")
             return
         
         if not self.jwt_token:
             raise PermissionError("Authentication required before connecting to signaling.")
 
-        # --- THE CORE FIX: Pass token as a query parameter ---
         ws_url = self.api_base_url.replace("http", "ws") + f"/ws/signal?token={self.jwt_token}"
         print(f"Connecting to signaling server...")
         
         try:
-            # Establish the connection. The server will authenticate based on the URL.
             self.websocket = await websockets.connect(ws_url)
             
-            # Wait for the confirmation message from the server
             response_str = await self.websocket.recv()
             response = json.loads(response_str)
 
@@ -151,15 +144,12 @@ class HubClient:
             print(f"Signaling server response: {response.get('message')}")
             print("Signaling socket connected and authenticated.")
         except websockets.exceptions.InvalidStatus as e:
-            # This will catch rejections like 403 Forbidden
             raise ConnectionError(f"Server rejected WebSocket connection: {e.status_code}") from e
 
     async def send_signal(self, target_node_id: str, payload: Dict[str, Any]):
         """Sends a signaling message to a target peer via the Hub."""
-        # --- THE CORE FIX ---
         if not self.websocket or self.websocket.state != websockets.State.OPEN:
             raise ConnectionError("Signaling socket is not connected.")
-        # --------------------
         
         message = {
             "type": "signal",
@@ -170,10 +160,8 @@ class HubClient:
 
     async def receive_signal(self) -> Dict[str, Any]:
         """Waits for and returns the next signaling message from the Hub."""
-        # --- PROACTIVE FIX ---
         if not self.websocket or self.websocket.state != websockets.State.OPEN:
             raise ConnectionError("Signaling socket is not connected.")
-        # ---------------------
         
         message_str = await self.websocket.recv()
         return json.loads(message_str)

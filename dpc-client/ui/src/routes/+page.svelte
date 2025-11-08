@@ -1,4 +1,5 @@
 <!-- dpc-client/ui/src/routes/+page.svelte -->
+<!-- FIXED VERSION - Proper URI detection for Direct TLS vs WebRTC -->
 
 <script lang="ts">
   import { writable } from "svelte/store";
@@ -12,7 +13,7 @@
     sender: string; 
     text: string; 
     timestamp: number;
-    commandId?: string;  // For matching AI query responses
+    commandId?: string;
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
     ['local_ai', [{ id: crypto.randomUUID(), sender: 'ai', text: 'Hello! I am your local AI assistant. How can I help you today?', timestamp: Date.now() }]]
@@ -22,20 +23,16 @@
   let currentInput: string = "";
   let isLoading: boolean = false;
   let chatWindow: HTMLElement;
-  let peerUri: string = "";
+  let peerInput: string = "";  // RENAMED from peerUri for clarity
   
-  // Track processed P2P messages to prevent duplicates
   let processedMessageIds = new Set<string>();
   
-  // Helper function to check if user is near the bottom of the chat
   function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
     if (!element) return true;
     const { scrollTop, scrollHeight, clientHeight } = element;
     return scrollHeight - scrollTop - clientHeight < threshold;
   }
   
-  // Auto-scroll function - always scrolls for active conversation
-  // (user sending message, receiving AI response, or receiving P2P message)
   function autoScroll() {
     setTimeout(() => {
       if (chatWindow) {
@@ -44,7 +41,6 @@
     }, 100);
   }
   
-  // Helper function to get display name for a peer
   function getPeerDisplayName(peerId: string): string {
     if (!$nodeStatus || !$nodeStatus.peer_info) {
       return peerId;
@@ -58,7 +54,6 @@
     return peerId;
   }
   
-  // Helper function to get active AI model display
   function getAIModelDisplay(): string {
     if (!$nodeStatus) {
       return '🤖 Local AI Assistant';
@@ -78,7 +73,6 @@
     const text = currentInput.trim();
     currentInput = "";
     
-    // Add user message with unique ID - CREATE NEW MAP
     chatHistories.update(h => {
       const newMap = new Map(h);
       const hist = newMap.get(activeChatId) || [];
@@ -87,31 +81,25 @@
     });
     
     if (activeChatId === 'local_ai') {
-      // AI query
       isLoading = true;
-      
-      // Generate command_id for this specific query
       const commandId = crypto.randomUUID();
       
-      // Add "Thinking..." message with unique ID and command_id
       chatHistories.update(h => {
         const newMap = new Map(h);
-        const hist = newMap.get(activeChatId)!;
+        const hist = newMap.get(activeChatId) || [];
         newMap.set(activeChatId, [...hist, { 
           id: crypto.randomUUID(), 
           sender: 'ai', 
           text: 'Thinking...', 
           timestamp: Date.now(),
-          commandId: commandId  // Store command_id to match response later
+          commandId: commandId
         }]);
         return newMap;
       });
       
-      // Send command with explicit command_id
       const success = sendCommand("execute_ai_query", { prompt: text }, commandId);
       if (!success) {
         isLoading = false;
-        // CREATE NEW MAP for error state
         chatHistories.update(h => {
           const newMap = new Map(h);
           const hist = newMap.get('local_ai') || [];
@@ -122,26 +110,37 @@
         });
       }
     } else {
-      // P2P message
       sendCommand("send_p2p_message", { target_node_id: activeChatId, text });
     }
     
-    // Always auto-scroll when user sends a message
     autoScroll();
   }
   
   // --- PEER CONNECTION FUNCTIONS ---
+  // FIXED: Proper detection of dpc:// URI vs node_id
   function handleConnectPeer() {
-    if (!peerUri.trim()) return;
-    console.log("Connecting to peer:", peerUri);
-    sendCommand("connect_to_peer", { uri: peerUri });
-    peerUri = "";
+    if (!peerInput.trim()) return;
+    
+    const input = peerInput.trim();
+    console.log("Connecting to peer:", input);
+    
+    // Detect if input is a dpc:// URI (Direct TLS) or just a node_id (WebRTC via Hub)
+    if (input.startsWith('dpc://')) {
+      // Direct TLS connection
+      console.log("Using Direct TLS connection");
+      sendCommand("connect_to_peer", { uri: input });
+    } else {
+      // WebRTC connection via Hub (just node_id)
+      console.log("Using WebRTC connection via Hub");
+      sendCommand("connect_to_peer_by_id", { node_id: input });
+    }
+    
+    peerInput = "";
   }
   
   function handleDisconnectPeer(nodeId: string) {
     if (confirm(`Disconnect from ${nodeId.slice(0, 15)}...?`)) {
       sendCommand("disconnect_from_peer", { node_id: nodeId });
-      // Switch to local_ai if we were chatting with this peer
       if (activeChatId === nodeId) {
         activeChatId = 'local_ai';
       }
@@ -164,52 +163,49 @@
         : `Error: ${message.payload?.message || 'Unknown error'}`;
       const newSender = message.status === "OK" ? 'ai' : 'system';
       
-      // Match response to the correct "Thinking..." message using command_id
       const responseCommandId = message.id;
       
-      // CREATE NEW MAP to trigger reactivity
       chatHistories.update(h => {
         const newMap = new Map(h);
         const hist = newMap.get('local_ai') || [];
         newMap.set('local_ai', hist.map(m => 
-          // Match by commandId instead of text
-          m.commandId === responseCommandId ? { ...m, sender: newSender, text: newText } : m
+          m.commandId === responseCommandId ? { ...m, sender: newSender, text: newText, commandId: undefined } : m
         ));
         return newMap;
       });
       
-      // Always auto-scroll when AI responds
       autoScroll();
     }
   }
   
   $: if ($p2pMessages) {
-    const message = $p2pMessages;
-    const { sender_node_id, text } = message;
+    const msg = $p2pMessages;
+    const messageId = `${msg.sender_node_id}-${msg.text}-${Date.now()}`;
     
-    if (sender_node_id && text) {
-      // Create unique message identifier based on content (not timestamp)
-      const messageId = `${sender_node_id}:${text}`;
+    if (!processedMessageIds.has(messageId)) {
+      processedMessageIds.add(messageId);
       
-      // Only process if we haven't seen this message before
-      if (!processedMessageIds.has(messageId)) {
-        processedMessageIds.add(messageId);
-        
-        // CREATE NEW MAP to trigger reactivity
-        chatHistories.update(h => {
-          const newMap = new Map(h);
-          if (!newMap.has(sender_node_id)) {
-            newMap.set(sender_node_id, []);
-          }
-          const hist = newMap.get(sender_node_id)!;
-          newMap.set(sender_node_id, [...hist, { id: crypto.randomUUID(), sender: sender_node_id, text, timestamp: Date.now() }]);
-          return newMap;
-        });
-        
-        // Always auto-scroll if this is the active chat when peer sends message
-        if (activeChatId === sender_node_id) {
-          autoScroll();
-        }
+      const wasNearBottom = isNearBottom(chatWindow);
+      
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        const hist = newMap.get(msg.sender_node_id) || [];
+        newMap.set(msg.sender_node_id, [...hist, {
+          id: crypto.randomUUID(),
+          sender: msg.sender_node_id,
+          text: msg.text,
+          timestamp: Date.now()
+        }]);
+        return newMap;
+      });
+      
+      if (wasNearBottom || activeChatId === msg.sender_node_id) {
+        autoScroll();
+      }
+      
+      if (processedMessageIds.size > 100) {
+        const firstId = processedMessageIds.values().next().value;
+        processedMessageIds.delete(firstId);
       }
     }
   }
@@ -222,29 +218,34 @@
 
   <!-- Status Bar -->
   <div class="status-bar">
-    <strong>Status:</strong>
-    <span class="status-{$connectionStatus}">{$connectionStatus}</span>
-    {#if $connectionStatus !== 'connected'}
-      <button on:click={handleReconnect} class="btn-small">Reconnect</button>
+    {#if $connectionStatus === 'connected'}
+      <span class="status-connected">Status: connected</span>
+    {:else if $connectionStatus === 'connecting'}
+      <span class="status-connecting">Status: connecting...</span>
+    {:else if $connectionStatus === 'error'}
+      <span class="status-error">Status: error</span>
+      <button class="btn-small" on:click={handleReconnect}>Retry</button>
+    {:else}
+      <span class="status-disconnected">Status: disconnected</span>
+      <button class="btn-small" on:click={handleReconnect}>Connect</button>
     {/if}
   </div>
 
   <div class="grid">
-    <!-- Left Sidebar -->
+    <!-- Sidebar -->
     <div class="sidebar">
       {#if $connectionStatus === 'connected' && $nodeStatus}
         <!-- Node Info -->
         <div class="node-info">
           <h2>Your Node</h2>
+          <p><strong>ID:</strong></p>
           <div class="node-id-container">
-            <p class="node-id" title={$nodeStatus.node_id}>
-              <strong>ID:</strong> {$nodeStatus.node_id}
-            </p>
+            <code class="node-id">{$nodeStatus.node_id}</code>
             <button 
-              class="copy-btn" 
+              class="copy-btn"
               on:click={() => {
                 navigator.clipboard.writeText($nodeStatus.node_id);
-                alert('Node ID copied to clipboard!');
+                alert('Node ID copied!');
               }}
               title="Copy Node ID"
             >
@@ -259,19 +260,22 @@
           </p>
         </div>
 
-        <!-- Direct Peer Connection -->
+        <!-- Connect to Peer - UPDATED PLACEHOLDER -->
         <div class="connect-section">
           <h3>Connect to Peer</h3>
           <input 
             type="text" 
-            bind:value={peerUri} 
+            bind:value={peerInput}
             placeholder="dpc://... or node_id"
             on:keydown={(e) => e.key === 'Enter' && handleConnectPeer()}
           />
           <button on:click={handleConnectPeer}>Connect</button>
+          <p class="small">
+            💡 Tip: Enter just node_id for WebRTC, or full dpc:// URI for Direct TLS
+          </p>
         </div>
 
-        <!-- Optional Hub Login -->
+        <!-- Hub Login -->
         {#if $nodeStatus.hub_status !== 'Connected'}
           <div class="hub-section">
             <p class="info-text">Optional: Connect to Hub for discovery</p>
@@ -400,7 +404,6 @@
     color: #1a1a1a;
   }
   
-  /* Status Bar */
   .status-bar {
     margin-bottom: 1.5rem;
     padding: 1rem;
@@ -429,7 +432,6 @@
     cursor: pointer;
   }
   
-  /* Grid Layout */
   .grid {
     display: grid;
     grid-template-columns: 320px 1fr;
@@ -440,7 +442,6 @@
     .grid { grid-template-columns: 1fr; }
   }
   
-  /* Sidebar */
   .sidebar {
     display: flex;
     flex-direction: column;
@@ -497,14 +498,13 @@
     font-weight: 600;
   }
   
-  .info-text {
+  .info-text, .small {
     font-size: 0.9rem;
     color: #666;
-    margin-bottom: 0.5rem;
+    margin: 0.5rem 0;
     font-style: italic;
   }
   
-  /* Inputs and Buttons */
   input, textarea {
     width: 100%;
     padding: 0.75rem;
@@ -548,7 +548,6 @@
     background: #545b62;
   }
   
-  /* Chat List */
   .chat-list ul {
     list-style: none;
     padding: 0;
@@ -609,7 +608,6 @@
     padding: 1rem;
   }
   
-  /* Chat Panel */
   .chat-panel {
     background: white;
     border: 1px solid #e0e0e0;
@@ -646,7 +644,6 @@
     font-style: italic;
   }
   
-  /* Messages */
   .message {
     margin-bottom: 1rem;
     padding: 0.75rem;
@@ -700,7 +697,6 @@
     word-wrap: break-word;
   }
   
-  /* Chat Input */
   .chat-input {
     padding: 1rem;
     border-top: 1px solid #eee;
@@ -720,14 +716,8 @@
     align-self: flex-end;
   }
   
-  /* Utility */
   .connecting, .error {
     text-align: center;
     padding: 2rem;
-  }
-  
-  .small {
-    font-size: 0.85rem;
-    color: #666;
   }
 </style>

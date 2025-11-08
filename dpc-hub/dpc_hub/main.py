@@ -38,10 +38,6 @@ class SearchResponse(BaseModel):
 
 @app.exception_handler(Exception)
 async def debug_exception_handler(request: Request, exc: Exception):
-    """
-    Перехватывает все ошибки, печатает стектрейс в консоль
-    и возвращает стандартный ответ 500.
-    """
     print("--- Unhandled Exception ---")
     traceback.print_exc()
     print("-------------------------")

@@ -108,27 +108,28 @@ class CoreService:
         print("D-PC Core Service shut down.")
 
     async def _listen_for_hub_signals(self):
-        """
-        Background task that listens for incoming WebRTC signaling messages from Hub.
-        Runs continuously while connected to Hub.
-        """
+        """Background task that listens for incoming WebRTC signaling messages from Hub."""
         print("Started listening for Hub WebRTC signals...")
         
         try:
             while self._is_running:
                 try:
-                    # Wait for next signal from Hub
-                    signal = await self.hub_client.receive_signal()
+                    if not self.hub_client.websocket or \
+                    self.hub_client.websocket.state != websockets.State.OPEN:
+                        print("Hub signaling socket disconnected, stopping listener...")
+                        break
                     
-                    # Handle the signal
+                    signal = await self.hub_client.receive_signal()
                     await self.p2p_manager.handle_incoming_signal(signal, self.hub_client)
                     
                 except asyncio.CancelledError:
                     break
+                except ConnectionError as e:
+                    print(f"Hub connection lost: {e}")
+                    break
                 except Exception as e:
                     print(f"Error receiving Hub signal: {e}")
-                    await asyncio.sleep(1)  # Brief pause before retry
-        
+                    await asyncio.sleep(1)
         finally:
             print("Stopped listening for Hub signals.")
 
