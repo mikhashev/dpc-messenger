@@ -90,7 +90,7 @@ User A (Behind NAT)              Hub Server              User B (Behind NAT)
 - ✅ **Fallback Support** - Graceful degradation to Direct TLS
 
 ### AI Integration
-- ✅ **Multiple Providers** - Ollama (local), OpenAI, Anthropic
+- ✅ **Multiple Providers** - Ollama (local), OpenAI, Anthropic, any other (local or API)
 - ✅ **Context Aggregation** - Query multiple peers' knowledge
 - ✅ **Remote Inference** - Share GPU resources (coming soon)
 

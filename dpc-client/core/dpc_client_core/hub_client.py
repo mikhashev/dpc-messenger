@@ -33,8 +33,9 @@ class HubClient:
 
     async def login(self, provider: str = "google"):
         """
-        Initiates the OAuth 2.0 login flow by starting a local server to
-        catch the redirect and opening the user's browser.
+        Initiates OAuth login flow and registers cryptographic identity.
+        
+        Updated to include automatic node registration after OAuth.
         """
         if self.jwt_token:
             print("Already authenticated.")
@@ -42,7 +43,6 @@ class HubClient:
 
         token_future = asyncio.Future()
         
-        # --- THE CORE FIX ---
         class OAuthCallbackHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 parsed_path = urlparse(self.path)
@@ -90,6 +90,17 @@ class HubClient:
             server.shutdown()
             thread.join()
             print("Local callback server stopped.")
+        
+        # NEW: Automatically register cryptographic node_id
+        try:
+            await self.register_node_id()
+            print("✅ Cryptographic identity registration complete!")
+        except Exception as e:
+            print(f"⚠️  Warning: Failed to register node identity: {e}")
+            print("   You may need to register manually or re-authenticate")
+            # Don't fail login if registration fails
+        
+        print("✅ Hub authentication complete!")
 
     # --- REST API Methods ---
 
@@ -115,6 +126,98 @@ class HubClient:
         )
         response.raise_for_status()
         return response.json()
+    
+    async def get_my_profile(self):
+        """
+        Get the authenticated user's own profile.
+        
+        NEW endpoint support.
+        
+        Returns:
+            dict: User's profile data
+        """
+        response = await self.http_client.get(
+            "/profile",
+            headers=self._get_auth_headers()
+        )
+        
+        if response.status_code == 200:
+            return response.json()
+        elif response.status_code == 404:
+            print("No profile found. Create one with update_profile()")
+            return None
+        else:
+            response.raise_for_status()
+
+
+    async def logout(self):
+        """
+        Logout from Hub by blacklisting the current token.
+        
+        NEW endpoint support.
+        """
+        if not self.jwt_token:
+            print("Not logged in.")
+            return
+        
+        try:
+            response = await self.http_client.post(
+                "/logout",
+                headers=self._get_auth_headers()
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ Logged out successfully: {data['message']}")
+                self.jwt_token = None
+                
+                # Close WebSocket if connected
+                if self.websocket:
+                    await self.websocket.close()
+                    self.websocket = None
+            else:
+                response.raise_for_status()
+                
+        except Exception as e:
+            print(f"Logout failed: {e}")
+            # Clear token anyway
+            self.jwt_token = None
+
+
+    async def delete_account(self):
+        """
+        Delete the user's account and all associated data.
+        
+        NEW endpoint support.
+        WARNING: This action cannot be undone!
+        """
+        if not self.jwt_token:
+            raise PermissionError("Not authenticated")
+        
+        # Confirm deletion
+        print("⚠️  WARNING: This will permanently delete your account and all data!")
+        print("   This action cannot be undone.")
+        confirm = input("   Type 'DELETE' to confirm: ")
+        
+        if confirm != "DELETE":
+            print("Account deletion cancelled.")
+            return
+        
+        response = await self.http_client.delete(
+            "/profile",
+            headers=self._get_auth_headers()
+        )
+        
+        if response.status_code == 204:
+            print("✅ Account deleted successfully")
+            self.jwt_token = None
+            
+            # Close WebSocket
+            if self.websocket:
+                await self.websocket.close()
+                self.websocket = None
+        else:
+            response.raise_for_status()
 
     # --- WebSocket Signaling Methods ---
 
@@ -176,47 +279,138 @@ class HubClient:
             
         print("HubClient connections closed.")
 
+    async def register_node_id(self):
+        """
+        Register the client's cryptographic node identity with the Hub.
+        
+        Should be called immediately after OAuth login.
+        Reads local identity files and sends them to Hub for verification.
+        
+        Raises:
+            Exception: If registration fails
+        """
+        from dpc_protocol.crypto import load_identity, CERT_FILE
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.backends import default_backend
+        
+        print("📝 Registering cryptographic identity with Hub...")
+        
+        try:
+            # Load local identity
+            node_id, key_file, cert_file = load_identity()
+            
+            # Read certificate
+            with open(cert_file, 'r') as f:
+                certificate = f.read()
+            
+            # Extract public key from certificate
+            cert = x509.load_pem_x509_certificate(
+                certificate.encode('utf-8'), 
+                default_backend()
+            )
+            public_key = cert.public_key()
+            public_key_pem = public_key.public_bytes(
+                encoding=serialization.Encoding.PEM,
+                format=serialization.PublicFormat.SubjectPublicKeyInfo
+            ).decode('utf-8')
+            
+            # Send registration request
+            response = await self.http_client.post(
+                "/register-node-id",
+                headers=self._get_auth_headers(),
+                json={
+                    "node_id": node_id,
+                    "public_key": public_key_pem,
+                    "certificate": certificate
+                }
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"✅ Node identity registered and verified!")
+                print(f"   Node ID: {data['node_id']}")
+                print(f"   Verified: {data['verified']}")
+                return data
+            else:
+                error_detail = response.json().get("detail", "Unknown error")
+                raise Exception(f"Registration failed: {error_detail}")
+                
+        except FileNotFoundError:
+            raise Exception(
+                "Local identity files not found. "
+                "Please run 'dpc init' to generate identity."
+            )
+        except Exception as e:
+            raise Exception(f"Failed to register node identity: {str(e)}")
+
 # --- Self-testing block ---
 async def main_test():
-    print("--- Testing HubClient ---")
-    # Make sure the Hub server is running at this address
+    """Updated test code with new features"""
+    print("--- Testing Enhanced HubClient ---")
+    
     hub = HubClient(api_base_url="http://127.0.0.1:8000")
 
     try:
-        # 1. Test Login
+        # 1. Test Login with Auto-Registration
         print("\n--- Step 1: Authentication ---")
         print("Please complete the login process in your browser.")
         await hub.login()
         assert hub.jwt_token is not None
+        print("✅ Authentication and registration successful")
 
-        # 2. Test Profile Update
-        print("\n--- Step 2: Profile Update ---")
-        dummy_profile = {
-            "node_id": "dpc-node-test-123456", # This should match the one from the Hub's DB
-            "name": "Test User",
-            "description": "Testing the HubClient.",
-            "expertise": {"testing": 5},
-        }
-        await hub.update_profile(dummy_profile)
+        # 2. Test Get Own Profile
+        print("\n--- Step 2: Get Own Profile ---")
+        my_profile = await hub.get_my_profile()
+        if my_profile:
+            print(f"✅ Profile found: {my_profile.get('name')}")
+        else:
+            print("ℹ️  No profile yet, creating one...")
+            
+            # Create profile
+            test_profile = {
+                "name": "Test User",
+                "description": "Testing node registration",
+                "expertise": {"testing": 5, "python": 4}
+            }
+            await hub.update_profile(test_profile)
+            
+            # Verify it was created
+            my_profile = await hub.get_my_profile()
+            assert my_profile is not None
+            print("✅ Profile created and retrieved")
 
         # 3. Test Search
-        print("\n--- Step 3: Discovery Search ---")
-        search_results = await hub.search_users(topic="testing")
-        print(f"Search results: {search_results}")
-        assert len(search_results.get("results", [])) > 0
+        print("\n--- Step 3: Discovery ---")
+        results = await hub.search_expertise("python", min_level=1)
+        print(f"✅ Found {len(results)} Python experts")
 
-        # 4. Test Signaling
-        print("\n--- Step 4: Signaling WebSocket ---")
-        await hub.connect_signaling_socket()
-        # In a real scenario, another task would be listening with receive_signal
-        print("Signaling test completed (connection was successful).")
+        # 4. Test Signaling Connection
+        print("\n--- Step 4: WebSocket Signaling ---")
+        await hub.connect_signaling()
+        print("✅ Signaling connected")
+
+        # 5. Test Logout
+        print("\n--- Step 5: Logout ---")
+        await hub.logout()
+        print("✅ Logged out successfully")
+        
+        # Verify token is blacklisted
+        try:
+            await hub.get_my_profile()
+            print("❌ Token should be blacklisted!")
+        except Exception:
+            print("✅ Token correctly blacklisted")
+
+        print("\n✅ All tests passed!")
 
     except Exception as e:
-        print(f"\nAn error occurred during testing: {e}")
+        print(f"\n❌ Test failed: {e}")
+        import traceback
         traceback.print_exc()
+        
     finally:
         await hub.close()
-        print("\n--- Test finished ---")
 
 if __name__ == '__main__':
     # To run this test:

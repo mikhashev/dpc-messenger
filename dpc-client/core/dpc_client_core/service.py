@@ -392,52 +392,85 @@ class CoreService:
 
     # --- AI Query Methods ---
 
-    async def execute_ai_query(self, query: str, use_context_from: List[str] = None, 
-                               compute_host: str = None, command_id: str = None):
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, **kwargs):
         """
-        Execute an AI query, optionally using context from peers and/or remote computation.
+        Orchestrates an AI query and sends the response back to the UI.
         
         Args:
-            query: The user's query
-            use_context_from: List of peer node_ids to request context from
-            compute_host: node_id of peer to run inference on (None = local)
-            command_id: Command ID for sending streaming responses to UI
+            command_id: Unique ID for this command
+            prompt: The user's prompt/query
+            context_ids: Optional list of peer node_ids to fetch context from
+            **kwargs: Additional arguments
         """
-        print(f"Executing AI query: {query}")
-        print(f"  - Context from: {use_context_from}")
-        print(f"  - Compute host: {compute_host or 'local'}")
+        print(f"Orchestrating AI query for command_id {command_id}: '{prompt[:50]}...'")
+        
+        # Start with local context
+        aggregated_contexts = {'local': self.p2p_manager.local_context}
+        
+        # TODO: Fetch remote contexts if context_ids provided
+        if context_ids:
+            for node_id in context_ids:
+                if node_id in self.p2p_manager.peers:
+                    # Fetch context from peer
+                    # context = await self.request_context_from_peer(node_id, prompt)
+                    # aggregated_contexts[node_id] = context
+                    pass
+        
+        # Assemble final prompt with context
+        final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt)
+
+        response_payload = {}
+        status = "OK"
         
         try:
-            # Aggregate contexts
-            contexts = await self._aggregate_contexts(query, peer_ids=use_context_from)
-            
-            # Build combined prompt
-            combined_prompt = self._build_combined_prompt(query, contexts)
-            
-            # Execute inference
-            if compute_host and compute_host != self.p2p_manager.node_id:
-                # Remote inference (not yet implemented)
-                result = "Remote inference not yet implemented"
-            else:
-                # Local inference
-                result = await self.llm_manager.query(combined_prompt)
-            
-            # Send result to UI
-            if command_id:
-                await self.local_api.broadcast_response(command_id, {
-                    "result": result,
-                    "contexts_used": list(contexts.keys())
-                })
-            
-            return result
+            # Query the LLM
+            response_content = await self.llm_manager.query(prompt=final_prompt)
+            response_payload = {"content": response_content}
             
         except Exception as e:
-            print(f"Error executing AI query: {e}")
-            if command_id:
-                await self.local_api.broadcast_response(command_id, {
-                    "error": str(e)
-                }, status="ERROR")
-            raise
+            print(f"  - Error during local inference: {e}")
+            status = "ERROR"
+            response_payload = {"message": str(e)}
+
+        # Send response back to UI
+        await self.local_api.send_response_to_all(
+            command_id=command_id,
+            command="execute_ai_query",
+            status=status,
+            payload=response_payload
+        )
+
+    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str) -> str:
+        """Helper method to assemble the final prompt for the LLM."""
+        system_instruction = (
+            "You are a helpful AI assistant. Your task is to answer the user's query based on the provided JSON data blobs inside <CONTEXT> tags. "
+            "The 'source' attribute of each tag indicates who the context belongs to. The source 'local' refers to the user asking the query. "
+            "Other sources are peer nodes who have shared their context to help answer the query. "
+            "Analyze all provided contexts to formulate your answer. When relevant, cite which source provided specific information."
+        )
+        context_blocks = []
+        for source_id, context_obj in contexts.items():
+            context_dict = asdict(context_obj)
+            json_string = json.dumps(context_dict, indent=2, ensure_ascii=False)
+            
+            # Add peer name if available
+            source_label = source_id
+            if source_id != 'local' and source_id in self.peer_metadata:
+                peer_name = self.peer_metadata[source_id].get('name')
+                if peer_name:
+                    source_label = f"{peer_name} ({source_id})"
+            
+            block = f'<CONTEXT source="{source_label}">\n{json_string}\n</CONTEXT>'
+            context_blocks.append(block)
+        
+        final_prompt = (
+            f"{system_instruction}\n\n"
+            f"--- CONTEXTUAL DATA ---\n"
+            f'{"\n\n".join(context_blocks)}\n'
+            f"--- END OF CONTEXTUAL DATA ---\n\n"
+            f"USER QUERY: {clean_prompt}"
+        )
+        return final_prompt
 
     def _build_combined_prompt(self, query: str, contexts: Dict[str, PersonalContext]) -> str:
         """Build a prompt that combines the query with multiple contexts."""
