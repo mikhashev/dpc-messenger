@@ -180,7 +180,7 @@
   
   $: if ($p2pMessages) {
     const msg = $p2pMessages;
-    const messageId = `${msg.sender_node_id}-${msg.text}-${Date.now()}`;
+    const messageId = msg.message_id || `${msg.sender_node_id}-${msg.text}`;
     
     if (!processedMessageIds.has(messageId)) {
       processedMessageIds.add(messageId);

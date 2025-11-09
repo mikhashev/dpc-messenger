@@ -33,7 +33,7 @@ class CoreService:
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / ".dpc_access")
         self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
-        self.hub_client = HubClient(api_base_url="http://127.0.0.1:8000")
+        self.hub_client = HubClient(api_base_url="https://unfascinated-semifiguratively-velda.ngrok-free.dev")
         self.p2p_manager = P2PManager(firewall=self.firewall)
         self.cache = ContextCache()
         
@@ -52,6 +52,8 @@ class CoreService:
         self.p2p_manager.set_core_service_ref(self)
         self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
+        self._processed_message_ids = set()  # Track processed messages
+        self._max_processed_ids = 1000  # Limit set size
 
     async def start(self):
         """Starts all background services and runs indefinitely."""
@@ -84,6 +86,11 @@ class CoreService:
         self._is_running = True
         print(f"D-PC Core Service started. Node ID: {self.p2p_manager.node_id}")
         
+        # Start hub connection monitor
+        task = asyncio.create_task(self._monitor_hub_connection())
+        task.set_name("hub_monitor")
+        self._background_tasks.add(task)
+
         try:
             await self._shutdown_event.wait()
         except asyncio.CancelledError:
@@ -106,6 +113,60 @@ class CoreService:
         await self.local_api.stop()
         await self.hub_client.close()
         print("D-PC Core Service shut down.")
+    
+    async def _monitor_hub_connection(self):
+        """Background task to monitor hub connection and auto-reconnect if needed."""
+        while self._is_running:
+            try:
+                await asyncio.sleep(10)
+                
+                if not self.hub_client.websocket or \
+                self.hub_client.websocket.state != websockets.State.OPEN:
+                    
+                    print("Hub connection lost, attempting to reconnect...")
+                    
+                    # Cancel old listener task
+                    old_listener = None
+                    for task in list(self._background_tasks):
+                        if task.get_name() == "hub_signals":
+                            old_listener = task
+                            break
+                    
+                    if old_listener:
+                        print("Cancelling old Hub signal listener...")
+                        old_listener.cancel()
+                        try:
+                            await old_listener
+                        except asyncio.CancelledError:
+                            pass
+                        self._background_tasks.discard(old_listener)
+                    
+                    # Close old websocket BEFORE reconnecting (THIS IS THE KEY FIX)
+                    if self.hub_client.websocket:
+                        print("Closing old Hub websocket...")
+                        try:
+                            await self.hub_client.websocket.close()
+                        except:
+                            pass
+                        self.hub_client.websocket = None
+                    
+                    try:
+                        await self.hub_client.connect_signaling_socket()
+                        
+                        task = asyncio.create_task(self._listen_for_hub_signals())
+                        task.set_name("hub_signals")
+                        self._background_tasks.add(task)
+                        
+                        print("Hub reconnection successful")
+                        await self.local_api.broadcast_event("status_update", await self.get_status())
+                        
+                    except Exception as e:
+                        print(f"Hub reconnection failed: {e}")
+                        
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"Error in hub connection monitor: {e}")
 
     async def _listen_for_hub_signals(self):
         """Background task that listens for incoming WebRTC signaling messages from Hub."""
@@ -132,6 +193,8 @@ class CoreService:
                     await asyncio.sleep(1)
         finally:
             print("Stopped listening for Hub signals.")
+            await self.local_api.broadcast_event("status_update", await self.get_status())
+
 
     # --- Callback Methods (called by P2PManager) ---
 
@@ -151,11 +214,35 @@ class CoreService:
         print(f"CoreService received message from {sender_node_id}: {command}")
         
         if command == "SEND_TEXT":
-            # Text message from peer - forward to UI
+            # Text message from peer - forward to UI with deduplication
             text = payload.get("text")
+            
+            # Create unique message ID for deduplication
+            import hashlib
+            import time
+            message_id = hashlib.sha256(
+                f"{sender_node_id}:{text}:{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
+            
+            # Check if already processed
+            if message_id in self._processed_message_ids:
+                print(f"Duplicate message detected from {sender_node_id}, skipping")
+                return
+            
+            # Add to processed set
+            self._processed_message_ids.add(message_id)
+            
+            # Clean up old IDs
+            if len(self._processed_message_ids) > self._max_processed_ids:
+                to_remove = list(self._processed_message_ids)[:self._max_processed_ids // 2]
+                for mid in to_remove:
+                    self._processed_message_ids.discard(mid)
+            
+            # Broadcast to UI
             await self.local_api.broadcast_event("new_p2p_message", {
                 "sender_node_id": sender_node_id,
-                "text": text
+                "text": text,
+                "message_id": message_id
             })
         
         elif command == "REQUEST_CONTEXT":

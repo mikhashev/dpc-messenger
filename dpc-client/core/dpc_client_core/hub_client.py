@@ -223,18 +223,38 @@ class HubClient:
 
     async def connect_signaling_socket(self):
         """Connects to the Hub's WebSocket and authenticates via query parameter."""
-        if self.websocket and self.websocket.state == websockets.State.OPEN:
-            print("Signaling socket is already connected.")
-            return
+        # Close existing websocket first (THIS IS THE KEY FIX)
+        if self.websocket:
+            print("Closing existing websocket before reconnecting...")
+            try:
+                if self.websocket.state == websockets.State.OPEN:
+                    await self.websocket.close()
+            except:
+                pass
+            self.websocket = None
         
         if not self.jwt_token:
             raise PermissionError("Authentication required before connecting to signaling.")
+
+        # Cancel old keepalive task
+        if hasattr(self, '_keepalive_task') and self._keepalive_task and not self._keepalive_task.done():
+            print("Cancelling old keepalive task...")
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
 
         ws_url = self.api_base_url.replace("http", "ws") + f"/ws/signal?token={self.jwt_token}"
         print(f"Connecting to signaling server...")
         
         try:
-            self.websocket = await websockets.connect(ws_url)
+            # Added ping_interval and ping_timeout for built-in keepalive
+            self.websocket = await websockets.connect(
+                ws_url,
+                ping_interval=20,
+                ping_timeout=60
+            )
             
             response_str = await self.websocket.recv()
             response = json.loads(response_str)
@@ -246,6 +266,11 @@ class HubClient:
 
             print(f"Signaling server response: {response.get('message')}")
             print("Signaling socket connected and authenticated.")
+            
+            # Start keepalive ping task
+            self._keepalive_task = asyncio.create_task(self._send_hub_keepalive_pings())
+            print("Hub keepalive task started")
+            
         except websockets.exceptions.InvalidStatus as e:
             raise ConnectionError(f"Server rejected WebSocket connection: {e.status_code}") from e
 
@@ -271,6 +296,14 @@ class HubClient:
 
     async def close(self):
         """Closes all network connections."""
+            # Cancel keepalive task
+        if hasattr(self, '_keepalive_task') and self._keepalive_task:
+            self._keepalive_task.cancel()
+            try:
+                await self._keepalive_task
+            except asyncio.CancelledError:
+                pass
+
         if self.websocket and self.websocket.state == websockets.State.OPEN:
             await self.websocket.close()
         
@@ -343,6 +376,36 @@ class HubClient:
             )
         except Exception as e:
             raise Exception(f"Failed to register node identity: {str(e)}")
+    
+    async def _send_hub_keepalive_pings(self):
+        """Background task to send keepalive pings to Hub."""
+        ping_count = 0
+        try:
+            while True:
+                await asyncio.sleep(25)
+                
+                if not self.websocket or self.websocket.state != websockets.State.OPEN:
+                    print(f"Keepalive stopping - websocket not open (sent {ping_count} pings)")
+                    break
+                
+                try:
+                    ping_count += 1
+                    ping_message = {
+                        "type": "ping",
+                        "timestamp": asyncio.get_event_loop().time()
+                    }
+                    await self.websocket.send(json.dumps(ping_message))
+                    print(f"✓ Hub keepalive ping #{ping_count} sent")
+                    
+                except websockets.exceptions.ConnectionClosed:
+                    print(f"Hub connection closed during ping #{ping_count}")
+                    break
+                except Exception as e:
+                    print(f"Error sending keepalive ping #{ping_count}: {e}")
+                    break
+                    
+        except asyncio.CancelledError:
+            print(f"Hub keepalive cancelled (sent {ping_count} pings)")
 
 # --- Self-testing block ---
 async def main_test():

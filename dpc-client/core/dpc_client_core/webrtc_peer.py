@@ -3,8 +3,14 @@
 import asyncio
 import json
 from typing import Dict, Any, Callable
-from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate, RTCDataChannel
-from aiortc.contrib.media import MediaBlackhole
+from aiortc import (
+    RTCPeerConnection, 
+    RTCSessionDescription, 
+    RTCIceCandidate, 
+    RTCDataChannel,
+    RTCConfiguration,
+    RTCIceServer
+)
 
 
 class WebRTCPeerConnection:
@@ -17,19 +23,32 @@ class WebRTCPeerConnection:
         self.node_id = node_id
         self.is_initiator = is_initiator
         
-        # Create RTCPeerConnection with STUN servers for NAT traversal
-        self.pc = RTCPeerConnection(configuration={
-            "iceServers": [
-                {"urls": "stun:stun.l.google.com:19302"},
-                {"urls": "stun:stun1.l.google.com:19302"},
-                {"urls": "stun:stun2.l.google.com:19302"},
-            ]
-        })
+        # Create RTCConfiguration with STUN and TURN servers for NAT traversal
+        ice_servers = [
+            # STUN servers (for discovering public IP)
+            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
+            RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
+            
+            # TURN server (for relaying traffic when direct connection fails)
+            # Using free OpenRelay TURN server for testing
+            RTCIceServer(
+                urls=["turn:openrelay.metered.ca:80"],
+                username="openrelayproject",
+                credential="openrelayproject"
+            ),
+        ]
+        
+        configuration = RTCConfiguration(iceServers=ice_servers)
+        
+        # Create RTCPeerConnection with proper configuration
+        self.pc = RTCPeerConnection(configuration=configuration)
         
         self.data_channel: RTCDataChannel = None
         self.ready = asyncio.Event()
-        self.on_ice_candidate: Callable = None
+        self.on_ice_candidate: Callable = None  # Not used in aiortc (candidates in SDP)
         self.on_message: Callable = None
+        self.on_close: Callable = None
+        self._ice_gathering_complete = asyncio.Event()
         
         # Set up event handlers
         self._setup_handlers()
@@ -40,32 +59,42 @@ class WebRTCPeerConnection:
         @self.pc.on("datachannel")
         def on_datachannel(channel: RTCDataChannel):
             """Handle incoming data channel (for answerer)."""
-            print(f"Data channel '{channel.label}' received from peer")
+            print(f"Data channel '{channel.label}' received from peer {self.node_id}")
             self.data_channel = channel
             self._setup_channel_handlers()
         
-        @self.pc.on("icecandidate")
-        def on_icecandidate(candidate):
-            """Forward ICE candidates to signaling."""
-            if candidate and self.on_ice_candidate:
-                asyncio.create_task(self.on_ice_candidate({
-                    "candidate": candidate.candidate,
-                    "sdpMid": candidate.sdpMid,
-                    "sdpMLineIndex": candidate.sdpMLineIndex
-                }))
+        @self.pc.on("icegatheringstatechange")
+        async def on_icegatheringstatechange():
+            """Track ICE gathering state."""
+            state = self.pc.iceGatheringState
+            print(f"[{self.node_id}] ICE gathering state: {state}")
+            if state == "complete":
+                self._ice_gathering_complete.set()
+                print(f"[{self.node_id}] ICE gathering complete - SDP includes all candidates")
+        
+        @self.pc.on("iceconnectionstatechange")
+        async def on_iceconnectionstatechange():
+            """Track ICE connection state."""
+            state = self.pc.iceConnectionState
+            print(f"[{self.node_id}] ICE connection state: {state}")
+            
+            if state == "completed":
+                print(f"[{self.node_id}] ICE connection established!")
         
         @self.pc.on("connectionstatechange")
         async def on_connectionstatechange():
             state = self.pc.connectionState
-            print(f"WebRTC connection state: {state}")
+            print(f"[{self.node_id}] WebRTC connection state: {state}")
             
             if state == "connected":
-                print(f"WebRTC connection established with {self.node_id}")
+                print(f"✅ WebRTC connection established with {self.node_id}")
                 self.ready.set()
             elif state in ["failed", "closed"]:
-                print(f"WebRTC connection {state} with {self.node_id}")
-                await self.close()
-    
+                print(f"❌ WebRTC connection {state} with {self.node_id}")
+                # Notify about connection close
+                if self.on_close:
+                    asyncio.create_task(self.on_close(self.node_id))
+            
     def _setup_channel_handlers(self):
         """Set up data channel event handlers."""
         if not self.data_channel:
@@ -73,7 +102,7 @@ class WebRTCPeerConnection:
         
         @self.data_channel.on("open")
         def on_open():
-            print(f"Data channel opened with {self.node_id}")
+            print(f"✅ Data channel opened with {self.node_id}")
             self.ready.set()
         
         @self.data_channel.on("message")
@@ -84,7 +113,7 @@ class WebRTCPeerConnection:
                     data = json.loads(message)
                     asyncio.create_task(self.on_message(data))
                 except json.JSONDecodeError as e:
-                    print(f"Failed to decode message: {e}")
+                    print(f"Failed to decode message from {self.node_id}: {e}")
         
         @self.data_channel.on("close")
         def on_close():
@@ -92,6 +121,8 @@ class WebRTCPeerConnection:
     
     async def create_offer(self) -> Dict[str, Any]:
         """Create WebRTC offer (initiator side)."""
+        print(f"[{self.node_id}] Creating offer...")
+        
         # Create data channel (initiator creates it)
         self.data_channel = self.pc.createDataChannel("dpc-data")
         self._setup_channel_handlers()
@@ -100,6 +131,15 @@ class WebRTCPeerConnection:
         offer = await self.pc.createOffer()
         await self.pc.setLocalDescription(offer)
         
+        print(f"[{self.node_id}] Waiting for ICE gathering to complete...")
+        # Wait for ICE gathering to complete (candidates are added to SDP automatically)
+        try:
+            await asyncio.wait_for(self._ice_gathering_complete.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            print(f"[{self.node_id}] Warning: ICE gathering timeout after 10s, sending SDP anyway")
+        
+        print(f"[{self.node_id}] Offer created with {len(self.pc.localDescription.sdp)} bytes SDP")
+        
         return {
             "type": "offer",
             "sdp": self.pc.localDescription.sdp
@@ -107,17 +147,30 @@ class WebRTCPeerConnection:
     
     async def handle_answer(self, answer: Dict[str, Any]):
         """Handle WebRTC answer (initiator side)."""
+        print(f"[{self.node_id}] Processing answer...")
         rdesc = RTCSessionDescription(sdp=answer["sdp"], type=answer["type"])
         await self.pc.setRemoteDescription(rdesc)
+        print(f"[{self.node_id}] Remote description set, ICE checking will begin")
     
     async def handle_offer(self, offer: Dict[str, Any]) -> Dict[str, Any]:
         """Handle WebRTC offer and create answer (answerer side)."""
+        print(f"[{self.node_id}] Processing offer...")
         rdesc = RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
         await self.pc.setRemoteDescription(rdesc)
         
         # Create answer
+        print(f"[{self.node_id}] Creating answer...")
         answer = await self.pc.createAnswer()
         await self.pc.setLocalDescription(answer)
+        
+        print(f"[{self.node_id}] Waiting for ICE gathering to complete...")
+        # Wait for ICE gathering
+        try:
+            await asyncio.wait_for(self._ice_gathering_complete.wait(), timeout=10.0)
+        except asyncio.TimeoutError:
+            print(f"[{self.node_id}] Warning: ICE gathering timeout after 10s, sending SDP anyway")
+        
+        print(f"[{self.node_id}] Answer created with {len(self.pc.localDescription.sdp)} bytes SDP")
         
         return {
             "type": "answer",
@@ -125,21 +178,32 @@ class WebRTCPeerConnection:
         }
     
     async def add_ice_candidate(self, candidate_dict: Dict[str, Any]):
-        """Add ICE candidate."""
+        """
+        Add ICE candidate. 
+        NOTE: In aiortc, this is typically not needed as candidates are in the SDP.
+        This method is kept for compatibility but may not be used.
+        """
         if not candidate_dict or not candidate_dict.get("candidate"):
             return
         
-        candidate = RTCIceCandidate(
-            candidate=candidate_dict["candidate"],
-            sdpMid=candidate_dict.get("sdpMid"),
-            sdpMLineIndex=candidate_dict.get("sdpMLineIndex")
-        )
-        await self.pc.addIceCandidate(candidate)
+        try:
+            candidate = RTCIceCandidate(
+                candidate=candidate_dict["candidate"],
+                sdpMid=candidate_dict.get("sdpMid"),
+                sdpMLineIndex=candidate_dict.get("sdpMLineIndex")
+            )
+            await self.pc.addIceCandidate(candidate)
+            print(f"[{self.node_id}] Added external ICE candidate")
+        except Exception as e:
+            print(f"[{self.node_id}] Failed to add ICE candidate: {e}")
     
     async def send(self, message: Dict[str, Any]):
         """Send a message over the data channel."""
         if not self.data_channel or self.data_channel.readyState != "open":
-            raise ConnectionError(f"Data channel not ready. State: {self.data_channel.readyState if self.data_channel else 'None'}")
+            raise ConnectionError(
+                f"Data channel not ready for {self.node_id}. "
+                f"State: {self.data_channel.readyState if self.data_channel else 'None'}"
+            )
         
         json_str = json.dumps(message)
         self.data_channel.send(json_str)
@@ -149,7 +213,17 @@ class WebRTCPeerConnection:
         try:
             await asyncio.wait_for(self.ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            raise ConnectionError(f"WebRTC connection timeout with {self.node_id}")
+            # Provide more helpful error message
+            ice_state = self.pc.iceConnectionState
+            conn_state = self.pc.connectionState
+            raise ConnectionError(
+                f"WebRTC connection timeout with {self.node_id} after {timeout}s. "
+                f"ICE state: {ice_state}, Connection state: {conn_state}. "
+                f"This usually means NAT traversal failed. Try: "
+                f"1) Testing on same local network, "
+                f"2) Checking firewall/UDP settings, "
+                f"3) Verifying TURN server is accessible"
+            )
     
     async def close(self):
         """Close the WebRTC connection."""

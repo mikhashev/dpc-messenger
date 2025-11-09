@@ -221,6 +221,10 @@ class P2PManager:
             print(f"Already connected to {target_node_id}")
             return
         
+        if target_node_id in self._pending_webrtc:
+            print(f"Connection to {target_node_id} already in progress")
+            return
+        
         try:
             # Create WebRTC peer connection
             webrtc_peer = WebRTCPeerConnection(node_id=target_node_id, is_initiator=True)
@@ -241,6 +245,17 @@ class P2PManager:
                     asyncio.create_task(self.on_message_received(target_node_id, message))
             
             webrtc_peer.on_message = handle_message
+
+            # Set up close handler
+            async def handle_close(node_id):
+                print(f"WebRTC connection closed for {node_id}, cleaning up...")
+                if node_id in self.peers:
+                    self.peers.pop(node_id)
+                    await self._notify_peer_change()
+                if node_id in self._pending_webrtc:
+                    self._pending_webrtc.pop(node_id)
+            
+            webrtc_peer.on_close = handle_close
             
             # Create and send offer
             offer = await webrtc_peer.create_offer()
@@ -251,6 +266,9 @@ class P2PManager:
             
             print(f"WebRTC offer sent to {target_node_id}, waiting for answer...")
             
+            # Start timeout task
+            asyncio.create_task(self._handle_connection_timeout(target_node_id))
+            
         except Exception as e:
             print(f"Failed to initiate WebRTC connection to {target_node_id}: {e}")
             self._pending_webrtc.pop(target_node_id, None)
@@ -260,28 +278,61 @@ class P2PManager:
         """
         Handles incoming WebRTC signaling messages from the Hub.
         Routes to appropriate handler based on signal type.
+        
+        Hub sends signals in this format:
+        {
+            "type": "signal",
+            "sender_node_id": "dpc-node-xxx",
+            "target_node_id": "dpc-node-yyy",
+            "payload": {
+                "type": "offer|answer|ice-candidate",
+                "offer": {...} or "answer": {...} or "candidate": {...}
+            }
+        }
         """
         signal_type = signal.get("type")
-        from_node = signal.get("from_node_id")
-        payload = signal.get("payload", {})
         
-        print(f"Received WebRTC signal '{signal_type}' from {from_node}")
+        # Filter out non-signal messages (pong, auth_ok, error)
+        if signal_type in ["pong", "auth_ok", "error"]:
+            return
         
-        try:
-            if signal_type == "offer":
-                await self._handle_webrtc_offer(from_node, payload, hub_client)
+        # Handle Hub-wrapped signals
+        if signal_type == "signal":
+            # Extract sender and payload from Hub wrapper
+            from_node = signal.get("sender_node_id")
+            wrapped_payload = signal.get("payload", {})
             
-            elif signal_type == "answer":
-                await self._handle_webrtc_answer(from_node, payload)
+            # The actual WebRTC signal type is inside the payload
+            webrtc_signal_type = wrapped_payload.get("type")
             
-            elif signal_type == "ice-candidate":
-                await self._handle_ice_candidate(from_node, payload)
+            # Validate we have required fields
+            if not from_node or not webrtc_signal_type:
+                print(f"Received invalid Hub signal (missing sender_node_id or payload.type): {signal}")
+                return
             
-            else:
-                print(f"Unknown signal type: {signal_type}")
+            print(f"Received WebRTC signal '{webrtc_signal_type}' from {from_node}")
+            
+            try:
+                if webrtc_signal_type == "offer":
+                    await self._handle_webrtc_offer(from_node, wrapped_payload, hub_client)
+                
+                elif webrtc_signal_type == "answer":
+                    await self._handle_webrtc_answer(from_node, wrapped_payload)
+                
+                elif webrtc_signal_type == "ice-candidate":
+                    await self._handle_ice_candidate(from_node, wrapped_payload)
+                
+                else:
+                    print(f"Unknown WebRTC signal type: {webrtc_signal_type}")
+            
+            except Exception as e:
+                print(f"Error handling signal from {from_node}: {e}")
+                import traceback
+                traceback.print_exc()
         
-        except Exception as e:
-            print(f"Error handling signal from {from_node}: {e}")
+        else:
+            # Unknown signal format
+            print(f"Received unknown signal format (type={signal_type}): {signal}")
 
     async def _handle_webrtc_offer(self, from_node: str, payload: Dict[str, Any], hub_client: HubClient):
         """Handle incoming WebRTC offer (ANSWERER side - Bob)."""
@@ -310,6 +361,17 @@ class P2PManager:
                 asyncio.create_task(self.on_message_received(from_node, message))
         
         webrtc_peer.on_message = handle_message
+
+        # Set up close handler
+        async def handle_close(node_id):
+            print(f"WebRTC connection closed for {node_id}, cleaning up...")
+            if node_id in self.peers:
+                self.peers.pop(node_id)
+                await self._notify_peer_change()
+            if node_id in self._pending_webrtc:
+                self._pending_webrtc.pop(node_id)
+        
+        webrtc_peer.on_close = handle_close
         
         # Handle offer and create answer
         offer_sdp = payload.get("offer")
@@ -328,6 +390,10 @@ class P2PManager:
             for candidate in self._ice_candidates_buffer[from_node]:
                 await webrtc_peer.add_ice_candidate(candidate)
             del self._ice_candidates_buffer[from_node]
+        
+        # Wait for connection to be ready, then move to active peers
+        # This ensures the UI is notified on the answerer side too
+        asyncio.create_task(self._finalize_webrtc_connection(from_node))
 
     async def _handle_webrtc_answer(self, from_node: str, payload: Dict[str, Any]):
         """Handle incoming WebRTC answer (INITIATOR side - Alice)."""
@@ -388,6 +454,25 @@ class P2PManager:
             self._pending_webrtc.pop(node_id, None)
             await webrtc_peer.close()
 
+    async def _handle_connection_timeout(self, node_id: str):
+        """Handle timeout for WebRTC connection establishment."""
+        try:
+            # Wait for connection to be established
+            await asyncio.sleep(30)  # 30 second timeout
+            
+            # Check if connection is still pending
+            if node_id in self._pending_webrtc and node_id not in self.peers:
+                print(f"WebRTC connection to {node_id} timed out after 30 seconds")
+                webrtc_peer = self._pending_webrtc.pop(node_id, None)
+                if webrtc_peer:
+                    await webrtc_peer.close()
+                
+                # Clean up ICE candidates buffer
+                self._ice_candidates_buffer.pop(node_id, None)
+                
+        except Exception as e:
+            print(f"Error in connection timeout handler: {e}")
+
     # --- Unified Connection Management ---
 
     async def send_message_to_peer(self, node_id: str, message: Dict[str, Any]):
@@ -404,12 +489,16 @@ class P2PManager:
             peer = self.peers.pop(peer_id)
             await peer.close()
             print(f"Connection with {peer_id} closed.")
+            # Ensure status update is broadcast
             await self._notify_peer_change()
         
         # Also clean up pending WebRTC connections
         if peer_id in self._pending_webrtc:
             webrtc_peer = self._pending_webrtc.pop(peer_id)
             await webrtc_peer.close()
+            print(f"Pending WebRTC connection with {peer_id} cleaned up.")
+            # Notify peer list change even for pending connections
+            await self._notify_peer_change()
         
         # Clean up buffered ICE candidates
         self._ice_candidates_buffer.pop(peer_id, None)
