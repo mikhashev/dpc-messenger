@@ -692,23 +692,48 @@ async def websocket_endpoint(
                     
             except json.JSONDecodeError as e:
                 logger.error(f"Invalid JSON from {node_id}: {e}")
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "message": "Invalid JSON format",
-                    "code": "invalid_json"
-                }))
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Invalid JSON format",
+                        "code": "invalid_json"
+                    }))
+                except Exception:
+                    logger.debug(f"Could not send JSON error to {node_id}, connection closed")
+                    break
+            
+            except WebSocketDisconnect:
+                # Re-raise to be caught by outer handler
+                raise
+            
+            except RuntimeError as e:
+                # "Cannot call 'receive' once a disconnect message has been received"
+                error_msg = str(e).lower()
+                if "disconnect" in error_msg or "receive" in error_msg:
+                    logger.debug(f"WebSocket already disconnected for {node_id}: {e}")
+                    break
+                logger.error(f"RuntimeError for {node_id}: {e}")
+                break
             
             except Exception as e:
                 logger.error(f"Error processing message from {node_id}: {e}")
-                await websocket.send_text(json.dumps({
-                    "type": "error",
-                    "message": "Failed to process message",
-                    "code": "processing_error"
-                }))
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "message": "Failed to process message",
+                        "code": "processing_error"
+                    }))
+                except Exception:
+                    logger.debug(f"Could not send error to {node_id}, connection closed")
+                    break
                 
-    except WebSocketDisconnect:
+    except WebSocketDisconnect as e:
         manager.disconnect(node_id)
-        logger.info(f"WebSocket disconnected: {node_id}")
+        disconnect_code = getattr(e, 'code', 'unknown')
+        if disconnect_code == 1006:
+            logger.info(f"WebSocket disconnected: {node_id} (keepalive timeout)")
+        else:
+            logger.info(f"WebSocket disconnected: {node_id} (code: {disconnect_code})")
         
     except Exception as e:
         logger.error(f"WebSocket error for {node_id}: {e}")
