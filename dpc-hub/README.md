@@ -2,7 +2,7 @@
 
 > **Server-side infrastructure for peer discovery and WebRTC signaling**
 > 
-> **Status:** Production Ready | **License:** AGPL v3
+> **Status:** Production Ready | **License:** AGPL v3 | **Version:** 0.5.0
 
 The D-PC Federation Hub is a minimalistic server application that provides essential services for the D-PC network: user authentication, peer discovery, and WebRTC signaling. It acts as a "phone book and matchmaker" while never storing or accessing users' private conversations.
 
@@ -14,10 +14,12 @@ The Hub is intentionally designed to be **"dumb"** to respect user privacy:
 
 ### What the Hub Does
 - ✅ **User Authentication** - OAuth 2.0 (Google, GitHub)
+- ✅ **Node Identity Verification** - Validates cryptographic identities
 - ✅ **Profile Hosting** - Public expertise profiles only
 - ✅ **Peer Discovery** - Search for users by expertise
 - ✅ **WebRTC Signaling** - Relay SDP/ICE for P2P setup
 - ✅ **Presence** - Track online/offline status
+- ✅ **Token Management** - JWT with blacklist support
 
 ### What the Hub Does NOT Do
 - ❌ **No Message Storage** - Messages go directly peer-to-peer
@@ -33,34 +35,37 @@ The Hub is intentionally designed to be **"dumb"** to respect user privacy:
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│              D-PC Hub Architecture                       │
+│              D-PC Hub Architecture                      │
 └─────────────────────────────────────────────────────────┘
 
 Internet Users
      │
      │ HTTPS/WSS
      ▼
-┌─────────────────────────────────────────────────────┐
-│  Nginx (Reverse Proxy + SSL Termination)           │
-│  - Port 80/443                                      │
-│  - Let's Encrypt SSL                                │
-└──────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│  Nginx (Reverse Proxy + SSL Termination)              │
+│  - Port 80/443                                        │
+│  - Let's Encrypt SSL                                  │
+└──────────────────┬────────────────────────────────────┘
                    │
                    ▼
-┌─────────────────────────────────────────────────────┐
-│  FastAPI Application                                │
-│  - REST API (OAuth, Profiles, Discovery)           │
-│  - WebSocket API (WebRTC Signaling)                │
-│  - Port 8000 (internal)                             │
-└──────────────────┬──────────────────────────────────┘
+┌───────────────────────────────────────────────────────┐
+│  FastAPI Application                                  │
+│  - REST API (OAuth, Profiles, Discovery)              │
+│  - WebSocket API (WebRTC Signaling)                   │
+│  - Crypto Identity Validation                         │
+│  - Token Blacklist Management                         │
+│  - Port 8000 (internal)                               │
+└──────────────────┬────────────────────────────────────┘
                    │
                    ▼
-┌─────────────────────────────────────────────────────┐
-│  PostgreSQL Database                                │
-│  - Users & Authentication                           │
-│  - Public Profiles                                  │
-│  - WebSocket Session State                          │
-└─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  PostgreSQL Database                                    │
+│  - Users & Authentication                               │
+│  - Node Identity (public keys, certificates)            │
+│  - Public Profiles                                      │
+│  - WebSocket Session State                              │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -125,6 +130,10 @@ GITHUB_CLIENT_SECRET="your_github_secret"
 # Optional: Server Settings
 HOST="0.0.0.0"
 PORT="8000"
+RATE_LIMIT_ENABLED=true
+
+# Optional: CORS Settings
+ALLOWED_ORIGINS="http://localhost:3000,http://localhost:8080"
 ```
 
 ### Getting OAuth Credentials
@@ -152,96 +161,215 @@ PORT="8000"
 
 ---
 
-## 🗄️ Database Management
+## 📊 API Endpoints
 
-### Using Docker
+### Authentication
 
-```bash
-# Start PostgreSQL
-docker-compose up -d
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/login/{provider}` | Initiate OAuth flow (google/github) |
+| `GET` | `/auth/{provider}/callback` | OAuth callback handler |
+| `POST` | `/token` | Get JWT token (legacy) |
+| `POST` | `/logout` | Logout and blacklist token |
+| `GET` | `/users/me` | Get current user info |
 
-# View logs
-docker-compose logs -f postgres
+### Node Identity Registration (NEW in v0.5.0)
 
-# Stop database
-docker-compose down
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/register-node-id` | Register cryptographic node identity |
 
-# Stop and remove data
-docker-compose down -v
+**Request Body:**
+```json
+{
+  "node_id": "dpc-node-8b066c7f3d7eb627",
+  "public_key": "-----BEGIN PUBLIC KEY-----\n...\n-----END PUBLIC KEY-----",
+  "certificate": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----"
+}
 ```
 
-### Using External PostgreSQL
-
-If you prefer using an external PostgreSQL instance:
-
-```bash
-# Install PostgreSQL 16+
-sudo apt install postgresql-16
-
-# Create database
-sudo -u postgres createdb dpc_hub
-
-# Create user
-sudo -u postgres createuser -P dpcuser
-
-# Grant privileges
-sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE dpc_hub TO dpcuser;"
-
-# Update .env
-DATABASE_URL="postgresql+asyncpg://dpcuser:password@localhost:5432/dpc_hub"
+**Response:**
+```json
+{
+  "node_id": "dpc-node-8b066c7f3d7eb627",
+  "verified": true,
+  "message": "Node identity successfully registered and verified"
+}
 ```
 
-### Migrations
+**Validation Steps:**
+1. Certificate format and validity
+2. Public key extraction from certificate
+3. Node ID derivation from public key
+4. Certificate CN matches node_id
+5. No duplicate node_id registration
 
-```bash
-# Create a new migration
-poetry run alembic revision --autogenerate -m "description"
+### Profile Management
 
-# Apply migrations
-poetry run alembic upgrade head
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/profile` | Get own profile |
+| `PUT` | `/profile` | Update profile |
+| `GET` | `/profile/{node_id}` | Get user's profile |
+| `DELETE` | `/profile` | Delete account |
 
-# Rollback one migration
-poetry run alembic downgrade -1
+### Discovery
 
-# View migration history
-poetry run alembic history
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/discovery/search` | Search users by expertise |
 
-# View current version
-poetry run alembic current
+**Query Parameters:**
+- `q` - Search query (required)
+- `min_level` - Minimum proficiency level (optional, 1-5)
+
+### WebRTC Signaling
+
+| Protocol | Endpoint | Description |
+|----------|----------|-------------|
+| `WebSocket` | `/ws/signal?token=<JWT>` | WebRTC signaling channel |
+
+**Authentication:** JWT token required via query parameter
+
+**Message Types:**
+```json
+// Client → Server
+{
+  "type": "signal",
+  "target_node_id": "dpc-node-...",
+  "payload": {
+    "type": "offer|answer|ice-candidate",
+    // WebRTC-specific data
+  }
+}
+
+// Server → Client
+{
+  "type": "auth_ok",
+  "message": "Successfully connected as dpc-node-...",
+  "node_id": "dpc-node-..."
+}
+
+// Error
+{
+  "type": "error",
+  "message": "Error description",
+  "code": "error_code"
+}
 ```
+
+### Health & Monitoring
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/` | Basic status check |
+| `GET` | `/health` | Comprehensive health check |
+
+---
+
+## 🔐 Cryptographic Identity System
+
+### How It Works
+
+1. **Client-Side Key Generation**
+   - Client generates RSA-4096 key pair
+   - Creates self-signed X.509 certificate
+   - Derives node_id from public key hash
+
+2. **Registration with Hub**
+   - After OAuth login, client sends:
+     - `node_id`
+     - Public key (PEM format)
+     - Certificate (PEM format)
+
+3. **Hub Validation**
+   - Validates certificate structure and format
+   - Extracts public key from certificate
+   - Generates node_id from public key
+   - Verifies provided node_id matches computed node_id
+   - Checks certificate CN matches node_id
+   - Ensures no duplicate registrations
+
+4. **Verified Status**
+   - Sets `node_id_verified = true` in database
+   - Client can now use full Hub features
+   - Other peers can verify identity via public key
+
+### Node ID Format
+
+```
+dpc-node-{16_hex_chars}
+```
+
+Example: `dpc-node-8b066c7f3d7eb627`
+
+Derived from: `SHA256(public_key)[:16]`
+
+---
+
+## 🛡️ Security Features
+
+### Token Management
+
+**JWT with Blacklist:**
+- Tokens are valid for 30 minutes by default
+- Logout endpoint blacklists tokens immediately
+- Blacklisted tokens rejected until natural expiry
+- In-memory blacklist with TTL cleanup
+
+### Rate Limiting
+
+**Default Limits:**
+- General endpoints: 60 requests/minute
+- Login: 5 requests/minute
+- Profile update: 20 requests/minute
+- Node registration: 10 requests/minute
+
+Can be disabled by setting `RATE_LIMIT_ENABLED=false`
+
+### Best Practices
+
+1. **Strong SECRET_KEY**
+   ```bash
+   # Generate secure key
+   openssl rand -hex 32
+   ```
+
+2. **Database Security**
+   - Use strong passwords
+   - Restrict network access
+   - Enable SSL connections in production
+
+3. **OAuth Configuration**
+   - Use HTTPS redirect URIs only
+   - Restrict OAuth scopes to minimum needed
+   - Rotate credentials periodically
+
+4. **Production Deployment**
+   - Always use HTTPS/WSS
+   - Deploy behind Nginx with SSL
+   - Set up firewall rules
+   - Regular security updates
 
 ---
 
 ## 🌐 Production Deployment
 
-### Option 1: VPS with Docker (Recommended)
-
-**Requirements:**
-- Ubuntu 22.04+ VPS
-- 1 GB RAM minimum
-- Domain with DNS pointing to VPS
-- Ports 80, 443 open
-
-**Step-by-Step:**
+### Option 1: VPS Deployment (Recommended)
 
 ```bash
-# 1. Connect to your VPS
-ssh root@your-server-ip
+# On your VPS (Ubuntu 22.04+)
+cd dpc-hub
 
-# 2. Install Docker & Docker Compose
-curl -fsSL https://get.docker.com -o get-docker.sh
-sh get-docker.sh
-apt install docker-compose -y
+# 1. Install dependencies
+sudo apt update
+sudo apt install docker.io docker-compose python3-poetry -y
 
-# 3. Clone repository
-git clone https://github.com/mikhashev/dpc-messenger.git
-cd dpc-messenger/dpc-hub
-
-# 4. Configure production environment
+# 2. Configure environment
 cp .env.example .env
 nano .env  # Set production credentials
 
-# 5. Create production docker-compose
+# 3. Create production docker-compose
 nano docker-compose.prod.yml
 ```
 
@@ -284,39 +412,13 @@ networks:
     driver: bridge
 ```
 
-**Dockerfile:**
-```dockerfile
-FROM python:3.12-slim
-
-WORKDIR /app
-
-# Install Poetry
-RUN pip install poetry
-
-# Copy project files
-COPY pyproject.toml poetry.lock ./
-COPY dpc_hub ./dpc_hub
-COPY alembic.ini ./
-COPY dpc_hub/alembic ./dpc_hub/alembic
-
-# Install dependencies
-RUN poetry config virtualenvs.create false \
-    && poetry install --no-dev --no-interaction --no-ansi
-
-# Run migrations and start server
-CMD poetry run alembic upgrade head && \
-    uvicorn dpc_hub.main:app --host 0.0.0.0 --port 8000
-```
-
 ```bash
-# 6. Start services
+# 4. Start services
 docker-compose -f docker-compose.prod.yml up -d
 
-# 7. Install Nginx
-apt install nginx certbot python3-certbot-nginx -y
-
-# 8. Configure Nginx
-nano /etc/nginx/sites-available/dpc-hub
+# 5. Install and configure Nginx
+sudo apt install nginx certbot python3-certbot-nginx -y
+sudo nano /etc/nginx/sites-available/dpc-hub
 ```
 
 **Nginx Configuration:**
@@ -341,267 +443,29 @@ server {
 ```
 
 ```bash
-# 9. Enable site and get SSL
-ln -s /etc/nginx/sites-available/dpc-hub /etc/nginx/sites-enabled/
-nginx -t
-systemctl restart nginx
-certbot --nginx -d hub.yourdomain.com
-
-# 10. Set up auto-renewal for SSL
-certbot renew --dry-run
+# 6. Enable site and get SSL
+sudo ln -s /etc/nginx/sites-available/dpc-hub /etc/nginx/sites-enabled/
+sudo nginx -t
+sudo systemctl restart nginx
+sudo certbot --nginx -d hub.yourdomain.com
 ```
 
 ### Option 2: Platform as a Service
 
-#### Heroku
-
+**Heroku:**
 ```bash
-# Install Heroku CLI
-curl https://cli-assets.heroku.com/install.sh | sh
-
-# Login and create app
-heroku login
 heroku create dpc-hub-prod
-
-# Add PostgreSQL
 heroku addons:create heroku-postgresql:mini
-
-# Set environment variables
 heroku config:set SECRET_KEY="your_secret_key"
-heroku config:set GOOGLE_CLIENT_ID="your_client_id"
-heroku config:set GOOGLE_CLIENT_SECRET="your_secret"
-
-# Deploy
 git push heroku main
-
-# Run migrations
-heroku run poetry run alembic upgrade head
 ```
 
-#### DigitalOcean App Platform
-
+**DigitalOcean App Platform:**
 1. Connect GitHub repository
 2. Select "dpc-hub" directory
 3. Add PostgreSQL database
 4. Configure environment variables
 5. Deploy
-
----
-
-## 📊 API Endpoints
-
-### Authentication
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/login/{provider}` | Initiate OAuth flow |
-| `GET` | `/auth/{provider}/callback` | OAuth callback |
-| `POST` | `/token` | Get JWT token |
-| `GET` | `/users/me` | Get current user info |
-
-### Profile Management
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/profile` | Get own profile |
-| `PUT` | `/profile` | Update profile |
-| `GET` | `/profile/{node_id}` | Get user's profile |
-| `DELETE` | `/profile` | Delete account |
-
-### Discovery
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| `GET` | `/discovery/search` | Search users by expertise |
-
-**Query Parameters:**
-- `q` - Search query (required)
-- `min_level` - Minimum proficiency level (optional, 1-5)
-
-### WebRTC Signaling
-
-| Protocol | Endpoint | Description |
-|----------|----------|-------------|
-| `WebSocket` | `/ws/signal` | WebRTC signaling channel |
-
-**Authentication:** JWT token required via query parameter or first message
-
----
-
-## 🔒 Security
-
-### Best Practices
-
-1. **Strong SECRET_KEY**
-   ```bash
-   # Generate secure key
-   openssl rand -hex 32
-   ```
-
-2. **Database Security**
-   - Use strong passwords
-   - Restrict network access
-   - Enable SSL connections in production
-
-3. **OAuth Configuration**
-   - Use HTTPS redirect URIs only
-   - Restrict OAuth scopes to minimum needed
-   - Rotate credentials periodically
-
-4. **Rate Limiting**
-   - Implement at Nginx level
-   - Protect against brute force attacks
-
-5. **Monitoring**
-   - Set up logging (see below)
-   - Monitor failed login attempts
-   - Alert on unusual traffic patterns
-
-### Security Headers
-
-Add to Nginx configuration:
-
-```nginx
-add_header X-Frame-Options "SAMEORIGIN" always;
-add_header X-Content-Type-Options "nosniff" always;
-add_header X-XSS-Protection "1; mode=block" always;
-add_header Referrer-Policy "no-referrer-when-downgrade" always;
-add_header Content-Security-Policy "default-src 'self' http: https: data: blob: 'unsafe-inline'" always;
-```
-
----
-
-## 📈 Monitoring & Logging
-
-### Application Logs
-
-```bash
-# Development
-poetry run uvicorn dpc_hub.main:app --log-level debug
-
-# Production (with Docker)
-docker-compose logs -f hub
-
-# Production (systemd)
-journalctl -u dpc-hub -f
-```
-
-### Database Logs
-
-```bash
-# Docker
-docker-compose logs -f postgres
-
-# Native PostgreSQL
-tail -f /var/log/postgresql/postgresql-16-main.log
-```
-
-### Metrics & Monitoring
-
-#### Prometheus + Grafana
-
-```yaml
-# Add to docker-compose.prod.yml
-  prometheus:
-    image: prom/prometheus
-    volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    ports:
-      - "9090:9090"
-    
-  grafana:
-    image: grafana/grafana
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
-```
-
----
-
-## 🧪 Testing
-
-### API Testing
-
-```bash
-# Install test dependencies
-poetry install --with dev
-
-# Run tests
-poetry run pytest
-
-# With coverage
-poetry run pytest --cov=dpc_hub
-
-# Specific test
-poetry run pytest tests/test_auth.py
-```
-
-### Manual Testing
-
-```bash
-# Test health endpoint
-curl http://localhost:8000/
-
-# Test authentication
-curl http://localhost:8000/login/google
-
-# Test WebSocket
-wscat -c ws://localhost:8000/ws/signal?token=YOUR_JWT_TOKEN
-```
-
----
-
-## 🔧 Maintenance
-
-### Backup Database
-
-```bash
-# Docker
-docker exec dpc-hub-db pg_dump -U user dpc_hub > backup.sql
-
-# Restore
-docker exec -i dpc-hub-db psql -U user dpc_hub < backup.sql
-
-# Native PostgreSQL
-pg_dump -U dpcuser dpc_hub > backup.sql
-psql -U dpcuser dpc_hub < backup.sql
-```
-
-### Updating
-
-```bash
-# Pull latest code
-git pull origin main
-
-# Update dependencies
-poetry update
-
-# Run new migrations
-poetry run alembic upgrade head
-
-# Restart services
-docker-compose -f docker-compose.prod.yml restart hub
-```
-
-### Scaling
-
-For high traffic, consider:
-
-1. **Horizontal Scaling**
-   - Deploy multiple Hub instances
-   - Use load balancer (Nginx, HAProxy)
-   - Share PostgreSQL across instances
-
-2. **Database Optimization**
-   - Use connection pooling
-   - Add read replicas for search queries
-   - Implement caching (Redis)
-
-3. **CDN**
-   - Serve static assets via CDN
-   - Cache API responses when appropriate
 
 ---
 
@@ -647,7 +511,19 @@ docker exec dpc-hub-db psql -U user -d dpc_hub -c "SELECT 1;"
 # Ensure Connection "upgrade" header is set
 
 # Test WebSocket directly
-wscat -c ws://localhost:8000/ws/signal
+wscat -c ws://localhost:8000/ws/signal?token=<JWT>
+```
+
+**"Node identity validation failed"**
+```bash
+# Common causes:
+# 1. node_id doesn't match public key hash
+# 2. Certificate CN doesn't match node_id
+# 3. Public key in certificate doesn't match provided public key
+# 4. Invalid PEM format
+
+# Check logs for specific validation error
+docker-compose logs hub | grep "validation"
 ```
 
 ---
@@ -664,7 +540,9 @@ dpc-hub/
 │   ├── schemas.py           # Pydantic schemas
 │   ├── crud.py              # Database operations
 │   ├── auth.py              # Authentication logic
+│   ├── crypto_validation.py # Node identity validation (NEW)
 │   ├── settings.py          # Configuration
+│   ├── websocket_manager.py # WebSocket connection management
 │   │
 │   └── alembic/             # Database migrations
 │       ├── versions/
@@ -672,6 +550,7 @@ dpc-hub/
 │
 ├── tests/                    # Test suite
 │   ├── test_auth.py
+│   ├── test_crypto_validation.py
 │   ├── test_profiles.py
 │   └── test_signaling.py
 │
@@ -688,12 +567,69 @@ dpc-hub/
 
 ---
 
+## 🔄 Database Migrations
+
+```bash
+# Create a new migration after model changes
+poetry run alembic revision --autogenerate -m "description"
+
+# Apply migrations
+poetry run alembic upgrade head
+
+# Rollback last migration
+poetry run alembic downgrade -1
+
+# Check current version
+poetry run alembic current
+
+# View migration history
+poetry run alembic history
+```
+
+---
+
+## ⚡ Performance & Scaling
+
+### Horizontal Scaling
+
+1. **Multiple Hub Instances**
+   - Deploy multiple Hub instances
+   - Use load balancer (Nginx, HAProxy)
+   - Share PostgreSQL across instances
+
+2. **Database Optimization**
+   - Use connection pooling
+   - Add read replicas for search queries
+   - Implement caching (Redis) for blacklist
+
+3. **CDN**
+   - Serve static assets via CDN
+   - Cache API responses when appropriate
+
+### Monitoring
+
+```bash
+# Check active WebSocket connections
+curl http://localhost:8000/health
+
+# View application logs
+docker-compose logs -f hub
+
+# Monitor database performance
+docker exec dpc-hub-db psql -U user -d dpc_hub -c "
+  SELECT * FROM pg_stat_activity;
+"
+```
+
+---
+
 ## 🤝 Contributing
 
 See the main [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
 
 Hub-specific areas:
 - 🔐 Authentication improvements
+- 🔍 Crypto validation enhancements
 - 📊 Performance optimization
 - 🧪 Test coverage
 - 📝 API documentation

@@ -1,78 +1,73 @@
-# D-PC Messenger Client
+# D-PC Client
 
-> **Cross-platform desktop application with WebRTC P2P connectivity**
+> **Desktop application for private P2P messaging with collaborative AI**
+> 
+> **Status:** Beta | **License:** GPL v3 | **Version:** 0.5.0
 
-The D-PC Messenger Client is a privacy-first desktop application that enables secure, AI-powered communication with automatic NAT traversal via WebRTC.
-
----
-
-## 🎯 Features
-
-### Core Functionality
-- ✅ **WebRTC P2P Connections** - Connect to peers anywhere with automatic NAT traversal
-- ✅ **Direct TLS Connections** - Local network connections without Hub
-- ✅ **Local AI Integration** - Ollama, OpenAI, Anthropic support
-- ✅ **Context Firewall** - Granular control over data sharing
-- ✅ **Hub Integration** - OAuth authentication and peer discovery
-- ✅ **End-to-End Encryption** - All communications use DTLS
-
-### Platform Support
-- ✅ **Windows** - Full support (x64)
-- ✅ **macOS** - Full support (Intel & Apple Silicon)
-- ✅ **Linux** - Full support (Ubuntu, Fedora, Arch)
+The D-PC Client is a desktop application built with Tauri (Rust) and SvelteKit that enables secure peer-to-peer communication with collaborative AI capabilities. It supports both Direct TLS connections (local network) and WebRTC connections (internet-wide).
 
 ---
 
-## 📦 Architecture
+## 🌟 Features
+
+- 🔒 **End-to-End Encrypted P2P** - Direct connections between peers
+- 🌐 **WebRTC** - Connect across NAT/firewalls using STUN/TURN
+- 🏠 **Local AI** - Ollama, GPT, Claude integration
+- 🤝 **Context Sharing** - Collaborate using shared personal contexts
+- 🛡️ **Context Firewall** - Granular permission control
+- 🔑 **Cryptographic Identity** - Automatic node_id registration
+- ⚡ **Lightweight** - ~150MB memory footprint
+
+---
+
+## 🏗️ Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│              D-PC Client Architecture                    │
+│                D-PC Client Architecture                 │
 └─────────────────────────────────────────────────────────┘
 
-┌──────────────────────┐
-│   Tauri Desktop App  │  ← User Interface (SvelteKit)
-│   (UI Frontend)      │
-└──────────┬───────────┘
-           │ WebSocket (ws://localhost:9999)
-           ▼
-┌──────────────────────────────────────────────────┐
-│   Core Service (Python Backend)                  │
-│                                                   │
-│  ┌──────────────┐  ┌──────────────┐             │
-│  │ P2PManager   │  │ HubClient    │             │
-│  │ - WebRTC     │  │ - OAuth      │             │
-│  │ - Direct TLS │  │ - Signaling  │             │
-│  └──────────────┘  └──────────────┘             │
-│                                                   │
-│  ┌──────────────┐  ┌──────────────┐             │
-│  │ LLMManager   │  │ Firewall     │             │
-│  │ - Ollama     │  │ - .dpc_access│             │
-│  │ - OpenAI     │  │ - Rules      │             │
-│  │ - Anthropic  │  │              │             │
-│  └──────────────┘  └──────────────┘             │
-└──────────────────────────────────────────────────┘
-           │
-           ▼
-┌──────────────────────┐
-│  ~/.dpc/             │  ← User Configuration
-│  - node.key/.crt     │    (Local Storage)
-│  - providers.toml    │
-│  - .dpc_access       │
-│  - personal.json     │
-└──────────────────────┘
+┌────────────────────────┐
+│    Tauri Frontend      │
+│   (SvelteKit + TS)     │
+│                        │
+│  • Chat UI             │
+│  • Connection Manager  │
+│  • Settings            │
+└───────────┬────────────┘
+            │ WebSocket
+            │ (localhost:9999)
+            ▼
+┌────────────────────────┐
+│   Python Backend       │
+│  (Core Service)        │
+│                        │
+│  • P2P Manager         │
+│  • WebRTC Handler      │
+│  • Hub Client          │
+│  • AI Manager          │
+│  • Context Firewall    │
+└───┬────────────┬───────┘
+    │            │
+    │ P2P        │ HTTPS/WSS
+    │            │
+    ▼            ▼
+┌─────────┐  ┌──────────┐
+│  Peers  │  │   Hub    │
+│         │  │          │
+└─────────┘  └──────────┘
 ```
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Getting Started
 
 ### Prerequisites
 
-1. **Python 3.12+** with Poetry 1.2+
-2. **Node.js 18+** with npm
-3. **Rust** - Install via [rustup.rs](https://rustup.rs/)
-4. **(Optional) Ollama** - For local AI: [ollama.ai](https://ollama.ai/)
+- **Python 3.12+** with Poetry
+- **Node.js 18+** with npm
+- **Rust** (install via [rustup.rs](https://rustup.rs/))
+- **(Optional) Ollama** - For local AI: [ollama.ai](https://ollama.ai/)
 
 ### Installation
 
@@ -115,7 +110,7 @@ npm run tauri build
 
 ## 🔧 Configuration
 
-### AI Providers (`~/.dpc/providers.toml`)
+### Any AI Providers (`~/.dpc/providers.toml`)
 
 ```toml
 # Default provider (used if not specified)
@@ -137,7 +132,7 @@ model = "gpt-4"
 [providers.anthropic]
 type = "anthropic"
 api_key = "sk-ant-..."  # Your API key
-model = "claude-3-sonnet-20240229"
+model = "claude-3-5-sonnet-20241022"
 ```
 
 ### Context Firewall (`~/.dpc/.dpc_access`)
@@ -212,18 +207,31 @@ npm run tauri build
 # Example: dpc://192.168.1.100:8888/dpc-node-abc123
 
 # Share this URI with your peer
-# They enter it in the "Connect to Peer" dialog
+# Click "Connect"
 ```
 
 #### Method 2: WebRTC via Hub (Internet)
 
+**NEW in v0.5.0: Automatic Node Registration**
+
 ```bash
 # 1. Ensure Hub is running and accessible
-# 2. Both users authenticate with Hub
-# 3. Enter peer's node_id in the UI
-# 4. Click "Connect via Hub"
-# 5. WebRTC automatically establishes P2P connection
+# 2. Click "Login with Google/GitHub" in the UI
+# 3. Client automatically:
+#    - Completes OAuth flow
+#    - Registers cryptographic node identity
+#    - Verifies identity with Hub
+# 4. Enter peer's node_id
+# 5. Click "Connect"
+# 6. WebRTC automatically establishes P2P connection
 ```
+
+**Authentication Flow:**
+1. OAuth authentication with Hub
+2. Automatic registration of node_id, public key, and certificate
+3. Hub validates and verifies identity
+4. JWT token issued for subsequent API calls
+5. Ready to connect to peers
 
 ### Chatting with AI
 
@@ -251,7 +259,7 @@ dpc-client/
 │   │   ├── service.py         # Main orchestrator
 │   │   ├── p2p_manager.py     # WebRTC & Direct TLS
 │   │   ├── webrtc_peer.py     # WebRTC peer connection
-│   │   ├── hub_client.py      # Hub communication
+│   │   ├── hub_client.py      # Hub communication (with auto-registration)
 │   │   ├── llm_manager.py     # AI provider management
 │   │   ├── firewall.py        # Context access control
 │   │   ├── local_api.py       # WebSocket API for UI
@@ -310,6 +318,53 @@ npm run format
 
 ---
 
+## 📚 API Reference
+
+### WebSocket API (UI ↔ Backend)
+
+The backend exposes a WebSocket server at `ws://127.0.0.1:9999`.
+
+**Command Format:**
+```json
+{
+  "id": "unique-id",
+  "command": "command_name",
+  "payload": { /* command-specific data */ }
+}
+```
+
+**Available Commands:**
+
+| Command | Payload | Description |
+|---------|---------|-------------|
+| `get_status` | `{}` | Get node ID, Hub status, connected peers |
+| `login_to_hub` | `{"provider": "google"}` | Login via OAuth (auto-registers node) |
+| `connect_to_peer` | `{"uri": "dpc://..."}` | Connect via Direct TLS |
+| `connect_to_peer_by_id` | `{"node_id": "..."}` | Connect via WebRTC |
+| `disconnect_from_peer` | `{"node_id": "..."}` | Close connection |
+| `send_p2p_message` | `{"target_node_id": "...", "text": "..."}` | Send message |
+| `execute_ai_query` | `{"query": "...", "use_context_from": [...]}` | AI query |
+
+**Response Format:**
+```json
+{
+  "id": "unique-id",
+  "command": "command_name",
+  "status": "OK",
+  "payload": { /* response data */ }
+}
+```
+
+**Event Format (broadcasts):**
+```json
+{
+  "event": "event_name",
+  "payload": { /* event data */ }
+}
+```
+
+---
+
 ## 🐛 Troubleshooting
 
 ### Backend Issues
@@ -330,6 +385,20 @@ This is expected if Hub is not running. The client will work in "Direct TLS only
 # To enable WebRTC:
 # 1. Start Hub (see dpc-hub/README.md)
 # 2. Restart client
+```
+
+**Problem: "Node identity registration failed"**
+
+Solution: Check that:
+```bash
+# 1. Identity files exist
+ls -la ~/.dpc/node.{key,crt,id}
+
+# 2. If missing, regenerate:
+rm ~/.dpc/node.*
+poetry run python run_service.py  # Will regenerate
+
+# 3. Check Hub logs for validation errors
 ```
 
 ### Frontend Issues
@@ -372,13 +441,26 @@ Causes:
 Solutions:
 ```bash
 # 1. Check Hub accessibility
-curl https://your-hub-url.com/docs
+curl https://your-hub-url.com/health
 
 # 2. Check firewall (allow UDP)
 # Linux: sudo ufw allow 8888/udp
 # Windows: Check Windows Firewall settings
 
-# 3. For symmetric NAT, TURN server needed (future feature)
+# 3. For symmetric NAT, TURN server needed
+# Check WebRTC logs for ICE connection state
+```
+
+**Problem: "ICE connection failed"**
+
+```bash
+# Check STUN/TURN server configuration
+# In webrtc_peer.py, verify:
+# - STUN servers are reachable
+# - TURN server credentials are correct
+
+# Test STUN connectivity:
+curl -v stun:stun.l.google.com:19302
 ```
 
 ### Port Conflicts
@@ -392,6 +474,36 @@ class LocalApiServer:
     def __init__(self, core_service, host="127.0.0.1", port=9998):  # Changed
         # ...
 ```
+
+---
+
+## 🔒 Security
+
+### Best Practices
+
+1. **Keep node.key private** - Never share this file
+2. **Review .dpc_access** - Control what peers can access
+3. **Use strong Hub passwords** - If deploying your own Hub
+4. **Update regularly** - Security patches are important
+5. **Verify peer identities** - Check node_ids before connecting
+
+### Threat Model
+
+| Threat | Mitigation |
+|--------|------------|
+| MITM Attack | ✅ TLS/DTLS encryption |
+| Data Exfiltration | ✅ Context firewall |
+| Impersonation | ✅ Cryptographic node IDs (verified by Hub) |
+| Hub Compromise | ✅ Hub never sees message content |
+| Local Malware | ⚠️ Operating system security responsibility |
+
+### Node Identity Security
+
+**v0.5.0 Improvements:**
+- Node identities verified by Hub using cryptographic validation
+- Public keys and certificates validated before registration
+- Node_id derivation from public key ensures authenticity
+- Prevents node_id spoofing and impersonation
 
 ---
 
@@ -413,28 +525,6 @@ class LocalApiServer:
 - Context caching reduces redundant AI queries
 - Ephemeral messages don't accumulate in memory
 - Direct TLS is faster than WebRTC for local network
-
----
-
-## 🔒 Security
-
-### Best Practices
-
-1. **Keep node.key private** - Never share this file
-2. **Review .dpc_access** - Control what peers can access
-3. **Use strong Hub passwords** - If deploying your own Hub
-4. **Update regularly** - Security patches are important
-5. **Verify peer identities** - Check node_ids before connecting
-
-### Threat Model
-
-| Threat | Mitigation |
-|--------|------------|
-| MITM Attack | ✅ TLS/DTLS encryption |
-| Data Exfiltration | ✅ Context firewall |
-| Impersonation | ✅ Cryptographic node IDs |
-| Hub Compromise | ✅ Hub never sees message content |
-| Local Malware | ⚠️ Operating system security responsibility |
 
 ---
 
@@ -463,52 +553,6 @@ For organizations deploying to multiple machines:
 # 2. Distribute via software management (SCCM, Jamf, etc.)
 # 3. Set up internal Hub for corporate network
 # 4. Configure firewall rules for VPN access
-```
-
----
-
-## 📚 API Reference
-
-### WebSocket API (UI ↔ Backend)
-
-The backend exposes a WebSocket server at `ws://127.0.0.1:9999`.
-
-**Command Format:**
-```json
-{
-  "id": "unique-id",
-  "command": "command_name",
-  "payload": { /* command-specific data */ }
-}
-```
-
-**Available Commands:**
-
-| Command | Payload | Description |
-|---------|---------|-------------|
-| `get_status` | `{}` | Get node ID, Hub status, connected peers |
-| `connect_to_peer` | `{"uri": "dpc://..."}` | Connect via Direct TLS |
-| `connect_to_peer_by_id` | `{"node_id": "..."}` | Connect via WebRTC |
-| `disconnect_from_peer` | `{"node_id": "..."}` | Close connection |
-| `send_p2p_message` | `{"target_node_id": "...", "text": "..."}` | Send message |
-| `execute_ai_query` | `{"query": "...", "use_context_from": [...]}` | AI query |
-
-**Response Format:**
-```json
-{
-  "id": "unique-id",
-  "command": "command_name",
-  "status": "OK",
-  "payload": { /* response data */ }
-}
-```
-
-**Event Format (broadcasts):**
-```json
-{
-  "event": "event_name",
-  "payload": { /* event data */ }
-}
 ```
 
 ---

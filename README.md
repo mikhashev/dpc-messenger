@@ -1,108 +1,81 @@
-# D-PC Messenger
+# D-PC Messenger: Decentralized Peer-to-Peer Collaborative Intelligence
 
-> **Status:** 🚧 In Active Development 🚧 | **Version:** 0.2.0 (Federated MVP + WebRTC)
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.5.0
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
-[![License: LGPL v3](https://img.shields.io/badge/License-LGPLv3-blue.svg)](https://www.gnu.org/licenses/lgpl-3.0)
-
-D-PC Messenger is a proof-of-concept for a privacy-first, AI-powered messenger designed for the collaborative intelligence era. It is the reference implementation of the **Decentralized Personal Context (D-PC)** protocol.
-
-Our vision is a future where users interact through local AI assistants that can securely exchange knowledge and share computational resources. D-PC aims to become the **"SMTP for AI"**: an open, interoperable standard enabling these assistants to communicate on behalf of their users.
+**D-PC Messenger** (Decentralized Personal Context) is a privacy-first, peer-to-peer messaging platform that enables **collaborative intelligence** through secure sharing of personal AI contexts between trusted peers, without relying on centralized servers for communication.
 
 ---
 
-## ✨ What's New in v0.2.0
+## 🌟 Key Features
 
-- 🌐 **WebRTC P2P Connections** - Connect to peers anywhere in the world with automatic NAT traversal
-- 🔒 **End-to-End Encrypted Channels** - All communications use DTLS encryption
-- 🚀 **Hub-Assisted Signaling** - Seamless connection establishment through Federation Hub
-- 📡 **Dual Connection Modes** - Both Direct TLS (local network) and WebRTC (internet) supported
-- 🎯 **Production Ready** - Complete deployment guides for VPS hosting
+### For End Users
+- 🔒 **True Privacy** - Messages never touch servers, only peers
+- 🤝 **Collaborative AI** - Share context with trusted peers for better answers
+- 🏠 **Local-First** - Your data stays on your device
+- 🌐 **Internet-Wide** - Connect to anyone, anywhere via WebRTC
+- 🔐 **Cryptographic Identity** - Self-sovereign node IDs based on public keys
+- 🛡️ **Context Firewall** - Granular control over what data you share
 
----
-
-## 💡 Core Concepts
-
-D-PC is built on three revolutionary ideas:
-
-### 1. **Transactional Communication**
-We treat conversations as transactions to produce results, not endless histories. The outcome is a "Knowledge Commit"—a structured update to participants' knowledge bases. We extract the **signal** (knowledge) and discard the **noise** (chatter).
-
-### 2. **The Contextual Knowledge Graph**
-The network models users as nodes in a social graph. AI assistants intelligently traverse this graph to find relevant knowledge from trusted sources, replacing AI "hallucinations" with verifiable facts.
-
-### 3. **The Decentralized Compute Pool**
-Users securely share their local AI inference capabilities with trusted peers. Someone with a laptop can "borrow" a friend's powerful GPU—all over an end-to-end encrypted channel, with full privacy.
-
-**Read our [Whitepaper](./whitepaper.md) for the full vision.**
+### For Developers
+- 📖 **Open Protocol** - Extensible DPTP (D-PC Transfer Protocol)
+- 🧩 **Modular Design** - Clear separation of concerns
+- 🔧 **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude)
+- 🚀 **Production Ready** - Docker deployment, OAuth, rate limiting
 
 ---
 
-## 🏗️ Architecture: WebRTC-Enabled Federation
+## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                D-PC Messenger Architecture                   │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│                   System Architecture                   │
+└─────────────────────────────────────────────────────────┘
 
-User A (Behind NAT)              Hub Server              User B (Behind NAT)
-┌──────────────┐                (Public VPS)            ┌──────────────┐
-│  Desktop App │                                        │  Desktop App │
-│              │                                        │              │
-│ - Local AI   │         1. WebSocket Signaling        │ - Local AI   │
-│ - Context DB │    ┌────────────────────────────┐     │ - Context DB │
-│ - WebRTC     │◄───┤  - OAuth (Google/GitHub)  │────►│ - WebRTC     │
-│              │    │  - User Discovery          │     │              │
-└──────┬───────┘    │  - P2P Signaling (ICE/SDP)│     └──────┬───────┘
-       │            └────────────────────────────┘            │
-       │                                                       │
-       │        2. Direct P2P WebRTC Data Channel            │
-       │◄══════════════════════════════════════════════════►│
-       │          (End-to-End Encrypted DTLS)                │
-       │                                                      │
-       └──────────────────────────────────────────────────────┘
-                    • Context Exchange
-                    • AI Model Inference
-                    • Compute Sharing
+┌──────────────┐                            ┌──────────────┐
+│   Client A   │ ◄──── P2P Encrypted ──────►│   Client B   │
+│              │       Connection           │              │
+│  • Local AI  │                            │  • Local AI  │
+│  • Context   │                            │  • Context   │
+│  • Firewall  │                            │  • Firewall  │
+└──────┬───────┘                            └──────┬───────┘
+       │                                           │
+       │            ┌─────────────────┐            │
+       └────────────►  Federation Hub  ◄───────────┘
+                    │                 │
+                    │  • Discovery    │
+                    │  • Signaling    │
+                    │  • OAuth        │
+                    │  • NO Messages  │
+                    └─────────────────┘
 ```
 
-### Connection Modes
+### Two Connection Methods
 
-1. **Direct TLS** - For peers on the same local network
-2. **WebRTC + STUN** - For peers behind NAT (most common)
-3. **WebRTC + TURN** - For restrictive corporate firewalls (future)
+1. **Direct TLS** (Local Network)
+   - Fastest, lowest latency
+   - Requires network visibility
+   - Uses cryptographic node certificates
 
----
-
-## 🎯 Key Features
-
-### Privacy-First
-- ✅ **Local AI Processing** - Your data never leaves your device
-- ✅ **E2E Encryption** - All P2P communications use DTLS
-- ✅ **Context Firewall** - Granular control via `.dpc_access` file
-- ✅ **No Message History** - Ephemeral by design
-
-### WebRTC Connectivity
-- ✅ **Automatic NAT Traversal** - Works behind routers without port forwarding
-- ✅ **Global Reach** - Connect to anyone, anywhere
-- ✅ **Low Latency** - Direct P2P minimizes hops
-- ✅ **Fallback Support** - Graceful degradation to Direct TLS
-
-### AI Integration
-- ✅ **Multiple Providers** - Ollama (local), OpenAI, Anthropic, any other (local or API)
-- ✅ **Context Aggregation** - Query multiple peers' knowledge
-- ✅ **Remote Inference** - Share GPU resources (coming soon)
+2. **WebRTC** (Internet-Wide)
+   - Works across NAT/firewalls
+   - Automatic NAT traversal via STUN/TURN
+   - Hub only for initial signaling
 
 ---
 
-## 📦 Project Structure (Monorepo)
+## 📁 Project Structure
 
 ```
 dpc-messenger/
-├── dpc-hub/              # Federation Hub (FastAPI + PostgreSQL)
-│   ├── dpc_hub/          # Server application
-│   ├── alembic/          # Database migrations
+│
+├── dpc-hub/              # Federation Hub (AGPL v3)
+│   ├── dpc_hub/
+│   │   ├── main.py       # FastAPI app & routes
+│   │   ├── auth.py       # JWT + OAuth authentication
+│   │   ├── crypto_validation.py  # Node identity validation
+│   │   ├── models.py     # Database models
+│   │   ├── crud.py       # Database operations
+│   │   └── alembic/      # Database migrations
 │   └── README.md         # Hub setup guide
 │
 ├── dpc-client/           # Desktop Client Application
@@ -195,10 +168,12 @@ cd dpc-client/ui
 npm run tauri dev
 ```
 
-**3. Connect to peers:**
-- Enter their `node_id` in the UI
+**3. Authenticate and Connect:**
+- Login via OAuth (Google/GitHub) in the UI
+- **NEW:** Client automatically registers cryptographic node identity
+- Enter peer's `node_id` in the UI
 - Click "Connect via Hub"
-- WebRTC will automatically establish a direct P2P connection!
+- WebRTC automatically establishes a direct P2P connection
 
 📖 **See [docs/QUICK_START.md](./docs/QUICK_START.md) for detailed instructions.**
 
@@ -217,7 +192,7 @@ cd dpc-messenger/dpc-hub
 
 # Configure production settings
 cp .env.example .env
-nano .env  # Add production credentials
+nano .env  # Add production credentials (SECRET_KEY, OAuth, etc.)
 
 # Deploy with Docker Compose
 docker-compose -f docker-compose.prod.yml up -d
@@ -227,6 +202,28 @@ docker-compose -f docker-compose.prod.yml up -d
 ```
 
 📖 **Full guide: [docs/WEBRTC_SETUP_GUIDE.md](./docs/WEBRTC_SETUP_GUIDE.md)**
+
+---
+
+## 🔑 Authentication & Security
+
+### New Authentication Flow (v0.5.0)
+
+1. **OAuth Login** - User authenticates via Google/GitHub
+2. **Temporary Node ID** - Hub assigns temporary ID
+3. **Cryptographic Registration** - Client registers public key & certificate
+4. **Verified Identity** - Hub validates and marks node_id as verified
+5. **JWT Token** - Client receives JWT for API access
+6. **Logout Support** - Tokens can be blacklisted upon logout
+
+### Security Features
+
+- 🔒 End-to-end encryption (DTLS in WebRTC, TLS in Direct)
+- 🔑 Cryptographic node identities (derived from RSA public keys)
+- 🛡️ Context firewall (.dpc_access) for granular permissions
+- 🔐 JWT authentication with Hub (token blacklisting supported)
+- ✅ No message persistence by default
+- 🔍 Node identity validation (certificates, public keys)
 
 ---
 
@@ -250,22 +247,24 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ## 🛣️ Roadmap
 
-### Phase 1: Federated MVP ✅ (Current)
+### Phase 1: Federated MVP ✅ (Current - v0.5.0)
 - ✅ Direct TLS P2P connections
 - ✅ WebRTC with NAT traversal
 - ✅ Federation Hub for discovery
 - ✅ OAuth authentication
+- ✅ Cryptographic node identity system
+- ✅ Token blacklist and logout
 - ✅ Local AI integration
 - ⏳ Remote inference (in progress)
 
-### Phase 2: Enhanced Federation (Q1-Q2 2025)
+### Phase 2: Enhanced Federation (Q1-Q2 2026)
 - 🔲 Multi-hub federation
 - 🔲 Advanced context firewall
 - 🔲 Remote inference MVP
 - 🔲 Mobile clients (Android, iOS)
-- 🔲 TURN server support
+- 🔲 Dedicated TURN server deployment
 
-### Phase 3: True P2P (2025-2026)
+### Phase 3: True P2P (2026-2027)
 - 🔲 DHT-based peer discovery
 - 🔲 Hub-free operation mode
 - 🔲 Blockchain-based identity (optional)
@@ -332,14 +331,6 @@ Email: legoogmiha@gmail.com
 
 We take security seriously and will respond within 48 hours.
 
-### Security Features
-
-- 🔒 End-to-end encryption (DTLS in WebRTC)
-- 🔑 Cryptographic node identities
-- 🛡️ Context firewall (.dpc_access)
-- 🔐 JWT authentication with Hub
-- ✅ No message persistence by default
-
 ---
 
 ## 🙏 Acknowledgments
@@ -363,7 +354,8 @@ Special thanks to all contributors and early testers!
 | **Core Protocol** | ✅ v1.0 |
 | **WebRTC** | ✅ Working |
 | **Direct TLS** | ✅ Working |
-| **Hub Server** | ✅ MVP Ready |
+| **Hub Server** | ✅ Production Ready |
+| **Crypto Identity** | ✅ v0.5.0 |
 | **Desktop Client** | 🚧 Beta |
 | **Mobile Clients** | 🔲 Planned |
 | **Test Coverage** | 🚧 In Progress |
@@ -380,48 +372,10 @@ Special thanks to all contributors and early testers!
 
 ---
 
-## 📈 Statistics
-
-![GitHub Stars](https://img.shields.io/github/stars/mikhashev/dpc-messenger?style=social)
-![GitHub Forks](https://img.shields.io/github/forks/mikhashev/dpc-messenger?style=social)
-![GitHub Issues](https://img.shields.io/github/issues/mikhashev/dpc-messenger)
-![GitHub Pull Requests](https://img.shields.io/github/issues-pr/mikhashev/dpc-messenger)
-
----
-
-## 🎯 Vision
-
-> **"In the future, all users will interact through local AI assistants. D-PC will be the SMTP for AI—an open standard enabling these assistants to securely exchange knowledge and share computational resources."**
-
-We're building the infrastructure for **collaborative intelligence** where:
-- Your AI assistant can access your friends' expertise
-- You can lend your GPU to help a colleague
-- All communications are private and encrypted
-- No corporation controls your data or relationships
-
-**Join us in building the future of human-AI collaboration!**
-
----
-
-## 📄 License
-
-Copyright © 2025 Mike Shevchenko and D-PC Contributors
-
-This project uses multiple licenses. See [LICENSE.md](./LICENSE.md) for details.
-
-- Client: GPL v3
-- Hub: AGPL v3
-- Protocol Libraries: LGPL v3
-- Specifications: CC0
-
----
-
 <div align="center">
 
-**[🌟 Star us on GitHub](https://github.com/mikhashev/dpc-messenger)** | **[📖 Read the Docs](./docs/)** | **[💬 Join Discussion](https://github.com/mikhashev/dpc-messenger/discussions)**
+**Made with ❤️ by the D-PC Community**
 
-*Building the future of collaborative intelligence, openly.*
-
-Made with ❤️ by the D-PC community
+[⭐ Star on GitHub](https://github.com/mikhashev/dpc-messenger) | [📖 Documentation](./docs/) | [💬 Discussions](https://github.com/mikhashev/dpc-messenger/discussions)
 
 </div>
