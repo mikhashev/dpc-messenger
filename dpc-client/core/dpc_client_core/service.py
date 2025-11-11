@@ -14,6 +14,7 @@ from .p2p_manager import P2PManager
 from .llm_manager import LLMManager
 from .local_api import LocalApiServer
 from .context_cache import ContextCache
+from .settings import Settings
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
 
@@ -27,13 +28,20 @@ class CoreService:
     """
     def __init__(self):
         print("Initializing D-PC Core Service...")
-        
+
         DPC_HOME_DIR.mkdir(exist_ok=True)
+
+        # Load settings (supports environment variables and config file)
+        self.settings = Settings(DPC_HOME_DIR)
 
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / ".dpc_access")
         self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
-        self.hub_client = HubClient(api_base_url="https://unfascinated-semifiguratively-velda.ngrok-free.dev")
+        self.hub_client = HubClient(
+            api_base_url=self.settings.get_hub_url(),
+            oauth_callback_host=self.settings.get_oauth_callback_host(),
+            oauth_callback_port=self.settings.get_oauth_callback_port()
+        )
         self.p2p_manager = P2PManager(firewall=self.firewall)
         self.cache = ContextCache()
         

@@ -238,6 +238,11 @@ docker-compose -f docker-compose.prod.yml up -d
 - **[WEBRTC_SETUP_GUIDE.md](./docs/WEBRTC_SETUP_GUIDE.md)** - Complete WebRTC setup
 - **[README_WEBRTC_INTEGRATION.md](./docs/README_WEBRTC_INTEGRATION.md)** - Technical overview
 
+### Configuration
+- **[CONFIGURATION.md](./docs/CONFIGURATION.md)** - Complete configuration guide
+- **Environment Variables** - All settings support env var overrides
+- **Config File** - `~/.dpc/config.ini` for persistent settings
+
 ### Protocol & Vision
 - **[whitepaper.md](./whitepaper.md)** - Project vision & philosophy
 - **[specs/hub_api_v1.md](./specs/hub_api_v1.md)** - Hub API specification

@@ -19,6 +19,7 @@ personal.json
 personal_context.json
 dpc_project_plan_phase2.json
 dpc_project_plan_phase3.json
+FIXES_SUMMARY.md
 # The user's private access control rules.
 .dpc_access
 # The user's cryptographic identity. CRITICAL to ignore.

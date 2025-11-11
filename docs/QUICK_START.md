@@ -134,6 +134,14 @@ GOOGLE_CLIENT_SECRET="your_secret"
 DATABASE_URL="postgresql+asyncpg://user:password@localhost:5432/dpc_hub"
 ```
 
+**TIP:** The client also has its own configuration at `~/.dpc/config.ini`.
+You can override any setting with environment variables. See [CONFIGURATION.md](./CONFIGURATION.md) for details.
+
+**Example:**
+```bash
+export DPC_HUB_URL=https://your-hub.com
+```
+
 **Get Google OAuth Credentials:**
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create new project

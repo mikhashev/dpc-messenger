@@ -19,12 +19,16 @@ class HubClient:
     authentication, profile management, discovery, and P2P signaling.
     """
 
-    def __init__(self, api_base_url: str):
+    def __init__(self, api_base_url: str, oauth_callback_host: str = '127.0.0.1', oauth_callback_port: int = 8080):
         self.api_base_url = api_base_url.rstrip('/')
         self.http_client = httpx.AsyncClient(base_url=self.api_base_url)
         self.jwt_token: str | None = None
         self.refresh_token: str | None = None
         self.websocket: websockets.WebSocketClientProtocol | None = None
+
+        # OAuth callback configuration
+        self.oauth_callback_host = oauth_callback_host
+        self.oauth_callback_port = oauth_callback_port
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Helper to create authorization headers."""
@@ -131,14 +135,14 @@ class HubClient:
                     self.wfile.write(b"Not Found")
 
         # We need to run the HTTP server in a separate thread so it doesn't block asyncio
-        server = HTTPServer(('127.0.0.1', 8080), OAuthCallbackHandler)
+        server = HTTPServer((self.oauth_callback_host, self.oauth_callback_port), OAuthCallbackHandler)
         server.loop = asyncio.get_running_loop()
-        
+
         thread = threading.Thread(target=server.serve_forever)
         thread.daemon = True
         thread.start()
-        
-        print("Starting local server for OAuth callback on port 8080...")
+
+        print(f"Starting local server for OAuth callback on {self.oauth_callback_host}:{self.oauth_callback_port}...")
         login_url = f"{self.api_base_url}/login/{provider}"
         print(f"Opening browser to: {login_url}")
         webbrowser.open(login_url)

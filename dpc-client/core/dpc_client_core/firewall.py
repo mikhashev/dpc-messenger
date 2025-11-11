@@ -23,11 +23,19 @@ class ContextFirewall:
 
         self.rules.optionxform = str # Make parser case-sensitive
         self.rules.read(access_file_path)
-        
+
+        # Parse file groups (aliases for groups of files)
         self.file_groups: Dict[str, List[str]] = {}
         if self.rules.has_section('file_groups'):
             for group_name, files_str in self.rules.items('file_groups'):
                 self.file_groups[group_name] = [f.strip() for f in files_str.split(',')]
+
+        # Parse node groups (which nodes belong to which groups)
+        # Format: colleagues = dpc-node-alice-123, dpc-node-bob-456
+        self.node_groups: Dict[str, List[str]] = {}
+        if self.rules.has_section('node_groups'):
+            for group_name, nodes_str in self.rules.items('node_groups'):
+                self.node_groups[group_name] = [n.strip() for n in nodes_str.split(',')]
 
     def _ensure_file_exists(self):
         """Creates a default, secure .dpc_access file if one doesn't exist."""
@@ -47,7 +55,17 @@ class ContextFirewall:
 personal.json:profile.name = allow
 personal.json:profile.description = allow
 
-# Add rules for friends, colleagues, etc. below.
+# Define node groups (which nodes belong to which groups)
+# [node_groups]
+# colleagues = dpc-node-alice-123, dpc-node-bob-456
+# friends = dpc-node-charlie-789
+
+# Define access rules for groups
+# [group:colleagues]
+# work_main.json:availability = allow
+# work_main.json:skills.* = allow
+
+# Add rules for specific nodes below.
 # Example for a friend:
 # [node:dpc-node-friend-id-here]
 # personal.json:profile.* = allow
@@ -111,6 +129,15 @@ personal.json:profile.description = allow
 
         return best_match_rule
 
+    def _get_groups_for_node(self, node_id: str) -> List[str]:
+        """
+        Returns a list of group names that the given node_id belongs to.
+        """
+        groups = []
+        for group_name, node_list in self.node_groups.items():
+            if node_id in node_list:
+                groups.append(group_name)
+        return groups
 
     def can_access(self, requester_identity: str, resource_path: str) -> bool:
         """
@@ -123,7 +150,14 @@ personal.json:profile.description = allow
         if rule:
             return rule.lower() == 'allow'
 
-        # 2. TODO: Check for group rules (e.g., [group:colleagues])
+        # 2. Check for group rules (e.g., [group:colleagues])
+        # Get all groups this node belongs to
+        groups = self._get_groups_for_node(requester_identity)
+        for group_name in groups:
+            group_section = f"group:{group_name}"
+            rule = self._get_rule_for_resource(group_section, resource_path)
+            if rule:
+                return rule.lower() == 'allow'
 
         # 3. Check for a hub rule or AI scope rule
         if requester_identity == "hub" or requester_identity.startswith("ai_scope:"):
@@ -195,6 +229,10 @@ if __name__ == '__main__':
     work = work_*.json
     personal = personal.json
 
+[node_groups]
+    colleagues = dpc-node-alice-123, dpc-node-bob-456
+    friends = dpc-node-boris-xyz
+
 [hub]
     personal.json:profile.name = allow
     work_main.json:skills.python = allow
@@ -202,6 +240,10 @@ if __name__ == '__main__':
 [ai_scope:work]
     @work:* = allow
     @personal:profile.* = deny
+
+[group:colleagues]
+    work_main.json:availability = allow
+    work_main.json:skills.* = allow
 
 [node:dpc-node-boris-xyz]
     personal.json:* = allow
@@ -218,23 +260,30 @@ if __name__ == '__main__':
     # Test Hub access
     assert firewall.can_access("hub", "personal.json:profile.name") == True
     assert firewall.can_access("hub", "personal.json:profile.age") == False
-    print("✅ Hub tests passed.")
+    print("[PASS] Hub tests passed.")
 
     # Test AI Scope access
     assert firewall.can_access("ai_scope:work", "work_main.json:availability") == True
     assert firewall.can_access("ai_scope:work", "work_project_alpha.json:details") == True
     assert firewall.can_access("ai_scope:work", "personal.json:profile.name") == False # Denied by specific rule
-    print("✅ AI Scope tests passed.")
+    print("[PASS] AI Scope tests passed.")
 
     # Test Node access (specificity)
     assert firewall.can_access("dpc-node-boris-xyz", "personal.json:profile.name") == True
     assert firewall.can_access("dpc-node-boris-xyz", "work_main.json:public_summary") == True
     assert firewall.can_access("dpc-node-boris-xyz", "work_main.json:internal_notes") == False # Denied by specific rule
-    print("✅ Node tests passed.")
-    
+    print("[PASS] Node tests passed.")
+
+    # Test Group access (NEW!)
+    assert firewall.can_access("dpc-node-alice-123", "work_main.json:availability") == True
+    assert firewall.can_access("dpc-node-alice-123", "work_main.json:skills.python") == True
+    assert firewall.can_access("dpc-node-bob-456", "work_main.json:skills.javascript") == True
+    assert firewall.can_access("dpc-node-alice-123", "personal.json:profile.name") == False  # No access to personal
+    print("[PASS] Group tests passed.")
+
     # Test default deny
     assert firewall.can_access("dpc-node-carol-abc", "personal.json:profile.name") == False
-    print("✅ Default deny test passed.")
+    print("[PASS] Default deny test passed.")
 
     test_file.unlink()
     print("\nAll tests passed!")
