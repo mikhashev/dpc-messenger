@@ -152,14 +152,17 @@ class CoreService:
                     
                     try:
                         await self.hub_client.connect_signaling_socket()
-                        
+
                         task = asyncio.create_task(self._listen_for_hub_signals())
                         task.set_name("hub_signals")
                         self._background_tasks.add(task)
-                        
+
                         print("Hub reconnection successful")
                         await self.local_api.broadcast_event("status_update", await self.get_status())
-                        
+
+                    except PermissionError as e:
+                        print(f"Hub reconnection failed - authentication expired: {e}")
+                        print("Please login again to reconnect to Hub.")
                     except Exception as e:
                         print(f"Hub reconnection failed: {e}")
                         

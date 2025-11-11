@@ -7,6 +7,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 import threading
 from typing import Dict, Any
+import time
+import base64
 
 import httpx
 import websockets
@@ -21,6 +23,7 @@ class HubClient:
         self.api_base_url = api_base_url.rstrip('/')
         self.http_client = httpx.AsyncClient(base_url=self.api_base_url)
         self.jwt_token: str | None = None
+        self.refresh_token: str | None = None
         self.websocket: websockets.WebSocketClientProtocol | None = None
 
     def _get_auth_headers(self) -> Dict[str, str]:
@@ -28,6 +31,62 @@ class HubClient:
         if not self.jwt_token:
             raise PermissionError("Authentication required. Please call login() first.")
         return {"Authorization": f"Bearer {self.jwt_token}"}
+
+    def _is_token_expired(self) -> bool:
+        """Check if the current JWT token is expired or about to expire (within 60 seconds)."""
+        if not self.jwt_token:
+            return True
+
+        try:
+            # JWT format: header.payload.signature
+            parts = self.jwt_token.split('.')
+            if len(parts) != 3:
+                return True
+
+            # Decode payload (add padding if needed)
+            payload = parts[1]
+            payload += '=' * (4 - len(payload) % 4)  # Add padding
+            decoded = base64.urlsafe_b64decode(payload)
+            payload_data = json.loads(decoded)
+
+            # Check expiration with 60 second buffer
+            exp_timestamp = payload_data.get('exp', 0)
+            current_time = time.time()
+
+            return current_time >= (exp_timestamp - 60)
+
+        except Exception as e:
+            print(f"Error checking token expiration: {e}")
+            return True
+
+    async def _refresh_access_token(self) -> bool:
+        """
+        Attempt to refresh the access token using the refresh token.
+        Returns True if successful, False otherwise.
+        """
+        if not self.refresh_token:
+            print("No refresh token available")
+            return False
+
+        try:
+            print("Refreshing access token...")
+            response = await self.http_client.post(
+                "/refresh",
+                json={"refresh_token": self.refresh_token}
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                self.jwt_token = data.get("access_token")
+                print("✅ Access token refreshed successfully")
+                return True
+            else:
+                print(f"Failed to refresh token: {response.status_code}")
+                return False
+
+        except Exception as e:
+            print(f"Error refreshing token: {e}")
+            return False
 
     # --- Authentication Flow ---
 
@@ -42,22 +101,26 @@ class HubClient:
             return
 
         token_future = asyncio.Future()
-        
+
         class OAuthCallbackHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 parsed_path = urlparse(self.path)
                 if parsed_path.path == "/callback":
                     query_components = parse_qs(parsed_path.query)
-                    token = query_components.get("access_token", [None])[0]
-                    
+                    access_token = query_components.get("access_token", [None])[0]
+                    refresh_token = query_components.get("refresh_token", [None])[0]
+
                     self.send_response(200)
                     self.send_header("Content-type", "text/html")
                     self.end_headers()
-                    
-                    if token:
+
+                    if access_token:
                         self.wfile.write(b"<h1>Authentication Successful!</h1>")
                         self.wfile.write(b"<p>You can now close this browser tab.</p>")
-                        self.server.loop.call_soon_threadsafe(token_future.set_result, token)
+                        self.server.loop.call_soon_threadsafe(
+                            token_future.set_result,
+                            {"access_token": access_token, "refresh_token": refresh_token}
+                        )
                     else:
                         self.wfile.write(b"<h1>Authentication Failed.</h1>")
                         self.wfile.write(b"<p>Token not found in callback. Please try again.</p>")
@@ -81,8 +144,12 @@ class HubClient:
         webbrowser.open(login_url)
 
         try:
-            self.jwt_token = await asyncio.wait_for(token_future, timeout=180) # 3 minute timeout
+            tokens = await asyncio.wait_for(token_future, timeout=180)  # 3 minute timeout
+            self.jwt_token = tokens.get("access_token")
+            self.refresh_token = tokens.get("refresh_token")
             print("Authentication successful, JWT received.")
+            if self.refresh_token:
+                print("Refresh token also received.")
         except asyncio.TimeoutError:
             print("Authentication timed out.")
             raise
@@ -170,18 +237,20 @@ class HubClient:
                 data = response.json()
                 print(f"✅ Logged out successfully: {data['message']}")
                 self.jwt_token = None
-                
+                self.refresh_token = None
+
                 # Close WebSocket if connected
                 if self.websocket:
                     await self.websocket.close()
                     self.websocket = None
             else:
                 response.raise_for_status()
-                
+
         except Exception as e:
             print(f"Logout failed: {e}")
-            # Clear token anyway
+            # Clear tokens anyway
             self.jwt_token = None
+            self.refresh_token = None
 
 
     async def delete_account(self):
@@ -211,7 +280,8 @@ class HubClient:
         if response.status_code == 204:
             print("✅ Account deleted successfully")
             self.jwt_token = None
-            
+            self.refresh_token = None
+
             # Close WebSocket
             if self.websocket:
                 await self.websocket.close()
@@ -232,9 +302,15 @@ class HubClient:
             except:
                 pass
             self.websocket = None
-        
+
         if not self.jwt_token:
             raise PermissionError("Authentication required before connecting to signaling.")
+
+        # Check if token is expired and try to refresh it
+        if self._is_token_expired():
+            print("Access token expired, attempting to refresh...")
+            if not await self._refresh_access_token():
+                raise PermissionError("Access token expired and refresh failed. Please login again.")
 
         # Cancel old keepalive task
         if hasattr(self, '_keepalive_task') and self._keepalive_task and not self._keepalive_task.done():
@@ -272,7 +348,8 @@ class HubClient:
             print("Hub keepalive task started")
             
         except websockets.exceptions.InvalidStatus as e:
-            raise ConnectionError(f"Server rejected WebSocket connection: {e.status_code}") from e
+            status = getattr(e.response, 'status_code', 'unknown') if hasattr(e, 'response') else 'unknown'
+            raise ConnectionError(f"Server rejected WebSocket connection: HTTP {status}") from e
 
     async def send_signal(self, target_node_id: str, payload: Dict[str, Any]):
         """Sends a signaling message to a target peer via the Hub."""
