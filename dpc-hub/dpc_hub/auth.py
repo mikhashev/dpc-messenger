@@ -24,6 +24,7 @@ logger = logging.getLogger(__name__)
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+REFRESH_TOKEN_EXPIRE_DAYS = 30
 
 # Security scheme
 oauth2_scheme = HTTPBearer()
@@ -32,30 +33,113 @@ oauth2_scheme = HTTPBearer()
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """
     Create a JWT access token.
-    
+
     Args:
         data: Dictionary with token claims (must include 'sub')
         expires_delta: Optional expiration time delta
-    
+
     Returns:
         Encoded JWT token string
     """
     to_encode = data.copy()
-    
+
     if expires_delta:
         expire = datetime.now(timezone.utc) + expires_delta
     else:
         expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    
+
     to_encode.update({
         "exp": expire,
         "iat": datetime.now(timezone.utc),
         "type": "access"
     })
-    
+
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     logger.debug(f"Created access token for: {data.get('sub')}")
     return encoded_jwt
+
+
+def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """
+    Create a JWT refresh token.
+
+    Args:
+        data: Dictionary with token claims (must include 'sub')
+        expires_delta: Optional expiration time delta
+
+    Returns:
+        Encoded JWT refresh token string
+    """
+    to_encode = data.copy()
+
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+
+    to_encode.update({
+        "exp": expire,
+        "iat": datetime.now(timezone.utc),
+        "type": "refresh"
+    })
+
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    logger.debug(f"Created refresh token for: {data.get('sub')}")
+    return encoded_jwt
+
+
+def verify_refresh_token(token_str: str) -> Optional[str]:
+    """
+    Verify a refresh token and return the email if valid.
+
+    Args:
+        token_str: JWT refresh token string
+
+    Returns:
+        Email from token if valid, None otherwise
+
+    Raises:
+        HTTPException: If token is invalid, expired, or not a refresh token
+    """
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate refresh token",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+    # Check if token is blacklisted
+    blacklist = get_blacklist()
+    if blacklist.is_blacklisted(token_str):
+        logger.warning("Attempted use of blacklisted refresh token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        # Decode token
+        payload = jwt.decode(token_str, SECRET_KEY, algorithms=[ALGORITHM])
+        email: str = payload.get("sub")
+        token_type: str = payload.get("type")
+
+        if email is None:
+            logger.warning("Refresh token missing 'sub' claim")
+            raise credentials_exception
+
+        if token_type != "refresh":
+            logger.warning(f"Token is not a refresh token: {token_type}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type. Expected refresh token.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        return email
+
+    except JWTError as e:
+        logger.warning(f"JWT decode error on refresh token: {e}")
+        raise credentials_exception
 
 
 async def _verify_token(token_str: str, db: AsyncSession) -> models.User:
@@ -95,11 +179,21 @@ async def _verify_token(token_str: str, db: AsyncSession) -> models.User:
         # Decode token
         payload = jwt.decode(token_str, SECRET_KEY, algorithms=[ALGORITHM])
         email: str = payload.get("sub")
-        
+        token_type: str = payload.get("type")
+
         if email is None:
             logger.warning("Token missing 'sub' claim")
             raise credentials_exception
-            
+
+        # Ensure it's an access token (not a refresh token)
+        if token_type != "access":
+            logger.warning(f"Invalid token type for API call: {token_type}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type. Expected access token.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
     except JWTError as e:
         logger.warning(f"JWT decode error: {e}")
         raise credentials_exception

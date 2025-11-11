@@ -350,11 +350,12 @@ async def auth_callback(request: Request, provider: str, db: AsyncSession = Depe
     else:
         logger.info(f"Existing user logged in: {email}")
 
-    # Create JWT token
+    # Create JWT tokens (access + refresh)
     access_token = auth.create_access_token(data={"sub": db_user.email})
-    
-    # Redirect to local client with token
-    local_redirect_uri = f"http://127.0.0.1:8080/callback?access_token={access_token}"
+    refresh_token = auth.create_refresh_token(data={"sub": db_user.email})
+
+    # Redirect to local client with both tokens
+    local_redirect_uri = f"http://127.0.0.1:8080/callback?access_token={access_token}&refresh_token={refresh_token}"
     return RedirectResponse(url=local_redirect_uri)
 
 
@@ -386,6 +387,52 @@ async def logout(
     return {
         "message": "Successfully logged out",
         "node_id": current_user.node_id
+    }
+
+
+@app.post("/refresh", response_model=schemas.Token, tags=["Authentication"])
+@limiter.limit("10/minute")
+async def refresh_access_token(
+    request: Request,
+    refresh_request: schemas.RefreshTokenRequest,
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Refresh an access token using a valid refresh token.
+
+    Returns a new access token. The refresh token remains valid.
+    When the refresh token expires, the user must login again.
+
+    Args:
+        refresh_request: Request containing the refresh token
+
+    Returns:
+        New access token
+
+    Raises:
+        401: If refresh token is invalid, expired, or revoked
+    """
+    # Verify the refresh token and get email
+    email = auth.verify_refresh_token(refresh_request.refresh_token)
+
+    # Get user from database
+    user = await crud.get_user_by_email(db, email=email)
+    if user is None:
+        logger.warning(f"User not found for refresh token: {email}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Create new access token
+    new_access_token = auth.create_access_token(data={"sub": user.email})
+
+    logger.info(f"Access token refreshed for user: {user.email}")
+
+    return {
+        "access_token": new_access_token,
+        "token_type": "bearer"
     }
 
 

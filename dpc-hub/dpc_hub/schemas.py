@@ -17,6 +17,18 @@ class Token(BaseModel):
     token_type: str = "bearer"
 
 
+class TokenPair(BaseModel):
+    """JWT token pair response (access + refresh)"""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+
+
+class RefreshTokenRequest(BaseModel):
+    """Request to refresh an access token"""
+    refresh_token: str = Field(..., description="Valid refresh token")
+
+
 class TokenData(BaseModel):
     """Decoded JWT token data"""
     email: Optional[str] = None
