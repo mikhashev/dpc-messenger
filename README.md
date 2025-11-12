@@ -4,12 +4,16 @@
 
 **D-PC Messenger** (Decentralized Personal Context) is a privacy-first, peer-to-peer messaging platform that enables **collaborative intelligence** through secure sharing of personal AI contexts between trusted peers, without relying on centralized servers for communication.
 
+**Philosophy:** [Digital Self-Sovereignty](./docs/USER_SOVEREIGNTY.md) - Your data, your keys, your control. No backdoors, no data mining, no compromises.
+
 ---
 
 ## 🌟 Key Features
 
 ### For End Users
 - 🔒 **True Privacy** - Messages never touch servers, only peers
+- 👤 **User Sovereignty** - You own your data, identity, and encryption keys ([read more](./docs/USER_SOVEREIGNTY.md))
+- 💾 **Encrypted Backups** - AES-256-GCM encrypted backups with no backdoors ([guide](./docs/BACKUP_RESTORE.md))
 - 🤝 **Collaborative AI** - Share context with trusted peers for better answers
 - 🏠 **Local-First** - Your data stays on your device
 - 🌐 **Internet-Wide** - Connect to anyone, anywhere via WebRTC
@@ -86,7 +90,9 @@ dpc-messenger/
 │   │   │   ├── p2p_manager.py    # WebRTC & TLS connections
 │   │   │   ├── webrtc_peer.py    # WebRTC peer connection
 │   │   │   ├── hub_client.py     # Hub communication
-│   │   │   └── llm_manager.py    # AI provider integration
+│   │   │   ├── llm_manager.py    # AI provider integration
+│   │   │   ├── backup_manager.py # Encrypted backup/restore
+│   │   │   └── cli_backup.py     # Backup CLI commands
 │   │   └── README.md
 │   │
 │   └── ui/               # Frontend (Tauri + SvelteKit)
@@ -107,6 +113,9 @@ dpc-messenger/
 ├── docs/                 # Additional documentation
 │   ├── QUICK_START.md           # 5-minute setup
 │   ├── WEBRTC_SETUP_GUIDE.md    # Production deployment
+│   ├── USER_SOVEREIGNTY.md      # Privacy philosophy & vision
+│   ├── BACKUP_RESTORE.md        # Encrypted backup guide
+│   ├── GITHUB_AUTH_SETUP.md     # GitHub OAuth setup
 │   └── README_WEBRTC_INTEGRATION.md
 │
 ├── whitepaper.md         # Project vision & philosophy
@@ -170,13 +179,25 @@ npm run tauri dev
 ```
 
 **3. Authenticate and Connect:**
-- Login via OAuth (Google/GitHub) in the UI
+- Login via OAuth (Google or GitHub) in the UI
 - **NEW:** Client automatically registers cryptographic node identity
 - Enter peer's `node_id` in the UI
 - Click "Connect via Hub"
 - WebRTC automatically establishes a direct P2P connection
 
+**4. Secure Your Data (Recommended):**
+```bash
+# Create encrypted backup of your .dpc directory
+cd dpc-client/core
+poetry run python -m dpc_client_core.cli_backup create
+
+# Your backup is saved to ~/dpc_backup_TIMESTAMP.dpc
+# Store it on USB drive or encrypted cloud storage
+```
+
 📖 **See [docs/QUICK_START.md](./docs/QUICK_START.md) for detailed instructions.**
+📖 **Backup guide: [docs/BACKUP_RESTORE.md](./docs/BACKUP_RESTORE.md)**
+📖 **GitHub OAuth: [docs/GITHUB_AUTH_SETUP.md](./docs/GITHUB_AUTH_SETUP.md)**
 
 ---
 
@@ -208,9 +229,9 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ## 🔑 Authentication & Security
 
-### New Authentication Flow (v0.5.0)
+### Authentication Flow (v0.6.0)
 
-1. **OAuth Login** - User authenticates via Google/GitHub
+1. **OAuth Login** - User authenticates via **Google or GitHub** ([setup guide](./docs/GITHUB_AUTH_SETUP.md))
 2. **Temporary Node ID** - Hub assigns temporary ID
 3. **Cryptographic Registration** - Client registers public key & certificate
 4. **Verified Identity** - Hub validates and marks node_id as verified
@@ -220,11 +241,13 @@ docker-compose -f docker-compose.prod.yml up -d
 ### Security Features
 
 - 🔒 End-to-end encryption (DTLS in WebRTC, TLS in Direct)
+- 💾 **Client-side encrypted backups** - AES-256-GCM with PBKDF2 (600k iterations)
 - 🔑 Cryptographic node identities (derived from RSA public keys)
 - 🛡️ Context firewall (.dpc_access) for granular permissions
 - 🔐 JWT authentication with Hub (token blacklisting supported)
 - ✅ No message persistence by default
 - 🔍 Node identity validation (certificates, public keys)
+- 🚫 **No backdoors** - If you lose your passphrase, data is permanently unrecoverable (by design)
 
 ---
 
@@ -234,6 +257,11 @@ docker-compose -f docker-compose.prod.yml up -d
 - **[QUICK_START.md](./docs/QUICK_START.md)** - 5-minute setup guide
 - **[dpc-client/README.md](./dpc-client/README.md)** - Client setup & development
 - **[dpc-hub/README.md](./dpc-hub/README.md)** - Hub deployment guide
+
+### Security & Privacy
+- **[USER_SOVEREIGNTY.md](./docs/USER_SOVEREIGNTY.md)** - Privacy philosophy & digital self-sovereignty
+- **[BACKUP_RESTORE.md](./docs/BACKUP_RESTORE.md)** - Encrypted backup & restore guide
+- **[GITHUB_AUTH_SETUP.md](./docs/GITHUB_AUTH_SETUP.md)** - GitHub OAuth authentication setup
 
 ### WebRTC & Networking
 - **[WEBRTC_SETUP_GUIDE.md](./docs/WEBRTC_SETUP_GUIDE.md)** - Complete WebRTC setup
@@ -258,9 +286,10 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ Direct TLS P2P connections
 - ✅ WebRTC with NAT traversal
 - ✅ Federation Hub for discovery
-- ✅ OAuth authentication
+- ✅ OAuth authentication (Google + GitHub)
 - ✅ Cryptographic node identity system
 - ✅ Token blacklist and logout
+- ✅ **Encrypted local backups** (AES-256-GCM with user-controlled passphrases)
 - ✅ Local AI integration
 - ✅ Offline mode with graceful degradation
 - ⏳ Remote inference (in progress)
@@ -269,12 +298,16 @@ docker-compose -f docker-compose.prod.yml up -d
 - 🔲 Multi-hub federation
 - 🔲 Advanced context firewall
 - 🔲 Remote inference MVP
+- 🔲 **Hub-assisted backup** (encrypted backup storage on Hub)
+- 🔲 **QR code backup transfer** (for mobile devices)
 - 🔲 Mobile clients (Android, iOS)
 - 🔲 Dedicated TURN server deployment
 
 ### Phase 3: True P2P (2026-2027)
 - 🔲 DHT-based peer discovery
 - 🔲 Hub-free operation mode
+- 🔲 **Social recovery** (Shamir Secret Sharing for backup passphrases)
+- 🔲 **Hardware wallet integration** (Ledger, YubiKey, TPM)
 - 🔲 Blockchain-based identity (optional)
 - 🔲 Full decentralization
 
