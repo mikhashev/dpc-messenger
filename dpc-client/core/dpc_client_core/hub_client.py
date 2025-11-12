@@ -13,13 +13,25 @@ import base64
 import httpx
 import websockets
 
+from .token_cache import TokenCache
+from typing import Optional
+
+
 class HubClient:
     """
     Manages all communication with a D-PC Federation Hub, including
     authentication, profile management, discovery, and P2P signaling.
+
+    Now supports offline mode with token caching for persistent authentication.
     """
 
-    def __init__(self, api_base_url: str, oauth_callback_host: str = '127.0.0.1', oauth_callback_port: int = 8080):
+    def __init__(
+        self,
+        api_base_url: str,
+        oauth_callback_host: str = '127.0.0.1',
+        oauth_callback_port: int = 8080,
+        token_cache: Optional[TokenCache] = None
+    ):
         self.api_base_url = api_base_url.rstrip('/')
         self.http_client = httpx.AsyncClient(base_url=self.api_base_url)
         self.jwt_token: str | None = None
@@ -29,6 +41,40 @@ class HubClient:
         # OAuth callback configuration
         self.oauth_callback_host = oauth_callback_host
         self.oauth_callback_port = oauth_callback_port
+
+        # Token persistence
+        self.token_cache = token_cache
+
+        # Try to load cached tokens on initialization
+        if self.token_cache:
+            self._load_cached_tokens()
+
+    def _load_cached_tokens(self):
+        """Load tokens from cache if available and valid."""
+        if not self.token_cache:
+            return
+
+        tokens = self.token_cache.load_tokens()
+        if tokens:
+            self.jwt_token = tokens.get("jwt_token")
+            self.refresh_token = tokens.get("refresh_token")
+            print("[OK] Loaded cached authentication tokens")
+        else:
+            print("No valid cached tokens found")
+
+    def _save_tokens_to_cache(self):
+        """Save current tokens to cache."""
+        if not self.token_cache or not self.jwt_token:
+            return
+
+        try:
+            self.token_cache.save_tokens(
+                jwt_token=self.jwt_token,
+                refresh_token=self.refresh_token,
+                expires_in=1800  # 30 minutes default
+            )
+        except Exception as e:
+            print(f"Warning: Could not cache tokens: {e}")
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Helper to create authorization headers."""
@@ -154,6 +200,10 @@ class HubClient:
             print("Authentication successful, JWT received.")
             if self.refresh_token:
                 print("Refresh token also received.")
+
+            # Save tokens to cache for offline mode
+            self._save_tokens_to_cache()
+
         except asyncio.TimeoutError:
             print("Authentication timed out.")
             raise
@@ -161,7 +211,7 @@ class HubClient:
             server.shutdown()
             thread.join()
             print("Local callback server stopped.")
-        
+
         # NEW: Automatically register cryptographic node_id
         try:
             await self.register_node_id()
@@ -170,7 +220,7 @@ class HubClient:
             print(f"⚠️  Warning: Failed to register node identity: {e}")
             print("   You may need to register manually or re-authenticate")
             # Don't fail login if registration fails
-        
+
         print("✅ Hub authentication complete!")
 
     # --- REST API Methods ---
@@ -243,6 +293,10 @@ class HubClient:
                 self.jwt_token = None
                 self.refresh_token = None
 
+                # Clear cached tokens
+                if self.token_cache:
+                    self.token_cache.clear()
+
                 # Close WebSocket if connected
                 if self.websocket:
                     await self.websocket.close()
@@ -255,6 +309,8 @@ class HubClient:
             # Clear tokens anyway
             self.jwt_token = None
             self.refresh_token = None
+            if self.token_cache:
+                self.token_cache.clear()
 
 
     async def delete_account(self):

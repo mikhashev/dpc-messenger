@@ -15,6 +15,9 @@ from .llm_manager import LLMManager
 from .local_api import LocalApiServer
 from .context_cache import ContextCache
 from .settings import Settings
+from .token_cache import TokenCache
+from .peer_cache import PeerCache
+from .connection_status import ConnectionStatus, OperationMode
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
 
@@ -34,13 +37,25 @@ class CoreService:
         # Load settings (supports environment variables and config file)
         self.settings = Settings(DPC_HOME_DIR)
 
+        # Initialize offline mode components
+        self.token_cache = TokenCache(
+            cache_dir=DPC_HOME_DIR,
+            node_key_path=DPC_HOME_DIR / "node.key"
+        )
+        self.peer_cache = PeerCache(DPC_HOME_DIR / "known_peers.json")
+        self.connection_status = ConnectionStatus()
+
+        # Set up status change callback
+        self.connection_status.set_on_status_change(self._on_connection_status_changed)
+
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / ".dpc_access")
         self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
             oauth_callback_host=self.settings.get_oauth_callback_host(),
-            oauth_callback_port=self.settings.get_oauth_callback_port()
+            oauth_callback_port=self.settings.get_oauth_callback_port(),
+            token_cache=self.token_cache  # Pass token cache for offline mode
         )
         self.p2p_manager = P2PManager(firewall=self.firewall)
         self.cache = ContextCache()
@@ -52,16 +67,44 @@ class CoreService:
         
         # Store peer metadata (names, profiles, etc.)
         self.peer_metadata: Dict[str, Dict[str, Any]] = {}
-        
+
         # Track pending context requests (for request-response matching)
         self._pending_context_requests: Dict[str, asyncio.Future] = {}
-        
+
+        # Hub reconnection settings
+        self._hub_reconnect_attempts = 0
+        self._max_hub_reconnect_attempts = 5
+
         # Set up callbacks AFTER all components are initialized
         self.p2p_manager.set_core_service_ref(self)
         self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
         self._processed_message_ids = set()  # Track processed messages
         self._max_processed_ids = 1000  # Limit set size
+
+    def _on_connection_status_changed(self, old_mode: OperationMode, new_mode: OperationMode):
+        """Callback when connection status changes."""
+        print(f"\n[Connection Status Change] {old_mode.value} -> {new_mode.value}")
+        print(f"Status: {self.connection_status.get_status_message()}")
+
+        # Notify UI via local API
+        asyncio.create_task(self._notify_ui_status_change(new_mode))
+
+    async def _notify_ui_status_change(self, mode: OperationMode):
+        """Notify UI of connection status change."""
+        try:
+            # Use same field names as get_status() for consistency
+            status_info = {
+                "operation_mode": mode.value,
+                "connection_status": self.connection_status.get_status_message(),
+                "available_features": self.connection_status.get_available_features(),
+                "cached_peers_count": len(self.peer_cache.get_all_peers())
+            }
+
+            # Send to UI via local API
+            await self.local_api.broadcast_event("connection_status_changed", {"status": status_info})
+        except Exception as e:
+            print(f"Error notifying UI of status change: {e}")
 
     async def start(self):
         """Starts all background services and runs indefinitely."""
@@ -70,34 +113,67 @@ class CoreService:
             return
 
         print("Starting D-PC Core Service...")
-        
+
         self._shutdown_event = asyncio.Event()
 
         # Start all background tasks
-        self._background_tasks.add(asyncio.create_task(self.p2p_manager.start_server()))
-        self._background_tasks.add(asyncio.create_task(self.local_api.start()))
-        
-        # Try to connect to Hub for WebRTC signaling
+        p2p_task = asyncio.create_task(self.p2p_manager.start_server())
+        p2p_task.set_name("p2p_server")
+        self._background_tasks.add(p2p_task)
+
+        api_task = asyncio.create_task(self.local_api.start())
+        api_task.set_name("local_api")
+        self._background_tasks.add(api_task)
+
+        # Wait a moment for P2P server to start
+        await asyncio.sleep(0.5)
+
+        # Update Direct TLS status (always available if P2P server running)
+        self.connection_status.update_direct_tls_status(available=True, port=8888)
+        print("[OK] Direct TLS server started on port 8888")
+
+        # Try to connect to Hub for WebRTC signaling (with graceful degradation)
+        hub_connected = False
         try:
             await self.hub_client.login()
             await self.hub_client.connect_signaling_socket()
-            
+            hub_connected = True
+
+            # Update connection status
+            self.connection_status.update_hub_status(connected=True)
+            self.connection_status.update_webrtc_status(available=True)
+
             # Start listening for incoming WebRTC signals
-            self._background_tasks.add(asyncio.create_task(self._listen_for_hub_signals()))
-            
-            print("✅ Successfully connected to Federation Hub for WebRTC signaling.")
+            signals_task = asyncio.create_task(self._listen_for_hub_signals())
+            signals_task.set_name("hub_signals")
+            self._background_tasks.add(signals_task)
+
+            print("[OK] Hub connected - WebRTC available")
+
         except Exception as e:
-            print(f"⚠️ Warning: Could not connect to Hub. WebRTC connections unavailable.")
-            print(f"   Error: {e}")
-            print(f"   You can still use direct connections via dpc:// URIs.")
+            print(f"\n[Offline Mode] Hub connection failed: {e}")
+            print(f"   Operating in {self.connection_status.get_operation_mode().value} mode")
+            print(f"   Status: {self.connection_status.get_status_message()}")
+            print(f"   Direct TLS connections still available via dpc:// URIs\n")
+
+            # Update connection status
+            self.connection_status.update_hub_status(connected=False, error=str(e))
+            self.connection_status.update_webrtc_status(available=False)
 
         self._is_running = True
-        print(f"D-PC Core Service started. Node ID: {self.p2p_manager.node_id}")
-        
-        # Start hub connection monitor
-        task = asyncio.create_task(self._monitor_hub_connection())
-        task.set_name("hub_monitor")
-        self._background_tasks.add(task)
+        print(f"\nD-PC Core Service started")
+        print(f"  Node ID: {self.p2p_manager.node_id}")
+        print(f"  Operation Mode: {self.connection_status.get_operation_mode().value}")
+        print(f"  Available Features:")
+        for feature, available in self.connection_status.get_available_features().items():
+            status = "[OK]" if available else "[--]"
+            print(f"    {status} {feature}")
+
+        # Start hub connection monitor (only if initially connected)
+        if hub_connected:
+            monitor_task = asyncio.create_task(self._monitor_hub_connection())
+            monitor_task.set_name("hub_monitor")
+            self._background_tasks.add(monitor_task)
 
         try:
             await self._shutdown_event.wait()
@@ -127,19 +203,41 @@ class CoreService:
         while self._is_running:
             try:
                 await asyncio.sleep(10)
-                
+
                 if not self.hub_client.websocket or \
                 self.hub_client.websocket.state != websockets.State.OPEN:
-                    
-                    print("Hub connection lost, attempting to reconnect...")
-                    
+
+                    # Check if we've exceeded max reconnection attempts
+                    if self._hub_reconnect_attempts >= self._max_hub_reconnect_attempts:
+                        print(f"\n[Hub Offline] Max reconnection attempts ({self._max_hub_reconnect_attempts}) reached")
+                        print("   Staying in offline mode. Use 'Login to Hub' button to reconnect manually.")
+                        self.connection_status.update_hub_status(
+                            connected=False,
+                            error=f"Max reconnection attempts ({self._max_hub_reconnect_attempts}) reached"
+                        )
+                        # Broadcast status update to UI
+                        await self.local_api.broadcast_event("status_update", await self.get_status())
+                        # Exit monitor loop - stop trying
+                        break
+
+                    self._hub_reconnect_attempts += 1
+
+                    # Exponential backoff: 2, 4, 8, 16, 32 seconds
+                    backoff_delay = min(2 ** self._hub_reconnect_attempts, 32)
+
+                    print(f"Hub connection lost, attempting to reconnect (attempt {self._hub_reconnect_attempts}/{self._max_hub_reconnect_attempts})...")
+
+                    # Update connection status
+                    self.connection_status.update_hub_status(connected=False, error="Connection lost")
+                    self.connection_status.update_webrtc_status(available=False)
+
                     # Cancel old listener task
                     old_listener = None
                     for task in list(self._background_tasks):
                         if task.get_name() == "hub_signals":
                             old_listener = task
                             break
-                    
+
                     if old_listener:
                         print("Cancelling old Hub signal listener...")
                         old_listener.cancel()
@@ -148,8 +246,8 @@ class CoreService:
                         except asyncio.CancelledError:
                             pass
                         self._background_tasks.discard(old_listener)
-                    
-                    # Close old websocket BEFORE reconnecting (THIS IS THE KEY FIX)
+
+                    # Close old websocket BEFORE reconnecting
                     if self.hub_client.websocket:
                         print("Closing old Hub websocket...")
                         try:
@@ -157,7 +255,11 @@ class CoreService:
                         except:
                             pass
                         self.hub_client.websocket = None
-                    
+
+                    # Wait before reconnection attempt (exponential backoff)
+                    print(f"   Waiting {backoff_delay}s before reconnection...")
+                    await asyncio.sleep(backoff_delay)
+
                     try:
                         await self.hub_client.connect_signaling_socket()
 
@@ -165,15 +267,30 @@ class CoreService:
                         task.set_name("hub_signals")
                         self._background_tasks.add(task)
 
-                        print("Hub reconnection successful")
+                        # Update connection status
+                        self.connection_status.update_hub_status(connected=True)
+                        self.connection_status.update_webrtc_status(available=True)
+
+                        # Reset reconnection attempts on success
+                        self._hub_reconnect_attempts = 0
+
+                        print("[OK] Hub reconnection successful")
                         await self.local_api.broadcast_event("status_update", await self.get_status())
 
                     except PermissionError as e:
                         print(f"Hub reconnection failed - authentication expired: {e}")
                         print("Please login again to reconnect to Hub.")
+                        self.connection_status.update_hub_status(connected=False, error="Authentication expired")
+                        # Don't count auth failures toward reconnect limit
+                        self._hub_reconnect_attempts = self._max_hub_reconnect_attempts
                     except Exception as e:
                         print(f"Hub reconnection failed: {e}")
-                        
+                        self.connection_status.update_hub_status(connected=False, error=str(e))
+                else:
+                    # Connection is healthy, reset reconnection attempts
+                    if self._hub_reconnect_attempts > 0:
+                        self._hub_reconnect_attempts = 0
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -212,6 +329,39 @@ class CoreService:
     async def on_peer_list_change(self):
         """Callback function that is triggered by P2PManager when peer list changes."""
         print("Peer list changed, broadcasting status update to UI.")
+
+        # Cache peer information for offline mode
+        for peer_id, peer_conn in self.p2p_manager.peers.items():
+            # Get peer metadata
+            display_name = self.peer_metadata.get(peer_id, {}).get("name")
+
+            # Determine connection type and extract IP if Direct TLS
+            direct_ip = None
+            connection_type = None
+
+            if hasattr(peer_conn, 'peer_connection'):  # WebRTC
+                connection_type = "webrtc"
+            elif hasattr(peer_conn, 'reader'):  # Direct TLS
+                connection_type = "direct_tls"
+                # Try to extract IP from transport
+                try:
+                    transport = peer_conn.writer.transport
+                    peername = transport.get_extra_info('peername')
+                    if peername:
+                        direct_ip = peername[0]  # IP address
+                except Exception:
+                    pass
+
+            # Update peer cache
+            self.peer_cache.add_or_update_peer(
+                node_id=peer_id,
+                display_name=display_name,
+                direct_ip=direct_ip,
+                supports_webrtc=(connection_type == "webrtc"),
+                supports_direct=(connection_type == "direct_tls"),
+                metadata={"last_connection_type": connection_type}
+            )
+
         await self.local_api.broadcast_event("status_update", await self.get_status())
     
     async def on_p2p_message_received(self, sender_node_id: str, message: Dict[str, Any]):
@@ -279,12 +429,12 @@ class CoreService:
 
     async def get_status(self) -> Dict[str, Any]:
         """Aggregates status from all components."""
-        
+
         hub_connected = (
             self.hub_client.websocket is not None and
             self.hub_client.websocket.state == websockets.State.OPEN
         )
-        
+
         # Get peer info with names
         peer_info = []
         for peer_id in self.p2p_manager.peers.keys():
@@ -293,19 +443,24 @@ class CoreService:
                 "name": self.peer_metadata.get(peer_id, {}).get("name", None)
             }
             peer_info.append(peer_data)
-        
+
         # Get active model name safely
         try:
             active_model = self.llm_manager.get_active_model_name()
         except (AttributeError, Exception):
             active_model = None
-        
+
         return {
             "node_id": self.p2p_manager.node_id,
             "hub_status": "Connected" if hub_connected else "Disconnected",
             "p2p_peers": list(self.p2p_manager.peers.keys()),
             "peer_info": peer_info,
             "active_ai_model": active_model,
+            # Offline mode status
+            "operation_mode": self.connection_status.get_operation_mode().value,
+            "connection_status": self.connection_status.get_status_message(),
+            "available_features": self.connection_status.get_available_features(),
+            "cached_peers_count": len(self.peer_cache.get_all_peers()),
         }
     
     def set_peer_metadata(self, node_id: str, **kwargs):
@@ -591,24 +746,57 @@ class CoreService:
         """Login to Hub using OAuth."""
         await self.hub_client.login(provider=provider)
         await self.hub_client.connect_signaling_socket()
-        
+
+        # Reset reconnection attempts on manual login
+        self._hub_reconnect_attempts = 0
+
+        # Update connection status
+        self.connection_status.update_hub_status(connected=True)
+        self.connection_status.update_webrtc_status(available=True)
+
         # Start listening for signals if not already
         if not any(task.get_name() == "hub_signals" for task in self._background_tasks):
-            task = asyncio.create_task(self._listen_for_hub_signals())
-            task.set_name("hub_signals")
-            self._background_tasks.add(task)
-        
-        print("Successfully logged in to Hub.")
+            signals_task = asyncio.create_task(self._listen_for_hub_signals())
+            signals_task.set_name("hub_signals")
+            self._background_tasks.add(signals_task)
+
+        # Start hub monitor if not already running
+        if not any(task.get_name() == "hub_monitor" for task in self._background_tasks):
+            monitor_task = asyncio.create_task(self._monitor_hub_connection())
+            monitor_task.set_name("hub_monitor")
+            self._background_tasks.add(monitor_task)
+
+        print("[OK] Successfully logged in to Hub.")
 
     async def disconnect_from_hub(self):
         """Disconnect from Hub."""
         # Cancel the signal listening task
-        for task in self._background_tasks:
+        for task in list(self._background_tasks):
             if task.get_name() == "hub_signals":
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
                 self._background_tasks.remove(task)
                 break
-        
+
+        # Cancel the hub monitor task
+        for task in list(self._background_tasks):
+            if task.get_name() == "hub_monitor":
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                self._background_tasks.remove(task)
+                break
+
         await self.hub_client.close()
-        print("Disconnected from Hub.")
+
+        # Update connection status
+        self.connection_status.update_hub_status(connected=False, error="User disconnected")
+        self.connection_status.update_webrtc_status(available=False)
+
+        print("[OK] Disconnected from Hub.")
         await self.local_api.broadcast_event("status_update", await self.get_status())

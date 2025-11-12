@@ -241,7 +241,7 @@
           <p><strong>ID:</strong></p>
           <div class="node-id-container">
             <code class="node-id">{$nodeStatus.node_id}</code>
-            <button 
+            <button
               class="copy-btn"
               on:click={() => {
                 navigator.clipboard.writeText($nodeStatus.node_id);
@@ -253,11 +253,46 @@
             </button>
           </div>
           <p>
-            <strong>Hub:</strong> 
+            <strong>Hub:</strong>
             <span class:hub-connected={$nodeStatus.hub_status === 'Connected'}>
               {$nodeStatus.hub_status}
             </span>
           </p>
+
+          <!-- Connection Status (NEW) -->
+          {#if $nodeStatus.operation_mode}
+            <div class="connection-mode">
+              <p><strong>Mode:</strong></p>
+              <div class="mode-badge" class:fully-online={$nodeStatus.operation_mode === 'fully_online'}
+                   class:hub-offline={$nodeStatus.operation_mode === 'hub_offline'}
+                   class:fully-offline={$nodeStatus.operation_mode === 'fully_offline'}>
+                {#if $nodeStatus.operation_mode === 'fully_online'}
+                  🟢 Online
+                {:else if $nodeStatus.operation_mode === 'hub_offline'}
+                  🟡 Hub Offline
+                {:else}
+                  🔴 Offline
+                {/if}
+              </div>
+              <p class="mode-description">{$nodeStatus.connection_status || 'All features available'}</p>
+
+              {#if $nodeStatus.available_features}
+                <details class="features-details">
+                  <summary>Available Features</summary>
+                  <ul class="features-list">
+                    {#each Object.entries($nodeStatus.available_features) as [feature, available]}
+                      <li class:feature-available={available} class:feature-unavailable={!available}>
+                        {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
+                      </li>
+                    {/each}
+                  </ul>
+                  {#if $nodeStatus.cached_peers_count > 0}
+                    <p class="cached-info">💾 {$nodeStatus.cached_peers_count} cached peer(s)</p>
+                  {/if}
+                </details>
+              {/if}
+            </div>
+          {/if}
         </div>
 
         <!-- Connect to Peer - UPDATED PLACEHOLDER -->
@@ -719,5 +754,94 @@
   .connecting, .error {
     text-align: center;
     padding: 2rem;
+  }
+
+  /* Connection Status Styles */
+  .connection-mode {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid #eee;
+  }
+
+  .mode-badge {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-weight: bold;
+    font-size: 0.95rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .mode-badge.fully-online {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+  }
+
+  .mode-badge.hub-offline {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeaa7;
+  }
+
+  .mode-badge.fully-offline {
+    background: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
+  }
+
+  .mode-description {
+    font-size: 0.85rem;
+    color: #666;
+    margin: 0.5rem 0;
+    font-style: italic;
+  }
+
+  .features-details {
+    margin-top: 0.75rem;
+    font-size: 0.9rem;
+  }
+
+  .features-details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: #555;
+    padding: 0.5rem 0;
+    user-select: none;
+  }
+
+  .features-details summary:hover {
+    color: #007bff;
+  }
+
+  .features-list {
+    list-style: none;
+    padding: 0.5rem 0 0 1rem;
+    margin: 0;
+  }
+
+  .features-list li {
+    padding: 0.3rem 0;
+    font-size: 0.85rem;
+  }
+
+  .features-list li.feature-available {
+    color: #28a745;
+  }
+
+  .features-list li.feature-unavailable {
+    color: #dc3545;
+    text-decoration: line-through;
+    opacity: 0.6;
+  }
+
+  .cached-info {
+    font-size: 0.8rem;
+    color: #666;
+    margin-top: 0.5rem;
+    padding: 0.4rem;
+    background: #f0f0f0;
+    border-radius: 4px;
+    text-align: center;
   }
 </style>

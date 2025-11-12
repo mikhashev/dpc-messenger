@@ -1,6 +1,6 @@
 # D-PC Messenger: Decentralized Peer-to-Peer Collaborative Intelligence
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.5.0
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.6.0
 
 **D-PC Messenger** (Decentralized Personal Context) is a privacy-first, peer-to-peer messaging platform that enables **collaborative intelligence** through secure sharing of personal AI contexts between trusted peers, without relying on centralized servers for communication.
 
@@ -13,6 +13,7 @@
 - 🤝 **Collaborative AI** - Share context with trusted peers for better answers
 - 🏠 **Local-First** - Your data stays on your device
 - 🌐 **Internet-Wide** - Connect to anyone, anywhere via WebRTC
+- 📶 **Offline Mode** - Works seamlessly when Hub is unavailable with cached tokens and Direct TLS
 - 🔐 **Cryptographic Identity** - Self-sovereign node IDs based on public keys
 - 🛡️ **Context Firewall** - Granular control over what data you share
 
@@ -238,8 +239,9 @@ docker-compose -f docker-compose.prod.yml up -d
 - **[WEBRTC_SETUP_GUIDE.md](./docs/WEBRTC_SETUP_GUIDE.md)** - Complete WebRTC setup
 - **[README_WEBRTC_INTEGRATION.md](./docs/README_WEBRTC_INTEGRATION.md)** - Technical overview
 
-### Configuration
+### Configuration & Features
 - **[CONFIGURATION.md](./docs/CONFIGURATION.md)** - Complete configuration guide
+- **[OFFLINE_MODE.md](./docs/OFFLINE_MODE.md)** - Offline mode features & usage
 - **Environment Variables** - All settings support env var overrides
 - **Config File** - `~/.dpc/config.ini` for persistent settings
 
@@ -252,7 +254,7 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ## 🛣️ Roadmap
 
-### Phase 1: Federated MVP ✅ (Current - v0.5.0)
+### Phase 1: Federated MVP ✅ (Current - v0.6.0)
 - ✅ Direct TLS P2P connections
 - ✅ WebRTC with NAT traversal
 - ✅ Federation Hub for discovery
@@ -260,6 +262,7 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ Cryptographic node identity system
 - ✅ Token blacklist and logout
 - ✅ Local AI integration
+- ✅ Offline mode with graceful degradation
 - ⏳ Remote inference (in progress)
 
 ### Phase 2: Enhanced Federation (Q1-Q2 2026)

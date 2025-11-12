@@ -120,11 +120,21 @@ export function connectToCoreService() {
                 const message = JSON.parse(event.data);
                 coreMessages.set(message);
 
-                if (message.event === "status_update" || 
+                if (message.event === "status_update" ||
                     (message.id && message.command === "get_status" && message.status === "OK")) {
                     nodeStatus.set({ ...message.payload });
                 } else if (message.event === "new_p2p_message") {
                     p2pMessages.set(message.payload);
+                } else if (message.event === "connection_status_changed") {
+                    // Update node status with new connection status
+                    const currentStatus = get(nodeStatus);
+                    if (currentStatus) {
+                        nodeStatus.set({
+                            ...currentStatus,
+                            ...message.payload.status
+                        });
+                    }
+                    console.log(`Connection mode changed: ${message.payload.status.mode} - ${message.payload.status.message}`);
                 }
             } catch (error) {
                 console.error("Error parsing message:", error);
