@@ -456,10 +456,104 @@ chmod 600 ~/.dpc/config.ini
 
 ---
 
+## Device Identity and Multi-Device Considerations
+
+### Device-Specific Identity
+
+Each DPC Client device generates a **unique cryptographic identity** on first initialization:
+
+**Identity Files (stored in `~/.dpc/`):**
+- `node.key` - RSA private key (2048-bit, unique per device)
+- `node.crt` - Self-signed X.509 certificate
+- `node.id` - Node identifier (e.g., `dpc-node-8b066c7f3d7eb627`)
+
+**How Node ID is Generated:**
+```
+1. Generate RSA key pair (2048-bit)
+2. Hash public key with SHA256
+3. Node ID = "dpc-node-" + first 16 hex characters of hash
+```
+
+**Key Characteristics:**
+- Each device has a unique node_id derived from its RSA public key
+- Private keys never leave the device (security by design)
+- Node identities cannot be shared between devices
+
+---
+
+### Single Device Per User (Current Limitation)
+
+**Important:** The current Hub implementation supports **one device per user account**.
+
+When you authenticate with the Hub via OAuth (Google or GitHub), the Hub associates your email address with your device's `node_id`. If you log in from a different device with the same email, the Hub will update the `node_id` to the new device, effectively "orphaning" the previous device.
+
+**Example Scenario:**
+
+```
+Device 1 (Laptop):
+1. Generate node_id: dpc-node-aaaa1111
+2. Login with user@example.com
+3. Hub database: {email: "user@example.com", node_id: "dpc-node-aaaa1111"}
+4. ✅ Device 1 is registered and connected
+
+Device 2 (Desktop):
+1. Generate node_id: dpc-node-bbbb2222 (different device = different keys)
+2. Login with user@example.com (same email!)
+3. Hub database: {email: "user@example.com", node_id: "dpc-node-bbbb2222"}
+4. ✅ Device 2 is now registered
+5. ❌ Device 1 is now "orphaned" (node_id no longer matches Hub records)
+```
+
+**What This Means:**
+- You can only actively use **one device** per email account
+- Logging in from a second device will disconnect the first device from Hub services
+- Direct P2P connections (TLS) still work between devices (no Hub needed)
+- WebRTC connections require Hub signaling, so only the most recently logged-in device can use WebRTC
+
+**Workaround (Development/Testing):**
+- Use different email addresses for different devices
+- Or use multi-instance testing with different OAuth credentials (see Scenario 4)
+
+**Future Enhancement:**
+Multi-device support would require Hub database schema changes to support one-to-many relationships between users and devices. This is not currently implemented.
+
+---
+
+### OAuth Provider Choice
+
+The `default_provider` configuration (Google vs GitHub) is about **which OAuth account you authenticate with**, not about using multiple devices.
+
+**Configuration:**
+```ini
+[oauth]
+default_provider = github  # or 'google'
+```
+
+**What This Controls:**
+- Which OAuth provider to use for authentication (Google or GitHub)
+- Which email address gets associated with your device's node_id
+- You can switch between providers, and the Hub will update the `provider` field
+
+**What This Does NOT Control:**
+- Multi-device support (not available in current version)
+- Device selection (each device always uses its own `node_id`)
+
+**Example:**
+```
+Device 1 with node_id "dpc-node-aaaa1111":
+- Login with Google → Hub: {email: "user@gmail.com", node_id: "dpc-node-aaaa1111", provider: "google"}
+- Later, login with GitHub → Hub: {email: "user@github.com", node_id: "dpc-node-aaaa1111", provider: "github"}
+
+Same device, different OAuth accounts = different Hub user profiles
+```
+
+---
+
 ## See Also
 
 - [Quick Start Guide](./QUICK_START.md)
 - [WebRTC Setup Guide](./WEBRTC_SETUP_GUIDE.md)
+- [GitHub OAuth Setup](./GITHUB_AUTH_SETUP.md)
 - [Firewall Configuration](../dpc-client/.dpc_access.example)
 - [Fixes Summary](../FIXES_SUMMARY.md)
 

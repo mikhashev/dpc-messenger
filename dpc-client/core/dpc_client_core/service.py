@@ -134,30 +134,45 @@ class CoreService:
 
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
-        try:
-            await self.hub_client.login()
-            await self.hub_client.connect_signaling_socket()
-            hub_connected = True
 
-            # Update connection status
-            self.connection_status.update_hub_status(connected=True)
-            self.connection_status.update_webrtc_status(available=True)
+        # Check if auto-connect is enabled in config
+        if self.settings.get_hub_auto_connect():
+            try:
+                # Use configured default provider
+                default_provider = self.settings.get_oauth_default_provider()
+                print(f"[Auto-Connect] Using OAuth provider: {default_provider}")
 
-            # Start listening for incoming WebRTC signals
-            signals_task = asyncio.create_task(self._listen_for_hub_signals())
-            signals_task.set_name("hub_signals")
-            self._background_tasks.add(signals_task)
+                await self.hub_client.login(provider=default_provider)
+                await self.hub_client.connect_signaling_socket()
+                hub_connected = True
 
-            print("[OK] Hub connected - WebRTC available")
+                # Update connection status
+                self.connection_status.update_hub_status(connected=True)
+                self.connection_status.update_webrtc_status(available=True)
 
-        except Exception as e:
-            print(f"\n[Offline Mode] Hub connection failed: {e}")
+                # Start listening for incoming WebRTC signals
+                signals_task = asyncio.create_task(self._listen_for_hub_signals())
+                signals_task.set_name("hub_signals")
+                self._background_tasks.add(signals_task)
+
+                print("[OK] Hub connected - WebRTC available")
+
+            except Exception as e:
+                print(f"\n[Offline Mode] Hub connection failed: {e}")
+                print(f"   Operating in {self.connection_status.get_operation_mode().value} mode")
+                print(f"   Status: {self.connection_status.get_status_message()}")
+                print(f"   Direct TLS connections still available via dpc:// URIs\n")
+
+                # Update connection status
+                self.connection_status.update_hub_status(connected=False, error=str(e))
+                self.connection_status.update_webrtc_status(available=False)
+        else:
+            print("[Auto-Connect] Disabled in config - use UI to connect to Hub manually")
             print(f"   Operating in {self.connection_status.get_operation_mode().value} mode")
-            print(f"   Status: {self.connection_status.get_status_message()}")
-            print(f"   Direct TLS connections still available via dpc:// URIs\n")
+            print(f"   Direct TLS connections available via dpc:// URIs\n")
 
             # Update connection status
-            self.connection_status.update_hub_status(connected=False, error=str(e))
+            self.connection_status.update_hub_status(connected=False)
             self.connection_status.update_webrtc_status(available=False)
 
         self._is_running = True

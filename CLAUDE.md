@@ -84,6 +84,82 @@ poetry install                    # Install dependencies
 poetry run pytest                 # Run tests
 ```
 
+### OAuth Configuration (Hub)
+
+The Hub supports multiple OAuth providers for authentication:
+
+**Supported Providers:**
+- **Google OAuth** (required) - Primary authentication provider
+- **GitHub OAuth** (optional) - Developer-friendly alternative
+
+**Setup:**
+1. Copy `.env.example` to `.env` in `dpc-hub/`
+2. Add OAuth credentials:
+   ```bash
+   # Google OAuth (required)
+   GOOGLE_CLIENT_ID="your_google_client_id"
+   GOOGLE_CLIENT_SECRET="your_google_client_secret"
+
+   # GitHub OAuth (optional)
+   GITHUB_CLIENT_ID="your_github_client_id"
+   GITHUB_CLIENT_SECRET="your_github_client_secret"
+   ```
+
+**Creating OAuth Apps:**
+- **Google**: [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+  - Callback URL: `http://localhost:8000/auth/google/callback` (dev)
+- **GitHub**: [GitHub Developer Settings](https://github.com/settings/developers)
+  - Callback URL: `http://localhost:8000/auth/github/callback` (dev)
+
+**Client Usage (Backend):**
+```python
+# Login with Google (default)
+await hub_client.login(provider="google")
+
+# Login with GitHub
+await hub_client.login(provider="github")
+```
+
+**Client UI:**
+The UI displays two separate login buttons in the sidebar:
+- **Google** button (blue) - Primary authentication
+- **GitHub** button (black) - Alternative authentication
+
+Users can choose their preferred provider before connecting to the Hub.
+
+**Provider Switching:**
+Users can authenticate with either provider using the same email. The Hub automatically updates the account's provider field to reflect the most recently used authentication method. No data is lost when switching providers.
+
+**Configuration (Optional):**
+Set OAuth preferences in `~/.dpc/config.ini`:
+```ini
+[hub]
+auto_connect = true  # Auto-connect to Hub on startup (default: true)
+
+[oauth]
+default_provider = github  # Provider for auto-connect: 'google' or 'github' (default: google)
+```
+
+**Auto-Connect Behavior:**
+- When `auto_connect = true`: Client automatically connects to Hub on startup using `default_provider`
+- When `auto_connect = false`: Client starts in offline mode; users must click a login button manually
+- Default: Auto-connects with Google on startup
+
+**Example Configurations:**
+```ini
+# Auto-connect with GitHub
+[hub]
+auto_connect = true
+[oauth]
+default_provider = github
+
+# Start offline, require manual login
+[hub]
+auto_connect = false
+```
+
+See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub setup instructions.
+
 ---
 
 ## Architecture Overview
@@ -154,6 +230,35 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
   - `node.crt` - X.509 self-signed certificate
   - `node.id` - Node identifier
 - Hub validates node identity via certificate verification
+
+**Important Limitation: Single Device Per User**
+
+The current Hub implementation supports **one device per user account** (one device per email address):
+- Each device generates a unique cryptographic identity (`node_id`)
+- Hub database schema: Users table has one `node_id` field per user (not one-to-many)
+- When logging in from a second device, the Hub overwrites the first device's `node_id`
+- This "orphans" the first device from Hub services (WebRTC signaling won't work)
+- Direct P2P (TLS) connections still work without Hub
+
+**Database Schema (dpc-hub/dpc_hub/models.py:15-49):**
+```python
+class User(Base):
+    email = Column(String, unique=True)  # User identity
+    node_id = Column(String, unique=True)  # ⚠️ Only ONE node_id per user
+    provider = Column(String)  # 'google' or 'github'
+```
+
+**Workarounds:**
+- Use different email addresses for each device
+- Direct TLS P2P connections don't require Hub registration
+
+**Future Enhancement:**
+Multi-device support would require:
+- Database schema change: One-to-many relationship (User → multiple Devices)
+- UI for device management
+- Signaling updates to route to specific devices
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#device-identity-and-multi-device-considerations) for detailed explanation.
 
 ### Configuration System
 
@@ -366,6 +471,7 @@ poetry run pytest tests/test_turn_connectivity.py
 - `docs/QUICK_START.md` - 5-minute setup guide
 - `docs/WEBRTC_SETUP_GUIDE.md` - Production deployment
 - `docs/CONFIGURATION.md` - Complete configuration reference
+- `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
 - `whitepaper.md` - Project vision and philosophy
 
 ---

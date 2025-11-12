@@ -15,7 +15,8 @@ class Settings:
     def __init__(self, dpc_home_dir: Path):
         self.dpc_home_dir = dpc_home_dir
         self.config_file = dpc_home_dir / "config.ini"
-        self._config = configparser.ConfigParser()
+        # Support inline comments with # (common in config files)
+        self._config = configparser.ConfigParser(inline_comment_prefixes=('#',))
 
         # Load config if it exists
         if self.config_file.exists():
@@ -67,7 +68,8 @@ class Settings:
 
         self._config['oauth'] = {
             'callback_port': '8080',
-            'callback_host': '127.0.0.1'
+            'callback_host': '127.0.0.1',
+            'default_provider': 'google'
         }
 
         self._config['p2p'] = {
@@ -87,7 +89,8 @@ class Settings:
         with open(self.config_file, 'w') as f:
             f.write("# D-PC Client Configuration\n")
             f.write("# You can override these settings with environment variables:\n")
-            f.write("# DPC_HUB_URL, DPC_OAUTH_CALLBACK_PORT, etc.\n\n")
+            f.write("# DPC_HUB_URL, DPC_OAUTH_CALLBACK_PORT, etc.\n")
+            f.write("# Inline comments are supported: key = value  # comment\n\n")
             self._config.write(f)
 
         print(f"[OK] Created default config at {self.config_file}")
@@ -123,6 +126,10 @@ class Settings:
     def get_oauth_callback_host(self) -> str:
         """Get the OAuth callback server host."""
         return self.get('oauth', 'callback_host', '127.0.0.1')
+
+    def get_oauth_default_provider(self) -> str:
+        """Get the default OAuth provider (google or github)."""
+        return self.get('oauth', 'default_provider', 'google')
 
     def get_p2p_listen_port(self) -> int:
         """Get the P2P server listen port."""

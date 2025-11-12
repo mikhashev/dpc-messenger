@@ -13,8 +13,9 @@ import time
 from contextlib import asynccontextmanager
 from typing import List, Optional
 
+import httpx
 from fastapi import (
-    FastAPI, Depends, Request, HTTPException, 
+    FastAPI, Depends, Request, HTTPException,
     WebSocket, WebSocketDisconnect, Query, status
 )
 from fastapi.middleware.cors import CORSMiddleware
@@ -291,14 +292,26 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 async def login(request: Request, provider: str):
     """
     Initiate OAuth login flow.
-    
+
     Supported providers: google, github
+
+    Raises:
+        HTTPException: If provider is unsupported or not configured
     """
     if provider not in ['google', 'github']:
         raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
-    
+
+    # Check if provider is configured
+    if provider == 'github':
+        if not (settings.GITHUB_CLIENT_ID and settings.GITHUB_CLIENT_SECRET):
+            raise HTTPException(
+                status_code=503,
+                detail="GitHub authentication is not configured on this Hub. "
+                       "Please contact the Hub administrator or use Google authentication."
+            )
+
     redirect_uri = request.url_for('auth_callback', provider=provider)
-    
+
     if provider == 'google':
         return await oauth.google.authorize_redirect(request, redirect_uri)
     elif provider == 'github':
@@ -309,7 +322,7 @@ async def login(request: Request, provider: str):
 async def auth_callback(request: Request, provider: str, db: AsyncSession = Depends(get_db)):
     """
     OAuth callback endpoint.
-    
+
     Handles the callback from OAuth provider, creates/updates user,
     and redirects back to local client with JWT token.
     """
@@ -318,37 +331,103 @@ async def auth_callback(request: Request, provider: str, db: AsyncSession = Depe
         if provider == 'google':
             token = await oauth.google.authorize_access_token(request)
             user_info = token.get('userinfo')
+            if not user_info or not user_info.get('email'):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not retrieve user info from Google"
+                )
+            email = user_info['email']
+
         elif provider == 'github':
             token = await oauth.github.authorize_access_token(request)
-            # GitHub requires separate API call for email
-            user_info = token.get('userinfo')
+            access_token = token.get('access_token')
+
+            if not access_token:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Could not retrieve access token from GitHub"
+                )
+
+            # GitHub requires separate API calls to get user data
+            async with httpx.AsyncClient() as client:
+                # Get user profile
+                user_response = await client.get(
+                    'https://api.github.com/user',
+                    headers={
+                        'Authorization': f'Bearer {access_token}',
+                        'Accept': 'application/vnd.github.v3+json'
+                    }
+                )
+
+                if user_response.status_code != 200:
+                    logger.error(f"GitHub API error: {user_response.status_code} - {user_response.text}")
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Could not retrieve user profile from GitHub"
+                    )
+
+                user_data = user_response.json()
+                email = user_data.get('email')
+
+                # If email is private, fetch from emails endpoint
+                if not email:
+                    emails_response = await client.get(
+                        'https://api.github.com/user/emails',
+                        headers={
+                            'Authorization': f'Bearer {access_token}',
+                            'Accept': 'application/vnd.github.v3+json'
+                        }
+                    )
+
+                    if emails_response.status_code == 200:
+                        emails = emails_response.json()
+                        # Find primary verified email
+                        for email_obj in emails:
+                            if email_obj.get('primary') and email_obj.get('verified'):
+                                email = email_obj.get('email')
+                                break
+
+                        # If no primary, use first verified email
+                        if not email:
+                            for email_obj in emails:
+                                if email_obj.get('verified'):
+                                    email = email_obj.get('email')
+                                    break
+
+                if not email:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Could not retrieve email from GitHub. Please make sure your email is verified."
+                    )
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported provider: {provider}")
-            
+
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"OAuth token exchange failed: {e}")
+        logger.error(traceback.format_exc())
         raise HTTPException(
-            status_code=400, 
+            status_code=400,
             detail=f"Could not authorize access token: {str(e)}"
         )
-
-    # Validate user info
-    if not user_info or not user_info.get('email'):
-        raise HTTPException(
-            status_code=400, 
-            detail="Could not retrieve user info from provider"
-        )
-
-    email = user_info['email']
     
     # Get or create user
     db_user = await crud.get_user_by_email(db, email=email)
-    
+
     if not db_user:
         db_user = await crud.create_user(db, email=email, provider=provider)
-        logger.info(f"Created new user: {email}")
+        logger.info(f"Created new user: {email} (provider: {provider})")
     else:
-        logger.info(f"Existing user logged in: {email}")
+        # Update provider to reflect current authentication method
+        if db_user.provider != provider:
+            old_provider = db_user.provider
+            db_user.provider = provider
+            await db.commit()
+            await db.refresh(db_user)
+            logger.info(f"Existing user logged in: {email} (provider updated: {old_provider} → {provider})")
+        else:
+            logger.info(f"Existing user logged in: {email} (provider: {provider})")
 
     # Create JWT tokens (access + refresh)
     access_token = auth.create_access_token(data={"sub": db_user.email})

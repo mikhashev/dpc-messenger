@@ -37,6 +37,7 @@ class HubClient:
         self.jwt_token: str | None = None
         self.refresh_token: str | None = None
         self.websocket: websockets.WebSocketClientProtocol | None = None
+        self.current_provider: str | None = None  # Track which provider was used
 
         # OAuth callback configuration
         self.oauth_callback_host = oauth_callback_host
@@ -58,7 +59,8 @@ class HubClient:
         if tokens:
             self.jwt_token = tokens.get("jwt_token")
             self.refresh_token = tokens.get("refresh_token")
-            print("[OK] Loaded cached authentication tokens")
+            self.current_provider = tokens.get("provider", "google")  # Default to google for backward compat
+            print(f"[OK] Loaded cached authentication tokens (provider: {self.current_provider})")
         else:
             print("No valid cached tokens found")
 
@@ -71,7 +73,8 @@ class HubClient:
             self.token_cache.save_tokens(
                 jwt_token=self.jwt_token,
                 refresh_token=self.refresh_token,
-                expires_in=1800  # 30 minutes default
+                expires_in=1800,  # 30 minutes default
+                provider=self.current_provider or "google"  # Save current provider
             )
         except Exception as e:
             print(f"Warning: Could not cache tokens: {e}")
@@ -143,42 +146,95 @@ class HubClient:
     async def login(self, provider: str = "google"):
         """
         Initiates OAuth login flow and registers cryptographic identity.
-        
+
+        Args:
+            provider: OAuth provider to use ('google' or 'github')
+
+        Raises:
+            ValueError: If provider is not supported
+            asyncio.TimeoutError: If authentication times out
+            Exception: If authentication fails
+
         Updated to include automatic node registration after OAuth.
         """
+        # Validate provider
+        supported_providers = ["google", "github"]
+        if provider not in supported_providers:
+            raise ValueError(
+                f"Unsupported OAuth provider: '{provider}'. "
+                f"Supported providers: {', '.join(supported_providers)}"
+            )
+
+        # Check if already authenticated with the same provider
         if self.jwt_token:
-            print("Already authenticated.")
-            return
+            if self.current_provider == provider:
+                print(f"Already authenticated with {provider}.")
+                return
+            else:
+                # Provider mismatch - clear cache and re-authenticate
+                print(f"Provider changed from {self.current_provider} to {provider}. Re-authenticating...")
+                if self.token_cache:
+                    self.token_cache.clear()
+                self.jwt_token = None
+                self.refresh_token = None
+                self.current_provider = None
 
         token_future = asyncio.Future()
 
         class OAuthCallbackHandler(BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                """Suppress HTTP server logs"""
+                pass
+
             def do_GET(self):
                 parsed_path = urlparse(self.path)
                 if parsed_path.path == "/callback":
                     query_components = parse_qs(parsed_path.query)
                     access_token = query_components.get("access_token", [None])[0]
                     refresh_token = query_components.get("refresh_token", [None])[0]
+                    error = query_components.get("error", [None])[0]
+                    error_description = query_components.get("error_description", [None])[0]
 
                     self.send_response(200)
-                    self.send_header("Content-type", "text/html")
+                    self.send_header("Content-type", "text/html; charset=utf-8")
                     self.end_headers()
 
-                    if access_token:
+                    if error:
+                        # OAuth error from Hub
+                        error_msg = error_description or error
+                        self.wfile.write(b"<h1>Authentication Failed</h1>")
+                        self.wfile.write(f"<p style='color: red;'>{error_msg}</p>".encode('utf-8'))
+                        self.wfile.write(b"<p>Please check:</p>")
+                        self.wfile.write(b"<ul>")
+                        self.wfile.write(b"<li>The OAuth provider is configured on the Hub</li>")
+                        self.wfile.write(b"<li>Your OAuth credentials are correct</li>")
+                        self.wfile.write(b"<li>You authorized the application</li>")
+                        self.wfile.write(b"</ul>")
+                        self.wfile.write(b"<p>You can close this tab and try again.</p>")
+                        self.server.loop.call_soon_threadsafe(
+                            token_future.set_exception,
+                            Exception(f"OAuth error: {error_msg}")
+                        )
+                    elif access_token:
                         self.wfile.write(b"<h1>Authentication Successful!</h1>")
-                        self.wfile.write(b"<p>You can now close this browser tab.</p>")
+                        self.wfile.write(b"<p style='color: green;'>You can now close this browser tab.</p>")
                         self.server.loop.call_soon_threadsafe(
                             token_future.set_result,
                             {"access_token": access_token, "refresh_token": refresh_token}
                         )
                     else:
-                        self.wfile.write(b"<h1>Authentication Failed.</h1>")
-                        self.wfile.write(b"<p>Token not found in callback. Please try again.</p>")
-                        self.server.loop.call_soon_threadsafe(token_future.set_exception, Exception("Token not found in callback"))
+                        self.wfile.write(b"<h1>Authentication Failed</h1>")
+                        self.wfile.write(b"<p>No access token received from the Hub.</p>")
+                        self.wfile.write(b"<p>You can close this tab and try again.</p>")
+                        self.server.loop.call_soon_threadsafe(
+                            token_future.set_exception,
+                            Exception("Token not found in callback")
+                        )
                 else:
                     self.send_response(404)
+                    self.send_header("Content-type", "text/html")
                     self.end_headers()
-                    self.wfile.write(b"Not Found")
+                    self.wfile.write(b"<h1>404 Not Found</h1>")
 
         # We need to run the HTTP server in a separate thread so it doesn't block asyncio
         server = HTTPServer((self.oauth_callback_host, self.oauth_callback_port), OAuthCallbackHandler)
@@ -190,14 +246,15 @@ class HubClient:
 
         print(f"Starting local server for OAuth callback on {self.oauth_callback_host}:{self.oauth_callback_port}...")
         login_url = f"{self.api_base_url}/login/{provider}"
-        print(f"Opening browser to: {login_url}")
+        print(f"Opening browser for {provider.upper()} authentication: {login_url}")
         webbrowser.open(login_url)
 
         try:
             tokens = await asyncio.wait_for(token_future, timeout=180)  # 3 minute timeout
             self.jwt_token = tokens.get("access_token")
             self.refresh_token = tokens.get("refresh_token")
-            print("Authentication successful, JWT received.")
+            self.current_provider = provider  # Track which provider was used
+            print(f"Authentication successful with {provider}, JWT received.")
             if self.refresh_token:
                 print("Refresh token also received.")
 

@@ -66,7 +66,8 @@ class TokenCache:
         jwt_token: str,
         refresh_token: Optional[str] = None,
         node_id: Optional[str] = None,
-        expires_in: int = 1800  # 30 minutes default
+        expires_in: int = 1800,  # 30 minutes default
+        provider: str = "google"  # OAuth provider used
     ) -> bool:
         """
         Save tokens to encrypted cache.
@@ -76,6 +77,7 @@ class TokenCache:
             refresh_token: Optional refresh token
             node_id: Node ID associated with tokens
             expires_in: Token lifetime in seconds
+            provider: OAuth provider used to obtain tokens ('google' or 'github')
 
         Returns:
             True if saved successfully
@@ -93,6 +95,7 @@ class TokenCache:
                 "jwt_token": jwt_token,
                 "refresh_token": refresh_token,
                 "node_id": node_id,
+                "provider": provider,
                 "expires_at": expires_at,
                 "cached_at": datetime.utcnow().isoformat()
             }
@@ -190,6 +193,28 @@ class TokenCache:
         """Get node ID from cached tokens."""
         tokens = self.load_tokens()
         return tokens.get("node_id") if tokens else None
+
+    def get_provider(self) -> Optional[str]:
+        """Get OAuth provider from cached tokens."""
+        tokens = self.load_tokens()
+        return tokens.get("provider") if tokens else None
+
+    def is_valid_for_provider(self, provider: str) -> bool:
+        """
+        Check if cached tokens are valid for the specified provider.
+
+        Args:
+            provider: OAuth provider to check ('google' or 'github')
+
+        Returns:
+            True if cached tokens exist, are valid, and match the provider
+        """
+        tokens = self.load_tokens()
+        if not tokens:
+            return False
+
+        cached_provider = tokens.get("provider", "google")  # Default to google for backward compat
+        return cached_provider == provider
 
 
 # Self-test

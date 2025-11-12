@@ -313,10 +313,25 @@
         <!-- Hub Login -->
         {#if $nodeStatus.hub_status !== 'Connected'}
           <div class="hub-section">
-            <p class="info-text">Optional: Connect to Hub for discovery</p>
-            <button on:click={() => sendCommand('login_to_hub')} class="btn-secondary">
-              Login to Hub
-            </button>
+            <p class="info-text">Connect to Hub for WebRTC and discovery</p>
+            <div class="hub-login-buttons">
+              <button
+                on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
+                class="btn-oauth btn-google"
+                title="Login with Google"
+              >
+                <span class="oauth-icon">🔵</span>
+                Google
+              </button>
+              <button
+                on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
+                class="btn-oauth btn-github"
+                title="Login with GitHub"
+              >
+                <span class="oauth-icon">⚫</span>
+                GitHub
+              </button>
+            </div>
           </div>
         {/if}
 
@@ -574,15 +589,62 @@
     background: #a0a0a0;
     cursor: not-allowed;
   }
-  
-  .btn-secondary {
-    background: #6c757d;
+
+  /* OAuth login buttons */
+  .hub-login-buttons {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
   }
-  
-  .btn-secondary:hover {
-    background: #545b62;
+
+  .btn-oauth {
+    flex: 1;
+    min-width: 120px;
+    padding: 0.75rem 1rem;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
   }
-  
+
+  .btn-oauth:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  .btn-oauth:active {
+    transform: translateY(0);
+  }
+
+  .btn-google {
+    background: #4285f4;
+    color: white;
+  }
+
+  .btn-google:hover {
+    background: #357ae8;
+  }
+
+  .btn-github {
+    background: #24292e;
+    color: white;
+  }
+
+  .btn-github:hover {
+    background: #1b1f23;
+  }
+
+  .oauth-icon {
+    font-size: 1.1rem;
+    line-height: 1;
+  }
+
   .chat-list ul {
     list-style: none;
     padding: 0;
