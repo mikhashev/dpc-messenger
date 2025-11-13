@@ -37,17 +37,47 @@ class ContextFirewall:
             for group_name, nodes_str in self.rules.items('node_groups'):
                 self.node_groups[group_name] = [n.strip() for n in nodes_str.split(',')]
 
+        # Parse compute sharing settings
+        self._parse_compute_settings()
+
+    def _parse_compute_settings(self):
+        """Parse compute sharing settings from the config file."""
+        self.compute_enabled = False
+        self.compute_allowed_nodes: List[str] = []
+        self.compute_allowed_groups: List[str] = []
+        self.compute_allowed_models: List[str] = []
+
+        if self.rules.has_section('compute'):
+            # Check if compute sharing is enabled
+            if self.rules.has_option('compute', 'enabled'):
+                self.compute_enabled = self.rules.getboolean('compute', 'enabled')
+
+            # Parse allowed nodes
+            if self.rules.has_option('compute', 'allow_nodes'):
+                nodes_str = self.rules.get('compute', 'allow_nodes')
+                self.compute_allowed_nodes = [n.strip() for n in nodes_str.split(',') if n.strip()]
+
+            # Parse allowed groups
+            if self.rules.has_option('compute', 'allow_groups'):
+                groups_str = self.rules.get('compute', 'allow_groups')
+                self.compute_allowed_groups = [g.strip() for g in groups_str.split(',') if g.strip()]
+
+            # Parse allowed models (empty = all models allowed)
+            if self.rules.has_option('compute', 'allowed_models'):
+                models_str = self.rules.get('compute', 'allowed_models')
+                self.compute_allowed_models = [m.strip() for m in models_str.split(',') if m.strip()]
+
     def _ensure_file_exists(self):
         """Creates a default, secure .dpc_access file if one doesn't exist."""
         if not self.access_file_path.exists():
             print(f"Warning: Access control file not found at {self.access_file_path}.")
             print("Creating a default, secure template...")
-            
+
             self.access_file_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             default_rules = """
 # D-PC Access Control File
-# This file controls who can access your context data.
+# This file controls who can access your context data and compute resources.
 # By default, all access is denied.
 
 [hub]
@@ -64,6 +94,13 @@ personal.json:profile.description = allow
 # [group:colleagues]
 # work_main.json:availability = allow
 # work_main.json:skills.* = allow
+
+# Compute sharing settings (Remote Inference)
+# [compute]
+# enabled = false
+# allow_groups = friends
+# allow_nodes = dpc-node-alice-123
+# allowed_models = llama3.1:8b, llama3-70b
 
 # Add rules for specific nodes below.
 # Example for a friend:
@@ -172,35 +209,35 @@ personal.json:profile.description = allow
         """
         Filters a PersonalContext based on firewall rules for a specific peer.
         Returns a new PersonalContext with only allowed fields.
-        
+
         Args:
             context: The full PersonalContext to filter
             peer_id: The node_id of the requesting peer
             query: Optional query string (for context-aware filtering)
-        
+
         Returns:
             Filtered PersonalContext with only allowed fields
         """
         from dataclasses import asdict, fields
         from copy import deepcopy
-        
+
         # Convert context to dict for manipulation
         context_dict = asdict(context)
         filtered_dict = {}
-        
+
         # Check each field against firewall rules
         for field in fields(context):
             field_name = field.name
             field_value = context_dict.get(field_name)
-            
+
             # Skip if field is None or empty
             if field_value is None:
                 filtered_dict[field_name] = None
                 continue
-            
+
             # Check if peer can access this field
             resource_path = f"personal.json:{field_name}"
-            
+
             if self.can_access(peer_id, resource_path):
                 # Peer has access to this field
                 filtered_dict[field_name] = deepcopy(field_value)
@@ -217,10 +254,65 @@ personal.json:profile.description = allow
                         filtered_dict[field_name] = {}
                     else:
                         filtered_dict[field_name] = None
-        
+
         # Create new PersonalContext from filtered dict
         from dpc_protocol.pcm_core import PersonalContext
         return PersonalContext(**filtered_dict)
+
+    def can_request_inference(self, requester_node_id: str, model: str = None) -> bool:
+        """
+        Checks if a peer can request remote inference on this node.
+
+        Args:
+            requester_node_id: The node_id of the requesting peer
+            model: Optional model name to check if allowed
+
+        Returns:
+            True if the peer can request inference (and use the specified model if provided)
+        """
+        # Check if compute sharing is enabled
+        if not self.compute_enabled:
+            return False
+
+        # Check if requester is in allowed nodes list
+        if requester_node_id in self.compute_allowed_nodes:
+            # Node is explicitly allowed, check model if specified
+            if model and self.compute_allowed_models:
+                return model in self.compute_allowed_models
+            return True
+
+        # Check if requester is in any allowed group
+        requester_groups = self._get_groups_for_node(requester_node_id)
+        for group in requester_groups:
+            if group in self.compute_allowed_groups:
+                # Node is in an allowed group, check model if specified
+                if model and self.compute_allowed_models:
+                    return model in self.compute_allowed_models
+                return True
+
+        # Not authorized
+        return False
+
+    def get_available_models_for_peer(self, requester_node_id: str, all_models: List[str]) -> List[str]:
+        """
+        Returns the list of models that a peer is allowed to use.
+
+        Args:
+            requester_node_id: The node_id of the requesting peer
+            all_models: List of all available models on this node
+
+        Returns:
+            List of model names the peer can use (empty if no access)
+        """
+        if not self.can_request_inference(requester_node_id):
+            return []
+
+        # If no specific models are restricted, return all available models
+        if not self.compute_allowed_models:
+            return all_models
+
+        # Return intersection of allowed models and available models
+        return [m for m in all_models if m in self.compute_allowed_models]
 
 # --- Self-testing block ---
 if __name__ == '__main__':

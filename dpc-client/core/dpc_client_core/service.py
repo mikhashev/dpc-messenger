@@ -72,6 +72,9 @@ class CoreService:
         # Track pending context requests (for request-response matching)
         self._pending_context_requests: Dict[str, asyncio.Future] = {}
 
+        # Track pending inference requests (for request-response matching)
+        self._pending_inference_requests: Dict[str, asyncio.Future] = {}
+
         # Hub reconnection settings
         self._hub_reconnect_attempts = 0
         self._max_hub_reconnect_attempts = 5
@@ -432,12 +435,35 @@ class CoreService:
             # Context response from peer - resolve the pending future
             request_id = payload.get("request_id")
             context_dict = payload.get("context")
-            
+
             if request_id in self._pending_context_requests:
                 future = self._pending_context_requests[request_id]
                 if not future.done():
                     future.set_result(context_dict)
-        
+
+        elif command == "REMOTE_INFERENCE_REQUEST":
+            # Remote inference request from peer - handle and respond
+            request_id = payload.get("request_id")
+            prompt = payload.get("prompt")
+            model = payload.get("model")
+            provider = payload.get("provider")
+            await self._handle_inference_request(sender_node_id, request_id, prompt, model, provider)
+
+        elif command == "REMOTE_INFERENCE_RESPONSE":
+            # Remote inference response from peer - resolve the pending future
+            request_id = payload.get("request_id")
+            status = payload.get("status")
+            response = payload.get("response")
+            error = payload.get("error")
+
+            if request_id in self._pending_inference_requests:
+                future = self._pending_inference_requests[request_id]
+                if not future.done():
+                    if status == "success":
+                        future.set_result(response)
+                    else:
+                        future.set_exception(RuntimeError(error or "Remote inference failed"))
+
         else:
             print(f"Unknown P2P message command: {command}")
 
@@ -591,6 +617,47 @@ class CoreService:
             print(f"Error sending message to {target_node_id}: {e}")
             raise
 
+    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None) -> str:
+        """
+        Send an AI query, either to local LLM or to a remote peer for inference.
+
+        Args:
+            prompt: The prompt to send to the AI
+            compute_host: Optional node_id of peer to use for inference (None = local)
+            model: Optional model name to use
+            provider: Optional provider alias to use
+
+        Returns:
+            The AI response as a string
+
+        Raises:
+            ValueError: If compute_host is specified but peer is not connected
+            RuntimeError: If inference fails
+        """
+        print(f"AI Query - compute_host: {compute_host or 'local'}, model: {model or 'default'}")
+
+        # Local inference
+        if not compute_host:
+            try:
+                return await self.llm_manager.query(prompt, provider_alias=provider)
+            except Exception as e:
+                print(f"Local inference failed: {e}")
+                raise RuntimeError(f"Local inference failed: {e}") from e
+
+        # Remote inference
+        try:
+            return await self._request_inference_from_peer(
+                peer_id=compute_host,
+                prompt=prompt,
+                model=model,
+                provider=provider
+            )
+        except ConnectionError as e:
+            raise ValueError(f"Compute host {compute_host} is not connected") from e
+        except Exception as e:
+            print(f"Remote inference failed: {e}")
+            raise RuntimeError(f"Remote inference failed: {e}") from e
+
     # --- Context Request Methods ---
 
     async def _handle_context_request(self, peer_id: str, query: str, request_id: str):
@@ -627,6 +694,53 @@ class CoreService:
             print(f"  - Sent filtered context response to {peer_id}")
         except Exception as e:
             print(f"  - Error sending context response to {peer_id}: {e}")
+
+    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None):
+        """
+        Handle incoming remote inference request from a peer.
+        Check firewall permissions, run inference, and send response.
+        """
+        from dpc_protocol.protocol import create_remote_inference_response
+
+        print(f"  - Handling inference request from {peer_id} (request_id: {request_id})")
+
+        # Check if peer is allowed to request inference
+        if not self.firewall.can_request_inference(peer_id, model):
+            print(f"  - Access denied: {peer_id} cannot request inference" + (f" for model {model}" if model else ""))
+            error_response = create_remote_inference_response(
+                request_id=request_id,
+                error=f"Access denied: You are not authorized to request inference" + (f" for model {model}" if model else "")
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                print(f"  - Error sending inference error response to {peer_id}: {e}")
+            return
+
+        # Run inference
+        try:
+            print(f"  - Running inference for {peer_id} (model: {model or 'default'}, provider: {provider or 'default'})")
+            result = await self.llm_manager.query(prompt, provider_alias=provider)
+            print(f"  - Inference completed successfully for {peer_id}")
+
+            # Send success response
+            success_response = create_remote_inference_response(
+                request_id=request_id,
+                response=result
+            )
+            await self.p2p_manager.send_message_to_peer(peer_id, success_response)
+            print(f"  - Sent inference result to {peer_id}")
+
+        except Exception as e:
+            print(f"  - Inference failed for {peer_id}: {e}")
+            error_response = create_remote_inference_response(
+                request_id=request_id,
+                error=str(e)
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as send_err:
+                print(f"  - Error sending inference error response to {peer_id}: {send_err}")
 
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """
@@ -681,6 +795,69 @@ class CoreService:
             print(f"  - Error requesting context from {peer_id}: {e}")
             return None
 
+    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, timeout: float = 60.0) -> str:
+        """
+        Request remote inference from a specific peer.
+        Uses async request-response pattern with Future.
+
+        Args:
+            peer_id: The node_id of the peer to request inference from
+            prompt: The prompt to send for inference
+            model: Optional model name to use
+            provider: Optional provider alias to use
+            timeout: Timeout in seconds (default 60s for inference)
+
+        Returns:
+            The inference result as a string
+
+        Raises:
+            ConnectionError: If peer is not connected
+            TimeoutError: If request times out
+            RuntimeError: If inference fails on remote peer
+        """
+        from dpc_protocol.protocol import create_remote_inference_request
+
+        print(f"  - Requesting inference from peer: {peer_id}")
+
+        if peer_id not in self.p2p_manager.peers:
+            raise ConnectionError(f"Peer {peer_id} is not connected")
+
+        try:
+            # Generate unique request ID
+            request_id = str(uuid.uuid4())
+
+            # Create Future to wait for response
+            response_future = asyncio.Future()
+            self._pending_inference_requests[request_id] = response_future
+
+            # Create inference request message
+            request_message = create_remote_inference_request(
+                request_id=request_id,
+                prompt=prompt,
+                model=model,
+                provider=provider
+            )
+
+            # Send request
+            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
+
+            # Wait for response with timeout
+            try:
+                result = await asyncio.wait_for(response_future, timeout=timeout)
+                print(f"  - Received inference result from {peer_id}")
+                return result
+
+            except asyncio.TimeoutError:
+                print(f"  - Timeout waiting for inference from {peer_id}")
+                raise TimeoutError(f"Inference request to {peer_id} timed out after {timeout}s")
+            finally:
+                # Clean up pending request
+                self._pending_inference_requests.pop(request_id, None)
+
+        except Exception as e:
+            print(f"  - Error requesting inference from {peer_id}: {e}")
+            raise
+
     async def _aggregate_contexts(self, query: str, peer_ids: List[str] = None) -> Dict[str, PersonalContext]:
         """
         Aggregate contexts from local user and connected peers.
@@ -717,21 +894,26 @@ class CoreService:
 
     # --- AI Query Methods ---
 
-    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, **kwargs):
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
-        
+
         Args:
             command_id: Unique ID for this command
             prompt: The user's prompt/query
             context_ids: Optional list of peer node_ids to fetch context from
+            compute_host: Optional node_id of peer to use for inference (None = local)
+            model: Optional model name to use
+            provider: Optional provider alias to use
             **kwargs: Additional arguments
         """
         print(f"Orchestrating AI query for command_id {command_id}: '{prompt[:50]}...'")
-        
+        print(f"  - Compute host: {compute_host or 'local'}")
+        print(f"  - Model: {model or 'default'}")
+
         # Start with local context
         aggregated_contexts = {'local': self.p2p_manager.local_context}
-        
+
         # TODO: Fetch remote contexts if context_ids provided
         if context_ids:
             for node_id in context_ids:
@@ -740,20 +922,25 @@ class CoreService:
                     # context = await self.request_context_from_peer(node_id, prompt)
                     # aggregated_contexts[node_id] = context
                     pass
-        
+
         # Assemble final prompt with context
         final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt)
 
         response_payload = {}
         status = "OK"
-        
+
         try:
-            # Query the LLM
-            response_content = await self.llm_manager.query(prompt=final_prompt)
+            # Use send_ai_query to support both local and remote inference
+            response_content = await self.send_ai_query(
+                prompt=final_prompt,
+                compute_host=compute_host,
+                model=model,
+                provider=provider
+            )
             response_payload = {"content": response_content}
-            
+
         except Exception as e:
-            print(f"  - Error during local inference: {e}")
+            print(f"  - Error during inference: {e}")
             status = "ERROR"
             response_payload = {"message": str(e)}
 

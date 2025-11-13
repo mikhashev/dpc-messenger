@@ -24,6 +24,29 @@ def create_send_text_message(text: str) -> Dict[str, Any]:
     # For now, we don't need a chat_id, the P2PManager knows the sender.
     return {"command": "SEND_TEXT", "payload": {"text": text}}
 
+def create_remote_inference_request(request_id: str, prompt: str, model: str = None, provider: str = None) -> Dict[str, Any]:
+    """Creates a remote inference request message."""
+    payload = {
+        "request_id": request_id,
+        "prompt": prompt
+    }
+    if model:
+        payload["model"] = model
+    if provider:
+        payload["provider"] = provider
+    return {"command": "REMOTE_INFERENCE_REQUEST", "payload": payload}
+
+def create_remote_inference_response(request_id: str, response: str = None, error: str = None) -> Dict[str, Any]:
+    """Creates a remote inference response message."""
+    payload = {"request_id": request_id}
+    if response is not None:
+        payload["response"] = response
+        payload["status"] = "success"
+    else:
+        payload["error"] = error or "Unknown error"
+        payload["status"] = "error"
+    return {"command": "REMOTE_INFERENCE_RESPONSE", "payload": payload}
+
 async def read_message(reader: asyncio.StreamReader) -> dict | None:
     try:
         header = await reader.readexactly(10)

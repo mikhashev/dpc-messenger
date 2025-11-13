@@ -1,6 +1,6 @@
 # D-PC Messenger: Decentralized Peer-to-Peer Collaborative Intelligence
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.6.0
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.6.1
 
 **D-PC Messenger** (Decentralized Personal Context) is a privacy-first, peer-to-peer messaging platform that enables **collaborative intelligence** through secure sharing of personal AI contexts between trusted peers, without relying on centralized servers for communication.
 
@@ -287,7 +287,7 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ## 🛣️ Roadmap
 
-### Phase 1: Federated MVP ✅ (Current - v0.6.0)
+### Phase 1: Federated MVP ✅ (Current - v0.6.1)
 - ✅ Direct TLS P2P connections
 - ✅ WebRTC with NAT traversal
 - ✅ Federation Hub for discovery
@@ -297,13 +297,13 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ **Encrypted local backups** (AES-256-GCM with user-controlled passphrases)
 - ✅ Local AI integration
 - ✅ Offline mode with graceful degradation
-- ⏳ Remote inference (in progress)
+- ✅ **Remote inference** - Share compute power with trusted peers ([guide](./docs/REMOTE_INFERENCE.md))
 
 ### Phase 2: Enhanced Federation (Q1-Q2 2026)
 - 🔲 Multi-hub federation
 - 🔲 Advanced context firewall
 - 🔲 **Knowledge Commit System** - Git-like versioned knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
-- 🔲 Remote inference MVP
+- 🔲 **Remote inference enhancements** - Model discovery, streaming responses, usage tracking
 - 🔲 **Hub-assisted backup** (encrypted backup storage on Hub)
 - 🔲 **QR code backup transfer** (for mobile devices)
 - 🔲 Mobile clients (Android, iOS)

@@ -24,7 +24,8 @@
   let isLoading: boolean = false;
   let chatWindow: HTMLElement;
   let peerInput: string = "";  // RENAMED from peerUri for clarity
-  
+  let selectedComputeHost: string = "local";  // "local" or node_id for remote inference
+
   let processedMessageIds = new Set<string>();
   
   function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
@@ -97,13 +98,19 @@
         return newMap;
       });
       
-      const success = sendCommand("execute_ai_query", { prompt: text }, commandId);
+      // Prepare AI query payload with optional compute host
+      const payload: any = { prompt: text };
+      if (selectedComputeHost !== "local") {
+        payload.compute_host = selectedComputeHost;
+      }
+
+      const success = sendCommand("execute_ai_query", payload, commandId);
       if (!success) {
         isLoading = false;
         chatHistories.update(h => {
           const newMap = new Map(h);
           const hist = newMap.get('local_ai') || [];
-          newMap.set('local_ai', hist.map(m => 
+          newMap.set('local_ai', hist.map(m =>
             m.commandId === commandId ? { ...m, sender: 'system', text: 'Error: Not connected' } : m
           ));
           return newMap;
@@ -455,23 +462,42 @@
       </div>
 
       <div class="chat-input">
-        <textarea 
-          bind:value={currentInput}
-          placeholder={$connectionStatus === 'connected' ? 'Type a message... (Enter to send, Shift+Enter for new line)' : 'Connect to Core Service first...'}
-          disabled={$connectionStatus !== 'connected' || isLoading}
-          on:keydown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              handleSendMessage();
-            }
-          }}
-        ></textarea>
-        <button 
-          on:click={handleSendMessage}
-          disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim()}
-        >
-          {#if isLoading}Sending...{:else}Send{/if}
-        </button>
+        {#if activeChatId === 'local_ai'}
+          <div class="compute-host-selector">
+            <label for="compute-host">🖥️ Compute Host:</label>
+            <select id="compute-host" bind:value={selectedComputeHost}>
+              <option value="local">Local (this device)</option>
+              {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
+                <optgroup label="Remote Peers">
+                  {#each $nodeStatus.peer_info as peer}
+                    <option value={peer.node_id}>
+                      {peer.name ? `${peer.name} (${peer.node_id.slice(0, 12)}...)` : peer.node_id}
+                    </option>
+                  {/each}
+                </optgroup>
+              {/if}
+            </select>
+          </div>
+        {/if}
+        <div class="input-row">
+          <textarea
+            bind:value={currentInput}
+            placeholder={$connectionStatus === 'connected' ? 'Type a message... (Enter to send, Shift+Enter for new line)' : 'Connect to Core Service first...'}
+            disabled={$connectionStatus !== 'connected' || isLoading}
+            on:keydown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSendMessage();
+              }
+            }}
+          ></textarea>
+          <button
+            on:click={handleSendMessage}
+            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim()}
+          >
+            {#if isLoading}Sending...{:else}Send{/if}
+          </button>
+        </div>
       </div>
     </div>
   </div>
@@ -875,17 +901,61 @@
     padding: 1rem;
     border-top: 1px solid #eee;
     display: flex;
+    flex-direction: column;
     gap: 0.5rem;
   }
-  
-  .chat-input textarea {
+
+  .compute-host-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+  }
+
+  .compute-host-selector label {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #555;
+    margin: 0;
+  }
+
+  .compute-host-selector select {
+    flex: 1;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: white;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+
+  .compute-host-selector select:hover {
+    border-color: #999;
+  }
+
+  .compute-host-selector select:focus {
+    outline: none;
+    border-color: #4285f4;
+    box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.1);
+  }
+
+  .input-row {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .input-row textarea {
     flex: 1;
     min-height: 60px;
     max-height: 120px;
     resize: vertical;
   }
-  
-  .chat-input button {
+
+  .input-row button {
     width: 100px;
     align-self: flex-end;
   }
