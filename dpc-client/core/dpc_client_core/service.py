@@ -5,6 +5,7 @@ from dataclasses import asdict
 import json
 import uuid
 import websockets
+import socket
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -442,6 +443,46 @@ class CoreService:
 
     # --- High-level methods (API for the UI) ---
 
+    def _get_local_ips(self) -> List[str]:
+        """
+        Get local network IP addresses (excluding loopback).
+        Returns a list of IP addresses for constructing dpc:// URIs.
+        """
+        local_ips = []
+
+        try:
+            # Get hostname
+            hostname = socket.gethostname()
+
+            # Get all IP addresses associated with this host
+            addr_info = socket.getaddrinfo(hostname, None)
+
+            for info in addr_info:
+                # info is a tuple: (family, type, proto, canonname, sockaddr)
+                # sockaddr is (ip, port) for IPv4
+                ip = info[4][0]
+
+                # Filter out loopback and IPv6 link-local addresses
+                if ip and not ip.startswith('127.') and ':' not in ip:
+                    if ip not in local_ips:
+                        local_ips.append(ip)
+
+        except Exception as e:
+            print(f"Warning: Could not determine local IPs: {e}")
+            # Fallback: try to get at least one IP
+            try:
+                # Create a socket to an external address to find the local IP
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+                s.close()
+                if local_ip and local_ip not in local_ips:
+                    local_ips.append(local_ip)
+            except Exception:
+                pass
+
+        return local_ips
+
     async def get_status(self) -> Dict[str, Any]:
         """Aggregates status from all components."""
 
@@ -465,6 +506,19 @@ class CoreService:
         except (AttributeError, Exception):
             active_model = None
 
+        # Get local IPs and construct dpc:// URIs
+        local_ips = self._get_local_ips()
+        dpc_port = 8888  # Default TLS server port
+        dpc_uris = []
+
+        for ip in local_ips:
+            uri = f"dpc://{ip}:{dpc_port}?node_id={self.p2p_manager.node_id}"
+            dpc_uris.append({
+                "ip": ip,
+                "port": dpc_port,
+                "uri": uri
+            })
+
         return {
             "node_id": self.p2p_manager.node_id,
             "hub_status": "Connected" if hub_connected else "Disconnected",
@@ -476,6 +530,9 @@ class CoreService:
             "connection_status": self.connection_status.get_status_message(),
             "available_features": self.connection_status.get_available_features(),
             "cached_peers_count": len(self.peer_cache.get_all_peers()),
+            # Direct TLS connection URIs
+            "local_ips": local_ips,
+            "dpc_uris": dpc_uris,
         }
     
     def set_peer_metadata(self, node_id: str, **kwargs):

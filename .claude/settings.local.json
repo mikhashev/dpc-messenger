@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(poetry run python:*)"
-    ],
-    "deny": [],
-    "ask": []
-  }
-}

@@ -45,12 +45,12 @@
     if (!$nodeStatus || !$nodeStatus.peer_info) {
       return peerId;
     }
-    
-    const peerInfo = $nodeStatus.peer_info.find(p => p.node_id === peerId);
+
+    const peerInfo = $nodeStatus.peer_info.find((p: { node_id: string; name?: string }) => p.node_id === peerId);
     if (peerInfo && peerInfo.name) {
       return `${peerInfo.name} | ${peerId}`;
     }
-    
+
     return peerId;
   }
   
@@ -205,7 +205,9 @@
       
       if (processedMessageIds.size > 100) {
         const firstId = processedMessageIds.values().next().value;
-        processedMessageIds.delete(firstId);
+        if (firstId) {
+          processedMessageIds.delete(firstId);
+        }
       }
     }
   }
@@ -258,6 +260,42 @@
               {$nodeStatus.hub_status}
             </span>
           </p>
+
+          <!-- Direct TLS Connection URIs (NEW - Redesigned) -->
+          {#if $nodeStatus.dpc_uris && $nodeStatus.dpc_uris.length > 0}
+            <div class="dpc-uris-section">
+              <details class="uri-details" open>
+                <summary class="uri-summary">
+                  <span class="uri-icon">🔗</span>
+                  <span class="uri-title">Local Network ({$nodeStatus.dpc_uris.length})</span>
+                </summary>
+                <div class="uri-help-text">
+                  Share with peers on your local network
+                </div>
+                {#each $nodeStatus.dpc_uris as { ip, uri }}
+                  <div class="uri-card">
+                    <div class="uri-card-header">
+                      <span class="ip-badge">{ip}</span>
+                      <button
+                        class="copy-btn-icon"
+                        on:click={() => {
+                          navigator.clipboard.writeText(uri);
+                          alert('✓ URI copied!');
+                        }}
+                        title="Copy URI"
+                      >
+                        📋
+                      </button>
+                    </div>
+                    <details class="uri-full-details">
+                      <summary class="show-uri-btn">Full URI ▼</summary>
+                      <code class="uri-full-text">{uri}</code>
+                    </details>
+                  </div>
+                {/each}
+              </details>
+            </div>
+          {/if}
 
           <!-- Connection Status (NEW) -->
           {#if $nodeStatus.operation_mode}
@@ -496,6 +534,27 @@
     display: flex;
     flex-direction: column;
     gap: 1rem;
+    overflow-y: auto;
+    max-height: 100vh;
+    padding-right: 0.5rem;
+  }
+
+  .sidebar::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  .sidebar::-webkit-scrollbar-track {
+    background: #f1f1f1;
+    border-radius: 3px;
+  }
+
+  .sidebar::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 3px;
+  }
+
+  .sidebar::-webkit-scrollbar-thumb:hover {
+    background: #555;
   }
   
   .node-info, .connect-section, .hub-section, .chat-list {
@@ -503,6 +562,24 @@
     border: 1px solid #e0e0e0;
     border-radius: 8px;
     padding: 1rem;
+  }
+
+  .node-info {
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+
+  .node-info::-webkit-scrollbar {
+    width: 4px;
+  }
+
+  .node-info::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .node-info::-webkit-scrollbar-thumb {
+    background: #ccc;
+    border-radius: 2px;
   }
   
   h2, h3 {
@@ -905,5 +982,158 @@
     background: #f0f0f0;
     border-radius: 4px;
     text-align: center;
+  }
+
+  /* DPC URI Styles - Redesigned for better UX */
+  .dpc-uris-section {
+    margin-top: 1rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .uri-details {
+    background: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .uri-details[open] {
+    border-color: #007bff;
+  }
+
+  .uri-summary {
+    padding: 0.75rem 1rem;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    color: #495057;
+    transition: background 0.2s;
+    user-select: none;
+  }
+
+  .uri-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .uri-summary:hover {
+    background: linear-gradient(135deg, #e9ecef 0%, #dee2e6 100%);
+  }
+
+  .uri-icon {
+    font-size: 1.2rem;
+  }
+
+  .uri-title {
+    flex: 1;
+    font-size: 0.9rem;
+  }
+
+  .uri-help-text {
+    padding: 0.5rem 1rem 0.75rem;
+    font-size: 0.75rem;
+    color: #6c757d;
+    background: #f8f9fa;
+    border-bottom: 1px solid #e9ecef;
+  }
+
+  .uri-card {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #f0f0f0;
+    transition: background 0.2s;
+  }
+
+  .uri-card:last-of-type {
+    border-bottom: none;
+  }
+
+  .uri-card:hover {
+    background: #f8f9fa;
+  }
+
+  .uri-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+  }
+
+  .ip-badge {
+    flex: 1;
+    font-family: 'Courier New', monospace;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #0056b3;
+    padding: 0.4rem 0.6rem;
+    background: #e7f1ff;
+    border-radius: 6px;
+    border: 1px solid #b3d7ff;
+  }
+
+  .copy-btn-icon {
+    width: auto;
+    min-width: auto;
+    padding: 0.3rem 0.5rem;
+    font-size: 1rem;
+    background: transparent;
+    border: 1px solid #ddd;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+
+  .copy-btn-icon:hover {
+    background: #f0f0f0;
+    border-color: #007bff;
+  }
+
+  .copy-btn-icon:active {
+    background: #e0e0e0;
+  }
+
+  .uri-full-details {
+    margin-top: 0.5rem;
+  }
+
+  .uri-full-details summary {
+    display: none;
+  }
+
+  .show-uri-btn {
+    display: inline-block !important;
+    font-size: 0.75rem;
+    color: #007bff;
+    cursor: pointer;
+    padding: 0.3rem 0.6rem;
+    background: #f0f7ff;
+    border: 1px solid #cce5ff;
+    border-radius: 4px;
+    margin-top: 0.4rem;
+    transition: all 0.2s;
+    user-select: none;
+  }
+
+  .show-uri-btn:hover {
+    background: #e0f0ff;
+    border-color: #99ccff;
+  }
+
+  .uri-full-text {
+    display: block;
+    margin-top: 0.5rem;
+    padding: 0.6rem;
+    font-family: 'Courier New', monospace;
+    font-size: 0.7rem;
+    color: #495057;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 4px;
+    word-break: break-all;
+    line-height: 1.5;
   }
 </style>
