@@ -80,3 +80,7 @@ logs/
 !poetry.lock
 # !pdm.lock
 # !Pipfile.lock
+
+# 11. AI assistant Editor-Specific Files
+# Prevents AI personal editor settings from being committed.
+.claude/

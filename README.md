@@ -24,6 +24,7 @@
 ### For Developers
 - 📖 **Open Protocol** - Extensible DPTP (D-PC Transfer Protocol)
 - 🧩 **Modular Design** - Clear separation of concerns
+- 🧠 **Knowledge Architecture** - Git-like knowledge commits with cognitive bias mitigation ([architecture doc](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - 🔧 **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude)
 - 🚀 **Production Ready** - Docker deployment, OAuth, rate limiting
 
@@ -112,6 +113,7 @@ dpc-messenger/
 │
 ├── docs/                 # Additional documentation
 │   ├── QUICK_START.md           # 5-minute setup
+│   ├── KNOWLEDGE_ARCHITECTURE.md # Knowledge management architecture
 │   ├── WEBRTC_SETUP_GUIDE.md    # Production deployment
 │   ├── USER_SOVEREIGNTY.md      # Privacy philosophy & vision
 │   ├── BACKUP_RESTORE.md        # Encrypted backup guide
@@ -273,9 +275,12 @@ docker-compose -f docker-compose.prod.yml up -d
 - **Environment Variables** - All settings support env var overrides
 - **Config File** - `~/.dpc/config.ini` for persistent settings
 
-### Protocol & Vision
+### Architecture & Design
+- **[KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md)** - Knowledge management architecture with cognitive bias mitigation
 - **[whitepaper.md](./whitepaper.md)** - Project vision & philosophy
 - **[specs/hub_api_v1.md](./specs/hub_api_v1.md)** - Hub API specification
+
+### Legal
 - **[LICENSE.md](./LICENSE.md)** - Licensing explained
 
 ---
@@ -297,6 +302,7 @@ docker-compose -f docker-compose.prod.yml up -d
 ### Phase 2: Enhanced Federation (Q1-Q2 2026)
 - 🔲 Multi-hub federation
 - 🔲 Advanced context firewall
+- 🔲 **Knowledge Commit System** - Git-like versioned knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - 🔲 Remote inference MVP
 - 🔲 **Hub-assisted backup** (encrypted backup storage on Hub)
 - 🔲 **QR code backup transfer** (for mobile devices)
