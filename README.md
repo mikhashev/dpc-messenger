@@ -78,11 +78,31 @@ This software contains strong cryptographic features and may be subject to legal
    - Fastest, lowest latency
    - Requires network visibility
    - Uses cryptographic node certificates
+   - **No Hub required** - Fully peer-to-peer
 
 2. **WebRTC** (Internet-Wide)
    - Works across NAT/firewalls
    - Automatic NAT traversal via STUN/TURN
    - Hub only for initial signaling
+   - **Messages never pass through Hub** - Direct P2P connection
+
+### ⚠️ Important: True Peer-to-Peer Architecture
+
+**D-PC Messenger is NOT a messaging service.** It is peer-to-peer communication software.
+
+**What this means:**
+- ✅ Messages are transmitted **directly between users** via encrypted P2P connections
+- ✅ The creator does **NOT operate message relay infrastructure**
+- ✅ The creator does **NOT store or transmit user messages**
+- ✅ The creator does **NOT control user communications**
+
+**Optional Hub servers:**
+- Provide WebRTC signaling only (connection facilitation)
+- Do NOT relay or store messages
+- Function similar to STUN/TURN servers or BitTorrent trackers
+- Completely optional (Direct TLS works without Hub)
+
+**Legal implication:** This software provides a communication tool, not a communication service. Users are solely responsible for their use of this software and any infrastructure they choose to deploy.
 
 ---
 

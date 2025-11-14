@@ -67,23 +67,57 @@ DO NOT export, import, or use this software without verifying compliance with
 applicable export control and encryption regulations in your jurisdiction.
 
 ================================================================================
-4. NOT A TELECOMMUNICATIONS SERVICE
+4. NOT A TELECOMMUNICATIONS SERVICE - PEER-TO-PEER SOFTWARE
 ================================================================================
 
-IMPORTANT: This software is:
+IMPORTANT: This software is PEER-TO-PEER communication software, NOT a messaging service.
+
+**What this software is:**
   ✅ An experimental research project
   ✅ Educational proof-of-concept code
   ✅ Academic demonstration of P2P protocols
+  ✅ Software that enables direct peer-to-peer communication
+  ✅ A communication tool (like BitTorrent, VPN clients, or PGP)
 
-This software is NOT:
+**What this software is NOT:**
   ❌ A commercial telecommunications service
   ❌ A messaging service provider/operator
+  ❌ A message relay or storage service
   ❌ Subject to telecommunications operator licensing
   ❌ Intended for production deployment
   ❌ Suitable for commercial use
 
-The creators do not operate any telecommunications services, messaging
-platforms, or communication networks using this software.
+**Critical Technical Distinction:**
+
+TRADITIONAL MESSAGING SERVICES (WhatsApp, Telegram, VK):
+  User A → Central Server (relays messages) → User B
+  └─ Server sees, stores, and controls all messages
+  └─ Service operator subject to telecommunications regulation
+
+D-PC MESSENGER (P2P ARCHITECTURE):
+  User A ←────────────────────────────→ User B
+         Direct encrypted P2P connection
+
+  Optional Hub (if using WebRTC):
+  └─ Provides signaling only (connection setup)
+  └─ Does NOT relay or store messages
+  └─ Similar to STUN/TURN servers or BitTorrent trackers
+  └─ Completely optional (Direct TLS works without Hub)
+
+**Legal Implication:**
+
+The creators do not operate:
+  ❌ Message relay infrastructure
+  ❌ Message storage services
+  ❌ Telecommunications networks
+  ❌ Messaging platforms
+
+The creators provide:
+  ✅ Peer-to-peer communication software (tool)
+  ✅ Optional signaling infrastructure (connection facilitation only)
+
+Users communicate directly with each other. The creators never control,
+relay, or store user messages.
 
 ================================================================================
 5. USER RESPONSIBILITY FOR LEGAL COMPLIANCE
