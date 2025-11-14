@@ -953,28 +953,58 @@ class CoreService:
         )
 
     def _assemble_final_prompt(self, contexts: dict, clean_prompt: str) -> str:
-        """Helper method to assemble the final prompt for the LLM."""
-        system_instruction = (
-            "You are a helpful AI assistant. Your task is to answer the user's query based on the provided JSON data blobs inside <CONTEXT> tags. "
-            "The 'source' attribute of each tag indicates who the context belongs to. The source 'local' refers to the user asking the query. "
-            "Other sources are peer nodes who have shared their context to help answer the query. "
-            "Analyze all provided contexts to formulate your answer. When relevant, cite which source provided specific information."
+        """Helper method to assemble the final prompt for the LLM with instruction processing.
+
+        Phase 2: Incorporates InstructionBlock and bias mitigation from PCM v2.0
+        """
+        # Extract instruction blocks and bias settings from contexts
+        instruction_blocks = []
+        bias_mitigation_settings = []
+        cultural_contexts = []
+
+        for source_id, context_obj in contexts.items():
+            # Extract instruction block if present
+            if hasattr(context_obj, 'instruction') and context_obj.instruction:
+                instruction = context_obj.instruction
+                instruction_blocks.append({
+                    'source': source_id,
+                    'primary': instruction.primary,
+                    'verification_protocol': instruction.verification_protocol,
+                    'bias_mitigation': instruction.bias_mitigation
+                })
+                bias_mitigation_settings.append(instruction.bias_mitigation)
+
+            # Extract cultural context if present
+            if hasattr(context_obj, 'cognitive_profile') and context_obj.cognitive_profile:
+                if context_obj.cognitive_profile.cultural_background:
+                    cultural_contexts.append({
+                        'source': source_id,
+                        'background': context_obj.cognitive_profile.cultural_background
+                    })
+
+        # Build system instruction with bias mitigation
+        system_instruction = self._build_bias_aware_system_instruction(
+            instruction_blocks,
+            bias_mitigation_settings,
+            cultural_contexts
         )
+
+        # Build context blocks
         context_blocks = []
         for source_id, context_obj in contexts.items():
             context_dict = asdict(context_obj)
             json_string = json.dumps(context_dict, indent=2, ensure_ascii=False)
-            
+
             # Add peer name if available
             source_label = source_id
             if source_id != 'local' and source_id in self.peer_metadata:
                 peer_name = self.peer_metadata[source_id].get('name')
                 if peer_name:
                     source_label = f"{peer_name} ({source_id})"
-            
+
             block = f'<CONTEXT source="{source_label}">\n{json_string}\n</CONTEXT>'
             context_blocks.append(block)
-        
+
         final_prompt = (
             f"{system_instruction}\n\n"
             f"--- CONTEXTUAL DATA ---\n"
@@ -983,6 +1013,121 @@ class CoreService:
             f"USER QUERY: {clean_prompt}"
         )
         return final_prompt
+
+    def _build_bias_aware_system_instruction(
+        self,
+        instruction_blocks: List[Dict[str, Any]],
+        bias_mitigation_settings: List[Dict[str, Any]],
+        cultural_contexts: List[Dict[str, str]]
+    ) -> str:
+        """Build system instruction with bias mitigation and multi-perspective requirements.
+
+        Phase 2: Implements cognitive bias mitigation strategies from KNOWLEDGE_ARCHITECTURE.md
+        """
+        # Base instruction
+        base = (
+            "You are a helpful AI assistant with strong bias-awareness training. "
+            "Your task is to answer the user's query based on the provided JSON data blobs inside <CONTEXT> tags. "
+            "The 'source' attribute of each tag indicates who the context belongs to. The source 'local' refers to the user asking the query. "
+            "Other sources are peer nodes who have shared their context to help answer the query. "
+            "Analyze all provided contexts to formulate your answer. When relevant, cite which source provided specific information."
+        )
+
+        # Add user-specific instructions
+        if instruction_blocks:
+            base += "\n\nUSER-SPECIFIC INSTRUCTIONS:"
+            for block in instruction_blocks:
+                source_label = "Local user" if block['source'] == 'local' else f"Peer {block['source']}"
+                base += f"\n[{source_label}] {block['primary']}"
+                if block.get('verification_protocol'):
+                    base += f" ({block['verification_protocol']})"
+
+        # Check if ANY context requires bias mitigation
+        requires_bias_mitigation = any(
+            settings.get('require_multi_perspective') or
+            settings.get('challenge_status_quo')
+            for settings in bias_mitigation_settings
+        ) if bias_mitigation_settings else False
+
+        # Add bias mitigation rules if required
+        if requires_bias_mitigation:
+            base += "\n\nBIAS MITIGATION RULES:"
+
+            # Multi-perspective requirement
+            if any(s.get('require_multi_perspective') for s in bias_mitigation_settings):
+                base += (
+                    "\n1. Multi-Perspective Analysis: Consider perspectives from at least 3 different cultural or methodological viewpoints"
+                    "\n   - Western individualistic approach"
+                    "\n   - Eastern collective approach"
+                    "\n   - Indigenous/holistic approach"
+                    "\n   - Or other relevant frameworks based on the query"
+                )
+
+            # Status quo challenge
+            if any(s.get('challenge_status_quo') for s in bias_mitigation_settings):
+                base += (
+                    "\n2. Challenge Status Quo: Always question existing approaches and common assumptions"
+                    "\n   - Don't favor solutions just because they're mentioned in context"
+                    "\n   - Consider alternatives to established methods"
+                    "\n   - Ask 'What if we approached this differently?'"
+                )
+
+            # Cultural sensitivity
+            cultural_sensitivity_settings = [
+                s.get('cultural_sensitivity')
+                for s in bias_mitigation_settings
+                if s.get('cultural_sensitivity')
+            ]
+            if cultural_sensitivity_settings:
+                base += f"\n3. Cultural Sensitivity: {cultural_sensitivity_settings[0]}"
+                if cultural_contexts:
+                    base += "\n   Cultural contexts to consider:"
+                    for ctx in cultural_contexts:
+                        base += f"\n   - [{ctx['source']}]: {ctx['background']}"
+
+            # Framing neutrality
+            if any(s.get('framing_neutrality') for s in bias_mitigation_settings):
+                base += (
+                    "\n4. Framing Neutrality: Present options without preference or bias"
+                    "\n   - Use neutral language"
+                    "\n   - Don't anchor on first-mentioned options"
+                    "\n   - Present pros and cons equally"
+                )
+
+            # Evidence requirement
+            evidence_requirements = [
+                s.get('evidence_requirement')
+                for s in bias_mitigation_settings
+                if s.get('evidence_requirement')
+            ]
+            if evidence_requirements:
+                evidence_level = evidence_requirements[0]
+                if evidence_level == 'citations_preferred':
+                    base += (
+                        "\n5. Evidence Requirement: Provide reasoning and sources for claims"
+                        "\n   - Cite which context provided specific information"
+                        "\n   - Distinguish between facts and opinions"
+                        "\n   - Note confidence levels when uncertain"
+                    )
+                elif evidence_level == 'citations_required':
+                    base += (
+                        "\n5. Evidence Requirement: MUST provide citations for all factual claims"
+                        "\n   - Every claim must be traceable to a context source"
+                        "\n   - Flag any unsourced information clearly"
+                    )
+
+            # Add cognitive biases to avoid
+            base += (
+                "\n\nCOGNITIVE BIASES TO AVOID:"
+                "\n- Status quo bias (favoring current/mentioned methods)"
+                "\n- Anchoring bias (overweighting information presented first)"
+                "\n- Cultural bias (assuming Western-centric solutions)"
+                "\n- Groupthink (consensus without critical evaluation)"
+                "\n- Primacy effect (favoring first-presented options)"
+                "\n- Confirmation bias (seeking info that confirms existing beliefs)"
+            )
+
+        return base
 
     def _build_combined_prompt(self, query: str, contexts: Dict[str, PersonalContext]) -> str:
         """Build a prompt that combines the query with multiple contexts."""

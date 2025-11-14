@@ -1,0 +1,442 @@
+"""
+Markdown Knowledge Manager - Phase 3
+
+Manages Claude Code-style markdown files for human-readable knowledge storage.
+Provides bidirectional sync between JSON PCM data and markdown files.
+"""
+
+import re
+from pathlib import Path
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+
+from .pcm_core import (
+    PersonalContext,
+    Topic,
+    KnowledgeEntry,
+    KnowledgeSource
+)
+from .crypto import DPC_HOME_DIR
+
+
+class MarkdownKnowledgeManager:
+    """Manages markdown files for knowledge topics (Claude Code pattern)"""
+
+    def __init__(self, knowledge_dir: Optional[Path] = None):
+        """Initialize markdown manager
+
+        Args:
+            knowledge_dir: Directory for markdown files (default: ~/.dpc/knowledge/)
+        """
+        if knowledge_dir:
+            self.knowledge_dir = Path(knowledge_dir)
+        else:
+            self.knowledge_dir = DPC_HOME_DIR / "knowledge"
+
+        self.knowledge_dir.mkdir(parents=True, exist_ok=True)
+
+    def sanitize_filename(self, text: str, max_length: int = 50) -> str:
+        """Convert text to safe filename
+
+        Args:
+            text: Text to convert
+            max_length: Maximum filename length
+
+        Returns:
+            Safe filename without extension
+        """
+        # Convert to lowercase, replace spaces with underscores
+        filename = text.lower().replace(' ', '_')
+
+        # Remove non-alphanumeric characters (except underscore and hyphen)
+        filename = re.sub(r'[^\w\-]', '', filename)
+
+        # Truncate to max length
+        return filename[:max_length]
+
+    def create_topic_file(
+        self,
+        topic: Topic,
+        topic_name: str,
+        commit_info: Optional[Dict[str, Any]] = None
+    ) -> Path:
+        """Create markdown file for a new topic
+
+        Args:
+            topic: Topic object to create file for
+            topic_name: Name of the topic
+            commit_info: Optional commit information
+
+        Returns:
+            Path to created markdown file
+        """
+        # Generate filename
+        filename = self.sanitize_filename(topic_name)
+        filepath = self.knowledge_dir / f"{filename}.md"
+
+        # Build markdown content
+        content = self._build_topic_markdown(topic, topic_name, commit_info)
+
+        # Write file
+        filepath.write_text(content, encoding='utf-8')
+
+        return filepath
+
+    def _build_topic_markdown(
+        self,
+        topic: Topic,
+        topic_name: str,
+        commit_info: Optional[Dict[str, Any]] = None
+    ) -> str:
+        """Build complete markdown content for a topic
+
+        Args:
+            topic: Topic object
+            topic_name: Name of the topic
+            commit_info: Optional commit information
+
+        Returns:
+            Markdown content as string
+        """
+        lines = []
+
+        # Title
+        lines.append(f"# {topic_name.replace('_', ' ').title()}")
+        lines.append("")
+
+        # Metadata header
+        lines.append(f"*Created: {topic.created_at}*")
+        lines.append(f"*Last Modified: {topic.last_modified}*")
+        lines.append(f"*Version: {topic.version}*")
+        lines.append(f"*Mastery Level: {topic.mastery_level.title()}*")
+
+        if commit_info:
+            lines.append(f"*Commit: {commit_info.get('commit_id', 'N/A')}*")
+
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+        # Overview
+        lines.append("## Overview")
+        lines.append("")
+        lines.append(topic.summary)
+        lines.append("")
+
+        # Key books (if any)
+        if topic.key_books:
+            lines.append("## Key Books")
+            lines.append("")
+            for book in topic.key_books:
+                authors_str = ", ".join(book.authors) if book.authors else "Unknown"
+                rating_stars = "⭐" * book.rating
+                lines.append(f"- **{book.title}** by {authors_str} {rating_stars}")
+            lines.append("")
+
+        # Preferred authors (if any)
+        if topic.preferred_authors:
+            lines.append("## Preferred Authors")
+            lines.append("")
+            for author in topic.preferred_authors:
+                lines.append(f"- {author}")
+            lines.append("")
+
+        # Learning strategies (if any)
+        if topic.learning_strategies:
+            lines.append("## Learning Strategies")
+            lines.append("")
+            for strategy in topic.learning_strategies:
+                lines.append(f"- {strategy}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+        # Knowledge Entries
+        if topic.entries:
+            lines.append("## Knowledge Entries")
+            lines.append("")
+
+            for i, entry in enumerate(topic.entries, 1):
+                lines.extend(self._format_knowledge_entry(entry, i))
+
+        return "\n".join(lines)
+
+    def _format_knowledge_entry(self, entry: KnowledgeEntry, index: int) -> List[str]:
+        """Format a single knowledge entry as markdown
+
+        Args:
+            entry: KnowledgeEntry object
+            index: Entry number
+
+        Returns:
+            List of markdown lines
+        """
+        lines = []
+
+        # Entry header
+        tag_label = entry.tags[0] if entry.tags else f"Entry {index}"
+        lines.append(f"### {tag_label.replace('_', ' ').title()}")
+        lines.append("")
+
+        # Metadata
+        lines.append(f"*Last Updated: {entry.last_updated}*")
+        lines.append(f"*Confidence: {entry.confidence:.0%}*")
+
+        if entry.source:
+            source_type = entry.source.type.replace('_', ' ').title()
+            lines.append(f"*Source: {source_type}*")
+
+            if entry.source.participants:
+                lines.append(f"*Participants: {', '.join(entry.source.participants)}*")
+
+            if entry.source.cultural_perspectives_considered:
+                perspectives = ', '.join(entry.source.cultural_perspectives_considered)
+                lines.append(f"*Cultural Perspectives: {perspectives}*")
+
+        if entry.cultural_specific:
+            context_str = ', '.join(entry.requires_context)
+            lines.append(f"*⚠️ Cultural Context Required: {context_str}*")
+
+        lines.append("")
+
+        # Content
+        lines.append(entry.content)
+        lines.append("")
+
+        # Tags
+        if len(entry.tags) > 1:
+            lines.append(f"**Tags:** {', '.join(entry.tags)}")
+            lines.append("")
+
+        # Alternative viewpoints
+        if entry.alternative_viewpoints:
+            lines.append("**Alternative Viewpoints:**")
+            for viewpoint in entry.alternative_viewpoints:
+                lines.append(f"- {viewpoint}")
+            lines.append("")
+
+        # Self-improvement metrics
+        if entry.usage_count > 0:
+            lines.append(f"*Used {entry.usage_count} times | Effectiveness: {entry.effectiveness_score:.0%}*")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+        return lines
+
+    def update_topic_file(
+        self,
+        filepath: Path,
+        new_entries: List[KnowledgeEntry],
+        update_metadata: Optional[Dict[str, Any]] = None
+    ) -> None:
+        """Append new entries to existing markdown file
+
+        Args:
+            filepath: Path to markdown file
+            new_entries: List of new KnowledgeEntry objects to add
+            update_metadata: Optional metadata to update in header
+        """
+        if not filepath.exists():
+            raise FileNotFoundError(f"Markdown file not found: {filepath}")
+
+        current_content = filepath.read_text(encoding='utf-8')
+
+        # Find "## Knowledge Entries" section
+        entries_marker = "## Knowledge Entries"
+        insert_pos = current_content.find(entries_marker)
+
+        if insert_pos == -1:
+            # No entries section yet, add one at the end
+            new_content = current_content.rstrip() + "\n\n---\n\n## Knowledge Entries\n\n"
+            # Count as starting from entry 1
+            start_index = 1
+        else:
+            # Find where to insert (after last entry, before next section or EOF)
+            next_section_pos = current_content.find("\n## ", insert_pos + len(entries_marker))
+            if next_section_pos == -1:
+                insert_pos = len(current_content)
+            else:
+                insert_pos = next_section_pos
+
+            # Count existing entries
+            existing_entries = current_content[:insert_pos].count("### ")
+            start_index = existing_entries + 1
+
+            new_content = current_content[:insert_pos]
+
+        # Append new entries
+        for i, entry in enumerate(new_entries, start_index):
+            entry_lines = self._format_knowledge_entry(entry, i)
+            new_content += "\n".join(entry_lines)
+
+        # Append remaining content if there was a next section
+        if insert_pos < len(current_content) and current_content[insert_pos:].strip():
+            new_content += current_content[insert_pos:]
+
+        # Update metadata in header if provided
+        if update_metadata:
+            new_content = self._update_markdown_metadata(new_content, update_metadata)
+
+        # Write updated file
+        filepath.write_text(new_content, encoding='utf-8')
+
+    def _update_markdown_metadata(self, content: str, metadata: Dict[str, Any]) -> str:
+        """Update metadata fields in markdown header
+
+        Args:
+            content: Current markdown content
+            metadata: Dictionary of metadata to update
+
+        Returns:
+            Updated markdown content
+        """
+        lines = content.split('\n')
+
+        # Update specific metadata lines
+        if 'last_modified' in metadata:
+            for i, line in enumerate(lines):
+                if line.startswith('*Last Modified:'):
+                    lines[i] = f"*Last Modified: {metadata['last_modified']}*"
+                    break
+
+        if 'version' in metadata:
+            for i, line in enumerate(lines):
+                if line.startswith('*Version:'):
+                    lines[i] = f"*Version: {metadata['version']}*"
+                    break
+
+        return '\n'.join(lines)
+
+    def sync_context_to_markdown(self, context: PersonalContext) -> Dict[str, Path]:
+        """Sync entire PersonalContext to markdown files
+
+        Args:
+            context: PersonalContext object
+
+        Returns:
+            Dictionary mapping topic names to markdown file paths
+        """
+        synced_files = {}
+
+        for topic_name, topic in context.knowledge.items():
+            # Check if topic already has a markdown file
+            if topic.markdown_file:
+                filepath = self.knowledge_dir / topic.markdown_file.split('/')[-1]
+            else:
+                # Create new file
+                filepath = self.create_topic_file(topic, topic_name)
+                # Update topic to reference the file
+                topic.markdown_file = f"knowledge/{filepath.name}"
+
+            synced_files[topic_name] = filepath
+
+        return synced_files
+
+    def read_markdown_file(self, filepath: Path) -> str:
+        """Read markdown file content
+
+        Args:
+            filepath: Path to markdown file
+
+        Returns:
+            File content as string
+        """
+        if not filepath.exists():
+            raise FileNotFoundError(f"Markdown file not found: {filepath}")
+
+        return filepath.read_text(encoding='utf-8')
+
+    def list_markdown_files(self) -> List[Path]:
+        """List all markdown files in knowledge directory
+
+        Returns:
+            List of Path objects for markdown files
+        """
+        return sorted(self.knowledge_dir.glob("*.md"))
+
+    def delete_markdown_file(self, filepath: Path) -> bool:
+        """Delete a markdown file
+
+        Args:
+            filepath: Path to file to delete
+
+        Returns:
+            True if file was deleted, False if file didn't exist
+        """
+        if filepath.exists():
+            filepath.unlink()
+            return True
+        return False
+
+
+# Example usage
+if __name__ == '__main__':
+    from dpc_protocol.pcm_core import Book
+
+    # Create manager
+    manager = MarkdownKnowledgeManager()
+
+    print(f"Knowledge directory: {manager.knowledge_dir}")
+
+    # Create example topic
+    topic = Topic(
+        summary="Game design principles and patterns",
+        key_books=[
+            Book(title="The Art of Game Design", rating=5, authors=["Jesse Schell"])
+        ],
+        mastery_level="intermediate",
+        entries=[
+            KnowledgeEntry(
+                content="Environmental storytelling is more powerful than explicit exposition.",
+                tags=["narrative_design", "environmental_storytelling"],
+                confidence=0.95,
+                source=KnowledgeSource(
+                    type="ai_summary",
+                    participants=["alice", "bob"],
+                    cultural_perspectives_considered=["Western", "Eastern"]
+                ),
+                alternative_viewpoints=[
+                    "Explicit narrative works better for complex lore",
+                    "Audio logs provide good middle ground"
+                ]
+            )
+        ],
+        learning_strategies=["Analyze successful games", "Prototype quickly"]
+    )
+
+    # Create markdown file
+    filepath = manager.create_topic_file(topic, "game_design_philosophy")
+    print(f"\nCreated: {filepath}")
+
+    # Read it back
+    content = manager.read_markdown_file(filepath)
+    print(f"\n--- Content Preview ---")
+    print(f"File length: {len(content)} characters")
+    print(f"First line: {content.split(chr(10))[0]}")
+
+    # Add another entry
+    new_entry = KnowledgeEntry(
+        content="Puzzle difficulty should scale gradually to maintain flow state.",
+        tags=["puzzle_design", "difficulty_curve"],
+        confidence=0.90
+    )
+
+    manager.update_topic_file(filepath, [new_entry], update_metadata={
+        'version': 2,
+        'last_modified': datetime.utcnow().isoformat()
+    })
+
+    print(f"\nUpdated: {filepath}")
+
+    # List all files
+    files = manager.list_markdown_files()
+    print(f"\nMarkdown files: {len(files)}")
+    for f in files:
+        print(f"  - {f.name}")
+
+    # Cleanup example file
+    manager.delete_markdown_file(filepath)
+    print(f"\nCleaned up example file")
