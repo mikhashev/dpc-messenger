@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 PCM Migration Script - Upgrade personal.json from v1.0 to v2.0
 
@@ -22,7 +22,7 @@ def backup_file(file_path: Path) -> Path:
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     backup_path = file_path.parent / f"{file_path.stem}_backup_{timestamp}{file_path.suffix}"
     shutil.copy2(file_path, backup_path)
-    print(f"✓ Backup created: {backup_path}")
+    print(f"[OK] Backup created: {backup_path}")
     return backup_path
 
 
@@ -48,13 +48,13 @@ def detect_version(file_path: Path) -> str:
 def migrate_v1_to_v2(file_path: Path, dry_run: bool = False) -> None:
     """Migrate PCM file from v1.0 to v2.0"""
 
-    print(f"\n📦 Migrating: {file_path}")
-    print(f"   Format: v1.0 → v2.0")
+    print(f"\nMigrating: {file_path}")
+    print(f"   Format: v1.0 -> v2.0")
 
     # Detect current version
     current_version = detect_version(file_path)
     if current_version == '2.0':
-        print(f"⚠️  File is already v2.0 format. No migration needed.")
+        print(f"Warning: File is already v2.0 format. No migration needed.")
         return
 
     # Load using PCMCore (handles v1 compatibility)
@@ -62,15 +62,15 @@ def migrate_v1_to_v2(file_path: Path, dry_run: bool = False) -> None:
 
     try:
         context = core.load_context()
-        print(f"✓ Loaded v1.0 context successfully")
+        print(f"[OK] Loaded v1.0 context successfully")
         print(f"   - Profile: {context.profile.name}")
         print(f"   - Topics: {len(context.knowledge)}")
     except Exception as e:
-        print(f"✗ Error loading context: {e}")
+        print(f"[ERROR] Error loading context: {e}")
         return
 
     # Show what will be added
-    print(f"\n📋 v2.0 Enhancements:")
+    print(f"\n v2.0 Enhancements:")
     print(f"   + InstructionBlock (AI behavior rules)")
     print(f"   + CognitiveProfile (learning style, bias awareness)")
     print(f"   + Version tracking (commit history)")
@@ -78,8 +78,8 @@ def migrate_v1_to_v2(file_path: Path, dry_run: bool = False) -> None:
     print(f"   + Metadata (format version, timestamps)")
 
     if dry_run:
-        print(f"\n🔍 DRY RUN - No changes made")
-        print(f"\n📄 Preview of v2.0 structure:")
+        print(f"\n DRY RUN - No changes made")
+        print(f"\n Preview of v2.0 structure:")
         print(json.dumps({
             "profile": {"name": context.profile.name, "description": context.profile.description},
             "knowledge": f"<{len(context.knowledge)} topics>",
@@ -99,16 +99,16 @@ def migrate_v1_to_v2(file_path: Path, dry_run: bool = False) -> None:
     # Save as v2.0
     try:
         core.save_context(context)
-        print(f"\n✅ Migration complete!")
+        print(f"\n[SUCCESS] Migration complete!")
         print(f"   - Format version: 2.0")
         print(f"   - Backup: {backup_path}")
-        print(f"\n💡 Next steps:")
+        print(f"\nTIP: Next steps:")
         print(f"   1. Review the migrated file: {file_path}")
         print(f"   2. Customize instruction blocks in the JSON")
         print(f"   3. Add cognitive profile if desired")
         print(f"   4. Original backup kept at: {backup_path}")
     except Exception as e:
-        print(f"\n✗ Migration failed: {e}")
+        print(f"\n[ERROR] Migration failed: {e}")
         print(f"   Restoring from backup...")
         shutil.copy2(backup_path, file_path)
         print(f"   File restored successfully")
@@ -177,7 +177,7 @@ Examples:
     args = parser.parse_args()
 
     print("=" * 60)
-    print("PCM Migration Tool - v1.0 → v2.0")
+    print("PCM Migration Tool - v1.0 -> v2.0")
     print("=" * 60)
 
     # Determine files to migrate
@@ -185,12 +185,12 @@ Examples:
 
     if args.file:
         if not args.file.exists():
-            print(f"✗ Error: File not found: {args.file}")
+            print(f"[ERROR] Error: File not found: {args.file}")
             return
         files_to_migrate.append(args.file)
     elif args.dir:
         if not args.dir.exists():
-            print(f"✗ Error: Directory not found: {args.dir}")
+            print(f"[ERROR] Error: Directory not found: {args.dir}")
             return
         pattern = '**/*.json' if args.recursive else '*.json'
         files_to_migrate = list(args.dir.glob(pattern))
@@ -198,28 +198,28 @@ Examples:
         # Default: migrate ~/.dpc/personal.json
         default_file = DPC_HOME_DIR / 'personal.json'
         if not default_file.exists():
-            print(f"✗ Error: Default file not found: {default_file}")
+            print(f"[ERROR] Error: Default file not found: {default_file}")
             print(f"   Use --file to specify a custom path")
             return
         files_to_migrate.append(default_file)
 
     if not files_to_migrate:
-        print("✗ No files found to migrate")
+        print("[ERROR] No files found to migrate")
         return
 
-    print(f"\n📁 Files to migrate: {len(files_to_migrate)}")
+    print(f"\n Files to migrate: {len(files_to_migrate)}")
     for file_path in files_to_migrate:
         print(f"   - {file_path}")
 
     if args.dry_run:
-        print(f"\n⚠️  DRY RUN MODE - No changes will be saved")
+        print(f"\n[WARNING]  DRY RUN MODE - No changes will be saved")
 
     # Migrate each file
     for file_path in files_to_migrate:
         try:
             migrate_v1_to_v2(file_path, dry_run=args.dry_run)
         except Exception as e:
-            print(f"\n✗ Error migrating {file_path}: {e}")
+            print(f"\n[ERROR] Error migrating {file_path}: {e}")
             continue
 
     print("\n" + "=" * 60)
