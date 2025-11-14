@@ -20,8 +20,10 @@ from .token_cache import TokenCache
 from .peer_cache import PeerCache
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
+from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
+from datetime import datetime
 
 # Define the path to the user's D-PC configuration directory
 DPC_HOME_DIR = Path.home() / ".dpc"
@@ -71,6 +73,13 @@ class CoreService:
             pcm_core=self.pcm_core,
             vote_timeout_minutes=10
         )
+
+        # Conversation monitors (per conversation/peer for knowledge extraction)
+        # conversation_id -> ConversationMonitor
+        self.conversation_monitors: Dict[str, ConversationMonitor] = {}
+
+        # Knowledge extraction settings
+        self.auto_knowledge_detection_enabled: bool = True  # Can be toggled by user
 
         self._is_running = False
         self._background_tasks = set()
@@ -433,7 +442,39 @@ class CoreService:
                 "text": text,
                 "message_id": message_id
             })
-        
+
+            # Feed to conversation monitor for knowledge extraction (Phase 4.2)
+            if self.auto_knowledge_detection_enabled:
+                try:
+                    monitor = self._get_or_create_conversation_monitor(sender_node_id)
+
+                    # Create ConvMessage object for monitor
+                    conv_message = ConvMessage(
+                        message_id=message_id,
+                        conversation_id=sender_node_id,
+                        sender_node_id=sender_node_id,
+                        sender_name=self.peer_metadata.get(sender_node_id, {}).get("name", sender_node_id),
+                        text=text,
+                        timestamp=datetime.utcnow().isoformat()
+                    )
+
+                    # Feed to monitor (automatic knowledge detection)
+                    proposal = await monitor.on_message(conv_message)
+
+                    # If proposal generated, broadcast to UI and start voting
+                    if proposal:
+                        print(f"[Auto-detect] Knowledge proposal generated for {sender_node_id}")
+                        await self.local_api.broadcast_event(
+                            "knowledge_commit_proposed",
+                            proposal.to_dict()
+                        )
+                        await self.consensus_manager.propose_commit(
+                            proposal=proposal,
+                            broadcast_func=self._broadcast_to_peers
+                        )
+                except Exception as e:
+                    print(f"Error in conversation monitoring: {e}")
+
         elif command == "REQUEST_CONTEXT":
             # Context request from peer - handle and respond
             request_id = payload.get("request_id")
@@ -653,6 +694,147 @@ class CoreService:
                 await self.p2p_manager.send_to_peer(peer_id, message)
             except Exception as e:
                 print(f"Failed to broadcast to {peer_id}: {e}")
+
+    def _get_or_create_conversation_monitor(self, conversation_id: str) -> ConversationMonitor:
+        """Get or create a conversation monitor for a conversation/peer.
+
+        Args:
+            conversation_id: Identifier for the conversation (peer node_id or "local_ai")
+
+        Returns:
+            ConversationMonitor instance
+        """
+        if conversation_id not in self.conversation_monitors:
+            # Build participants list
+            participants = []
+
+            if conversation_id == "local_ai":
+                # Local AI chat: just the user
+                participants = [
+                    {
+                        "node_id": self.p2p_manager.node_id,
+                        "name": "User",
+                        "context": "local"
+                    }
+                ]
+            else:
+                # Peer chat: user + peer
+                participants = [
+                    {
+                        "node_id": self.p2p_manager.node_id,
+                        "name": "User",
+                        "context": "local"
+                    },
+                    {
+                        "node_id": conversation_id,
+                        "name": self.peer_metadata.get(conversation_id, {}).get("name", conversation_id),
+                        "context": "peer"
+                    }
+                ]
+
+            self.conversation_monitors[conversation_id] = ConversationMonitor(
+                conversation_id=conversation_id,
+                participants=participants,
+                llm_manager=self.llm_manager,
+                knowledge_threshold=0.7  # 70% confidence threshold
+            )
+            print(f"Created conversation monitor for {conversation_id} with {len(participants)} participant(s)")
+
+        return self.conversation_monitors[conversation_id]
+
+    async def end_conversation_session(self, conversation_id: str) -> Dict[str, Any]:
+        """Manually end a conversation session and extract knowledge.
+
+        UI Integration: Called when user clicks "End Session & Save Knowledge" button.
+
+        Args:
+            conversation_id: The conversation/peer ID to end session for
+
+        Returns:
+            Dict with status and proposal (if knowledge detected)
+        """
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            print(f"[End Session] Attempting manual extraction for {conversation_id}")
+            print(f"   Buffer: {len(monitor.message_buffer)} messages")
+            print(f"   Current score: {monitor.knowledge_score:.2f}")
+
+            # Force knowledge extraction even if threshold not met
+            proposal = await monitor.generate_commit_proposal(force=True)
+
+            if proposal:
+                print(f"✓ Knowledge proposal generated for {conversation_id}")
+                print(f"   Topic: {proposal.topic}")
+                print(f"   Entries: {len(proposal.entries)}")
+                print(f"   Confidence: {proposal.avg_confidence:.2f}")
+
+                # Broadcast to UI
+                await self.local_api.broadcast_event(
+                    "knowledge_commit_proposed",
+                    proposal.to_dict()
+                )
+
+                # Start consensus voting
+                await self.consensus_manager.propose_commit(
+                    proposal=proposal,
+                    broadcast_func=self._broadcast_to_peers
+                )
+
+                return {
+                    "status": "success",
+                    "message": "Knowledge proposal created",
+                    "proposal_id": proposal.proposal_id
+                }
+            else:
+                print(f"✗ No proposal generated - buffer was empty or no knowledge detected")
+                return {
+                    "status": "success",
+                    "message": "No significant knowledge detected in conversation (buffer may be empty)"
+                }
+
+        except Exception as e:
+            print(f"Error ending conversation session: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def toggle_auto_knowledge_detection(self, enabled: bool = None) -> Dict[str, Any]:
+        """Toggle automatic knowledge detection on/off.
+
+        UI Integration: Called when user toggles the auto-detection switch.
+
+        Args:
+            enabled: True to enable, False to disable, None to toggle current state
+
+        Returns:
+            Dict with status and current state
+        """
+        try:
+            if enabled is None:
+                # Toggle current state
+                self.auto_knowledge_detection_enabled = not self.auto_knowledge_detection_enabled
+            else:
+                # Set to specific value
+                self.auto_knowledge_detection_enabled = enabled
+
+            state_text = "enabled" if self.auto_knowledge_detection_enabled else "disabled"
+            print(f"Auto knowledge detection {state_text}")
+
+            return {
+                "status": "success",
+                "enabled": self.auto_knowledge_detection_enabled,
+                "message": f"Automatic knowledge detection {state_text}"
+            }
+
+        except Exception as e:
+            print(f"Error toggling auto knowledge detection: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
 
     # --- P2P Connection Methods ---
 
@@ -1038,6 +1220,58 @@ class CoreService:
             status=status,
             payload=response_payload
         )
+
+        # Feed local AI conversation to monitor (Phase 4.2 - Local AI support)
+        if self.auto_knowledge_detection_enabled and status == "OK":
+            try:
+                monitor = self._get_or_create_conversation_monitor("local_ai")
+                print(f"[Monitor] Feeding messages to local_ai monitor (buffer size before: {len(monitor.message_buffer)})")
+
+                # Feed user message
+                user_message = ConvMessage(
+                    message_id=f"{command_id}-user",
+                    conversation_id="local_ai",
+                    sender_node_id="user",
+                    sender_name="User",
+                    text=prompt,
+                    timestamp=datetime.utcnow().isoformat()
+                )
+                await monitor.on_message(user_message)
+
+                # Feed AI response
+                ai_message = ConvMessage(
+                    message_id=f"{command_id}-ai",
+                    conversation_id="local_ai",
+                    sender_node_id="ai",
+                    sender_name="AI Assistant",
+                    text=response_payload.get("content", ""),
+                    timestamp=datetime.utcnow().isoformat()
+                )
+                proposal = await monitor.on_message(ai_message)
+
+                print(f"[Monitor] Buffer size after: {len(monitor.message_buffer)}, Score: {monitor.knowledge_score:.2f}")
+
+                # If proposal generated, broadcast to UI
+                if proposal:
+                    print(f"[Auto-detect] Knowledge proposal generated for local_ai chat")
+                    await self.local_api.broadcast_event(
+                        "knowledge_commit_proposed",
+                        proposal.to_dict()
+                    )
+                    await self.consensus_manager.propose_commit(
+                        proposal=proposal,
+                        broadcast_func=self._broadcast_to_peers
+                    )
+                else:
+                    print(f"[Monitor] No proposal yet (need 5 messages for auto-detect)")
+            except Exception as e:
+                print(f"Error in local AI conversation monitoring: {e}")
+                import traceback
+                traceback.print_exc()
+        elif not self.auto_knowledge_detection_enabled:
+            print(f"[Monitor] Auto-detection is OFF - messages not being monitored")
+        elif status != "OK":
+            print(f"[Monitor] Query failed (status={status}) - not monitoring")
 
     def _assemble_final_prompt(self, contexts: dict, clean_prompt: str) -> str:
         """Helper method to assemble the final prompt for the LLM with instruction processing.

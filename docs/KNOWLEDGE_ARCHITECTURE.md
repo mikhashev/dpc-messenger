@@ -1,7 +1,7 @@
 # DPC Messenger: Knowledge Architecture & Context Management
 
 **Version:** 2.0
-**Date:** January 2025
+**Date:** November 2025
 **Status:** Design Specification
 
 ---
@@ -530,8 +530,7 @@ class PersonalContext:
         "created": datetime.utcnow().isoformat(),
         "last_updated": datetime.utcnow().isoformat(),
         "storage": "local",
-        "format_version": "2.0",
-        "schema_url": "https://dpc-protocol.org/schemas/pcm/v2.0"
+        "format_version": "2.0"
     })
 ```
 

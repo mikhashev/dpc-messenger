@@ -98,6 +98,37 @@ class ConversationMonitor:
 
         return None
 
+    async def generate_commit_proposal(self, force: bool = False) -> Optional[KnowledgeCommitProposal]:
+        """Manually generate a knowledge commit proposal
+
+        Args:
+            force: If True, generate proposal even if below threshold
+
+        Returns:
+            KnowledgeCommitProposal if knowledge detected (or forced), None otherwise
+        """
+        if not self.message_buffer:
+            return None
+
+        # Calculate score if not already done
+        if self.knowledge_score == 0.0:
+            self.knowledge_score = await self._calculate_knowledge_score()
+            self.last_analysis_time = datetime.utcnow().isoformat()
+
+        # Check if we should generate proposal
+        if force or self.knowledge_score > self.knowledge_threshold:
+            # Generate proposal
+            proposal = await self._generate_commit_proposal()
+
+            # Reset buffer
+            self.message_buffer = []
+            self.knowledge_score = 0.0
+            self.proposals_created += 1
+
+            return proposal
+
+        return None
+
     async def _calculate_knowledge_score(self) -> float:
         """Calculate knowledge-worthiness score for conversation segment
 
@@ -114,7 +145,9 @@ class ConversationMonitor:
         # Format messages for analysis
         messages_text = self._format_messages_for_analysis(self.message_buffer[-10:])
 
-        prompt = f"""Analyze this conversation segment for knowledge-worthiness.
+        prompt = f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations, no markdown, no code blocks - just raw JSON.
+
+Task: Analyze this conversation for knowledge-worthiness.
 
 Score 0.0-1.0 based on:
 - Substantive information (facts, decisions, insights): +0.3
@@ -126,22 +159,34 @@ Score 0.0-1.0 based on:
 MESSAGES:
 {messages_text}
 
-Output JSON: {{"score": 0.0-1.0, "reasoning": "explanation"}}"""
+REQUIRED OUTPUT FORMAT (raw JSON only):
+{{"score": 0.75, "reasoning": "brief explanation"}}
+
+DO NOT include any text before or after the JSON. DO NOT use markdown code blocks. DO NOT explain your analysis outside the JSON."""
 
         try:
             # Use LLM to analyze
-            response = await self.llm_manager.generate(
-                prompt=prompt,
-                temperature=0.3,  # Low temperature for consistent scoring
-                max_tokens=200
+            response = await self.llm_manager.query(
+                prompt=prompt
             )
 
-            # Parse response (assuming JSON output)
+            # Try to extract JSON if wrapped in markdown or text
             import json
-            result = json.loads(response)
-            return float(result.get('score', 0.0))
+            import re
+
+            # Try to find JSON in the response
+            json_match = re.search(r'\{[^{}]*"score"[^{}]*\}', response)
+            if json_match:
+                json_str = json_match.group(0)
+                result = json.loads(json_str)
+                return float(result.get('score', 0.0))
+            else:
+                # Try parsing the whole response
+                result = json.loads(response.strip())
+                return float(result.get('score', 0.0))
         except Exception as e:
             print(f"Error calculating knowledge score: {e}")
+            print(f"  LLM Response preview: {response[:200] if 'response' in locals() else 'N/A'}...")
             return 0.0
 
     def _detect_consensus(self) -> bool:
@@ -209,7 +254,7 @@ Output JSON: {{"score": 0.0-1.0, "reasoning": "explanation"}}"""
         messages_text = self._format_messages_for_analysis(self.message_buffer)
 
         # Build bias-resistant prompt
-        prompt = f"""You are a knowledge curator trained in cognitive bias mitigation.
+        prompt = f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
 
 PARTICIPANTS' CULTURAL CONTEXTS:
 {', '.join(cultural_contexts) if cultural_contexts else 'Not specified'}
@@ -217,33 +262,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 CONVERSATION:
 {messages_text}
 
-TASK: Extract structured knowledge following these STRICT RULES:
+TASK: Extract structured knowledge with bias mitigation.
 
-1. BIAS MITIGATION:
-   - Identify cultural assumptions in the discussion
-   - Provide alternative perspectives from non-represented cultures
-   - Flag statements that may only apply in specific contexts
-   - Rate confidence (0.0-1.0) for each claim
-   - Cite sources (participant names, external refs if mentioned)
-
-2. MULTI-PERSPECTIVE REQUIREMENT:
-   - Consider at least 3 cultural perspectives:
-     * Western individualistic
-     * Eastern collective
-     * Indigenous/holistic
-   - For each knowledge entry, state: "Universal" or "Context: [culture]"
-
-3. EVIDENCE REQUIREMENT:
-   - Every claim needs reasoning
-   - Flag opinions vs facts
-   - Note where participants disagreed
-
-4. DEVIL'S ADVOCATE:
-   - Generate critique of your own summary
-   - Identify potential weaknesses
-   - Suggest what might be missing
-
-OUTPUT FORMAT (JSON):
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
 {{
   "topic": "brief_topic_name",
   "summary": "One sentence overview",
@@ -251,32 +272,45 @@ OUTPUT FORMAT (JSON):
     {{
       "content": "Knowledge statement",
       "tags": ["tag1", "tag2"],
-      "confidence": 0.0-1.0,
-      "cultural_context": "Universal" or "Context: Western workplace",
-      "sources": ["alice", "bob"],
-      "reasoning": "Why this is notable"
+      "confidence": 0.8,
+      "cultural_context": "Universal",
+      "sources": ["participant_name"],
+      "reasoning": "Why notable"
     }}
   ],
-  "cultural_perspectives": ["Western individualistic", "..."],
-  "alternatives": [
-    "Alternative perspective 1",
-    "Alternative perspective 2"
-  ],
-  "devil_advocate": "Critical analysis of this summary",
-  "flagged_assumptions": ["Assumption 1", "..."]
-}}"""
+  "cultural_perspectives": ["Western individualistic", "Eastern collective"],
+  "alternatives": ["Alternative perspective 1"],
+  "devil_advocate": "Critical analysis",
+  "flagged_assumptions": ["Assumption if any"]
+}}
+
+RULES:
+- Rate confidence 0.0-1.0 for each claim
+- Mark cultural_context as "Universal" or "Context: [specific culture]"
+- Include devil's advocate critique
+- List alternative viewpoints
+- Flag cultural assumptions
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
 
         try:
             # Use LLM to generate proposal
-            response = await self.llm_manager.generate(
-                prompt=prompt,
-                temperature=0.5,
-                max_tokens=1000
+            response = await self.llm_manager.query(
+                prompt=prompt
             )
 
-            # Parse response
+            # Try to extract JSON from response
             import json
-            result = json.loads(response)
+            import re
+
+            # Try to find JSON object in response (handles markdown wrapping)
+            json_match = re.search(r'\{(?:[^{}]|\{[^{}]*\})*\}', response, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(0)
+                result = json.loads(json_str)
+            else:
+                # Try parsing whole response
+                result = json.loads(response.strip())
 
             # Build knowledge entries
             entries = []
@@ -325,11 +359,12 @@ OUTPUT FORMAT (JSON):
 
         except Exception as e:
             print(f"Error generating commit proposal: {e}")
+            print(f"  LLM Response preview: {response[:300] if 'response' in locals() else 'N/A'}...")
             # Return empty proposal on error
             return KnowledgeCommitProposal(
                 conversation_id=self.conversation_id,
                 topic='error',
-                summary='Failed to extract knowledge',
+                summary='Failed to extract knowledge - LLM did not return valid JSON',
                 participants=[p['node_id'] for p in self.participants]
             )
 

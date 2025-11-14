@@ -33,6 +33,7 @@
   // Knowledge Architecture UI state
   let showContextViewer: boolean = false;
   let showCommitDialog: boolean = false;
+  let autoKnowledgeDetection: boolean = true;  // Default: enabled
 
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
@@ -190,6 +191,35 @@
   function closeCommitDialog() {
     showCommitDialog = false;
     knowledgeCommitProposal.set(null);
+  }
+
+  function handleEndSession(conversationId: string) {
+    if (confirm("End this conversation session and extract knowledge?")) {
+      sendCommand("end_conversation_session", {
+        conversation_id: conversationId
+      });
+    }
+  }
+
+  function toggleAutoKnowledgeDetection() {
+    // bind:checked already updates the variable, just sync to backend
+    sendCommand("toggle_auto_knowledge_detection", {
+      enabled: autoKnowledgeDetection
+    });
+  }
+
+  function handleNewChat(chatId: string) {
+    if (confirm("Start a new conversation? This will clear the current chat history and knowledge buffer.")) {
+      // Clear message history for this chat
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        newMap.set(chatId, []);  // Clear the message array for this chat
+        return newMap;
+      });
+
+      // Backend will create a new monitor on next message
+      // (Old monitor's buffer was already cleared by previous extraction)
+    }
   }
 
   // --- HANDLE INCOMING MESSAGES ---
@@ -378,6 +408,26 @@
           <button class="btn-context" on:click={loadPersonalContext}>
             📚 View Personal Context
           </button>
+
+          <!-- Auto Knowledge Detection Toggle -->
+          <div class="knowledge-toggle">
+            <label class="toggle-container">
+              <input
+                type="checkbox"
+                bind:checked={autoKnowledgeDetection}
+                on:change={toggleAutoKnowledgeDetection}
+              />
+              <span class="toggle-slider"></span>
+              <span class="toggle-label">
+                Auto-detect knowledge in conversations
+              </span>
+            </label>
+            <p class="toggle-hint">
+              {autoKnowledgeDetection
+                ? "✓ AI is monitoring conversations for knowledge"
+                : "✗ Manual knowledge extraction only"}
+            </p>
+          </div>
         </div>
 
         <!-- Connect to Peer - UPDATED PLACEHOLDER -->
@@ -481,6 +531,14 @@
             👤 Chat with {getPeerDisplayName(activeChatId)}
           {/if}
         </h2>
+        <div class="chat-actions">
+          <button class="btn-new-chat" on:click={() => handleNewChat(activeChatId)}>
+            🔄 New Chat
+          </button>
+          <button class="btn-end-session" on:click={() => handleEndSession(activeChatId)}>
+            📚 End Session & Save Knowledge
+          </button>
+        </div>
       </div>
 
       <div class="chat-window" bind:this={chatWindow}>
@@ -829,6 +887,72 @@
     transform: translateY(0);
   }
 
+  /* Knowledge Architecture - Auto-Detection Toggle */
+  .knowledge-toggle {
+    margin-top: 1rem;
+    padding-top: 1rem;
+    border-top: 1px solid #e0e0e0;
+  }
+
+  .toggle-container {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .toggle-container input[type="checkbox"] {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .toggle-slider {
+    position: relative;
+    width: 44px;
+    height: 24px;
+    background: #ccc;
+    border-radius: 24px;
+    transition: background 0.3s;
+    flex-shrink: 0;
+  }
+
+  .toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 18px;
+    height: 18px;
+    left: 3px;
+    top: 3px;
+    background: white;
+    border-radius: 50%;
+    transition: transform 0.3s;
+  }
+
+  .toggle-container input[type="checkbox"]:checked + .toggle-slider {
+    background: #667eea;
+  }
+
+  .toggle-container input[type="checkbox"]:checked + .toggle-slider::before {
+    transform: translateX(20px);
+  }
+
+  .toggle-label {
+    font-size: 0.9rem;
+    color: #333;
+    line-height: 1.4;
+  }
+
+  .toggle-hint {
+    font-size: 0.8rem;
+    color: #666;
+    margin: 0.5rem 0 0 0;
+    padding-left: 3.5rem;
+    line-height: 1.3;
+  }
+
   .chat-list ul {
     list-style: none;
     padding: 0;
@@ -899,16 +1023,69 @@
   }
   
   .chat-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
     padding: 1rem;
     border-bottom: 1px solid #eee;
   }
-  
+
   .chat-header h2 {
     margin: 0;
     border: none;
     padding: 0;
   }
-  
+
+  .chat-actions {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+  }
+
+  .btn-new-chat {
+    padding: 0.6rem 1rem;
+    background: linear-gradient(135deg, #6c757d 0%, #5a6268 100%);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+
+  .btn-new-chat:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(108, 117, 125, 0.4);
+  }
+
+  .btn-new-chat:active {
+    transform: translateY(0);
+  }
+
+  .btn-end-session {
+    padding: 0.6rem 1rem;
+    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+
+  .btn-end-session:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
+  }
+
+  .btn-end-session:active {
+    transform: translateY(0);
+  }
+
   .chat-window {
     flex: 1;
     padding: 1rem;

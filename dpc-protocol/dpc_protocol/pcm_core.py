@@ -178,8 +178,7 @@ class PersonalContext:
         "created": datetime.utcnow().isoformat(),
         "last_updated": datetime.utcnow().isoformat(),
         "storage": "local",
-        "format_version": "2.0",
-        "schema_url": "https://dpc-protocol.org/schemas/pcm/v2.0"
+        "format_version": "2.0"
     })
 
     @classmethod
@@ -280,8 +279,7 @@ class PersonalContext:
                 "created": datetime.utcnow().isoformat(),
                 "last_updated": datetime.utcnow().isoformat(),
                 "storage": "local",
-                "format_version": "2.0",
-                "schema_url": "https://dpc-protocol.org/schemas/pcm/v2.0"
+                "format_version": "2.0"
             }
         )
 
