@@ -1,6 +1,7 @@
-# D-PC Messenger: Decentralized Peer-to-Peer Collaborative Intelligence
+# D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
 > **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.6.1
+> **Core Mission:** Enable humans with personal AI assistants to collaborate securely through peer-to-peer context sharing
 
 ---
 
@@ -19,7 +20,20 @@ This software contains strong cryptographic features and may be subject to legal
 
 ---
 
-**D-PC Messenger** (Decentralized Personal Context) is a privacy-first, peer-to-peer messaging platform that enables **collaborative intelligence** through secure sharing of personal AI contexts between trusted peers, without relying on centralized servers for communication.
+## 🧠 What is D-PC Messenger?
+
+**D-PC Messenger** (Decentralized Personal Context) is a **privacy-first, peer-to-peer platform for human-AI collaboration**.
+
+**The Core Idea:** Imagine you're working with your personal AI assistant (ChatGPT, Claude, or local Ollama). Now imagine securely sharing relevant context with a trusted friend so *their* AI assistant can help too - without compromising privacy or relying on centralized servers.
+
+**How it works:**
+- 🤝 **You + Your AI** - Chat with your personal AI assistant about anything
+- 💬 **Collaborate with Humans** - Connect directly with trusted peers via encrypted P2P messaging
+- 📚 **Share Context Securely** - Share conversation histories, documents, or knowledge with peers
+- 🧠 **Their AI Gets Smarter** - Your shared context helps their AI give better, more informed answers
+- 🔒 **Complete Privacy** - All data stays on your devices, encrypted end-to-end, with granular access control
+
+**Real-world example:** You're researching a technical topic with your AI assistant. You share your conversation history with a colleague. Their AI can now see your research and provide complementary insights, creating a **collective intelligence** between humans and their AI assistants.
 
 **Philosophy:** [Digital Self-Sovereignty](./docs/USER_SOVEREIGNTY.md) - Your data, your keys, your control. No backdoors, no data mining, no compromises.
 
@@ -31,7 +45,7 @@ This software contains strong cryptographic features and may be subject to legal
 - 🔒 **True Privacy** - Messages never touch servers, only peers
 - 👤 **User Sovereignty** - You own your data, identity, and encryption keys ([read more](./docs/USER_SOVEREIGNTY.md))
 - 💾 **Encrypted Backups** - AES-256-GCM encrypted backups with no backdoors ([guide](./docs/BACKUP_RESTORE.md))
-- 🤝 **Collaborative AI** - Share context with trusted peers for better answers
+- 🤝 **Human-AI Collaboration** - Work with your AI assistant, then share contexts with trusted peers so their AIs can contribute too
 - 🏠 **Local-First** - Your data stays on your device
 - 🌐 **Internet-Wide** - Connect to anyone, anywhere via WebRTC
 - 📶 **Offline Mode** - Works seamlessly when Hub is unavailable with cached tokens and Direct TLS
@@ -50,26 +64,31 @@ This software contains strong cryptographic features and may be subject to legal
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                   System Architecture                   │
-└─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│              Human-AI Collaborative Intelligence                │
+└─────────────────────────────────────────────────────────────────┘
 
-┌──────────────┐                            ┌──────────────┐
-│   Client A   │ ◄──── P2P Encrypted ──────►│   Client B   │
-│              │       Connection           │              │
-│  • Local AI  │                            │  • Local AI  │
-│  • Context   │                            │  • Context   │
-│  • Firewall  │                            │  • Firewall  │
-└──────┬───────┘                            └──────┬───────┘
-       │                                           │
-       │            ┌─────────────────┐            │
-       └────────────►  Federation Hub  ◄───────────┘
-                    │                 │
-                    │  • Discovery    │
-                    │  • Signaling    │
-                    │  • OAuth        │
-                    │  • NO Messages  │
-                    └─────────────────┘
+┌───────────────────┐                        ┌───────────────────┐
+│    Human A        │                        │    Human B        │
+│  ┌─────────────┐  │                        │  ┌─────────────┐  │
+│  │ AI Assistant│  │  P2P Encrypted Context │  │ AI Assistant│  │
+│  │  (GPT/Llama)│  │◄───── Sharing ────────►│  │  (Claude)   │  │
+│  └─────────────┘  │                        │  └─────────────┘  │
+│   • Chat History  │                        │   • Chat History  │
+│   • Documents     │                        │   • Documents     │
+│   • Context Store │                        │   • Context Store │
+│   • Firewall      │                        │   • Firewall      │
+└────────┬──────────┘                        └────────┬──────────┘
+         │                                            │
+         │            ┌─────────────────┐             │
+         └────────────►  Federation Hub  ◄────────────┘
+                      │  (Optional)     │
+                      │  • Discovery    │
+                      │  • Signaling    │
+                      │  • OAuth        │
+                      │  • NO Messages  │
+                      │  • NO Context   │
+                      └─────────────────┘
 ```
 
 ### Two Connection Methods
