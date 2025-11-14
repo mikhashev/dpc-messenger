@@ -1,0 +1,449 @@
+"""
+Conversation Monitor - Phase 4.2
+
+Monitors group chat conversations in real-time to detect knowledge-worthy content
+and propose knowledge commits. Uses AI to analyze conversation patterns and
+detect consensus signals.
+"""
+
+import asyncio
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass
+from datetime import datetime
+
+from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSource
+from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
+
+
+@dataclass
+class Message:
+    """Represents a chat message"""
+    message_id: str
+    conversation_id: str
+    sender_node_id: str
+    sender_name: str
+    text: str
+    timestamp: str
+
+
+class ConversationMonitor:
+    """Monitors conversations for knowledge-worthy content
+
+    Runs in background during group chats, analyzing messages for:
+    - Substantive information (facts, decisions, insights)
+    - Multiple perspectives being discussed
+    - Consensus being reached
+    - Novel ideas vs casual chat
+
+    When detected, proposes knowledge commits to participants.
+    """
+
+    def __init__(
+        self,
+        conversation_id: str,
+        participants: List[Dict[str, str]],  # [{node_id, name, context}]
+        llm_manager,  # LLMManager instance
+        knowledge_threshold: float = 0.7  # Minimum score to propose commit
+    ):
+        """Initialize conversation monitor
+
+        Args:
+            conversation_id: Unique conversation identifier
+            participants: List of participant info dicts
+            llm_manager: LLMManager instance for AI analysis
+            knowledge_threshold: Score threshold (0.0-1.0) to trigger commit proposal
+        """
+        self.conversation_id = conversation_id
+        self.participants = participants
+        self.llm_manager = llm_manager
+        self.knowledge_threshold = knowledge_threshold
+
+        # Message buffer
+        self.message_buffer: List[Message] = []
+        self.knowledge_score: float = 0.0
+
+        # Tracking
+        self.proposals_created: int = 0
+        self.last_analysis_time: Optional[str] = None
+
+    async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
+        """Process new message in conversation
+
+        Args:
+            message: New message to analyze
+
+        Returns:
+            KnowledgeCommitProposal if knowledge detected, None otherwise
+        """
+        self.message_buffer.append(message)
+
+        # Analyze every 5 messages or if buffer gets large
+        if len(self.message_buffer) >= 5:
+            self.knowledge_score = await self._calculate_knowledge_score()
+            self.last_analysis_time = datetime.utcnow().isoformat()
+
+            # Check if conversation is knowledge-worthy
+            if self.knowledge_score > self.knowledge_threshold:
+                # Check for consensus signals
+                if self._detect_consensus():
+                    # Generate commit proposal
+                    proposal = await self._generate_commit_proposal()
+
+                    # Reset buffer
+                    self.message_buffer = []
+                    self.knowledge_score = 0.0
+                    self.proposals_created += 1
+
+                    return proposal
+
+        return None
+
+    async def _calculate_knowledge_score(self) -> float:
+        """Calculate knowledge-worthiness score for conversation segment
+
+        Uses LLM to score based on:
+        - Substantive information (facts, decisions, insights): +0.3
+        - Multiple perspectives discussed: +0.2
+        - Consensus reached: +0.2
+        - Actionable conclusions: +0.2
+        - Novel ideas vs casual chat: +0.1
+
+        Returns:
+            Score from 0.0 to 1.0
+        """
+        # Format messages for analysis
+        messages_text = self._format_messages_for_analysis(self.message_buffer[-10:])
+
+        prompt = f"""Analyze this conversation segment for knowledge-worthiness.
+
+Score 0.0-1.0 based on:
+- Substantive information (facts, decisions, insights): +0.3
+- Multiple perspectives discussed: +0.2
+- Consensus reached: +0.2
+- Actionable conclusions: +0.2
+- Novel ideas vs casual chat: +0.1
+
+MESSAGES:
+{messages_text}
+
+Output JSON: {{"score": 0.0-1.0, "reasoning": "explanation"}}"""
+
+        try:
+            # Use LLM to analyze
+            response = await self.llm_manager.generate(
+                prompt=prompt,
+                temperature=0.3,  # Low temperature for consistent scoring
+                max_tokens=200
+            )
+
+            # Parse response (assuming JSON output)
+            import json
+            result = json.loads(response)
+            return float(result.get('score', 0.0))
+        except Exception as e:
+            print(f"Error calculating knowledge score: {e}")
+            return 0.0
+
+    def _detect_consensus(self) -> bool:
+        """Detect if group has reached agreement
+
+        Looks for consensus signals in recent messages:
+        - "sounds good", "agreed", "let's go with"
+        - "I'm on board", "works for me"
+        - "approved", "✅"
+
+        Returns:
+            True if consensus detected, False otherwise
+        """
+        consensus_signals = [
+            "sounds good",
+            "agreed",
+            "agree",
+            "let's go with",
+            "i'm on board",
+            "works for me",
+            "approved",
+            "✅",
+            "👍",
+            "yes",
+            "that works",
+            "makes sense",
+            "good idea"
+        ]
+
+        recent_messages = self.message_buffer[-5:]
+        consensus_count = 0
+
+        for msg in recent_messages:
+            text_lower = msg.text.lower()
+            if any(signal in text_lower for signal in consensus_signals):
+                consensus_count += 1
+
+        # Need majority of participants to express agreement
+        threshold = len(self.participants) * 0.6
+        return consensus_count >= threshold
+
+    async def _generate_commit_proposal(self) -> KnowledgeCommitProposal:
+        """Generate knowledge commit proposal from conversation
+
+        Uses bias-aware prompting to extract structured knowledge with:
+        - Multi-perspective analysis
+        - Cultural assumptions flagged
+        - Alternative viewpoints
+        - Confidence scores
+        - Devil's advocate critique
+
+        Returns:
+            KnowledgeCommitProposal object
+        """
+        # Load participant cultural contexts
+        cultural_contexts = []
+        for participant in self.participants:
+            if 'context' in participant:
+                context = participant['context']
+                if hasattr(context, 'cognitive_profile') and context.cognitive_profile:
+                    if context.cognitive_profile.cultural_background:
+                        cultural_contexts.append(context.cognitive_profile.cultural_background)
+
+        # Format conversation
+        messages_text = self._format_messages_for_analysis(self.message_buffer)
+
+        # Build bias-resistant prompt
+        prompt = f"""You are a knowledge curator trained in cognitive bias mitigation.
+
+PARTICIPANTS' CULTURAL CONTEXTS:
+{', '.join(cultural_contexts) if cultural_contexts else 'Not specified'}
+
+CONVERSATION:
+{messages_text}
+
+TASK: Extract structured knowledge following these STRICT RULES:
+
+1. BIAS MITIGATION:
+   - Identify cultural assumptions in the discussion
+   - Provide alternative perspectives from non-represented cultures
+   - Flag statements that may only apply in specific contexts
+   - Rate confidence (0.0-1.0) for each claim
+   - Cite sources (participant names, external refs if mentioned)
+
+2. MULTI-PERSPECTIVE REQUIREMENT:
+   - Consider at least 3 cultural perspectives:
+     * Western individualistic
+     * Eastern collective
+     * Indigenous/holistic
+   - For each knowledge entry, state: "Universal" or "Context: [culture]"
+
+3. EVIDENCE REQUIREMENT:
+   - Every claim needs reasoning
+   - Flag opinions vs facts
+   - Note where participants disagreed
+
+4. DEVIL'S ADVOCATE:
+   - Generate critique of your own summary
+   - Identify potential weaknesses
+   - Suggest what might be missing
+
+OUTPUT FORMAT (JSON):
+{{
+  "topic": "brief_topic_name",
+  "summary": "One sentence overview",
+  "entries": [
+    {{
+      "content": "Knowledge statement",
+      "tags": ["tag1", "tag2"],
+      "confidence": 0.0-1.0,
+      "cultural_context": "Universal" or "Context: Western workplace",
+      "sources": ["alice", "bob"],
+      "reasoning": "Why this is notable"
+    }}
+  ],
+  "cultural_perspectives": ["Western individualistic", "..."],
+  "alternatives": [
+    "Alternative perspective 1",
+    "Alternative perspective 2"
+  ],
+  "devil_advocate": "Critical analysis of this summary",
+  "flagged_assumptions": ["Assumption 1", "..."]
+}}"""
+
+        try:
+            # Use LLM to generate proposal
+            response = await self.llm_manager.generate(
+                prompt=prompt,
+                temperature=0.5,
+                max_tokens=1000
+            )
+
+            # Parse response
+            import json
+            result = json.loads(response)
+
+            # Build knowledge entries
+            entries = []
+            for entry_data in result.get('entries', []):
+                source = KnowledgeSource(
+                    type="ai_summary",
+                    conversation_id=self.conversation_id,
+                    participants=[p['node_id'] for p in self.participants],
+                    confidence_score=entry_data.get('confidence', 1.0),
+                    sources_cited=entry_data.get('sources', []),
+                    cultural_perspectives_considered=result.get('cultural_perspectives', [])
+                )
+
+                cultural_context = entry_data.get('cultural_context', 'Universal')
+                entry = KnowledgeEntry(
+                    content=entry_data.get('content', ''),
+                    tags=entry_data.get('tags', []),
+                    source=source,
+                    confidence=entry_data.get('confidence', 1.0),
+                    cultural_specific=(cultural_context != 'Universal'),
+                    requires_context=[cultural_context] if cultural_context != 'Universal' else [],
+                    alternative_viewpoints=result.get('alternatives', [])
+                )
+                entries.append(entry)
+
+            # Calculate average confidence
+            avg_confidence = sum(e.confidence for e in entries) / len(entries) if entries else 1.0
+
+            # Create proposal
+            proposal = KnowledgeCommitProposal(
+                conversation_id=self.conversation_id,
+                topic=result.get('topic', 'conversation_summary'),
+                summary=result.get('summary', 'Knowledge from group discussion'),
+                entries=entries,
+                participants=[p['node_id'] for p in self.participants],
+                proposed_by='ai',
+                cultural_perspectives=result.get('cultural_perspectives', []),
+                alternatives=result.get('alternatives', []),
+                flagged_assumptions=result.get('flagged_assumptions', []),
+                devil_advocate=result.get('devil_advocate'),
+                avg_confidence=avg_confidence,
+                status='proposed'
+            )
+
+            return proposal
+
+        except Exception as e:
+            print(f"Error generating commit proposal: {e}")
+            # Return empty proposal on error
+            return KnowledgeCommitProposal(
+                conversation_id=self.conversation_id,
+                topic='error',
+                summary='Failed to extract knowledge',
+                participants=[p['node_id'] for p in self.participants]
+            )
+
+    def _format_messages_for_analysis(self, messages: List[Message]) -> str:
+        """Format messages as text for LLM analysis
+
+        Args:
+            messages: List of messages to format
+
+        Returns:
+            Formatted string
+        """
+        lines = []
+        for msg in messages:
+            timestamp = msg.timestamp.split('T')[1][:8] if 'T' in msg.timestamp else msg.timestamp
+            lines.append(f"[{timestamp}] {msg.sender_name}: {msg.text}")
+        return "\n".join(lines)
+
+    def reset(self):
+        """Reset monitor state"""
+        self.message_buffer = []
+        self.knowledge_score = 0.0
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Get monitor statistics
+
+        Returns:
+            Dictionary with stats
+        """
+        return {
+            'conversation_id': self.conversation_id,
+            'participants': len(self.participants),
+            'messages_buffered': len(self.message_buffer),
+            'current_knowledge_score': self.knowledge_score,
+            'proposals_created': self.proposals_created,
+            'last_analysis': self.last_analysis_time
+        }
+
+
+# Example usage
+if __name__ == '__main__':
+    print("=== ConversationMonitor Demo ===\n")
+
+    # Mock LLM manager
+    class MockLLMManager:
+        async def generate(self, prompt: str, temperature: float = 0.7, max_tokens: int = 500) -> str:
+            # Simulate LLM response
+            if "knowledge-worthiness" in prompt:
+                return '{"score": 0.85, "reasoning": "Substantive discussion about game design with consensus"}'
+            elif "Extract structured knowledge" in prompt:
+                return '''{
+                    "topic": "game_design_philosophy",
+                    "summary": "Environmental storytelling is powerful for player immersion",
+                    "entries": [
+                        {
+                            "content": "Environmental storytelling allows players to discover narrative through exploration rather than explicit exposition.",
+                            "tags": ["game_design", "narrative"],
+                            "confidence": 0.90,
+                            "cultural_context": "Universal",
+                            "sources": ["alice", "bob"],
+                            "reasoning": "Both participants agreed and cited examples"
+                        }
+                    ],
+                    "cultural_perspectives": ["Western", "Eastern"],
+                    "alternatives": ["Dialogue-heavy approach", "Audio logs"],
+                    "devil_advocate": "May not work for complex lore-heavy games",
+                    "flagged_assumptions": ["Assumes players enjoy exploration"]
+                }'''
+            return "{}"
+
+    async def demo():
+        participants = [
+            {'node_id': 'alice', 'name': 'Alice', 'context': None},
+            {'node_id': 'bob', 'name': 'Bob', 'context': None}
+        ]
+
+        monitor = ConversationMonitor(
+            conversation_id='conv-demo',
+            participants=participants,
+            llm_manager=MockLLMManager(),
+            knowledge_threshold=0.7
+        )
+
+        print("1. Creating conversation monitor")
+        print(f"   Participants: {[p['name'] for p in participants]}")
+        print(f"   Threshold: {monitor.knowledge_threshold}")
+        print()
+
+        # Simulate conversation
+        messages = [
+            Message('m1', 'conv-demo', 'alice', 'Alice', 'What do you think about environmental storytelling?', '2025-01-14T10:00:00'),
+            Message('m2', 'conv-demo', 'bob', 'Bob', 'I think it\'s really powerful for immersion', '2025-01-14T10:00:15'),
+            Message('m3', 'conv-demo', 'alice', 'Alice', 'Yeah, players discover the narrative themselves', '2025-01-14T10:00:30'),
+            Message('m4', 'conv-demo', 'bob', 'Bob', 'Better than explicit exposition in many cases', '2025-01-14T10:00:45'),
+            Message('m5', 'conv-demo', 'alice', 'Alice', 'Agreed! Let\'s use this approach', '2025-01-14T10:01:00')
+        ]
+
+        print("2. Simulating conversation:")
+        for msg in messages:
+            print(f"   [{msg.sender_name}] {msg.text}")
+            proposal = await monitor.on_message(msg)
+            if proposal:
+                print(f"\n3. Knowledge commit proposed!")
+                print(f"   Topic: {proposal.topic}")
+                print(f"   Summary: {proposal.summary}")
+                print(f"   Entries: {len(proposal.entries)}")
+                print(f"   Confidence: {proposal.avg_confidence:.0%}")
+                print(f"   Devil's Advocate: {proposal.devil_advocate}")
+                break
+
+        print(f"\n4. Monitor stats:")
+        stats = monitor.get_stats()
+        for key, value in stats.items():
+            print(f"   {key}: {value}")
+
+    asyncio.run(demo())
+    print("\n=== Demo Complete ===")
