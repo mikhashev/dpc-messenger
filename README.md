@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.6.1
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.7.0
 > **Core Mission:** Enable humans with personal AI assistants to collaborate securely through peer-to-peer context sharing
 
 ---
@@ -46,6 +46,7 @@ This software contains strong cryptographic features and may be subject to legal
 - 👤 **User Sovereignty** - You own your data, identity, and encryption keys ([read more](./docs/USER_SOVEREIGNTY.md))
 - 💾 **Encrypted Backups** - AES-256-GCM encrypted backups with no backdoors ([guide](./docs/BACKUP_RESTORE.md))
 - 🤝 **Human-AI Collaboration** - Work with your AI assistant, then share contexts with trusted peers so their AIs can contribute too
+- 📚 **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - 🏠 **Local-First** - Your data stays on your device
 - 🌐 **Internet-Wide** - Connect to anyone, anywhere via WebRTC
 - 📶 **Offline Mode** - Works seamlessly when Hub is unavailable with cached tokens and Direct TLS
@@ -343,7 +344,7 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ## 🛣️ Roadmap
 
-### Phase 1: Federated MVP ✅ (Current - v0.6.1)
+### Phase 1: Federated MVP ✅ (Completed - v0.7.0)
 - ✅ Direct TLS P2P connections
 - ✅ WebRTC with NAT traversal
 - ✅ Federation Hub for discovery
@@ -354,18 +355,29 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ Local AI integration
 - ✅ Offline mode with graceful degradation
 - ✅ **Remote inference** - Share compute power with trusted peers ([guide](./docs/REMOTE_INFERENCE.md))
+- ✅ **Knowledge Commit System** - Git-like versioned knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
+  - ✅ Personal Context Model (PCM) v2.0
+  - ✅ Knowledge topics with entries, tags, and confidence scoring
+  - ✅ Automatic conversation monitoring and knowledge extraction
+  - ✅ Multi-perspective bias mitigation (Western, Eastern, Indigenous viewpoints)
+  - ✅ Knowledge commit proposals with approval workflow
+  - ✅ Git-style versioning with commit history
+  - ✅ User-controlled auto-detection toggle
 
-### Phase 2: Enhanced Federation (Q1-Q2 2026)
+### Phase 2: Enhanced Federation (Next - Q1-Q2 2026) ⏳
+**Current Starting Point for Development**
+
 - 🔲 Multi-hub federation
-- 🔲 Advanced context firewall
-- 🔲 **Knowledge Commit System** - Git-like versioned knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
+- 🔲 Advanced context firewall with tag-based sharing
+- 🔲 **Peer-to-peer knowledge sharing** - Share knowledge commits between peers
+- 🔲 **Collaborative knowledge building** - Multi-peer consensus on shared knowledge
 - 🔲 **Remote inference enhancements** - Model discovery, streaming responses, usage tracking
 - 🔲 **Hub-assisted backup** (encrypted backup storage on Hub)
 - 🔲 **QR code backup transfer** (for mobile devices)
 - 🔲 Mobile clients (Android, iOS)
 - 🔲 Dedicated TURN server deployment
 
-### Phase 3: True P2P (2026-2027)
+### Phase 3: True P2P (Future - 2026-2027)
 - 🔲 DHT-based peer discovery
 - 🔲 Hub-free operation mode
 - 🔲 **Social recovery** (Shamir Secret Sharing for backup passphrases)
@@ -564,8 +576,9 @@ Special thanks to all contributors and early testers!
 | **Direct TLS** | ✅ Working |
 | **Hub Server** | ✅ Production Ready |
 | **Crypto Identity** | ✅ v0.5.0 |
-| **Desktop Client** | 🚧 Beta |
-| **Mobile Clients** | 🔲 Planned |
+| **Knowledge Architecture** | ✅ v2.0 (Phase 4.2 Complete) |
+| **Desktop Client** | ✅ Beta (v0.7.0) |
+| **Mobile Clients** | 🔲 Planned (Phase 2) |
 | **Test Coverage** | 🚧 In Progress |
 | **Documentation** | ✅ Good |
 
