@@ -19,6 +19,7 @@ from .settings import Settings
 from .token_cache import TokenCache
 from .peer_cache import PeerCache
 from .connection_status import ConnectionStatus, OperationMode
+from .consensus_manager import ConsensusManager
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
 from dpc_protocol.utils import parse_dpc_uri
 
@@ -60,9 +61,17 @@ class CoreService:
         )
         self.p2p_manager = P2PManager(firewall=self.firewall)
         self.cache = ContextCache()
-        
+
         self.local_api = LocalApiServer(core_service=self)
-        
+
+        # Knowledge Architecture components (Phase 1-6)
+        self.pcm_core = PCMCore(DPC_HOME_DIR / "personal.json")
+        self.consensus_manager = ConsensusManager(
+            node_id=self.p2p_manager.node_id,
+            pcm_core=self.pcm_core,
+            vote_timeout_minutes=10
+        )
+
         self._is_running = False
         self._background_tasks = set()
         
@@ -566,6 +575,84 @@ class CoreService:
         if node_id not in self.peer_metadata:
             self.peer_metadata[node_id] = {}
         self.peer_metadata[node_id].update(kwargs)
+
+    # --- Knowledge Architecture Command Handlers ---
+
+    async def get_personal_context(self) -> Dict[str, Any]:
+        """Load and return personal context for UI display.
+
+        UI Integration: Called when user opens ContextViewer component.
+        Returns the full v2.0 PersonalContext with all metadata.
+        """
+        try:
+            context = self.pcm_core.load_context()
+            return {
+                "status": "success",
+                "context": asdict(context)
+            }
+        except Exception as e:
+            print(f"Error loading personal context: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def vote_knowledge_commit(
+        self,
+        proposal_id: str,
+        vote: str,
+        comment: str = None
+    ) -> Dict[str, Any]:
+        """Cast vote on a knowledge commit proposal.
+
+        UI Integration: Called when user clicks approve/reject/request_changes
+        in KnowledgeCommitDialog component.
+
+        Args:
+            proposal_id: ID of the proposal to vote on
+            vote: 'approve', 'reject', or 'request_changes'
+            comment: Optional comment explaining the vote
+
+        Returns:
+            Dict with status and result
+        """
+        try:
+            # Cast vote through ConsensusManager
+            success = await self.consensus_manager.cast_vote(
+                proposal_id=proposal_id,
+                vote=vote,
+                comment=comment,
+                broadcast_func=self._broadcast_to_peers
+            )
+
+            if success:
+                return {
+                    "status": "success",
+                    "message": f"Vote cast: {vote}"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": "Proposal not found or voting session expired"
+                }
+
+        except Exception as e:
+            print(f"Error voting on knowledge commit: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def _broadcast_to_peers(self, message: Dict[str, Any]) -> None:
+        """Broadcast message to all connected peers.
+
+        Used by ConsensusManager to broadcast votes and proposals.
+        """
+        for peer_id in list(self.p2p_manager.peers.keys()):
+            try:
+                await self.p2p_manager.send_to_peer(peer_id, message)
+            except Exception as e:
+                print(f"Failed to broadcast to {peer_id}: {e}")
 
     # --- P2P Connection Methods ---
 

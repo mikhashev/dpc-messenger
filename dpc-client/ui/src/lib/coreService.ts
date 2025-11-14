@@ -8,6 +8,10 @@ export const nodeStatus = writable<any>(null);
 export const coreMessages = writable<any>(null);
 export const p2pMessages = writable<any>(null);
 
+// Knowledge Architecture stores (Phase 1-6 integration)
+export const knowledgeCommitProposal = writable<any>(null);
+export const personalContext = writable<any>(null);
+
 let socket: WebSocket | null = null;
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempts = 0;
@@ -135,6 +139,22 @@ export function connectToCoreService() {
                         });
                     }
                     console.log(`Connection mode changed: ${message.payload.status.mode} - ${message.payload.status.message}`);
+                }
+                // Knowledge Architecture event handlers
+                else if (message.event === "knowledge_commit_proposed") {
+                    console.log("Knowledge commit proposal received:", message.payload);
+                    knowledgeCommitProposal.set(message.payload);
+                } else if (message.event === "knowledge_commit_approved") {
+                    console.log("Knowledge commit approved:", message.payload);
+                    // Refresh personal context after approval
+                    sendCommand("get_personal_context");
+                }
+                // Handle get_personal_context response
+                else if (message.command === "get_personal_context" && message.status === "OK") {
+                    console.log("Personal context loaded:", message.payload);
+                    if (message.payload.status === "success") {
+                        personalContext.set(message.payload.context);
+                    }
                 }
             } catch (error) {
                 console.error("Error parsing message:", error);

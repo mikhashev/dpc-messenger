@@ -3,7 +3,9 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext } from "$lib/coreService";
+  import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
+  import ContextViewer from "$lib/components/ContextViewer.svelte";
   
   console.log("Full D-PC Messenger loading...");
   
@@ -27,6 +29,15 @@
   let selectedComputeHost: string = "local";  // "local" or node_id for remote inference
 
   let processedMessageIds = new Set<string>();
+
+  // Knowledge Architecture UI state
+  let showContextViewer: boolean = false;
+  let showCommitDialog: boolean = false;
+
+  // Reactive: Open commit dialog when proposal received
+  $: if ($knowledgeCommitProposal) {
+    showCommitDialog = true;
+  }
   
   function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
     if (!element) return true;
@@ -158,7 +169,29 @@
     resetReconnection();
     connectToCoreService();
   }
-  
+
+  // --- Knowledge Architecture Handlers ---
+
+  function loadPersonalContext() {
+    sendCommand("get_personal_context");
+    showContextViewer = true;
+  }
+
+  function handleCommitVote(event: CustomEvent) {
+    const { proposal_id, vote, comment } = event.detail;
+    sendCommand("vote_knowledge_commit", {
+      proposal_id,
+      vote,
+      comment
+    });
+    showCommitDialog = false;
+  }
+
+  function closeCommitDialog() {
+    showCommitDialog = false;
+    knowledgeCommitProposal.set(null);
+  }
+
   // --- HANDLE INCOMING MESSAGES ---
   $: if ($coreMessages?.id) {
     const message = $coreMessages;
@@ -340,6 +373,13 @@
           {/if}
         </div>
 
+        <!-- Personal Context Button (Knowledge Architecture) -->
+        <div class="context-section">
+          <button class="btn-context" on:click={loadPersonalContext}>
+            📚 View Personal Context
+          </button>
+        </div>
+
         <!-- Connect to Peer - UPDATED PLACEHOLDER -->
         <div class="connect-section">
           <h3>Connect to Peer</h3>
@@ -503,6 +543,20 @@
   </div>
 </main>
 
+<!-- Knowledge Architecture UI Components -->
+<KnowledgeCommitDialog
+  bind:open={showCommitDialog}
+  proposal={$knowledgeCommitProposal}
+  on:vote={handleCommitVote}
+  on:close={closeCommitDialog}
+/>
+
+<ContextViewer
+  bind:open={showContextViewer}
+  context={$personalContext}
+  on:close={() => showContextViewer = false}
+/>
+
 <style>
   .container {
     padding: 1.5rem;
@@ -583,7 +637,7 @@
     background: #555;
   }
   
-  .node-info, .connect-section, .hub-section, .chat-list {
+  .node-info, .connect-section, .hub-section, .context-section, .chat-list {
     background: white;
     border: 1px solid #e0e0e0;
     border-radius: 8px;
@@ -746,6 +800,33 @@
   .oauth-icon {
     font-size: 1.1rem;
     line-height: 1;
+  }
+
+  /* Knowledge Architecture - Context Button */
+  .btn-context {
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+  }
+
+  .btn-context:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  }
+
+  .btn-context:active {
+    transform: translateY(0);
   }
 
   .chat-list ul {
