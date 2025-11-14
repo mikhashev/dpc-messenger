@@ -1,0 +1,297 @@
+D-PC MESSENGER - LEGAL NOTICE AND WARNINGS
+
+================================================================================
+                    ⚠️  CRITICAL LEGAL WARNINGS  ⚠️
+================================================================================
+
+THIS SOFTWARE IS PROVIDED FOR EDUCATIONAL AND RESEARCH PURPOSES ONLY.
+
+By accessing, using, or distributing this software, you acknowledge that you
+have read, understood, and agree to comply with ALL terms and conditions
+outlined in this notice, the LICENSE.md file, and applicable laws.
+
+================================================================================
+1. NO WARRANTY - COMPLETE DISCLAIMER OF LIABILITY
+================================================================================
+
+THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+
+IN NO EVENT SHALL THE AUTHORS, COPYRIGHT HOLDERS, OR CONTRIBUTORS BE LIABLE
+FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE
+OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+================================================================================
+2. GEOGRAPHIC RESTRICTIONS - NOT AVAILABLE IN CERTAIN JURISDICTIONS
+================================================================================
+
+⛔ THIS SOFTWARE IS EXPLICITLY NOT INTENDED FOR USE IN THE RUSSIAN FEDERATION
+
+The software is NOT designed for, intended for, or compliant with the laws of:
+  - Russian Federation
+  - Belarus
+  - Any jurisdiction with mandatory encryption backdoor requirements
+  - Any jurisdiction with telecommunications interception mandates
+  - Any jurisdiction where use would violate local law
+
+DO NOT USE, DEPLOY, OR DISTRIBUTE THIS SOFTWARE IN THESE JURISDICTIONS.
+
+The creators EXPLICITLY PROHIBIT use of this software in any jurisdiction where:
+  - Encryption registration/licensing is required
+  - Government backdoor access to communications is mandatory
+  - Data retention obligations apply to messaging platforms
+  - The software would be classified as a "telecommunications operator"
+
+================================================================================
+3. CRYPTOGRAPHIC TECHNOLOGY - EXPORT CONTROL NOTICE
+================================================================================
+
+This software contains strong cryptographic features including:
+  - RSA-2048 encryption
+  - TLS 1.2+ protocols
+  - AES-256-GCM encryption
+  - X.509 certificate-based authentication
+
+EXPORT, IMPORT, OR USE MAY BE RESTRICTED OR PROHIBITED IN CERTAIN COUNTRIES.
+
+You are solely responsible for compliance with:
+  - U.S. Export Administration Regulations (EAR)
+  - Wassenaar Arrangement on Export Controls
+  - EU Dual-Use Regulation
+  - Local encryption import/export laws
+  - Cryptographic registration requirements
+
+DO NOT export, import, or use this software without verifying compliance with
+applicable export control and encryption regulations in your jurisdiction.
+
+================================================================================
+4. NOT A TELECOMMUNICATIONS SERVICE
+================================================================================
+
+IMPORTANT: This software is:
+  ✅ An experimental research project
+  ✅ Educational proof-of-concept code
+  ✅ Academic demonstration of P2P protocols
+
+This software is NOT:
+  ❌ A commercial telecommunications service
+  ❌ A messaging service provider/operator
+  ❌ Subject to telecommunications operator licensing
+  ❌ Intended for production deployment
+  ❌ Suitable for commercial use
+
+The creators do not operate any telecommunications services, messaging
+platforms, or communication networks using this software.
+
+================================================================================
+5. USER RESPONSIBILITY FOR LEGAL COMPLIANCE
+================================================================================
+
+YOU ARE SOLELY AND EXCLUSIVELY RESPONSIBLE FOR:
+
+  ✓ Ensuring your use complies with ALL applicable laws in your jurisdiction
+  ✓ Obtaining any required licenses, permits, or registrations
+  ✓ Complying with data protection and privacy regulations
+  ✓ Meeting telecommunications and encryption legal requirements
+  ✓ Adhering to export control and sanctions laws
+  ✓ Obtaining legal counsel regarding your specific use case
+
+The creators accept ZERO liability for your use, deployment, or distribution
+of this software.
+
+================================================================================
+6. PROHIBITED USES
+================================================================================
+
+The creators EXPLICITLY PROHIBIT use of this software for:
+
+  ❌ ANY use in the Russian Federation or Belarus
+  ❌ Violation of export controls or economic sanctions
+  ❌ Illegal activities under applicable law
+  ❌ Circumventing lawful surveillance or interception orders
+  ❌ Operating commercial telecommunications services
+  ❌ Activities violating third-party rights
+  ❌ Purposes contrary to public safety or national security
+  ❌ Any use that would subject creators to legal liability
+
+================================================================================
+7. INDEMNIFICATION
+================================================================================
+
+By using this software, you AGREE TO INDEMNIFY, DEFEND, AND HOLD HARMLESS
+the creators, contributors, copyright holders, and any affiliated parties
+from ANY AND ALL claims, damages, losses, liabilities, costs, and expenses
+(including legal fees) arising from or related to your use, distribution,
+or deployment of this software.
+
+================================================================================
+8. DISCLAIMER REGARDING RUSSIAN FEDERATION LAW
+================================================================================
+
+⚠️  CRITICAL NOTICE FOR RUSSIAN JURISDICTION:
+
+This software is NOT compliant with and does NOT attempt to comply with:
+  - Federal Law No. 374-FZ/375-FZ (Yarovaya Law)
+  - Federal Law No. 152-FZ (Personal Data Law)
+  - FSB/FSTEC cryptography registration requirements
+  - SORM (lawful interception) requirements
+  - Roskomnadzor telecommunications regulations
+  - Data localization mandates for Russian citizens
+
+The creators:
+  ❌ Have NOT registered this cryptographic software with FSB/FSTEC
+  ❌ Have NOT obtained telecommunications operator licenses
+  ❌ Do NOT provide FSB access to communications
+  ❌ Do NOT implement mandatory data retention
+  ❌ Do NOT comply with SORM interception requirements
+  ❌ Make NO GUARANTEES of compliance with Russian law
+
+DO NOT USE THIS SOFTWARE IN THE RUSSIAN FEDERATION.
+
+Violation of Russian encryption and telecommunications laws may result in:
+  - Administrative fines up to 1,000,000+ rubles
+  - Criminal prosecution
+  - Imprisonment
+  - Service blocking by Roskomnadzor
+  - Asset seizure
+
+CONSULT RUSSIAN LEGAL COUNSEL BEFORE ANY USE IN RUSSIAN JURISDICTION.
+
+================================================================================
+9. INTERNATIONAL SANCTIONS COMPLIANCE
+================================================================================
+
+Users must ensure compliance with all applicable international sanctions,
+including but not limited to:
+
+  - U.S. OFAC sanctions programs
+  - EU sanctions regulations
+  - UK sanctions regulations
+  - UN Security Council sanctions
+
+DO NOT provide this software or related services to:
+  - Sanctioned individuals or entities
+  - Persons in sanctioned jurisdictions (where prohibited)
+  - Activities that would violate applicable sanctions laws
+
+================================================================================
+10. PRIVACY AND DATA PROTECTION
+================================================================================
+
+While this software is designed with privacy in mind, users are responsible for:
+
+  ✓ Obtaining necessary consents for personal data processing
+  ✓ Complying with GDPR, CCPA, or other data protection laws
+  ✓ Meeting data localization requirements
+  ✓ Providing required privacy notices and policies
+  ✓ Implementing data protection impact assessments (if required)
+  ✓ Appointing data protection officers (if required)
+
+The creators provide NO privacy law compliance guarantees.
+
+================================================================================
+11. REPOSITORY ACCESS AND DISTRIBUTION
+================================================================================
+
+NOTICE: This repository is PRIVATE and access is restricted.
+
+  ⚠️  Public access was revoked to limit legal exposure
+  ⚠️  Do NOT redistribute without understanding legal obligations
+  ⚠️  Do NOT make this repository public without creator permission
+  ⚠️  Access may be further restricted or revoked at any time
+
+Unauthorized redistribution may:
+  - Violate export control laws
+  - Expose you to legal liability
+  - Violate intellectual property rights
+  - Subject you to indemnification obligations
+
+================================================================================
+12. NO LEGAL ADVICE
+================================================================================
+
+This notice and all related documentation:
+  ❌ Do NOT constitute legal advice
+  ❌ Are NOT a substitute for qualified legal counsel
+  ❌ May be incomplete or not applicable to your situation
+
+YOU MUST consult with qualified legal counsel familiar with:
+  - Encryption and cryptography law in your jurisdiction
+  - Telecommunications regulations
+  - Export control law
+  - Data protection and privacy law
+  - International sanctions
+
+================================================================================
+13. CREATOR LIABILITY LIMITATION
+================================================================================
+
+TO THE MAXIMUM EXTENT PERMITTED BY LAW:
+
+The creators shall have ZERO liability for:
+  ✗ Direct, indirect, incidental, or consequential damages
+  ✗ Loss of profits, data, or business opportunities
+  ✗ Legal penalties, fines, or sanctions imposed on users
+  ✗ Regulatory action taken against users
+  ✗ Criminal prosecution of users
+  ✗ Any other damages or losses of any kind
+
+USERS ASSUME ALL RISKS. NO EXCEPTIONS.
+
+================================================================================
+14. CONTACT FOR LEGAL MATTERS
+================================================================================
+
+Legal inquiries ONLY (not technical support):
+  Email: legoogmiha@gmail.com
+  Subject line: "LEGAL - DPC Messenger"
+
+Response time: Best effort, no guarantees
+Do NOT send inquiries regarding Russian law compliance
+
+For takedown requests: Include specific legal basis and jurisdiction
+
+================================================================================
+15. GOVERNING LAW
+================================================================================
+
+This software is provided from an undisclosed jurisdiction.
+No specific governing law or jurisdiction is established.
+Users must resolve disputes under their own local law.
+
+================================================================================
+16. SEVERABILITY
+================================================================================
+
+If any provision of this notice is held invalid or unenforceable, the
+remaining provisions shall remain in full force and effect.
+
+================================================================================
+17. ACCEPTANCE OF TERMS
+================================================================================
+
+BY USING THIS SOFTWARE, YOU ACKNOWLEDGE THAT:
+
+  ✓ You have read and understood this entire notice
+  ✓ You agree to ALL terms and conditions
+  ✓ You accept ALL risks associated with use
+  ✓ You will comply with ALL applicable laws
+  ✓ You will NOT use this software in prohibited jurisdictions
+  ✓ You will indemnify creators from all liability
+  ✓ You have consulted legal counsel (or waive this protection)
+
+IF YOU DO NOT AGREE, DO NOT USE THIS SOFTWARE.
+
+================================================================================
+
+Document Version: 1.0
+Last Updated: 2025-11-14
+Applicable to: D-PC Messenger v0.6.1 and all versions
+
+READ LICENSE.md AND README.md FOR ADDITIONAL IMPORTANT INFORMATION
+
+================================================================================
+                    ⚠️  USE AT YOUR OWN RISK  ⚠️
+================================================================================

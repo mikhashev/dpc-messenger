@@ -3,7 +3,7 @@ name = "dpc-protocol"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Mike Shevchenko",email = "mikhashev@yandex.ru"}
+    {name = "Mike Shevchenko",email = "legoogmiha@gmail.com"}
 ]
 readme = "README.md"
 requires-python = ">=3.12"

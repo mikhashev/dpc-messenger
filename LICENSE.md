@@ -429,14 +429,79 @@ Contact: legoogmiha@gmail.com
 
 ---
 
-## Legal Disclaimer
+## Legal Disclaimer & Liability
 
-This document provides an overview and does not constitute legal advice.
+### NO WARRANTY - AS-IS BASIS
 
-**For legal matters:**
-- Consult with qualified legal counsel
-- Read complete license texts
-- Contact us for clarification
+**THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.**
+
+### LIMITATION OF LIABILITY
+
+**IN NO EVENT SHALL THE AUTHORS, COPYRIGHT HOLDERS, OR CONTRIBUTORS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.**
+
+### Important Legal Notices
+
+1. **Educational and Research Use Only**
+   - This software is provided for educational and research purposes
+   - The creators accept NO LIABILITY for any consequences of use
+   - Users assume ALL RISKS associated with using this software
+
+2. **User Responsibility for Compliance**
+   - YOU ARE SOLELY RESPONSIBLE for compliance with applicable laws in your jurisdiction
+   - This includes but is not limited to:
+     - Cryptography and encryption regulations (export controls, registration requirements)
+     - Telecommunications and messaging laws
+     - Data protection regulations (GDPR, CCPA, Russian Federal Law No. 152-FZ, etc.)
+     - Privacy and surveillance laws
+     - Content restrictions and censorship requirements
+
+3. **Cryptographic Technology Notice**
+   - This software contains strong cryptographic features (RSA-2048, TLS 1.2+, AES-256)
+   - Export and use may be RESTRICTED in certain countries
+   - Users must verify compliance with applicable export control laws (U.S. EAR, Wassenaar Arrangement, etc.)
+   - Some jurisdictions require registration or licensing for cryptographic software
+
+4. **Russian Federation Specific Notice**
+   - Users in Russia must comply with Federal Law No. 152-FZ on Personal Data
+   - Users in Russia must comply with Yarovaya Law (data retention requirements)
+   - Users may need to register cryptographic tools with FSB/FSTEC
+   - Users may need to comply with SORM requirements
+   - **The creators make NO GUARANTEES of compliance with Russian Federation law**
+   - **Consult legal counsel before use in Russian jurisdiction**
+
+5. **Prohibited Uses**
+   - The creators EXPLICITLY PROHIBIT use of this software for:
+     - Illegal activities under applicable law
+     - Violation of export controls or sanctions
+     - Circumventing lawful surveillance or interception orders
+     - Activities violating third-party rights
+     - Purposes contrary to public safety or national security
+
+6. **Indemnification**
+   - By using this software, you agree to INDEMNIFY AND HOLD HARMLESS the creators, contributors, and copyright holders from any claims, damages, or legal actions arising from your use
+
+7. **Repository Access**
+   - This repository may become PRIVATE without notice to limit legal exposure
+   - Public access may be revoked at any time
+   - Users should not redistribute without understanding their own legal obligations
+
+8. **No Legal Advice**
+   - This document provides an overview and DOES NOT constitute legal advice
+   - For legal matters: consult qualified legal counsel, read complete license texts, contact us for clarification
+
+### Compliance Recommendations
+
+Before deploying this software, users should:
+- Consult legal counsel familiar with telecommunications, data protection, and encryption laws
+- Conduct a legal risk assessment for their jurisdiction
+- Implement additional controls as required by local law
+- For Russian users: verify compliance with all applicable regulations and registration requirements
+
+### Contact for Legal Matters
+
+**Legal inquiries, compliance questions, or takedown requests:**
+- Email: legoogmiha@gmail.com
+- Response time: Best effort, no guarantees
 
 ---
 
