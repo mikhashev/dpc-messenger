@@ -193,11 +193,9 @@
   }
   
   function handleDisconnectPeer(nodeId: string) {
-    if (confirm(`Disconnect from ${nodeId.slice(0, 15)}...?`)) {
-      sendCommand("disconnect_from_peer", { node_id: nodeId });
-      if (activeChatId === nodeId) {
-        activeChatId = 'local_ai';
-      }
+    sendCommand("disconnect_from_peer", { node_id: nodeId });
+    if (activeChatId === nodeId) {
+      activeChatId = 'local_ai';
     }
   }
   
