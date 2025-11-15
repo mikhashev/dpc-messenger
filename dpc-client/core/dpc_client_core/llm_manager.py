@@ -204,6 +204,21 @@ default_provider = "ollama_local"
         else:
             return model
 
+    def find_provider_by_model(self, model_name: str) -> str | None:
+        """
+        Find a provider alias by model name.
+
+        Args:
+            model_name: The model name to search for (e.g., "claude-haiku-4-5")
+
+        Returns:
+            Provider alias if found, None otherwise
+        """
+        for alias, provider in self.providers.items():
+            if provider.model == model_name:
+                return alias
+        return None
+
     async def query(self, prompt: str, provider_alias: str | None = None) -> str:
         """
         Routes a query to the specified provider, or the default provider if None.
@@ -211,10 +226,10 @@ default_provider = "ollama_local"
         alias_to_use = provider_alias or self.default_provider
         if not alias_to_use:
             raise ValueError("No provider specified and no default provider is set.")
-        
+
         if alias_to_use not in self.providers:
             raise ValueError(f"Provider '{alias_to_use}' is not configured or failed to load.")
-        
+
         provider = self.providers[alias_to_use]
         print(f"Routing query to provider '{alias_to_use}' with model '{provider.model}'...")
         return await provider.generate_response(prompt)

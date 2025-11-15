@@ -170,7 +170,8 @@ export function connectToCoreService() {
                 }
                 // Handle peer_providers_updated event
                 else if (message.event === "peer_providers_updated") {
-                    console.log("Peer providers updated:", message.payload);
+                    const nodeId = message.payload.node_id.slice(0, 16);
+                    console.log(`✓ Received ${message.payload.providers.length} providers from ${nodeId}...`);
                     peerProviders.update(map => {
                         const newMap = new Map(map);
                         newMap.set(message.payload.node_id, message.payload.providers);

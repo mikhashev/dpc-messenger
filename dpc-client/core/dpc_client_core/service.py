@@ -1023,7 +1023,23 @@ class CoreService:
         # Run inference
         try:
             print(f"  - Running inference for {peer_id} (model: {model or 'default'}, provider: {provider or 'default'})")
-            result = await self.llm_manager.query(prompt, provider_alias=provider)
+
+            # Determine which provider to use:
+            # 1. If model name specified, find provider by model
+            # 2. Otherwise use provider alias if specified
+            # 3. Otherwise use default provider
+            provider_alias_to_use = provider
+
+            if model and not provider:
+                # Find provider by model name
+                found_alias = self.llm_manager.find_provider_by_model(model)
+                if found_alias:
+                    provider_alias_to_use = found_alias
+                    print(f"  - Found provider '{found_alias}' for model '{model}'")
+                else:
+                    raise ValueError(f"No provider found for model '{model}'")
+
+            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use)
             print(f"  - Inference completed successfully for {peer_id}")
 
             # Send success response

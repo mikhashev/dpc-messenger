@@ -72,15 +72,17 @@
   
   function getPeerDisplayName(peerId: string): string {
     if (!$nodeStatus || !$nodeStatus.peer_info) {
-      return peerId;
+      return peerId.slice(0, 20) + '...';
     }
 
     const peerInfo = $nodeStatus.peer_info.find((p: { node_id: string; name?: string }) => p.node_id === peerId);
     if (peerInfo && peerInfo.name) {
-      return `${peerInfo.name} | ${peerId}`;
+      // Show: "Name (dpc-node-abc123...)"
+      return `${peerInfo.name} (${peerId.slice(0, 16)}...)`;
     }
 
-    return peerId;
+    // Just show truncated node_id if no name
+    return peerId.slice(0, 20) + '...';
   }
   
   function getAIModelDisplay(): string {
@@ -769,14 +771,11 @@
               {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
                 <optgroup label="Remote Peers">
                   {#each $nodeStatus.peer_info as peer}
-                    {@const providers = $peerProviders.get(peer.node_id)}
+                    {@const displayName = peer.name
+                      ? `${peer.name} (${peer.node_id.slice(0, 16)}...)`
+                      : `${peer.node_id.slice(0, 20)}...`}
                     <option value={peer.node_id}>
-                      {peer.name || peer.node_id.slice(0, 12)}
-                      {#if providers && providers.length > 0}
-                        - {providers.map(p => p.model).join(', ')}
-                      {:else}
-                        (no models available)
-                      {/if}
+                      {displayName}
                     </option>
                   {/each}
                 </optgroup>
@@ -1537,6 +1536,7 @@
 
   .compute-host-selector select {
     flex: 1;
+    max-width: 400px;  /* Prevent selects from becoming too wide */
     padding: 0.4rem 0.6rem;
     border: 1px solid #ccc;
     border-radius: 4px;
@@ -1544,6 +1544,10 @@
     font-size: 0.9rem;
     cursor: pointer;
     transition: border-color 0.2s;
+    /* Truncate long model names with ellipsis */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .compute-host-selector select:hover {
