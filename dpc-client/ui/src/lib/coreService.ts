@@ -12,6 +12,9 @@ export const p2pMessages = writable<any>(null);
 export const knowledgeCommitProposal = writable<any>(null);
 export const personalContext = writable<any>(null);
 
+// AI Providers store
+export const availableProviders = writable<any>(null);
+
 let socket: WebSocket | null = null;
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempts = 0;
@@ -111,7 +114,8 @@ export function connectToCoreService() {
             connectionStatus.set('connected');
             reconnectAttempts = 0;
             sendCommand("get_status");
-            
+            sendCommand("list_providers");
+
             // Stop polling
             if (pollingInterval) {
                 clearInterval(pollingInterval);
@@ -155,6 +159,11 @@ export function connectToCoreService() {
                     if (message.payload.status === "success") {
                         personalContext.set(message.payload.context);
                     }
+                }
+                // Handle list_providers response
+                else if (message.command === "list_providers" && message.status === "OK") {
+                    console.log("Available providers loaded:", message.payload);
+                    availableProviders.set(message.payload);
                 }
             } catch (error) {
                 console.error("Error parsing message:", error);

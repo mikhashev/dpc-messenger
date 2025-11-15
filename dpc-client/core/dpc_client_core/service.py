@@ -611,6 +611,31 @@ class CoreService:
             "dpc_uris": dpc_uris,
         }
     
+    async def list_providers(self) -> Dict[str, Any]:
+        """
+        Returns all available AI providers from providers.toml.
+
+        Returns:
+            Dictionary with:
+            - providers: List of provider objects with alias, type, model
+            - default_provider: The default provider alias
+        """
+        providers_list = []
+
+        for alias, provider in self.llm_manager.providers.items():
+            provider_info = {
+                "alias": alias,
+                "type": provider.config.get("type"),
+                "model": provider.model,
+                "is_default": alias == self.llm_manager.default_provider
+            }
+            providers_list.append(provider_info)
+
+        return {
+            "providers": providers_list,
+            "default_provider": self.llm_manager.default_provider
+        }
+
     def set_peer_metadata(self, node_id: str, **kwargs):
         """Store metadata for a peer (name, etc)."""
         if node_id not in self.peer_metadata:

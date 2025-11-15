@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, availableProviders } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   
@@ -28,12 +28,27 @@
   let peerInput: string = "";  // RENAMED from peerUri for clarity
   let selectedComputeHost: string = "local";  // "local" or node_id for remote inference
 
+  // Store provider selection per chat (chatId -> provider alias)
+  const chatProviders = writable<Map<string, string>>(new Map());
+
+  // Store AI chat metadata (chatId -> {name: string, provider: string})
+  const aiChats = writable<Map<string, {name: string, provider: string}>>(
+    new Map([['local_ai', {name: 'Local AI Assistant', provider: ''}]])
+  );
+
+  // Track which chat each AI command belongs to (commandId -> chatId)
+  let commandToChatMap = new Map<string, string>();
+
   let processedMessageIds = new Set<string>();
 
   // Knowledge Architecture UI state
   let showContextViewer: boolean = false;
   let showCommitDialog: boolean = false;
   let autoKnowledgeDetection: boolean = true;  // Default: enabled
+
+  // Add AI Chat dialog state
+  let showAddAIChatDialog: boolean = false;
+  let selectedProviderForNewChat: string = "";
 
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
@@ -82,38 +97,48 @@
   // --- CHAT FUNCTIONS ---
   function handleSendMessage() {
     if (!currentInput.trim()) return;
-    
+
     const text = currentInput.trim();
     currentInput = "";
-    
+
     chatHistories.update(h => {
       const newMap = new Map(h);
       const hist = newMap.get(activeChatId) || [];
       newMap.set(activeChatId, [...hist, { id: crypto.randomUUID(), sender: 'user', text, timestamp: Date.now() }]);
       return newMap;
     });
-    
-    if (activeChatId === 'local_ai') {
+
+    // Check if this is an AI chat (local_ai or ai_chat_*)
+    if ($aiChats.has(activeChatId)) {
       isLoading = true;
       const commandId = crypto.randomUUID();
-      
+
+      // Track which chat this command belongs to
+      commandToChatMap.set(commandId, activeChatId);
+
       chatHistories.update(h => {
         const newMap = new Map(h);
         const hist = newMap.get(activeChatId) || [];
-        newMap.set(activeChatId, [...hist, { 
-          id: crypto.randomUUID(), 
-          sender: 'ai', 
-          text: 'Thinking...', 
+        newMap.set(activeChatId, [...hist, {
+          id: crypto.randomUUID(),
+          sender: 'ai',
+          text: 'Thinking...',
           timestamp: Date.now(),
           commandId: commandId
         }]);
         return newMap;
       });
-      
-      // Prepare AI query payload with optional compute host
+
+      // Prepare AI query payload with optional compute host and provider
       const payload: any = { prompt: text };
       if (selectedComputeHost !== "local") {
         payload.compute_host = selectedComputeHost;
+      }
+
+      // Add provider if one is selected for this chat
+      const selectedProvider = $chatProviders.get(activeChatId);
+      if (selectedProvider) {
+        payload.provider = selectedProvider;
       }
 
       const success = sendCommand("execute_ai_query", payload, commandId);
@@ -121,12 +146,14 @@
         isLoading = false;
         chatHistories.update(h => {
           const newMap = new Map(h);
-          const hist = newMap.get('local_ai') || [];
-          newMap.set('local_ai', hist.map(m =>
+          const hist = newMap.get(activeChatId) || [];
+          newMap.set(activeChatId, hist.map(m =>
             m.commandId === commandId ? { ...m, sender: 'system', text: 'Error: Not connected' } : m
           ));
           return newMap;
         });
+        // Clean up the command mapping
+        commandToChatMap.delete(commandId);
       }
     } else {
       sendCommand("send_p2p_message", { target_node_id: activeChatId, text });
@@ -222,28 +249,133 @@
     }
   }
 
+  function handleAddAIChat() {
+    if (!$availableProviders || !$availableProviders.providers || $availableProviders.providers.length === 0) {
+      alert("No AI providers available. Please configure providers in ~/.dpc/providers.toml");
+      return;
+    }
+
+    // Set default selection and show dialog
+    selectedProviderForNewChat = $availableProviders.default_provider;
+    showAddAIChatDialog = true;
+  }
+
+  function confirmAddAIChat() {
+    if (!selectedProviderForNewChat) return;
+
+    // Find the selected provider
+    const provider = $availableProviders.providers.find((p: any) => p.alias === selectedProviderForNewChat);
+    if (!provider) {
+      alert(`Provider '${selectedProviderForNewChat}' not found.`);
+      return;
+    }
+
+    // Create new AI chat ID
+    const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
+    const chatName = `${provider.alias} (${provider.model})`;
+
+    // Add to aiChats
+    aiChats.update(chats => {
+      const newMap = new Map(chats);
+      newMap.set(chatId, { name: chatName, provider: selectedProviderForNewChat });
+      return newMap;
+    });
+
+    // Set provider for this chat
+    chatProviders.update(map => {
+      const newMap = new Map(map);
+      newMap.set(chatId, selectedProviderForNewChat);
+      return newMap;
+    });
+
+    // Initialize chat history
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      newMap.set(chatId, [{
+        id: crypto.randomUUID(),
+        sender: 'ai',
+        text: `Hello! I'm powered by ${chatName}. How can I help you today?`,
+        timestamp: Date.now()
+      }]);
+      return newMap;
+    });
+
+    // Switch to the new chat
+    activeChatId = chatId;
+
+    // Close dialog
+    showAddAIChatDialog = false;
+  }
+
+  function cancelAddAIChat() {
+    showAddAIChatDialog = false;
+    selectedProviderForNewChat = "";
+  }
+
+  function handleDeleteAIChat(chatId: string) {
+    if (chatId === 'local_ai') {
+      alert("Cannot delete the default Local AI chat.");
+      return;
+    }
+
+    if (confirm("Delete this AI chat? This will permanently remove the chat history.")) {
+      // Remove from aiChats
+      aiChats.update(chats => {
+        const newMap = new Map(chats);
+        newMap.delete(chatId);
+        return newMap;
+      });
+
+      // Remove from chatProviders
+      chatProviders.update(map => {
+        const newMap = new Map(map);
+        newMap.delete(chatId);
+        return newMap;
+      });
+
+      // Remove chat history
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        newMap.delete(chatId);
+        return newMap;
+      });
+
+      // Switch to default chat
+      if (activeChatId === chatId) {
+        activeChatId = 'local_ai';
+      }
+    }
+  }
+
   // --- HANDLE INCOMING MESSAGES ---
   $: if ($coreMessages?.id) {
     const message = $coreMessages;
-    
+
     if (message.command === "execute_ai_query") {
       isLoading = false;
-      const newText = message.status === "OK" 
-        ? message.payload.content 
+      const newText = message.status === "OK"
+        ? message.payload.content
         : `Error: ${message.payload?.message || 'Unknown error'}`;
       const newSender = message.status === "OK" ? 'ai' : 'system';
-      
+
       const responseCommandId = message.id;
-      
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        const hist = newMap.get('local_ai') || [];
-        newMap.set('local_ai', hist.map(m => 
-          m.commandId === responseCommandId ? { ...m, sender: newSender, text: newText, commandId: undefined } : m
-        ));
-        return newMap;
-      });
-      
+
+      // Find which chat this command belongs to
+      const chatId = commandToChatMap.get(responseCommandId);
+      if (chatId) {
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          const hist = newMap.get(chatId) || [];
+          newMap.set(chatId, hist.map(m =>
+            m.commandId === responseCommandId ? { ...m, sender: newSender, text: newText, commandId: undefined } : m
+          ));
+          return newMap;
+        });
+
+        // Clean up the command mapping
+        commandToChatMap.delete(responseCommandId);
+      }
+
       autoScroll();
     }
   }
@@ -472,18 +604,41 @@
 
         <!-- Chat List -->
         <div class="chat-list">
-          <h3>Chats</h3>
+          <div class="chat-list-header">
+            <h3>Chats</h3>
+            <button
+              class="btn-add-chat"
+              on:click={handleAddAIChat}
+              title="Add a new AI chat with a different provider"
+            >
+              + AI
+            </button>
+          </div>
           <ul>
-            <li>
-              <button 
-                class="chat-button" 
-                class:active={activeChatId === 'local_ai'}
-                on:click={() => activeChatId = 'local_ai'}
-              >
-                {getAIModelDisplay()}
-              </button>
-            </li>
-            
+            <!-- AI Chats -->
+            {#each Array.from($aiChats.entries()) as [chatId, chatInfo] (chatId)}
+              <li class="peer-item">
+                <button
+                  class="chat-button"
+                  class:active={activeChatId === chatId}
+                  on:click={() => activeChatId = chatId}
+                  title={chatInfo.provider ? `Provider: ${chatInfo.provider}` : 'Default AI Assistant'}
+                >
+                  🤖 {chatInfo.name}
+                </button>
+                {#if chatId !== 'local_ai'}
+                  <button
+                    class="disconnect-btn"
+                    on:click={() => handleDeleteAIChat(chatId)}
+                    title="Delete AI chat"
+                  >
+                    ×
+                  </button>
+                {/if}
+              </li>
+            {/each}
+
+            <!-- P2P Peer Chats -->
             {#if $nodeStatus.p2p_peers && $nodeStatus.p2p_peers.length > 0}
               {#each $nodeStatus.p2p_peers as peerId (peerId)}
                 <li class="peer-item">
@@ -524,13 +679,43 @@
     <!-- Chat Panel -->
     <div class="chat-panel">
       <div class="chat-header">
-        <h2>
-          {#if activeChatId === 'local_ai'}
-            {getAIModelDisplay()}
-          {:else}
-            👤 Chat with {getPeerDisplayName(activeChatId)}
+        <div class="chat-title-section">
+          <h2>
+            {#if $aiChats.has(activeChatId)}
+              🤖 {$aiChats.get(activeChatId).name}
+            {:else}
+              👤 Chat with {getPeerDisplayName(activeChatId)}
+            {/if}
+          </h2>
+
+          {#if $aiChats.has(activeChatId) && $availableProviders && $availableProviders.providers && $availableProviders.providers.length >= 1}
+            <div class="provider-selector">
+              <label for="provider-select">Provider:</label>
+              <select
+                id="provider-select"
+                value={$chatProviders.get(activeChatId) || $availableProviders.default_provider}
+                on:change={(e) => {
+                  chatProviders.update(map => {
+                    const newMap = new Map(map);
+                    newMap.set(activeChatId, e.currentTarget.value);
+                    return newMap;
+                  });
+                }}
+                disabled={$availableProviders.providers.length === 1}
+              >
+                {#each $availableProviders.providers as provider}
+                  <option value={provider.alias}>
+                    {provider.alias} ({provider.model})
+                  </option>
+                {/each}
+              </select>
+              {#if $availableProviders.providers.length === 1}
+                <span class="provider-hint">(Configure more in ~/.dpc/providers.toml)</span>
+              {/if}
+            </div>
           {/if}
-        </h2>
+        </div>
+
         <div class="chat-actions">
           <button class="btn-new-chat" on:click={() => handleNewChat(activeChatId)}>
             🔄 New Chat
@@ -614,6 +799,48 @@
   context={$personalContext}
   on:close={() => showContextViewer = false}
 />
+
+<!-- Add AI Chat Dialog -->
+{#if showAddAIChatDialog}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div
+    class="modal-overlay"
+    role="presentation"
+    on:click={cancelAddAIChat}
+    on:keydown={(e) => e.key === 'Escape' && cancelAddAIChat()}
+  >
+    <!-- svelte-ignore a11y-click-events-have-key-events -->
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="modal-content"
+      role="dialog"
+      aria-labelledby="modal-title"
+      aria-modal="true"
+      tabindex="-1"
+      on:click|stopPropagation
+    >
+      <h2 id="modal-title">Add New AI Chat</h2>
+      <p>Select an AI provider for the new chat:</p>
+
+      <div class="dialog-provider-selector">
+        <label for="new-chat-provider">Provider:</label>
+        <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
+          {#each $availableProviders.providers as provider}
+            <option value={provider.alias}>
+              {provider.alias} - {provider.model}
+            </option>
+          {/each}
+        </select>
+      </div>
+
+      <div class="dialog-actions">
+        <button class="btn-cancel" on:click={cancelAddAIChat}>Cancel</button>
+        <button class="btn-confirm" on:click={confirmAddAIChat}>Create Chat</button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .container {
@@ -953,12 +1180,53 @@
     line-height: 1.3;
   }
 
+  .chat-list-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+  }
+
+  .chat-list-header h3 {
+    margin: 0;
+    padding: 0;
+    border: none;
+  }
+
+  .btn-add-chat {
+    padding: 0.3rem 0.6rem;
+    background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.75rem;
+    font-weight: 600;
+    transition: all 0.2s;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    white-space: nowrap;
+    flex-shrink: 0;
+    width: fit-content;
+    min-width: auto;
+  }
+
+  .btn-add-chat:hover {
+    background: linear-gradient(135deg, #45a049 0%, #4CAF50 100%);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    transform: translateY(-1px);
+  }
+
+  .btn-add-chat:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  }
+
   .chat-list ul {
     list-style: none;
     padding: 0;
     margin: 0;
   }
-  
+
   .chat-list li {
     margin-bottom: 0.5rem;
   }
@@ -1030,10 +1298,60 @@
     border-bottom: 1px solid #eee;
   }
 
+  .chat-title-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
   .chat-header h2 {
     margin: 0;
     border: none;
     padding: 0;
+  }
+
+  .provider-selector {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.9rem;
+  }
+
+  .provider-selector label {
+    font-weight: 500;
+    color: #666;
+  }
+
+  .provider-selector select {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    background: white;
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+
+  .provider-selector select:hover {
+    border-color: #4CAF50;
+  }
+
+  .provider-selector select:focus {
+    outline: none;
+    border-color: #4CAF50;
+    box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.1);
+  }
+
+  .provider-selector select:disabled {
+    background: #f5f5f5;
+    cursor: not-allowed;
+    opacity: 0.7;
+  }
+
+  .provider-hint {
+    font-size: 0.75rem;
+    color: #888;
+    font-style: italic;
+    margin-left: 0.5rem;
   }
 
   .chat-actions {
@@ -1463,5 +1781,114 @@
     border-radius: 4px;
     word-break: break-all;
     line-height: 1.5;
+  }
+
+  /* Modal Dialog Styles */
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+  }
+
+  .modal-content {
+    background: white;
+    padding: 2rem;
+    border-radius: 12px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+    max-width: 500px;
+    width: 90%;
+  }
+
+  .modal-content h2 {
+    margin: 0 0 0.5rem 0;
+    color: #333;
+    font-size: 1.5rem;
+  }
+
+  .modal-content p {
+    margin: 0 0 1.5rem 0;
+    color: #666;
+    font-size: 0.95rem;
+  }
+
+  .dialog-provider-selector {
+    margin-bottom: 1.5rem;
+  }
+
+  .dialog-provider-selector label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    color: #333;
+  }
+
+  .dialog-provider-selector select {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 1rem;
+    background: white;
+    cursor: pointer;
+  }
+
+  .dialog-provider-selector select:hover {
+    border-color: #4CAF50;
+  }
+
+  .dialog-provider-selector select:focus {
+    outline: none;
+    border-color: #4CAF50;
+    box-shadow: 0 0 0 3px rgba(76, 175, 80, 0.1);
+  }
+
+  .dialog-actions {
+    display: flex;
+    gap: 1rem;
+    justify-content: flex-end;
+  }
+
+  .btn-cancel,
+  .btn-confirm {
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .btn-cancel {
+    background: #f0f0f0;
+    color: #666;
+  }
+
+  .btn-cancel:hover {
+    background: #e0e0e0;
+  }
+
+  .btn-confirm {
+    background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+    color: white;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  }
+
+  .btn-confirm:hover {
+    background: linear-gradient(135deg, #45a049 0%, #4CAF50 100%);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    transform: translateY(-1px);
+  }
+
+  .btn-confirm:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   }
 </style>
