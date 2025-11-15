@@ -47,6 +47,18 @@ def create_remote_inference_response(request_id: str, response: str = None, erro
         payload["status"] = "error"
     return {"command": "REMOTE_INFERENCE_RESPONSE", "payload": payload}
 
+def create_get_providers_message() -> Dict[str, Any]:
+    """Creates a request to get available AI providers from a peer."""
+    return {"command": "GET_PROVIDERS"}
+
+def create_providers_response(providers: list) -> Dict[str, Any]:
+    """Creates a response containing available AI providers.
+
+    Args:
+        providers: List of provider dicts with keys: alias, model, type
+    """
+    return {"command": "PROVIDERS_RESPONSE", "payload": {"providers": providers}}
+
 async def read_message(reader: asyncio.StreamReader) -> dict | None:
     try:
         header = await reader.readexactly(10)

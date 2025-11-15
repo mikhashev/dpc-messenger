@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, availableProviders } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, availableProviders, peerProviders } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   
@@ -27,6 +27,7 @@
   let chatWindow: HTMLElement;
   let peerInput: string = "";  // RENAMED from peerUri for clarity
   let selectedComputeHost: string = "local";  // "local" or node_id for remote inference
+  let selectedRemoteModel: string = "";  // Selected model when using remote compute host
 
   // Store provider selection per chat (chatId -> provider alias)
   const chatProviders = writable<Map<string, string>>(new Map());
@@ -129,16 +130,21 @@
         return newMap;
       });
 
-      // Prepare AI query payload with optional compute host and provider
+      // Prepare AI query payload with optional compute host and provider/model
       const payload: any = { prompt: text };
-      if (selectedComputeHost !== "local") {
-        payload.compute_host = selectedComputeHost;
-      }
 
-      // Add provider if one is selected for this chat
-      const selectedProvider = $chatProviders.get(activeChatId);
-      if (selectedProvider) {
-        payload.provider = selectedProvider;
+      if (selectedComputeHost !== "local") {
+        // Remote inference - send compute_host and model
+        payload.compute_host = selectedComputeHost;
+        if (selectedRemoteModel) {
+          payload.model = selectedRemoteModel;
+        }
+      } else {
+        // Local inference - send provider if one is selected
+        const selectedProvider = $chatProviders.get(activeChatId);
+        if (selectedProvider) {
+          payload.provider = selectedProvider;
+        }
       }
 
       const success = sendCommand("execute_ai_query", payload, commandId);
@@ -748,18 +754,49 @@
         {#if activeChatId === 'local_ai'}
           <div class="compute-host-selector">
             <label for="compute-host">🖥️ Compute Host:</label>
-            <select id="compute-host" bind:value={selectedComputeHost}>
+            <select id="compute-host" bind:value={selectedComputeHost} on:change={() => {
+              // Reset selected model when switching compute hosts
+              selectedRemoteModel = "";
+              // Auto-select first available model if switching to remote
+              if (selectedComputeHost !== "local") {
+                const providers = $peerProviders.get(selectedComputeHost);
+                if (providers && providers.length > 0) {
+                  selectedRemoteModel = providers[0].model;
+                }
+              }
+            }}>
               <option value="local">Local (this device)</option>
               {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
                 <optgroup label="Remote Peers">
                   {#each $nodeStatus.peer_info as peer}
+                    {@const providers = $peerProviders.get(peer.node_id)}
                     <option value={peer.node_id}>
-                      {peer.name ? `${peer.name} (${peer.node_id.slice(0, 12)}...)` : peer.node_id}
+                      {peer.name || peer.node_id.slice(0, 12)}
+                      {#if providers && providers.length > 0}
+                        - {providers.map(p => p.model).join(', ')}
+                      {:else}
+                        (no models available)
+                      {/if}
                     </option>
                   {/each}
                 </optgroup>
               {/if}
             </select>
+
+            <!-- Model selector for remote compute host -->
+            {#if selectedComputeHost !== "local"}
+              {@const providers = $peerProviders.get(selectedComputeHost)}
+              {#if providers && providers.length > 0}
+                <label for="remote-model">Model:</label>
+                <select id="remote-model" bind:value={selectedRemoteModel}>
+                  {#each providers as provider}
+                    <option value={provider.model}>
+                      {provider.alias} ({provider.model})
+                    </option>
+                  {/each}
+                </select>
+              {/if}
+            {/if}
           </div>
         {/if}
         <div class="input-row">

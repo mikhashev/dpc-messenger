@@ -514,6 +514,15 @@ class CoreService:
                     else:
                         future.set_exception(RuntimeError(error or "Remote inference failed"))
 
+        elif command == "GET_PROVIDERS":
+            # Peer is requesting our available AI providers
+            await self._handle_get_providers_request(sender_node_id)
+
+        elif command == "PROVIDERS_RESPONSE":
+            # Peer is sending their available AI providers
+            providers = payload.get("providers", [])
+            await self._handle_providers_response(sender_node_id, providers)
+
         else:
             print(f"Unknown P2P message command: {command}")
 
@@ -1035,6 +1044,78 @@ class CoreService:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
             except Exception as send_err:
                 print(f"  - Error sending inference error response to {peer_id}: {send_err}")
+
+    async def _handle_get_providers_request(self, peer_id: str):
+        """
+        Handle GET_PROVIDERS request from a peer.
+        Check firewall permissions and send available providers that the peer can use.
+        """
+        from dpc_protocol.protocol import create_providers_response
+
+        print(f"  - Handling GET_PROVIDERS request from {peer_id}")
+
+        # Check if compute sharing is enabled and peer is authorized
+        if not self.firewall.can_request_inference(peer_id):
+            print(f"  - Access denied: {peer_id} cannot access compute resources")
+            # Send empty provider list (no access)
+            response = create_providers_response([])
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, response)
+            except Exception as e:
+                print(f"  - Error sending providers response to {peer_id}: {e}")
+            return
+
+        # Get all available providers
+        all_providers = []
+        all_models = []
+
+        for alias, provider in self.llm_manager.providers.items():
+            model = provider.model
+            provider_type = provider.config.get("type", "unknown")
+
+            all_providers.append({
+                "alias": alias,
+                "model": model,
+                "type": provider_type
+            })
+            all_models.append(model)
+
+        # Filter providers based on firewall allowed_models setting
+        allowed_models = self.firewall.get_available_models_for_peer(peer_id, all_models)
+
+        # Only include providers with allowed models
+        filtered_providers = [
+            p for p in all_providers
+            if p["model"] in allowed_models
+        ]
+
+        print(f"  - Sending {len(filtered_providers)} providers to {peer_id} (filtered from {len(all_providers)} total)")
+
+        # Send response with filtered providers
+        response = create_providers_response(filtered_providers)
+        try:
+            await self.p2p_manager.send_message_to_peer(peer_id, response)
+        except Exception as e:
+            print(f"  - Error sending providers response to {peer_id}: {e}")
+
+    async def _handle_providers_response(self, peer_id: str, providers: list):
+        """
+        Handle PROVIDERS_RESPONSE from a peer.
+        Store the providers in peer metadata and broadcast to UI.
+        """
+        print(f"  - Received {len(providers)} providers from {peer_id}")
+
+        # Update peer metadata with providers
+        if peer_id not in self.peer_metadata:
+            self.peer_metadata[peer_id] = {}
+
+        self.peer_metadata[peer_id]["providers"] = providers
+
+        # Broadcast to UI
+        await self.local_api.broadcast_event("peer_providers_updated", {
+            "node_id": peer_id,
+            "providers": providers
+        })
 
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """

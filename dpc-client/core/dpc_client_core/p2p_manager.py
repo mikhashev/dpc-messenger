@@ -187,6 +187,14 @@ class P2PManager:
 
             asyncio.create_task(self._listen_to_peer(peer))
 
+            # Auto-discover peer's available AI providers
+            from dpc_protocol.protocol import create_get_providers_message
+            try:
+                await self.send_message_to_peer(target_node_id, create_get_providers_message())
+                print(f"  - Requested AI providers from {target_node_id}")
+            except Exception as e:
+                print(f"  - Failed to request providers from {target_node_id}: {e}")
+
         except Exception as e:
             print(f"Failed to establish direct connection with {target_node_id}: {e}")
             raise
@@ -445,9 +453,17 @@ class P2PManager:
             # Move from pending to active peers
             self._pending_webrtc.pop(node_id, None)
             self.peers[node_id] = webrtc_peer
-            
+
             await self._notify_peer_change()
             print(f"✅ WebRTC connection established with {node_id}")
+
+            # Auto-discover peer's available AI providers
+            from dpc_protocol.protocol import create_get_providers_message
+            try:
+                await self.send_message_to_peer(node_id, create_get_providers_message())
+                print(f"  - Requested AI providers from {node_id}")
+            except Exception as e:
+                print(f"  - Failed to request providers from {node_id}: {e}")
             
         except Exception as e:
             print(f"Failed to finalize WebRTC connection with {node_id}: {e}")

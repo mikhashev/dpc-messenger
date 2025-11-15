@@ -15,6 +15,9 @@ export const personalContext = writable<any>(null);
 // AI Providers store
 export const availableProviders = writable<any>(null);
 
+// Peer Providers store (node_id -> provider list)
+export const peerProviders = writable<Map<string, any[]>>(new Map());
+
 let socket: WebSocket | null = null;
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempts = 0;
@@ -164,6 +167,15 @@ export function connectToCoreService() {
                 else if (message.command === "list_providers" && message.status === "OK") {
                     console.log("Available providers loaded:", message.payload);
                     availableProviders.set(message.payload);
+                }
+                // Handle peer_providers_updated event
+                else if (message.event === "peer_providers_updated") {
+                    console.log("Peer providers updated:", message.payload);
+                    peerProviders.update(map => {
+                        const newMap = new Map(map);
+                        newMap.set(message.payload.node_id, message.payload.providers);
+                        return newMap;
+                    });
                 }
             } catch (error) {
                 console.error("Error parsing message:", error);
