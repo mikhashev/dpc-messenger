@@ -6,7 +6,8 @@
   import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, availableProviders, peerProviders } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
-  
+  import { ask } from '@tauri-apps/plugin-dialog';
+
   console.log("Full D-PC Messenger loading...");
   
   // --- STATE ---
@@ -318,16 +319,19 @@
     selectedProviderForNewChat = "";
   }
 
-  function handleDeleteAIChat(chatId: string) {
+  async function handleDeleteAIChat(chatId: string) {
     console.log('Delete AI chat button clicked for:', chatId);
 
     if (chatId === 'local_ai') {
-      alert("Cannot delete the default Local AI chat.");
+      await ask("Cannot delete the default Local AI chat.", { title: "D-PC Messenger", kind: "info" });
       return;
     }
 
-    // Use confirm dialog
-    const shouldDelete = confirm("Delete this AI chat? This will permanently remove the chat history.");
+    // Use Tauri's ask dialog (works on all platforms including macOS)
+    const shouldDelete = await ask(
+      "Delete this AI chat? This will permanently remove the chat history.",
+      { title: "Confirm Deletion", kind: "warning" }
+    );
     console.log('User confirmed deletion:', shouldDelete);
 
     if (!shouldDelete) {

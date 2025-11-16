@@ -9,9 +9,12 @@ import threading
 from typing import Dict, Any
 import time
 import base64
+import ssl
+import sys
 
 import httpx
 import websockets
+import certifi
 
 from .token_cache import TokenCache
 from typing import Optional
@@ -440,11 +443,18 @@ class HubClient:
 
         ws_url = self.api_base_url.replace("http", "ws") + f"/ws/signal?token={self.jwt_token}"
         print(f"Connecting to signaling server...")
-        
+
         try:
+            # Create SSL context with proper certificate verification (fixes macOS SSL error)
+            ssl_context = None
+            if ws_url.startswith("wss://"):
+                ssl_context = ssl.create_default_context(cafile=certifi.where())
+                print(f"Using SSL context with certifi CA bundle: {certifi.where()}")
+
             # Added ping_interval and ping_timeout for built-in keepalive
             self.websocket = await websockets.connect(
                 ws_url,
+                ssl=ssl_context,
                 ping_interval=20,
                 ping_timeout=60
             )

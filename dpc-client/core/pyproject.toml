@@ -15,6 +15,7 @@ openai = ">=1.0.0,<2.0.0"
 anthropic = ">=0.20.0,<0.21.0"
 httpx = ">=0.27.0,<0.28.0"
 aiortc = ">=1.6.0,<2.0.0"
+certifi = ">=2024.0.0"
 fastapi = { version = "*", optional = true }
 
 # Dependency from local library dpc-protocol
