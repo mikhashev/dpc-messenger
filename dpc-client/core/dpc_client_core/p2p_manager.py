@@ -7,6 +7,7 @@ import json
 from typing import Dict, Any, Callable, Tuple, Union
 
 from cryptography import x509
+import websockets
 
 from dpc_protocol.crypto import generate_node_id, load_identity, generate_identity
 from dpc_protocol.protocol import read_message, write_message, create_hello_message
@@ -48,10 +49,14 @@ class P2PManager:
         self.firewall = firewall
         self.peers: Dict[str, Union[PeerConnection, WebRTCPeerConnection]] = {}
         self.display_name: str | None = None
-        
+
         # WebRTC connection state tracking
         self._pending_webrtc: Dict[str, WebRTCPeerConnection] = {}
         self._ice_candidates_buffer: Dict[str, list] = {}
+
+        # Auto-reconnect tracking
+        self._intentional_disconnects: set = set()  # Track user-initiated disconnects
+        self._hub_client_refs: Dict[str, HubClient] = {}  # Store hub_client for reconnection
         
         try:
             self.node_id, self.key_file, self.cert_file = load_identity()
@@ -224,16 +229,19 @@ class P2PManager:
         This is the INITIATOR side (Alice).
         """
         print(f"Initiating WebRTC connection to {target_node_id} via Hub...")
-        
+
         if target_node_id in self.peers:
             print(f"Already connected to {target_node_id}")
             return
-        
+
         if target_node_id in self._pending_webrtc:
             print(f"Connection to {target_node_id} already in progress")
             return
-        
+
         try:
+            # Store hub_client reference for reconnection
+            self._hub_client_refs[target_node_id] = hub_client
+
             # Create WebRTC peer connection
             webrtc_peer = WebRTCPeerConnection(node_id=target_node_id, is_initiator=True)
             self._pending_webrtc[target_node_id] = webrtc_peer
@@ -254,7 +262,7 @@ class P2PManager:
             
             webrtc_peer.on_message = handle_message
 
-            # Set up close handler
+            # Set up close handler with auto-reconnect
             async def handle_close(node_id):
                 print(f"WebRTC connection closed for {node_id}, cleaning up...")
                 if node_id in self.peers:
@@ -262,7 +270,29 @@ class P2PManager:
                     await self._notify_peer_change()
                 if node_id in self._pending_webrtc:
                     self._pending_webrtc.pop(node_id)
-            
+
+                # Auto-reconnect if disconnection was not intentional
+                if node_id not in self._intentional_disconnects:
+                    print(f"[Auto-Reconnect] Connection to {node_id} lost unexpectedly")
+                    print(f"[Auto-Reconnect] Will attempt to reconnect in 3 seconds...")
+                    await asyncio.sleep(3)
+
+                    # Check if hub_client is still connected
+                    stored_hub_client = self._hub_client_refs.get(node_id)
+                    if stored_hub_client and stored_hub_client.websocket and stored_hub_client.websocket.state == websockets.State.OPEN:
+                        try:
+                            print(f"[Auto-Reconnect] Reconnecting to {node_id}...")
+                            await self.connect_via_hub(node_id, stored_hub_client)
+                        except Exception as e:
+                            print(f"[Auto-Reconnect] Failed to reconnect to {node_id}: {e}")
+                    else:
+                        print(f"[Auto-Reconnect] Cannot reconnect to {node_id} - Hub client not connected")
+                        self._hub_client_refs.pop(node_id, None)
+                else:
+                    print(f"[Auto-Reconnect] Disconnection was intentional, not reconnecting")
+                    self._intentional_disconnects.discard(node_id)
+                    self._hub_client_refs.pop(node_id, None)
+
             webrtc_peer.on_close = handle_close
             
             # Create and send offer
@@ -345,11 +375,14 @@ class P2PManager:
     async def _handle_webrtc_offer(self, from_node: str, payload: Dict[str, Any], hub_client: HubClient):
         """Handle incoming WebRTC offer (ANSWERER side - Bob)."""
         print(f"Handling WebRTC offer from {from_node}")
-        
+
         if from_node in self.peers:
             print(f"Already connected to {from_node}, ignoring offer")
             return
-        
+
+        # Store hub_client reference for reconnection
+        self._hub_client_refs[from_node] = hub_client
+
         # Create WebRTC peer connection as answerer
         webrtc_peer = WebRTCPeerConnection(node_id=from_node, is_initiator=False)
         self._pending_webrtc[from_node] = webrtc_peer
@@ -370,7 +403,7 @@ class P2PManager:
         
         webrtc_peer.on_message = handle_message
 
-        # Set up close handler
+        # Set up close handler with auto-reconnect
         async def handle_close(node_id):
             print(f"WebRTC connection closed for {node_id}, cleaning up...")
             if node_id in self.peers:
@@ -378,9 +411,31 @@ class P2PManager:
                 await self._notify_peer_change()
             if node_id in self._pending_webrtc:
                 self._pending_webrtc.pop(node_id)
-        
+
+            # Auto-reconnect if disconnection was not intentional
+            if node_id not in self._intentional_disconnects:
+                print(f"[Auto-Reconnect] Connection to {node_id} lost unexpectedly")
+                print(f"[Auto-Reconnect] Will attempt to reconnect in 3 seconds...")
+                await asyncio.sleep(3)
+
+                # Check if hub_client is still connected
+                stored_hub_client = self._hub_client_refs.get(node_id)
+                if stored_hub_client and stored_hub_client.websocket and stored_hub_client.websocket.state == websockets.State.OPEN:
+                    try:
+                        print(f"[Auto-Reconnect] Reconnecting to {node_id}...")
+                        await self.connect_via_hub(node_id, stored_hub_client)
+                    except Exception as e:
+                        print(f"[Auto-Reconnect] Failed to reconnect to {node_id}: {e}")
+                else:
+                    print(f"[Auto-Reconnect] Cannot reconnect to {node_id} - Hub client not connected")
+                    self._hub_client_refs.pop(node_id, None)
+            else:
+                print(f"[Auto-Reconnect] Disconnection was intentional, not reconnecting")
+                self._intentional_disconnects.discard(node_id)
+                self._hub_client_refs.pop(node_id, None)
+
         webrtc_peer.on_close = handle_close
-        
+
         # Handle offer and create answer
         offer_sdp = payload.get("offer")
         answer = await webrtc_peer.handle_offer(offer_sdp)
@@ -509,14 +564,17 @@ class P2PManager:
         await peer.send(message)
 
     async def shutdown_peer_connection(self, peer_id: str):
-        """Close connection with a peer."""
+        """Close connection with a peer (user-initiated)."""
+        # Mark this as an intentional disconnect to prevent auto-reconnect
+        self._intentional_disconnects.add(peer_id)
+
         if peer_id in self.peers:
             peer = self.peers.pop(peer_id)
             await peer.close()
-            print(f"Connection with {peer_id} closed.")
+            print(f"Connection with {peer_id} closed (intentional).")
             # Ensure status update is broadcast
             await self._notify_peer_change()
-        
+
         # Also clean up pending WebRTC connections
         if peer_id in self._pending_webrtc:
             webrtc_peer = self._pending_webrtc.pop(peer_id)
@@ -524,22 +582,36 @@ class P2PManager:
             print(f"Pending WebRTC connection with {peer_id} cleaned up.")
             # Notify peer list change even for pending connections
             await self._notify_peer_change()
-        
+
         # Clean up buffered ICE candidates
         self._ice_candidates_buffer.pop(peer_id, None)
 
+        # Note: hub_client_refs will be cleaned up in the close handler
+
     async def shutdown_all(self):
-        """Shutdown all connections."""
+        """Shutdown all connections (intentional shutdown)."""
         print("Shutting down P2P Manager...")
-        
+
+        # Mark all disconnections as intentional to prevent auto-reconnect
+        for peer_id in list(self.peers.keys()):
+            self._intentional_disconnects.add(peer_id)
+        for peer_id in list(self._pending_webrtc.keys()):
+            self._intentional_disconnects.add(peer_id)
+
         if self._server_task:
             self._server_task.cancel()
-        
+
         for peer_id in list(self.peers.keys()):
-            await self.shutdown_peer_connection(peer_id)
-        
+            peer = self.peers.pop(peer_id)
+            await peer.close()
+
         for peer_id in list(self._pending_webrtc.keys()):
             webrtc_peer = self._pending_webrtc.pop(peer_id)
             await webrtc_peer.close()
-        
+
+        # Clean up all tracking structures
+        self._hub_client_refs.clear()
+        self._intentional_disconnects.clear()
+        self._ice_candidates_buffer.clear()
+
         print("P2P Manager shut down.")

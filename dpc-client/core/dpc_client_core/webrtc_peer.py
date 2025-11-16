@@ -78,7 +78,11 @@ class WebRTCPeerConnection:
             ])
             print("[WebRTC] Falling back to free OpenRelay servers (may not work)")
 
-        configuration = RTCConfiguration(iceServers=ice_servers)
+        configuration = RTCConfiguration(
+            iceServers=ice_servers,
+            # Uncomment to force TURN relay (testing/troubleshooting only):
+            # iceTransportPolicy="relay"
+        )
 
         # Create RTCPeerConnection with proper configuration
         self.pc = RTCPeerConnection(configuration=configuration)
