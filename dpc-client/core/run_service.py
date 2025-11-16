@@ -7,17 +7,33 @@ from dpc_client_core.service import CoreService
 async def main():
     """Main entrypoint to start and run the Core Service."""
     service = CoreService()
-    
+
     # --- THE CORE FIX: Cross-platform shutdown logic ---
-    
+
     # Create a future that will be used to signal shutdown
     shutdown_future = asyncio.Future()
+
+    # Get event loop and set up exception handler to suppress aioice warnings
+    loop = asyncio.get_running_loop()
+
+    # Custom exception handler to suppress known aioice InvalidStateError warnings
+    def exception_handler(loop, context):
+        exception = context.get('exception')
+        # Suppress aioice STUN transaction InvalidStateError (known bug in aioice)
+        if isinstance(exception, asyncio.exceptions.InvalidStateError):
+            message = context.get('message', '')
+            if 'Transaction.__retry' in message or 'stun.py' in str(context.get('source_traceback', '')):
+                # Silently ignore this known aioice race condition
+                return
+        # For all other exceptions, use default behavior
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(exception_handler)
 
     # On Windows, signal handlers are not supported. We rely on KeyboardInterrupt.
     # On other OSes, we can set up a more graceful signal handler.
     if platform.system() != "Windows":
         import signal
-        loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
             loop.add_signal_handler(sig, lambda s=sig: shutdown_future.set_result(s))
 

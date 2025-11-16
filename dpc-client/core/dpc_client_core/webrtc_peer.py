@@ -22,7 +22,7 @@ class WebRTCPeerConnection:
     Wrapper for aiortc RTCPeerConnection that manages WebRTC data channel communication.
     Provides the same interface as PeerConnection for seamless integration.
     """
-    
+
     def __init__(self, node_id: str, is_initiator: bool = False):
         self.node_id = node_id
         self.is_initiator = is_initiator
@@ -77,19 +77,22 @@ class WebRTCPeerConnection:
                 ),
             ])
             print("[WebRTC] Falling back to free OpenRelay servers (may not work)")
-        
+
         configuration = RTCConfiguration(iceServers=ice_servers)
-        
+
         # Create RTCPeerConnection with proper configuration
         self.pc = RTCPeerConnection(configuration=configuration)
-        
+
         self.data_channel: RTCDataChannel = None
         self.ready = asyncio.Event()
         self.on_ice_candidate: Callable = None  # Not used in aiortc (candidates in SDP)
         self.on_message: Callable = None
         self.on_close: Callable = None
         self._ice_gathering_complete = asyncio.Event()
-        
+        self._keepalive_task: asyncio.Task = None
+        self._keepalive_interval = 20.0  # Send keepalive every 20 seconds
+        self._closing = False  # Track if we're intentionally closing
+
         # Set up event handlers
         self._setup_handlers()
     
@@ -126,9 +129,20 @@ class WebRTCPeerConnection:
             """Track ICE connection state."""
             state = self.pc.iceConnectionState
             print(f"[{self.node_id}] ICE connection state: {state}")
-            
+
             if state == "completed":
                 print(f"[{self.node_id}] ICE connection established!")
+            elif state == "failed":
+                print(f"[{self.node_id}] ICE connection FAILED - NAT traversal unsuccessful")
+                print(f"[{self.node_id}] Possible causes:")
+                print(f"  - Symmetric NAT requiring TURN relay")
+                print(f"  - Firewall blocking UDP traffic")
+                print(f"  - TURN server unavailable or misconfigured")
+            elif state == "disconnected":
+                print(f"[{self.node_id}] ICE connection DISCONNECTED - network change or timeout")
+                print(f"[{self.node_id}] Connection may recover automatically...")
+            elif state == "closed":
+                print(f"[{self.node_id}] ICE connection CLOSED")
         
         @self.pc.on("connectionstatechange")
         async def on_connectionstatechange():
@@ -139,10 +153,16 @@ class WebRTCPeerConnection:
                 print(f"✅ WebRTC connection established with {self.node_id}")
                 # Don't set ready here - wait for data channel to be open
             elif state in ["failed", "closed"]:
-                print(f"❌ WebRTC connection {state} with {self.node_id}")
-                # Notify about connection close
-                if self.on_close:
-                    asyncio.create_task(self.on_close(self.node_id))
+                # Stop keepalive on connection failure/close
+                self._stop_keepalive()
+
+                # Only notify if this wasn't an intentional close
+                if not self._closing:
+                    print(f"❌ WebRTC connection {state} with {self.node_id}")
+                    if self.on_close:
+                        asyncio.create_task(self.on_close(self.node_id))
+                else:
+                    print(f"[{self.node_id}] WebRTC connection closed (intentional)")
             
     def _setup_channel_handlers(self):
         """Set up data channel event handlers."""
@@ -153,6 +173,8 @@ class WebRTCPeerConnection:
         def on_open():
             print(f"✅ Data channel opened with {self.node_id}")
             self.ready.set()
+            # Start keepalive task when data channel opens
+            self._start_keepalive()
 
         @self.data_channel.on("message")
         def on_message(message):
@@ -160,18 +182,31 @@ class WebRTCPeerConnection:
             if self.on_message:
                 try:
                     data = json.loads(message)
+                    # Ignore keepalive pings/pongs - don't pass to application
+                    if data.get("type") in ["ping", "pong"]:
+                        return
                     asyncio.create_task(self.on_message(data))
                 except json.JSONDecodeError as e:
                     print(f"Failed to decode message from {self.node_id}: {e}")
 
         @self.data_channel.on("close")
         def on_close():
-            print(f"Data channel closed with {self.node_id}")
+            ice_state = self.pc.iceConnectionState
+            conn_state = self.pc.connectionState
+            if not self._closing:
+                print(f"⚠️  Data channel closed with {self.node_id} (unexpected)")
+                print(f"   ICE state: {ice_state}, Connection state: {conn_state}")
+            else:
+                print(f"Data channel closed with {self.node_id} (intentional)")
+            # Stop keepalive task when data channel closes
+            self._stop_keepalive()
 
         # Check if data channel is already open (happens on answerer side)
         if self.data_channel.readyState == "open":
             print(f"✅ Data channel already open with {self.node_id}")
             self.ready.set()
+            # Start keepalive task for already-open channel
+            self._start_keepalive()
     
     async def create_offer(self) -> Dict[str, Any]:
         """Create WebRTC offer (initiator side)."""
@@ -296,9 +331,55 @@ class WebRTCPeerConnection:
                 f"2) Checking firewall/UDP settings, "
                 f"3) Verifying TURN server is accessible"
             )
-    
+
+    def _start_keepalive(self):
+        """Start the keepalive task to maintain WebRTC connection."""
+        if self._keepalive_task is None or self._keepalive_task.done():
+            self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+            print(f"[{self.node_id}] Keepalive task started (interval: {self._keepalive_interval}s)")
+
+    def _stop_keepalive(self):
+        """Stop the keepalive task."""
+        if self._keepalive_task and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+            print(f"[{self.node_id}] Keepalive task stopped")
+
+    async def _keepalive_loop(self):
+        """Background task that sends periodic keepalive pings over data channel."""
+        ping_count = 0
+        try:
+            while True:
+                await asyncio.sleep(self._keepalive_interval)
+
+                # Check if data channel is still open
+                if not self.data_channel or self.data_channel.readyState != "open":
+                    print(f"[{self.node_id}] Data channel not open, stopping keepalive")
+                    break
+
+                try:
+                    ping_count += 1
+                    ping_message = {
+                        "type": "ping",
+                        "timestamp": asyncio.get_event_loop().time()
+                    }
+                    self.data_channel.send(json.dumps(ping_message))
+                    # Only log every 5th ping to reduce noise
+                    if ping_count % 5 == 0:
+                        print(f"[{self.node_id}] Keepalive ping #{ping_count} sent")
+
+                except Exception as e:
+                    print(f"[{self.node_id}] Error sending keepalive ping #{ping_count}: {e}")
+                    break
+
+        except asyncio.CancelledError:
+            print(f"[{self.node_id}] Keepalive cancelled (sent {ping_count} pings)")
+        except Exception as e:
+            print(f"[{self.node_id}] Keepalive loop error: {e}")
+
     async def close(self):
         """Close the WebRTC connection."""
+        self._closing = True
+        self._stop_keepalive()
         if self.data_channel:
             self.data_channel.close()
         await self.pc.close()
