@@ -179,23 +179,49 @@ class WebRTCPeerConnection:
         @self.data_channel.on("message")
         def on_message(message):
             """Handle incoming messages."""
-            if self.on_message:
-                try:
-                    data = json.loads(message)
-                    # Ignore keepalive pings/pongs - don't pass to application
-                    if data.get("type") in ["ping", "pong"]:
-                        return
+            try:
+                data = json.loads(message)
+
+                # Handle keepalive ping - respond with pong
+                if data.get("type") == "ping":
+                    try:
+                        pong_message = {
+                            "type": "pong",
+                            "timestamp": data.get("timestamp")
+                        }
+                        self.data_channel.send(json.dumps(pong_message))
+                        # Debug: Log pong response (remove after testing)
+                        print(f"[{self.node_id}] ← Received ping, sent pong")
+                    except Exception as e:
+                        print(f"[{self.node_id}] ❌ Failed to send pong: {e}")
+                    return
+
+                # Handle pong responses - just log receipt
+                if data.get("type") == "pong":
+                    # Debug: Log pong receipt (remove after testing)
+                    print(f"[{self.node_id}] ✓ Received pong response")
+                    return
+
+                # Pass all other messages to application
+                if self.on_message:
                     asyncio.create_task(self.on_message(data))
-                except json.JSONDecodeError as e:
-                    print(f"Failed to decode message from {self.node_id}: {e}")
+
+            except json.JSONDecodeError as e:
+                print(f"Failed to decode message from {self.node_id}: {e}")
+
+        @self.data_channel.on("error")
+        def on_error(error):
+            """Handle data channel errors."""
+            print(f"❌ Data channel error with {self.node_id}: {error}")
 
         @self.data_channel.on("close")
         def on_close():
             ice_state = self.pc.iceConnectionState
             conn_state = self.pc.connectionState
+            dc_state = self.data_channel.readyState if self.data_channel else None
             if not self._closing:
                 print(f"⚠️  Data channel closed with {self.node_id} (unexpected)")
-                print(f"   ICE state: {ice_state}, Connection state: {conn_state}")
+                print(f"   ICE state: {ice_state}, Connection state: {conn_state}, DC state: {dc_state}")
             else:
                 print(f"Data channel closed with {self.node_id} (intentional)")
             # Stop keepalive task when data channel closes
