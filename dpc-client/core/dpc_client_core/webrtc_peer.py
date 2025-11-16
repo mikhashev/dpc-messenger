@@ -90,7 +90,7 @@ class WebRTCPeerConnection:
         self.on_close: Callable = None
         self._ice_gathering_complete = asyncio.Event()
         self._keepalive_task: asyncio.Task = None
-        self._keepalive_interval = 20.0  # Send keepalive every 20 seconds
+        self._keepalive_interval = 5.0  # Send keepalive every 5 seconds (aggressive to prevent SCTP timeout)
         self._closing = False  # Track if we're intentionally closing
 
         # Set up event handlers
@@ -132,6 +132,24 @@ class WebRTCPeerConnection:
 
             if state == "completed":
                 print(f"[{self.node_id}] ICE connection established!")
+                # Try to log selected candidate pair for debugging
+                try:
+                    # Access transport to get selected candidate info
+                    if hasattr(self.pc, '_RTCPeerConnection__sctp') and self.pc._RTCPeerConnection__sctp:
+                        transport = self.pc._RTCPeerConnection__sctp.transport.transport
+                        if hasattr(transport, '_connection') and transport._connection:
+                            selected = transport._connection.selected_candidate_pair
+                            if selected:
+                                local_type = selected[0].type if selected[0] else "unknown"
+                                remote_type = selected[1].type if selected[1] else "unknown"
+                                local_addr = f"{selected[0].host}:{selected[0].port}" if selected[0] else "unknown"
+                                remote_addr = f"{selected[1].host}:{selected[1].port}" if selected[1] else "unknown"
+                                print(f"[{self.node_id}] ✓ Selected ICE candidate pair:")
+                                print(f"   Local:  {local_type} @ {local_addr}")
+                                print(f"   Remote: {remote_type} @ {remote_addr}")
+                except Exception as e:
+                    # Silently ignore if internal structure changed
+                    pass
             elif state == "failed":
                 print(f"[{self.node_id}] ICE connection FAILED - NAT traversal unsuccessful")
                 print(f"[{self.node_id}] Possible causes:")
@@ -237,9 +255,11 @@ class WebRTCPeerConnection:
     async def create_offer(self) -> Dict[str, Any]:
         """Create WebRTC offer (initiator side)."""
         print(f"[{self.node_id}] Creating offer...")
-        
+
         # Create data channel (initiator creates it)
-        self.data_channel = self.pc.createDataChannel("dpc-data")
+        # Use default reliable, ordered channel (no maxRetransmits/maxPacketLifeTime)
+        # This ensures SCTP uses fully reliable mode
+        self.data_channel = self.pc.createDataChannel("dpc-data", ordered=True)
         self._setup_channel_handlers()
         
         # Create offer
