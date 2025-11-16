@@ -4,8 +4,12 @@ import asyncio
 import json
 from typing import Dict, Any
 
-def create_hello_message(node_id: str) -> Dict[str, Any]:
-    return {"command": "HELLO", "payload": {"node_id": node_id}}
+def create_hello_message(node_id: str, name: str = None) -> Dict[str, Any]:
+    """Creates a HELLO message with optional display name."""
+    payload = {"node_id": node_id}
+    if name:
+        payload["name"] = name
+    return {"command": "HELLO", "payload": payload}
 
 def create_get_context_message() -> Dict[str, Any]:
     return {"command": "GET_CONTEXT"}
@@ -63,12 +67,22 @@ async def read_message(reader: asyncio.StreamReader) -> dict | None:
     try:
         header = await reader.readexactly(10)
         payload_length = int(header.decode())
-        
+
         payload = await reader.readexactly(payload_length)
-        
+
         return json.loads(payload.decode())
-    except (asyncio.IncompleteReadError, ConnectionResetError, ValueError) as e:
-        print(f"Protocol error or connection closed: {e}")
+    except asyncio.IncompleteReadError as e:
+        # Graceful disconnect: 0 bytes read means connection closed cleanly
+        if len(e.partial) == 0:
+            print("Connection closed by peer")
+        else:
+            print(f"Protocol error: incomplete message ({len(e.partial)} bytes received)")
+        return None
+    except (ConnectionResetError, BrokenPipeError) as e:
+        print(f"Connection lost: {e}")
+        return None
+    except ValueError as e:
+        print(f"Protocol error: invalid message format ({e})")
         return None
 
 async def write_message(writer: asyncio.StreamWriter, data: dict):

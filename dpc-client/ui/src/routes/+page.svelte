@@ -77,8 +77,8 @@
 
     const peerInfo = $nodeStatus.peer_info.find((p: { node_id: string; name?: string }) => p.node_id === peerId);
     if (peerInfo && peerInfo.name) {
-      // Show: "Name (dpc-node-abc123...)"
-      return `${peerInfo.name} (${peerId.slice(0, 16)}...)`;
+      // Show: "Name | dpc-node-abc123..."
+      return `${peerInfo.name} | ${peerId.slice(0, 20)}...`;
     }
 
     // Just show truncated node_id if no name
@@ -319,38 +319,48 @@
   }
 
   function handleDeleteAIChat(chatId: string) {
+    console.log('Delete AI chat button clicked for:', chatId);
+
     if (chatId === 'local_ai') {
       alert("Cannot delete the default Local AI chat.");
       return;
     }
 
-    if (confirm("Delete this AI chat? This will permanently remove the chat history.")) {
-      // Remove from aiChats
-      aiChats.update(chats => {
-        const newMap = new Map(chats);
-        newMap.delete(chatId);
-        return newMap;
-      });
+    // Use confirm dialog
+    const shouldDelete = confirm("Delete this AI chat? This will permanently remove the chat history.");
+    console.log('User confirmed deletion:', shouldDelete);
 
-      // Remove from chatProviders
-      chatProviders.update(map => {
-        const newMap = new Map(map);
-        newMap.delete(chatId);
-        return newMap;
-      });
-
-      // Remove chat history
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        newMap.delete(chatId);
-        return newMap;
-      });
-
-      // Switch to default chat
-      if (activeChatId === chatId) {
-        activeChatId = 'local_ai';
-      }
+    if (!shouldDelete) {
+      return;
     }
+
+    // Remove from aiChats
+    aiChats.update(chats => {
+      const newMap = new Map(chats);
+      newMap.delete(chatId);
+      return newMap;
+    });
+
+    // Remove from chatProviders
+    chatProviders.update(map => {
+      const newMap = new Map(map);
+      newMap.delete(chatId);
+      return newMap;
+    });
+
+    // Remove chat history
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      newMap.delete(chatId);
+      return newMap;
+    });
+
+    // Switch to default chat
+    if (activeChatId === chatId) {
+      activeChatId = 'local_ai';
+    }
+
+    console.log('AI chat deleted successfully');
   }
 
   // --- HANDLE INCOMING MESSAGES ---
@@ -625,6 +635,7 @@
             {#each Array.from($aiChats.entries()) as [chatId, chatInfo] (chatId)}
               <li class="peer-item">
                 <button
+                  type="button"
                   class="chat-button"
                   class:active={activeChatId === chatId}
                   on:click={() => activeChatId = chatId}
@@ -634,8 +645,9 @@
                 </button>
                 {#if chatId !== 'local_ai'}
                   <button
+                    type="button"
                     class="disconnect-btn"
-                    on:click={() => handleDeleteAIChat(chatId)}
+                    on:click|stopPropagation={() => handleDeleteAIChat(chatId)}
                     title="Delete AI chat"
                   >
                     ×
@@ -648,18 +660,20 @@
             {#if $nodeStatus.p2p_peers && $nodeStatus.p2p_peers.length > 0}
               {#each $nodeStatus.p2p_peers as peerId (peerId)}
                 <li class="peer-item">
-                  <button 
-                    class="chat-button" 
+                  <button
+                    type="button"
+                    class="chat-button"
                     class:active={activeChatId === peerId}
                     on:click={() => activeChatId = peerId}
                     title={peerId}
                   >
                     👤 {getPeerDisplayName(peerId)}
                   </button>
-                  <button 
-                    class="disconnect-btn" 
-                    on:click={() => handleDisconnectPeer(peerId)}
-                    title="Disconnect"
+                  <button
+                    type="button"
+                    class="disconnect-btn"
+                    on:click|stopPropagation={() => handleDisconnectPeer(peerId)}
+                    title="Disconnect from peer"
                   >
                     ×
                   </button>
@@ -770,7 +784,7 @@
                 <optgroup label="Remote Peers">
                   {#each $nodeStatus.peer_info as peer}
                     {@const displayName = peer.name
-                      ? `${peer.name} (${peer.node_id.slice(0, 16)}...)`
+                      ? `${peer.name} | ${peer.node_id.slice(0, 20)}...`
                       : `${peer.node_id.slice(0, 20)}...`}
                     <option value={peer.node_id}>
                       {displayName}
@@ -963,24 +977,9 @@
     padding: 1rem;
   }
 
-  .node-info {
-    max-height: 60vh;
-    overflow-y: auto;
-  }
+  /* Note: .node-info no longer has max-height restriction to prevent
+     unwanted scrollbars on macOS/Ubuntu. Content naturally fits in sidebar. */
 
-  .node-info::-webkit-scrollbar {
-    width: 4px;
-  }
-
-  .node-info::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  .node-info::-webkit-scrollbar-thumb {
-    background: #ccc;
-    border-radius: 2px;
-  }
-  
   h2, h3 {
     margin: 0 0 0.75rem 0;
     font-size: 1.1rem;
@@ -1302,7 +1301,7 @@
     font-size: 1.5rem;
     border: 1px solid transparent;
   }
-  
+
   .disconnect-btn:hover {
     background: #ffebee;
     color: #dc3545;

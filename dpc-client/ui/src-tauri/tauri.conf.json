@@ -17,8 +17,9 @@
         "height": 700,
         "minWidth": 800,
         "minHeight": 600,
-        "maxWidth": 1400,
-        "resizable": true
+        "resizable": true,
+        "fullscreen": false,
+        "maximizable": true
       }
     ],
     "security": {

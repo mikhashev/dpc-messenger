@@ -6,6 +6,7 @@ import json
 import uuid
 import websockets
 import socket
+import sys
 from pathlib import Path
 from typing import Dict, Any, List
 
@@ -523,6 +524,15 @@ class CoreService:
             providers = payload.get("providers", [])
             await self._handle_providers_response(sender_node_id, providers)
 
+        elif command == "HELLO":
+            # Name exchange (mainly for WebRTC connections that don't have initial handshake)
+            peer_name = payload.get("name")
+            if peer_name:
+                print(f"Received name from {sender_node_id}: {peer_name}")
+                self.set_peer_metadata(sender_node_id, name=peer_name)
+                # Notify UI of peer list change so names update
+                await self.on_peer_list_change()
+
         else:
             print(f"Unknown P2P message command: {command}")
 
@@ -532,39 +542,61 @@ class CoreService:
         """
         Get local network IP addresses (excluding loopback).
         Returns a list of IP addresses for constructing dpc:// URIs.
+        Uses multiple methods for cross-platform compatibility and combines results.
         """
         local_ips = []
+        errors = []
 
+        # Method 1: Use socket to external address (most reliable, finds primary interface)
         try:
-            # Get hostname
-            hostname = socket.gethostname()
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            if local_ip and not local_ip.startswith('127.'):
+                local_ips.append(local_ip)
+                print(f"✓ Found local IP via socket method: {local_ip}")
+        except Exception as e:
+            errors.append(f"Socket method: {e}")
 
-            # Get all IP addresses associated with this host
-            addr_info = socket.getaddrinfo(hostname, None)
+        # Method 2: Try hostname resolution (finds all interfaces)
+        try:
+            hostname = socket.gethostname()
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET)
 
             for info in addr_info:
-                # info is a tuple: (family, type, proto, canonname, sockaddr)
-                # sockaddr is (ip, port) for IPv4
                 ip = info[4][0]
-
-                # Filter out loopback and IPv6 link-local addresses
-                if ip and not ip.startswith('127.') and ':' not in ip:
-                    if ip not in local_ips:
-                        local_ips.append(ip)
+                # Filter out loopback addresses and duplicates
+                if ip and not ip.startswith('127.') and ip not in local_ips:
+                    local_ips.append(ip)
+                    print(f"✓ Found local IP via hostname method: {ip}")
 
         except Exception as e:
-            print(f"Warning: Could not determine local IPs: {e}")
-            # Fallback: try to get at least one IP
+            errors.append(f"Hostname method: {e}")
+
+        # Method 3: Platform-specific (Linux/Unix only - finds all interfaces)
+        if sys.platform.startswith('linux'):
             try:
-                # Create a socket to an external address to find the local IP
-                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                s.connect(("8.8.8.8", 80))
-                local_ip = s.getsockname()[0]
-                s.close()
-                if local_ip and local_ip not in local_ips:
-                    local_ips.append(local_ip)
-            except Exception:
-                pass
+                import subprocess
+                # Use 'ip addr' command on Linux
+                result = subprocess.run(['ip', 'addr', 'show'], capture_output=True, text=True, timeout=2)
+                if result.returncode == 0:
+                    import re
+                    # Look for inet addresses (not inet6)
+                    for match in re.finditer(r'inet\s+(\d+\.\d+\.\d+\.\d+)', result.stdout):
+                        ip = match.group(1)
+                        if not ip.startswith('127.') and ip not in local_ips:
+                            local_ips.append(ip)
+                            print(f"✓ Found local IP via 'ip addr' command: {ip}")
+            except Exception as e:
+                errors.append(f"Linux 'ip addr' method: {e}")
+
+        # Report results
+        if not local_ips:
+            print("⚠ Warning: Could not determine any local IP addresses")
+            print(f"Errors encountered: {'; '.join(errors)}")
+        else:
+            print(f"✓ Successfully detected {len(local_ips)} local IP(s): {local_ips}")
 
         return local_ips
 

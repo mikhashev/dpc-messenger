@@ -445,17 +445,26 @@ class P2PManager:
         webrtc_peer = self._pending_webrtc.get(node_id)
         if not webrtc_peer:
             return
-        
+
         try:
             # Wait for connection to be ready
             await webrtc_peer.wait_ready(timeout=30.0)
-            
+
             # Move from pending to active peers
             self._pending_webrtc.pop(node_id, None)
             self.peers[node_id] = webrtc_peer
 
             await self._notify_peer_change()
             print(f"✅ WebRTC connection established with {node_id}")
+
+            # Exchange names (WebRTC doesn't have initial HELLO handshake like TLS)
+            from dpc_protocol.protocol import create_hello_message
+            try:
+                hello_msg = create_hello_message(self.node_id, self.display_name)
+                await self.send_message_to_peer(node_id, hello_msg)
+                print(f"  - Sent name to {node_id}: {self.display_name}")
+            except Exception as e:
+                print(f"  - Failed to send name to {node_id}: {e}")
 
             # Auto-discover peer's available AI providers
             from dpc_protocol.protocol import create_get_providers_message
@@ -464,7 +473,7 @@ class P2PManager:
                 print(f"  - Requested AI providers from {node_id}")
             except Exception as e:
                 print(f"  - Failed to request providers from {node_id}: {e}")
-            
+
         except Exception as e:
             print(f"Failed to finalize WebRTC connection with {node_id}: {e}")
             self._pending_webrtc.pop(node_id, None)
