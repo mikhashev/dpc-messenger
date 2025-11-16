@@ -82,6 +82,11 @@ class Settings:
             'host': '127.0.0.1'
         }
 
+        self._config['turn'] = {
+            'username': '',  # Leave empty - set via environment variable DPC_TURN_USERNAME
+            'credential': '',  # Leave empty - set via environment variable DPC_TURN_CREDENTIAL
+        }
+
         # Ensure directory exists
         self.dpc_home_dir.mkdir(parents=True, exist_ok=True)
 
@@ -89,7 +94,7 @@ class Settings:
         with open(self.config_file, 'w') as f:
             f.write("# D-PC Client Configuration\n")
             f.write("# You can override these settings with environment variables:\n")
-            f.write("# DPC_HUB_URL, DPC_OAUTH_CALLBACK_PORT, etc.\n")
+            f.write("# DPC_HUB_URL, DPC_OAUTH_CALLBACK_PORT, DPC_TURN_USERNAME, DPC_TURN_CREDENTIAL, etc.\n")
             f.write("# Inline comments are supported: key = value  # comment\n\n")
             self._config.write(f)
 
@@ -151,6 +156,22 @@ class Settings:
         """Check if Hub should auto-connect on startup."""
         value = self.get('hub', 'auto_connect', 'true')
         return value.lower() in ('true', '1', 'yes')
+
+    def get_turn_username(self) -> Optional[str]:
+        """Get TURN server username (from env var or config)."""
+        try:
+            username = self.get('turn', 'username', '')
+            return username if username else None
+        except KeyError:
+            return None
+
+    def get_turn_credential(self) -> Optional[str]:
+        """Get TURN server credential/password (from env var or config)."""
+        try:
+            credential = self.get('turn', 'credential', '')
+            return credential if credential else None
+        except KeyError:
+            return None
 
     def set(self, section: str, key: str, value: str):
         """Set a configuration value in the config file."""

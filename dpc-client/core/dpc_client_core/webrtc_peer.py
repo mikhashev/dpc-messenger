@@ -2,15 +2,19 @@
 
 import asyncio
 import json
-from typing import Dict, Any, Callable
+import os
+from pathlib import Path
+from typing import Dict, Any, Callable, Optional
 from aiortc import (
-    RTCPeerConnection, 
-    RTCSessionDescription, 
-    RTCIceCandidate, 
+    RTCPeerConnection,
+    RTCSessionDescription,
+    RTCIceCandidate,
     RTCDataChannel,
     RTCConfiguration,
     RTCIceServer
 )
+
+from .settings import Settings
 
 
 class WebRTCPeerConnection:
@@ -22,21 +26,57 @@ class WebRTCPeerConnection:
     def __init__(self, node_id: str, is_initiator: bool = False):
         self.node_id = node_id
         self.is_initiator = is_initiator
-        
+
+        # Load TURN credentials from Settings (environment variables or config file)
+        dpc_home = Path.home() / ".dpc"
+        settings = Settings(dpc_home)
+        turn_username = settings.get_turn_username()
+        turn_credential = settings.get_turn_credential()
+
         # Create RTCConfiguration with STUN and TURN servers for NAT traversal
         ice_servers = [
             # STUN servers (for discovering public IP)
             RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
             RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
-            
-            # TURN server (for relaying traffic when direct connection fails)
-            # Using free OpenRelay TURN server for testing
-            RTCIceServer(
-                urls=["turn:openrelay.metered.ca:80"],
-                username="openrelayproject",
-                credential="openrelayproject"
-            ),
+            RTCIceServer(urls=["stun:global.stun.twilio.com:3478"]),
         ]
+
+        # Add TURN servers if credentials are configured
+        if turn_username and turn_credential:
+            # Metered.ca TURN servers (user's account)
+            ice_servers.append(
+                RTCIceServer(
+                    urls=[
+                        "stun:stun.relay.metered.ca:80",
+                        "turn:global.relay.metered.ca:80",
+                        "turn:global.relay.metered.ca:80?transport=tcp",
+                        "turn:global.relay.metered.ca:443",
+                        "turns:global.relay.metered.ca:443?transport=tcp",
+                    ],
+                    username=turn_username,
+                    credential=turn_credential
+                )
+            )
+            print(f"[WebRTC] Using configured TURN credentials (username: {turn_username[:8]}...)")
+        else:
+            print("[WebRTC] Warning: No TURN credentials configured")
+            print("         Set DPC_TURN_USERNAME and DPC_TURN_CREDENTIAL environment variables")
+            print("         or add [turn] section to ~/.dpc/config.ini")
+            print("         WebRTC connections may fail without TURN relay!")
+
+            # Fallback: Try free OpenRelay servers (unreliable)
+            ice_servers.extend([
+                RTCIceServer(
+                    urls=[
+                        "turn:openrelay.metered.ca:80",
+                        "turn:openrelay.metered.ca:443",
+                        "turn:openrelay.metered.ca:443?transport=tcp"
+                    ],
+                    username="openrelayproject",
+                    credential="openrelayproject"
+                ),
+            ])
+            print("[WebRTC] Falling back to free OpenRelay servers (may not work)")
         
         configuration = RTCConfiguration(iceServers=ice_servers)
         
@@ -62,7 +102,7 @@ class WebRTCPeerConnection:
             print(f"Data channel '{channel.label}' received from peer {self.node_id}")
             self.data_channel = channel
             self._setup_channel_handlers()
-        
+
         @self.pc.on("icegatheringstatechange")
         async def on_icegatheringstatechange():
             """Track ICE gathering state."""
@@ -70,7 +110,16 @@ class WebRTCPeerConnection:
             print(f"[{self.node_id}] ICE gathering state: {state}")
             if state == "complete":
                 self._ice_gathering_complete.set()
-                print(f"[{self.node_id}] ICE gathering complete - SDP includes all candidates")
+                # Log candidate types found in SDP
+                if self.pc.localDescription:
+                    sdp = self.pc.localDescription.sdp
+                    host_count = sdp.count("typ host")
+                    srflx_count = sdp.count("typ srflx")
+                    relay_count = sdp.count("typ relay")
+                    print(f"[{self.node_id}] ICE gathering complete - "
+                          f"host:{host_count} srflx:{srflx_count} relay:{relay_count}")
+                else:
+                    print(f"[{self.node_id}] ICE gathering complete - SDP includes all candidates")
         
         @self.pc.on("iceconnectionstatechange")
         async def on_iceconnectionstatechange():
@@ -142,7 +191,15 @@ class WebRTCPeerConnection:
             await asyncio.wait_for(self._ice_gathering_complete.wait(), timeout=10.0)
         except asyncio.TimeoutError:
             print(f"[{self.node_id}] Warning: ICE gathering timeout after 10s, sending SDP anyway")
-        
+
+        # Log ICE candidates after gathering completes
+        if self.pc.localDescription:
+            sdp = self.pc.localDescription.sdp
+            host_count = sdp.count("typ host")
+            srflx_count = sdp.count("typ srflx")
+            relay_count = sdp.count("typ relay")
+            print(f"[{self.node_id}] Offer SDP contains - host:{host_count} srflx:{srflx_count} relay:{relay_count}")
+
         print(f"[{self.node_id}] Offer created with {len(self.pc.localDescription.sdp)} bytes SDP")
         
         return {
@@ -174,7 +231,15 @@ class WebRTCPeerConnection:
             await asyncio.wait_for(self._ice_gathering_complete.wait(), timeout=10.0)
         except asyncio.TimeoutError:
             print(f"[{self.node_id}] Warning: ICE gathering timeout after 10s, sending SDP anyway")
-        
+
+        # Log ICE candidates after gathering completes
+        if self.pc.localDescription:
+            sdp = self.pc.localDescription.sdp
+            host_count = sdp.count("typ host")
+            srflx_count = sdp.count("typ srflx")
+            relay_count = sdp.count("typ relay")
+            print(f"[{self.node_id}] Answer SDP contains - host:{host_count} srflx:{srflx_count} relay:{relay_count}")
+
         print(f"[{self.node_id}] Answer created with {len(self.pc.localDescription.sdp)} bytes SDP")
         
         return {
