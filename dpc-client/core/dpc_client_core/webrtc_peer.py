@@ -85,10 +85,10 @@ class WebRTCPeerConnection:
         async def on_connectionstatechange():
             state = self.pc.connectionState
             print(f"[{self.node_id}] WebRTC connection state: {state}")
-            
+
             if state == "connected":
                 print(f"✅ WebRTC connection established with {self.node_id}")
-                self.ready.set()
+                # Don't set ready here - wait for data channel to be open
             elif state in ["failed", "closed"]:
                 print(f"❌ WebRTC connection {state} with {self.node_id}")
                 # Notify about connection close
@@ -99,12 +99,12 @@ class WebRTCPeerConnection:
         """Set up data channel event handlers."""
         if not self.data_channel:
             return
-        
+
         @self.data_channel.on("open")
         def on_open():
             print(f"✅ Data channel opened with {self.node_id}")
             self.ready.set()
-        
+
         @self.data_channel.on("message")
         def on_message(message):
             """Handle incoming messages."""
@@ -114,10 +114,15 @@ class WebRTCPeerConnection:
                     asyncio.create_task(self.on_message(data))
                 except json.JSONDecodeError as e:
                     print(f"Failed to decode message from {self.node_id}: {e}")
-        
+
         @self.data_channel.on("close")
         def on_close():
             print(f"Data channel closed with {self.node_id}")
+
+        # Check if data channel is already open (happens on answerer side)
+        if self.data_channel.readyState == "open":
+            print(f"✅ Data channel already open with {self.node_id}")
+            self.ready.set()
     
     async def create_offer(self) -> Dict[str, Any]:
         """Create WebRTC offer (initiator side)."""
@@ -209,17 +214,19 @@ class WebRTCPeerConnection:
         self.data_channel.send(json_str)
     
     async def wait_ready(self, timeout: float = 30.0):
-        """Wait for connection to be ready."""
+        """Wait for connection and data channel to be ready."""
         try:
             await asyncio.wait_for(self.ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             # Provide more helpful error message
             ice_state = self.pc.iceConnectionState
             conn_state = self.pc.connectionState
+            dc_state = self.data_channel.readyState if self.data_channel else None
             raise ConnectionError(
                 f"WebRTC connection timeout with {self.node_id} after {timeout}s. "
-                f"ICE state: {ice_state}, Connection state: {conn_state}. "
-                f"This usually means NAT traversal failed. Try: "
+                f"ICE state: {ice_state}, Connection state: {conn_state}, "
+                f"Data channel state: {dc_state}. "
+                f"This usually means NAT traversal failed or data channel didn't open. Try: "
                 f"1) Testing on same local network, "
                 f"2) Checking firewall/UDP settings, "
                 f"3) Verifying TURN server is accessible"
