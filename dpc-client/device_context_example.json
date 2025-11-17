@@ -1,0 +1,97 @@
+{
+  "schema_version": "1.0",
+  "created_at": "2025-01-15T10:30:00.000000+00:00",
+  "last_updated": "2025-01-15T10:30:00.000000+00:00",
+  "collection_timestamp": "2025-01-15T10:30:00.000000+00:00",
+  "hardware": {
+    "cpu": {
+      "architecture": "x86_64",
+      "processor": "Intel Core i7-9700K CPU @ 3.60GHz",
+      "cores_physical": 8,
+      "cores_logical": 8
+    },
+    "memory": {
+      "ram_gb": 32.0,
+      "ram_tier": "32GB",
+      "total_bytes": 34359738368,
+      "comment": "ram_tier rounded to nearest power-of-2 for privacy"
+    },
+    "gpu": {
+      "type": "nvidia",
+      "model": "NVIDIA GeForce RTX 4090",
+      "vram_mib": 24576,
+      "vram_gb": 24.0,
+      "driver_version": "537.34",
+      "cuda_version": "12.2",
+      "compute_capability": "8.9"
+    },
+    "storage": {
+      "free_gb": 850.5,
+      "total_gb": 2000.0,
+      "free_tier": "500GB+",
+      "used_percent": 57.5,
+      "type": "NVMe SSD"
+    }
+  },
+  "software": {
+    "os": {
+      "family": "Linux",
+      "version": "Ubuntu 22.04.3 LTS",
+      "build": "5.15.0-91-generic",
+      "platform": "Linux-5.15.0-91-generic-x86_64-with-glibc2.35",
+      "architecture": "64bit"
+    },
+    "runtime": {
+      "python": {
+        "version": "3.12.0",
+        "major": 3,
+        "minor": 12,
+        "patch": 0,
+        "executable": "/home/bob/.pyenv/versions/3.12.0/bin/python"
+      }
+    },
+    "shell": {
+      "type": "bash"
+    },
+    "dev_tools": {
+      "git": "2.40.1",
+      "docker": "24.0.7",
+      "node": "20.10.0",
+      "npm": "installed",
+      "rustc": "1.75.0",
+      "cargo": "1.75.0"
+    },
+    "package_managers": [
+      "pip",
+      "poetry",
+      "npm",
+      "cargo",
+      "apt"
+    ],
+    "ai_models": [
+      {
+        "name": "llama3.1:8b",
+        "provider": "ollama",
+        "size_gb": 4.7,
+        "context_length": 8192
+      },
+      {
+        "name": "llama3:70b",
+        "provider": "ollama",
+        "size_gb": 40.0,
+        "context_length": 8192
+      },
+      {
+        "name": "codellama:13b",
+        "provider": "ollama",
+        "size_gb": 7.4,
+        "context_length": 16384
+      }
+    ]
+  },
+  "metadata": {
+    "collector_version": "1.0",
+    "auto_collected": true,
+    "privacy_level": "detailed"
+  }
+}

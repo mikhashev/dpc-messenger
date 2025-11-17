@@ -37,8 +37,21 @@ work_main.json:skills.* = allow
 personal.json:profile.* = allow
 @learning:* = allow
 
-# Section 5: Device Context Sharing (device_context.json)
+# Section 5: Remote Inference Permissions (Compute Sharing)
+# Control who can use your local AI models for remote inference
+# NOTE: This does NOT share hardware access - only API access to run AI models on your device
+[compute]
+enabled = false
+# Allow specific nodes to request inference on your local AI models
+allow_nodes = dpc-node-alice-xyz
+# Allow node groups to request inference
+allow_groups = trusted_developers
+# Restrict which models can be used (empty = all models allowed)
+allowed_models = llama3.1:8b, llama3:70b
+
+# Section 6: Device Context Sharing (device_context.json)
 # Control what hardware/software info is shared with peers
+# This is for discovery and compatibility checking, NOT for resource sharing
 
 [device_sharing:basic]
 # Share OS and dev tools only (no hardware specs)
@@ -49,14 +62,16 @@ device_context.json:software.package_managers = allow
 device_context.json:hardware.* = deny
 
 [device_sharing:compute]
-# Share GPU info for compute-sharing feature
+# Share GPU info for peers to discover compute capabilities
+# Used together with [compute] section to enable remote inference
 device_context.json:hardware.gpu.* = allow
 device_context.json:hardware.memory.* = allow
 device_context.json:hardware.cpu.cores_physical = allow
 device_context.json:software.ai_models.* = allow
 
 [node:dpc-node-alice-xyz]
-# Alice can use my GPU for compute-sharing
+# Alice can request remote inference (see [compute] section above)
+# Share device context so she can see what models/GPU are available
 device_context.json:hardware.gpu.* = allow
 device_context.json:hardware.memory.ram_gb = allow
 device_context.json:software.ai_models.* = allow

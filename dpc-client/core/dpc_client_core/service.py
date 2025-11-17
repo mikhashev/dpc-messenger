@@ -94,6 +94,15 @@ class CoreService:
                 print(f"[Warning] Failed to collect device context: {e}")
                 # Continue service startup even if collection fails
 
+        # Set display name from personal context (for P2P handshakes)
+        try:
+            context = self.pcm_core.load_context()
+            if context.profile and context.profile.name:
+                self.p2p_manager.set_display_name(context.profile.name)
+                print(f"[OK] Display name set from personal context: {context.profile.name}")
+        except Exception as e:
+            print(f"[Warning] Failed to load display name from personal context: {e}")
+
         self.consensus_manager = ConsensusManager(
             node_id=self.p2p_manager.node_id,
             pcm_core=self.pcm_core,
@@ -1475,6 +1484,11 @@ class CoreService:
         # Start with local context
         aggregated_contexts = {'local': self.p2p_manager.local_context}
 
+        # Add device context if available
+        device_context_data = None
+        if self.device_context:
+            device_context_data = self.device_context
+
         # TODO: Fetch remote contexts if context_ids provided
         if context_ids:
             for node_id in context_ids:
@@ -1485,7 +1499,7 @@ class CoreService:
                     pass
 
         # Assemble final prompt with context
-        final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt)
+        final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt, device_context_data)
 
         response_payload = {}
         status = "OK"
@@ -1565,7 +1579,7 @@ class CoreService:
         elif status != "OK":
             print(f"[Monitor] Query failed (status={status}) - not monitoring")
 
-    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str) -> str:
+    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str, device_context: dict = None) -> str:
         """Helper method to assemble the final prompt for the LLM with instruction processing.
 
         Phase 2: Incorporates InstructionBlock and bias mitigation from PCM v2.0
@@ -1617,6 +1631,12 @@ class CoreService:
 
             block = f'<CONTEXT source="{source_label}">\n{json_string}\n</CONTEXT>'
             context_blocks.append(block)
+
+        # Add device context if available
+        if device_context:
+            device_json = json.dumps(device_context, indent=2, ensure_ascii=False)
+            device_block = f'<DEVICE_CONTEXT source="local">\n{device_json}\n</DEVICE_CONTEXT>'
+            context_blocks.append(device_block)
 
         final_prompt = (
             f"{system_instruction}\n\n"
