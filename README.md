@@ -1,22 +1,30 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
 > **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.7.0
-> **Core Mission:** Enable humans with personal AI assistants to collaborate securely through peer-to-peer context sharing
+> **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
 ---
 
-## ⚠️ IMPORTANT LEGAL NOTICE
+## 🚀 The Vision: A Private Internet for Human-AI Collaboration
 
-**EDUCATIONAL AND RESEARCH USE ONLY** • **NO WARRANTY** • **USE AT YOUR OWN RISK**
+The age of AI is here, but it's being built on a broken foundation. We are handing our most sensitive conversations and data to centralized companies, creating a massive privacy crisis.
 
-This software contains strong cryptographic features and may be subject to legal restrictions in your jurisdiction. The creator:
-- Provides this software **AS-IS** with **NO LIABILITY** for any consequences of use
-- Makes **NO GUARANTEES** of compliance with any laws (including Russian Federation regulations)
-- **YOU ARE SOLELY RESPONSIBLE** for compliance with applicable laws (encryption, telecommunications, data protection)
+**D-PC Messenger fixes this.**
 
-⚠️ **This repository may become private without notice** to limit legal exposure.
+It's an open-source, peer-to-peer platform that creates a secure, private network for you and your AI assistants. It's a place where you can collaborate with trusted peers, letting your AIs work together to achieve collective intelligence, without your data ever leaving your control.
 
-📖 **READ THE FULL [LEGAL NOTICE & COMPLIANCE](#%EF%B8%8F-legal-notice--compliance) SECTION BEFORE USE**
+We are not just building a messaging app; we are building the foundational protocol for the future of private, decentralized intelligence.
+
+---
+
+## 🤝 Join the Mission: Seeking a Business Co-Founder
+
+The core technology is built, but the mission to build a world-changing company has just begun.
+
+I am a product-focused technical founder looking for a business-focused co-founder to be my partner. If you have a passion for privacy, a deep understanding of go-to-market strategy, and the drive to build a global community, I want to talk to you.
+
+If this vision resonates with you, let's connect:
+📧 [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com) | 💼 [LinkedIn](https://www.linkedin.com/in/mikemikhashev) | 🐦 [X/Twitter](https://x.com/mikeshev4enko)
 
 ---
 
