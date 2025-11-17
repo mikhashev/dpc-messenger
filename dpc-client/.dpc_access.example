@@ -33,7 +33,7 @@ work_main.json:availability = allow
 work_main.json:skills.* = allow
 
 [node:dpc-node-boris-xyz]
-# My friend Boris can see my personal profile and learning progress.
+# My friend Alice can see my personal profile and learning progress.
 personal.json:profile.* = allow
 @learning:* = allow
 

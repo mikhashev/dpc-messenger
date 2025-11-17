@@ -11,12 +11,14 @@
   console.log("Full D-PC Messenger loading...");
   
   // --- STATE ---
-  type Message = { 
-    id: string; 
-    sender: string; 
-    text: string; 
+  type Message = {
+    id: string;
+    sender: string;
+    senderName?: string;  // Display name for the sender (peer name or model name)
+    text: string;
     timestamp: number;
     commandId?: string;
+    model?: string;  // AI model name (for AI responses)
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
     ['local_ai', [{ id: crypto.randomUUID(), sender: 'ai', text: 'Hello! I am your local AI assistant. How can I help you today?', timestamp: Date.now() }]]
@@ -377,6 +379,7 @@
         ? message.payload.content
         : `Error: ${message.payload?.message || 'Unknown error'}`;
       const newSender = message.status === "OK" ? 'ai' : 'system';
+      const modelName = message.status === "OK" ? message.payload.model : undefined;
 
       const responseCommandId = message.id;
 
@@ -387,7 +390,7 @@
           const newMap = new Map(h);
           const hist = newMap.get(chatId) || [];
           newMap.set(chatId, hist.map(m =>
-            m.commandId === responseCommandId ? { ...m, sender: newSender, text: newText, commandId: undefined } : m
+            m.commandId === responseCommandId ? { ...m, sender: newSender, text: newText, model: modelName, commandId: undefined } : m
           ));
           return newMap;
         });
@@ -415,6 +418,7 @@
         newMap.set(msg.sender_node_id, [...hist, {
           id: crypto.randomUUID(),
           sender: msg.sender_node_id,
+          senderName: msg.sender_name,
           text: msg.text,
           timestamp: Date.now()
         }]);
@@ -755,7 +759,15 @@
           {#each activeMessages as msg (msg.id)}
             <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'}>
               <div class="message-header">
-                <strong>{msg.sender === 'user' ? 'You' : msg.sender}</strong>
+                <strong>
+                  {#if msg.sender === 'user'}
+                    You
+                  {:else if msg.sender === 'ai'}
+                    {msg.model ? `AI (${msg.model})` : 'AI Assistant'}
+                  {:else}
+                    {msg.senderName ? `${msg.senderName} | ${msg.sender.slice(0, 20)}...` : msg.sender}
+                  {/if}
+                </strong>
                 <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
               </div>
               <p>{msg.text}</p>

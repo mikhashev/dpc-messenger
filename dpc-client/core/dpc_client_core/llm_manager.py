@@ -219,9 +219,17 @@ default_provider = "ollama_local"
                 return alias
         return None
 
-    async def query(self, prompt: str, provider_alias: str | None = None) -> str:
+    async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False):
         """
         Routes a query to the specified provider, or the default provider if None.
+
+        Args:
+            prompt: The prompt to send to the LLM
+            provider_alias: Optional provider alias to use (uses default if None)
+            return_metadata: If True, returns dict with 'response', 'provider', 'model'. If False, returns just the response string.
+
+        Returns:
+            str if return_metadata=False, dict if return_metadata=True
         """
         alias_to_use = provider_alias or self.default_provider
         if not alias_to_use:
@@ -232,7 +240,15 @@ default_provider = "ollama_local"
 
         provider = self.providers[alias_to_use]
         print(f"Routing query to provider '{alias_to_use}' with model '{provider.model}'...")
-        return await provider.generate_response(prompt)
+        response = await provider.generate_response(prompt)
+
+        if return_metadata:
+            return {
+                "response": response,
+                "provider": alias_to_use,
+                "model": provider.model
+            }
+        return response
 
 # --- Self-testing block ---
 async def main_test():

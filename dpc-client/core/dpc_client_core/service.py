@@ -474,9 +474,11 @@ class CoreService:
                 for mid in to_remove:
                     self._processed_message_ids.discard(mid)
             
-            # Broadcast to UI
+            # Broadcast to UI with sender name
+            sender_name = self.peer_metadata.get(sender_node_id, {}).get("name") or sender_node_id
             await self.local_api.broadcast_event("new_p2p_message", {
                 "sender_node_id": sender_node_id,
+                "sender_name": sender_name,
                 "text": text,
                 "message_id": message_id
             })
@@ -1004,7 +1006,7 @@ class CoreService:
             print(f"Error sending message to {target_node_id}: {e}")
             raise
 
-    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None) -> str:
+    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None):
         """
         Send an AI query, either to local LLM or to a remote peer for inference.
 
@@ -1015,7 +1017,7 @@ class CoreService:
             provider: Optional provider alias to use
 
         Returns:
-            The AI response as a string
+            Dict with 'response', 'model', 'provider', and 'compute_host' keys
 
         Raises:
             ValueError: If compute_host is specified but peer is not connected
@@ -1026,19 +1028,28 @@ class CoreService:
         # Local inference
         if not compute_host:
             try:
-                return await self.llm_manager.query(prompt, provider_alias=provider)
+                result = await self.llm_manager.query(prompt, provider_alias=provider, return_metadata=True)
+                result['compute_host'] = 'local'
+                return result
             except Exception as e:
                 print(f"Local inference failed: {e}")
                 raise RuntimeError(f"Local inference failed: {e}") from e
 
         # Remote inference
         try:
-            return await self._request_inference_from_peer(
+            response = await self._request_inference_from_peer(
                 peer_id=compute_host,
                 prompt=prompt,
                 model=model,
                 provider=provider
             )
+            # For remote inference, we know the model/provider if specified
+            return {
+                "response": response,
+                "model": model or "unknown",
+                "provider": provider or "unknown",
+                "compute_host": compute_host
+            }
         except ConnectionError as e:
             raise ValueError(f"Compute host {compute_host} is not connected") from e
         except Exception as e:
@@ -1506,13 +1517,19 @@ class CoreService:
 
         try:
             # Use send_ai_query to support both local and remote inference
-            response_content = await self.send_ai_query(
+            result = await self.send_ai_query(
                 prompt=final_prompt,
                 compute_host=compute_host,
                 model=model,
                 provider=provider
             )
-            response_payload = {"content": response_content}
+            # result is a dict with 'response', 'model', 'provider', 'compute_host'
+            response_payload = {
+                "content": result["response"],
+                "model": result["model"],
+                "provider": result["provider"],
+                "compute_host": result["compute_host"]
+            }
 
         except Exception as e:
             print(f"  - Error during inference: {e}")
@@ -1545,11 +1562,15 @@ class CoreService:
                 await monitor.on_message(user_message)
 
                 # Feed AI response
+                # Include model name in sender_name for visibility
+                model_name = response_payload.get("model", "unknown")
+                ai_name = f"AI ({model_name})" if model_name != "unknown" else "AI Assistant"
+
                 ai_message = ConvMessage(
                     message_id=f"{command_id}-ai",
                     conversation_id="local_ai",
                     sender_node_id="ai",
-                    sender_name="AI Assistant",
+                    sender_name=ai_name,
                     text=response_payload.get("content", ""),
                     timestamp=datetime.utcnow().isoformat()
                 )
