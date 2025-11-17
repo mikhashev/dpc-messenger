@@ -2,13 +2,116 @@
   "profile": {
     "name": "Bob",
     "description": "A Linux enthusiast and network engineer.",
-    "core_values": ["Open Source", "Simplicity"]
+    "core_values": [
+      "Open Source",
+      "Simplicity",
+      "Privacy"
+    ]
   },
   "knowledge": {
     "linux_networking": {
-      "summary": "I have experience with iptables and BGP.",
-      "favorite_tool": "Wireshark"
+      "summary": "I have experience with iptables, BGP, and network troubleshooting.",
+      "key_books": [
+        {
+          "title": "TCP/IP Illustrated",
+          "author": "W. Richard Stevens",
+          "year": 1994,
+          "key_insights": [
+            "Deep understanding of TCP/IP protocols",
+            "Packet-level analysis techniques"
+          ]
+        }
+      ],
+      "preferred_authors": [
+        "W. Richard Stevens",
+        "Brendan Gregg"
+      ],
+      "entries": [
+        {
+          "content": "Wireshark is my go-to tool for network packet analysis and troubleshooting",
+          "tags": [
+            "networking",
+            "tools",
+            "troubleshooting"
+          ],
+          "source": {
+            "type": "manual_edit",
+            "conversation_id": null,
+            "participants": [],
+            "timestamp": "2025-01-15T10:30:00.000000",
+            "consensus_status": "draft",
+            "approved_by": [],
+            "dissenting_opinions": [],
+            "commit_id": null,
+            "cultural_perspectives_considered": [],
+            "confidence_score": 1.0,
+            "sources_cited": []
+          },
+          "confidence": 1.0,
+          "last_updated": "2025-01-15T10:30:00.000000",
+          "usage_count": 0,
+          "effectiveness_score": 1.0,
+          "review_due": null,
+          "cultural_specific": false,
+          "requires_context": [],
+          "alternative_viewpoints": [
+            "tcpdump is preferred by some for command-line efficiency",
+            "tshark provides scriptable packet analysis"
+          ]
+        }
+      ],
+      "mastery_level": "intermediate",
+      "learning_strategies": [
+        "Hands-on lab practice",
+        "Reading RFCs",
+        "Building network topologies in GNS3"
+      ],
+      "version": 1,
+      "created_at": "2025-01-10T08:00:00.000000",
+      "last_modified": "2025-01-15T10:30:00.000000",
+      "markdown_file": null
     }
   },
-  "preferences": null
+  "preferences": null,
+  "instruction": {
+    "primary": "Use this context to provide personalized technical assistance",
+    "context_update": "Suggest updates when new tools or techniques emerge",
+    "verification_protocol": "Provide command examples and documentation references",
+    "learning_support": {
+      "explanations": "Connect to existing networking knowledge",
+      "practice": "Suggest hands-on exercises and lab scenarios",
+      "metacognition": "Help reflect on troubleshooting approaches",
+      "connections": "Link concepts across OSI layers"
+    },
+    "bias_mitigation": {
+      "require_multi_perspective": true,
+      "challenge_status_quo": true,
+      "cultural_sensitivity": "Consider diverse technical backgrounds",
+      "framing_neutrality": true,
+      "evidence_requirement": "citations_preferred"
+    },
+    "collaboration_mode": "individual",
+    "consensus_required": true,
+    "ai_curation_enabled": true,
+    "dissent_encouraged": true
+  },
+  "cognitive_profile": null,
+  "version": 2,
+  "last_commit_id": null,
+  "last_commit_message": null,
+  "last_commit_timestamp": "2025-01-15T10:30:00.000000",
+  "commit_history": [],
+  "metadata": {
+    "created": "2025-01-10T08:00:00.000000",
+    "last_updated": "2025-01-15T10:30:00.000000",
+    "storage": "local",
+    "format_version": "2.0",
+    "external_contexts": {
+      "device_context": {
+        "file": "device_context.json",
+        "schema_version": "1.0",
+        "last_updated": "2025-01-15T10:30:00.000000"
+      }
+    }
+  }
 }

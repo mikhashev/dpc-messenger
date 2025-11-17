@@ -189,6 +189,7 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
 - `firewall.py` - Context access control system
 - `local_api.py` - WebSocket API for UI (localhost:9999)
 - `settings.py` - Configuration management
+- `device_context_collector.py` - Device/system info collector (generates device_context.json)
 
 **Client Frontend (`dpc-client/ui`):**
 - Built with SvelteKit 5.0 + Tauri 2.x
@@ -272,6 +273,115 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#device-identity-and-multi-devi
 - Linux/Mac: `~/.dpc/config.ini`
 - Providers: `~/.dpc/providers.toml` (AI provider configs)
 - Firewall: `~/.dpc/.dpc_access` (context sharing rules)
+- Personal Context: `~/.dpc/personal.json` (auto-generated)
+- Device Context: `~/.dpc/device_context.json` (auto-generated, structured hardware/software info)
+
+**Automatic Device Context Collection:**
+
+The client automatically collects device and system information on startup and stores it in a **separate `device_context.json` file** with structured fields. This enables environment-aware AI assistance without repeatedly asking "What GPU do you have?" or "How much RAM?"
+
+**Storage Architecture:**
+- **device_context.json**: Structured JSON file (`~/.dpc/device_context.json`) with hardware/software details
+- **personal.json**: Contains reference to device_context.json in metadata.external_contexts
+- **Auto-updates**: Refreshes on every client startup (detects driver updates, new tools, etc.)
+
+**What's collected:**
+
+*Hardware (with structured fields):*
+```json
+{
+  "hardware": {
+    "cpu": {
+      "cores_physical": 4,
+      "cores_logical": 4,
+      "architecture": "AMD64"
+    },
+    "memory": {
+      "ram_gb": 23.95,
+      "ram_tier": "32GB"
+    },
+    "gpu": {
+      "type": "nvidia",
+      "model": "NVIDIA GeForce RTX 3060",
+      "vram_gb": 12.0,
+      "vram_mib": 12288,
+      "driver_version": "576.28",
+      "cuda_version": "12.8"
+    },
+    "storage": {
+      "free_gb": 150.25,
+      "total_gb": 500.0,
+      "free_tier": "100GB+",
+      "type": "SSD"
+    }
+  }
+}
+```
+
+*Software (with structured fields):*
+```json
+{
+  "software": {
+    "os": {
+      "family": "Windows",
+      "version": "10",
+      "architecture": "64bit"
+    },
+    "runtime": {
+      "python": {
+        "version": "3.12.0",
+        "major": 3,
+        "minor": 12
+      }
+    },
+    "shell": {"type": "bash.exe"},
+    "dev_tools": {
+      "git": "2.47",
+      "docker": "28.4",
+      "node": "22.14"
+    },
+    "package_managers": ["pip", "poetry", "npm", "winget"]
+  }
+}
+```
+
+*Timestamps (for tracking):*
+```json
+{
+  "created_at": "2025-11-17T07:00:00.000000Z",
+  "last_updated": "2025-11-17T08:30:00.000000Z",
+  "collection_timestamp": "2025-11-17T08:30:00.000000Z"
+}
+```
+
+**Cross-Platform Support:**
+- **NVIDIA GPUs**: Full details via nvidia-smi (Windows/Linux/macOS)
+- **AMD GPUs**: rocm-smi (Linux)
+- **Apple GPUs**: Metal detection (macOS)
+- **Intel GPUs**: lspci parsing (Linux)
+
+**Privacy Features:**
+- Both exact RAM (23.95GB) and privacy tier (32GB) stored
+- Tool versions rounded to major.minor
+- No serial numbers, MAC addresses, or hostnames
+- Separate file = easy to exclude from sharing
+- Firewall controls what gets shared
+
+**Configuration:**
+```ini
+[system]
+auto_collect_device_info = true   # Master toggle
+collect_hardware_specs = true     # CPU/RAM/disk/GPU details
+collect_dev_tools = true          # Git, Docker, Node, etc.
+collect_ai_models = false         # Ollama models (opt-in for compute-sharing)
+```
+
+**Example AI Assistance:**
+- **GPU-aware**: "Your RTX 3060 (12GB VRAM) can run llama3:13b comfortably"
+- **Driver-aware**: "CUDA 12.8 detected - use PyTorch 2.5+ for compatibility"
+- **Resource-aware**: "You have 24GB RAM - can run 2 models simultaneously"
+- **Platform-specific**: "Windows 10 detected - use WSL2 for better Linux compatibility"
+- **Compute-sharing**: "Alice has RTX 4090 (24GB) - offload training to her GPU"
 
 ---
 

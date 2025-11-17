@@ -87,6 +87,13 @@ class Settings:
             'credential': '',  # Leave empty - set via environment variable DPC_TURN_CREDENTIAL
         }
 
+        self._config['system'] = {
+            'auto_collect_device_info': 'true',  # Automatically collect device/system info for AI context
+            'collect_hardware_specs': 'true',    # Collect hardware tiers (RAM, CPU, disk, GPU)
+            'collect_dev_tools': 'true',         # Collect installed dev tools and versions
+            'collect_ai_models': 'false'         # Collect locally available AI models (opt-in for compute-sharing)
+        }
+
         # Ensure directory exists
         self.dpc_home_dir.mkdir(parents=True, exist_ok=True)
 
@@ -172,6 +179,11 @@ class Settings:
             return credential if credential else None
         except KeyError:
             return None
+
+    def get_auto_collect_device_info(self) -> bool:
+        """Check if automatic device/system info collection is enabled."""
+        value = self.get('system', 'auto_collect_device_info', 'true')
+        return value.lower() in ('true', '1', 'yes')
 
     def set(self, section: str, key: str, value: str):
         """Set a configuration value in the config file."""

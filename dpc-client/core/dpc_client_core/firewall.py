@@ -314,6 +314,84 @@ personal.json:profile.description = allow
         # Return intersection of allowed models and available models
         return [m for m in all_models if m in self.compute_allowed_models]
 
+    def filter_device_context_for_peer(self, device_context: Dict, peer_id: str) -> Dict:
+        """
+        Filters device context based on firewall rules for a specific peer.
+        Returns a new dict with only allowed fields.
+
+        Args:
+            device_context: The full device context dict to filter
+            peer_id: The node_id of the requesting peer
+
+        Returns:
+            Filtered device context dict with only allowed fields
+        """
+        from copy import deepcopy
+
+        def filter_nested_dict(data: Dict, path_prefix: str) -> Dict:
+            """Recursively filter nested dict based on firewall rules."""
+            if not isinstance(data, dict):
+                return data
+
+            filtered = {}
+            for key, value in data.items():
+                current_path = f"{path_prefix}.{key}" if path_prefix else key
+                resource_path = f"device_context.json:{current_path}"
+
+                # Check if peer has access to this specific path
+                if self.can_access(peer_id, resource_path):
+                    if isinstance(value, dict):
+                        # Allow access - but still recursively filter in case there are deny rules below
+                        filtered[key] = filter_nested_dict(value, current_path)
+                        # If nothing was allowed in the subtree, use the whole value
+                        if not filtered[key] and value:
+                            filtered[key] = deepcopy(value)
+                    else:
+                        # Leaf node - allow access
+                        filtered[key] = deepcopy(value)
+                else:
+                    # Check for wildcard access (e.g., device_context.json:hardware.gpu.*)
+                    wildcard_path = f"device_context.json:{current_path}.*"
+                    if self.can_access(peer_id, wildcard_path):
+                        # Allow access to all sub-fields
+                        filtered[key] = deepcopy(value)
+                    elif isinstance(value, dict):
+                        # No direct access, but might have access to nested fields
+                        nested_filtered = filter_nested_dict(value, current_path)
+                        if nested_filtered:  # Only include if not empty
+                            filtered[key] = nested_filtered
+
+            return filtered
+
+        # Filter top-level sections (hardware, software, metadata)
+        filtered_context = {}
+        for section_name, section_data in device_context.items():
+            # Skip non-dict values at top level
+            if not isinstance(section_data, dict):
+                # Check if this top-level field is allowed
+                resource_path = f"device_context.json:{section_name}"
+                if self.can_access(peer_id, resource_path):
+                    filtered_context[section_name] = deepcopy(section_data)
+                continue
+
+            resource_path = f"device_context.json:{section_name}"
+
+            # Check if peer has access to entire section
+            if self.can_access(peer_id, resource_path):
+                filtered_context[section_name] = deepcopy(section_data)
+            else:
+                # Check for wildcard access to section
+                wildcard_path = f"device_context.json:{section_name}.*"
+                if self.can_access(peer_id, wildcard_path):
+                    filtered_context[section_name] = deepcopy(section_data)
+                else:
+                    # Recursively filter section contents
+                    filtered_section = filter_nested_dict(section_data, section_name)
+                    if filtered_section:  # Only include if not empty
+                        filtered_context[section_name] = filtered_section
+
+        return filtered_context
+
 # --- Self-testing block ---
 if __name__ == '__main__':
     dummy_rules = """

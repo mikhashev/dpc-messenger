@@ -36,3 +36,32 @@ work_main.json:skills.* = allow
 # My friend Boris can see my personal profile and learning progress.
 personal.json:profile.* = allow
 @learning:* = allow
+
+# Section 5: Device Context Sharing (device_context.json)
+# Control what hardware/software info is shared with peers
+
+[device_sharing:basic]
+# Share OS and dev tools only (no hardware specs)
+device_context.json:software.os.* = allow
+device_context.json:software.runtime.* = allow
+device_context.json:software.dev_tools.* = allow
+device_context.json:software.package_managers = allow
+device_context.json:hardware.* = deny
+
+[device_sharing:compute]
+# Share GPU info for compute-sharing feature
+device_context.json:hardware.gpu.* = allow
+device_context.json:hardware.memory.* = allow
+device_context.json:hardware.cpu.cores_physical = allow
+device_context.json:software.ai_models.* = allow
+
+[node:dpc-node-alice-xyz]
+# Alice can use my GPU for compute-sharing
+device_context.json:hardware.gpu.* = allow
+device_context.json:hardware.memory.ram_gb = allow
+device_context.json:software.ai_models.* = allow
+
+[group:trusted_developers]
+# Share dev environment details but not hardware
+device_context.json:software.* = allow
+device_context.json:hardware.* = deny

@@ -69,6 +69,31 @@ class CoreService:
 
         # Knowledge Architecture components (Phase 1-6)
         self.pcm_core = PCMCore(DPC_HOME_DIR / "personal.json")
+
+        # Auto-collect device context on startup (if enabled)
+        self.device_context = None
+        if self.settings.get_auto_collect_device_info():
+            try:
+                from .device_context_collector import DeviceContextCollector
+                device_collector = DeviceContextCollector(settings=self.settings)
+
+                # Generate/update device_context.json
+                device_file = device_collector.collect_and_save()
+                print(f"[OK] Device context saved to {device_file.name}")
+
+                # Update personal.json with reference to device_context.json
+                context = self.pcm_core.load_context()
+                context = device_collector.update_personal_context_reference(context)
+                self.pcm_core.save_context(context)
+
+                # Load device context for AI use
+                with open(device_file, 'r', encoding='utf-8') as f:
+                    self.device_context = json.load(f)
+                print("[OK] Device context loaded and referenced in personal.json")
+            except Exception as e:
+                print(f"[Warning] Failed to collect device context: {e}")
+                # Continue service startup even if collection fails
+
         self.consensus_manager = ConsensusManager(
             node_id=self.p2p_manager.node_id,
             pcm_core=self.pcm_core,
@@ -90,6 +115,9 @@ class CoreService:
 
         # Track pending context requests (for request-response matching)
         self._pending_context_requests: Dict[str, asyncio.Future] = {}
+
+        # Track pending device context requests (for request-response matching)
+        self._pending_device_context_requests: Dict[str, asyncio.Future] = {}
 
         # Track pending inference requests (for request-response matching)
         self._pending_inference_requests: Dict[str, asyncio.Future] = {}
@@ -491,6 +519,21 @@ class CoreService:
                 future = self._pending_context_requests[request_id]
                 if not future.done():
                     future.set_result(context_dict)
+
+        elif command == "REQUEST_DEVICE_CONTEXT":
+            # Device context request from peer - handle and respond
+            request_id = payload.get("request_id")
+            await self._handle_device_context_request(sender_node_id, request_id)
+
+        elif command == "DEVICE_CONTEXT_RESPONSE":
+            # Device context response from peer - resolve the pending future
+            request_id = payload.get("request_id")
+            device_context = payload.get("device_context")
+
+            if request_id in self._pending_device_context_requests:
+                future = self._pending_device_context_requests[request_id]
+                if not future.done():
+                    future.set_result(device_context)
 
         elif command == "REMOTE_INFERENCE_REQUEST":
             # Remote inference request from peer - handle and respond
@@ -1030,6 +1073,48 @@ class CoreService:
         except Exception as e:
             print(f"  - Error sending context response to {peer_id}: {e}")
 
+    async def _handle_device_context_request(self, peer_id: str, request_id: str):
+        """
+        Handle incoming device context request from a peer.
+        Apply firewall rules and return filtered device context.
+        """
+        print(f"  - Handling device context request from {peer_id} (request_id: {request_id})")
+
+        # Check if device context is available
+        if not self.device_context:
+            print(f"  - Device context not available, sending empty response")
+            response = {
+                "command": "DEVICE_CONTEXT_RESPONSE",
+                "payload": {
+                    "request_id": request_id,
+                    "device_context": {},
+                    "error": "Device context not available"
+                }
+            }
+        else:
+            # Apply firewall to filter device context based on peer
+            filtered_device_context = self.firewall.filter_device_context_for_peer(
+                device_context=self.device_context,
+                peer_id=peer_id
+            )
+
+            print(f"  - Device context filtered by firewall for {peer_id}")
+
+            # Send response back to peer with request_id
+            response = {
+                "command": "DEVICE_CONTEXT_RESPONSE",
+                "payload": {
+                    "request_id": request_id,
+                    "device_context": filtered_device_context
+                }
+            }
+
+        try:
+            await self.p2p_manager.send_message_to_peer(peer_id, response)
+            print(f"  - Sent filtered device context response to {peer_id}")
+        except Exception as e:
+            print(f"  - Error sending device context response to {peer_id}: {e}")
+
     async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None):
         """
         Handle incoming remote inference request from a peer.
@@ -1213,9 +1298,62 @@ class CoreService:
                 self._pending_context_requests.pop(request_id, None)
             
             return None
-            
+
         except Exception as e:
             print(f"  - Error requesting context from {peer_id}: {e}")
+            return None
+
+    async def _request_device_context_from_peer(self, peer_id: str) -> Dict:
+        """
+        Request device context from a specific peer.
+        Uses async request-response pattern with Future.
+
+        Args:
+            peer_id: The node_id of the peer to request device context from
+
+        Returns:
+            Dict containing filtered device context, or None if request fails
+        """
+        print(f"  - Requesting device context from peer: {peer_id}")
+
+        if peer_id not in self.p2p_manager.peers:
+            print(f"  - Peer {peer_id} not connected, skipping device context request.")
+            return None
+
+        try:
+            # Generate unique request ID
+            request_id = str(uuid.uuid4())
+
+            # Create Future to wait for response
+            response_future = asyncio.Future()
+            self._pending_device_context_requests[request_id] = response_future
+
+            # Create device context request message
+            request_message = {
+                "command": "REQUEST_DEVICE_CONTEXT",
+                "payload": {
+                    "request_id": request_id,
+                    "requestor_id": self.p2p_manager.node_id
+                }
+            }
+
+            # Send request using P2PManager's method
+            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
+
+            # Wait for response with timeout
+            try:
+                device_context_dict = await asyncio.wait_for(response_future, timeout=5.0)
+                return device_context_dict if device_context_dict else None
+
+            except asyncio.TimeoutError:
+                print(f"  - Timeout waiting for device context from {peer_id}")
+                return None
+            finally:
+                # Clean up pending request
+                self._pending_device_context_requests.pop(request_id, None)
+
+        except Exception as e:
+            print(f"  - Error requesting device context from {peer_id}: {e}")
             return None
 
     async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, timeout: float = 60.0) -> str:
