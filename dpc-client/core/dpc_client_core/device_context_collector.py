@@ -35,7 +35,7 @@ from dpc_protocol.pcm_core import (
 class DeviceContextCollector:
     """Collects device/system information and generates device_context.json."""
 
-    SCHEMA_VERSION = "1.0"
+    SCHEMA_VERSION = "1.1"
     COLLECTOR_VERSION = "1.0"
 
     def __init__(self, settings=None):
@@ -81,10 +81,112 @@ class DeviceContextCollector:
                 "collector_version": self.COLLECTOR_VERSION,
                 "auto_collected": True,
                 "privacy_level": "detailed"
-            }
+            },
+            "special_instructions": self._generate_special_instructions()
         }
 
         return device_context
+
+    def _generate_special_instructions(self) -> Dict[str, Any]:
+        """Generate special instructions block for AI interpretation.
+
+        Returns comprehensive rules for how AI systems should interpret
+        and use the device context data, including privacy guidelines,
+        capability inference rules, and platform-specific advice.
+        """
+        return {
+            "interpretation": {
+                "privacy_tiers": (
+                    "ram_tier and free_tier are privacy-rounded values. "
+                    "Use exact ram_gb/free_gb only when precise calculations are required. "
+                    "Always present the tier value to users for privacy."
+                ),
+                "capability_inference": (
+                    "Map GPU specifications to AI model capabilities using these guidelines: "
+                    "<12GB VRAM → models up to 7B parameters, "
+                    "12GB VRAM → models up to 13B parameters, "
+                    "16GB VRAM → models up to 20B parameters, "
+                    "24GB VRAM → models up to 70B parameters (with quantization). "
+                    "Consider compute_capability for NVIDIA GPUs: "
+                    ">=7.0 for modern frameworks, >=8.0 for advanced features."
+                ),
+                "version_compatibility": (
+                    "Match CUDA version with PyTorch/TensorFlow requirements. "
+                    "CUDA 11.x requires PyTorch <2.0, CUDA 12.x requires PyTorch >=2.0. "
+                    "Warn about potential driver updates if model inference fails with compatibility errors."
+                ),
+                "platform_specificity": (
+                    "Consider os.family when suggesting commands and tools: "
+                    "Windows → PowerShell/cmd/winget, "
+                    "Linux → bash/apt/yum, "
+                    "Darwin (macOS) → zsh/brew. "
+                    "If Windows has WSL detected (check dev_tools for 'wsl'), "
+                    "suggest Linux commands as an option."
+                )
+            },
+            "privacy": {
+                "sensitive_paths": (
+                    "Never share or suggest sharing full file paths for executables "
+                    "(python.executable, shell paths, etc.). Only share version numbers and tool names. "
+                    "File paths may reveal usernames, directory structures, or organizational information."
+                ),
+                "optional_fields": (
+                    "The ai_models array requires explicit opt-in via collect_ai_models=true in [system] config. "
+                    "If this array is empty or missing, DO NOT assume the user has no AI models installed—"
+                    "they may have disabled collection for privacy. "
+                    "Always check metadata.privacy_level and respect the user's choice."
+                ),
+                "default_sharing": (
+                    "By default, only software.os and software.dev_tools should be shared with peers "
+                    "unless explicit firewall allow rules exist. Hardware specifications (GPU, RAM, storage) "
+                    "require explicit authorization via device_context.json:hardware.* = allow rules "
+                    "in .dpc_access file."
+                )
+            },
+            "update_protocol": {
+                "auto_refresh": (
+                    "Device context is automatically refreshed on every client startup. "
+                    "If you detect an error related to outdated drivers, missing tools, or changed hardware, "
+                    "suggest the user restart the DPC-Client service to refresh device context. "
+                    "Major updates (OS upgrade, driver update, new GPU) should trigger manual recollection."
+                ),
+                "opt_in_features": (
+                    "To enable AI model collection (ai_models array), users must set collect_ai_models=true "
+                    "in the [system] section of config.ini. This is disabled by default for privacy. "
+                    "Do not automatically enable this feature."
+                ),
+                "staleness_check": (
+                    "If collection_timestamp is more than 7 days old, recommend restarting the client "
+                    "to refresh device context. For hardware changes (new GPU, RAM upgrade), "
+                    "context will remain stale until next restart."
+                )
+            },
+            "usage_scenarios": {
+                "local_inference": (
+                    "When recommending local AI models, consider both GPU VRAM and the ai_models list (if present). "
+                    "Prioritize models the user already has installed. For new model suggestions, "
+                    "ensure VRAM requirements are met with 20% safety margin for OS overhead."
+                ),
+                "remote_inference": (
+                    "When suggesting compute offloading to peers, match the peer's GPU VRAM to the model requirements. "
+                    "Check both requester's and peer's device context. If a peer has superior hardware "
+                    "(more VRAM, newer compute capability), suggest offloading. "
+                    "If peer's hardware is similar or inferior, keep inference local."
+                ),
+                "dev_environment": (
+                    "When suggesting package installations, check software.package_managers and prioritize "
+                    "the user's available tools. Order of preference: poetry > pip for Python, "
+                    "npm > yarn for JavaScript, cargo for Rust. "
+                    "Provide fallback commands if the preferred manager isn't available."
+                ),
+                "cross_platform": (
+                    "Detect the user's OS and provide platform-native instructions. "
+                    "For Windows users with WSL (detected via dev_tools), offer both Windows-native and WSL/Linux commands. "
+                    "For macOS, prefer Homebrew when available. "
+                    "For Linux, detect package manager from package_managers list (apt, yum, pacman, etc.)."
+                )
+            }
+        }
 
     def _collect_hardware(self) -> Dict[str, Any]:
         """Collect hardware information."""

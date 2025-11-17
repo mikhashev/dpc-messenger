@@ -1655,8 +1655,36 @@ class CoreService:
 
         # Add device context if available
         if device_context:
+            # Extract special instructions if present (schema v1.1+)
+            special_instructions_text = ""
+            if "special_instructions" in device_context:
+                instructions_obj = device_context["special_instructions"]
+                special_instructions_text = "\nDEVICE CONTEXT INTERPRETATION RULES:\n"
+
+                if "interpretation" in instructions_obj:
+                    special_instructions_text += "\nInterpretation Guidelines:\n"
+                    for key, value in instructions_obj["interpretation"].items():
+                        special_instructions_text += f"  - {key}: {value}\n"
+
+                if "privacy" in instructions_obj:
+                    special_instructions_text += "\nPrivacy Rules:\n"
+                    for key, value in instructions_obj["privacy"].items():
+                        special_instructions_text += f"  - {key}: {value}\n"
+
+                if "update_protocol" in instructions_obj:
+                    special_instructions_text += "\nUpdate Protocol:\n"
+                    for key, value in instructions_obj["update_protocol"].items():
+                        special_instructions_text += f"  - {key}: {value}\n"
+
+                if "usage_scenarios" in instructions_obj:
+                    special_instructions_text += "\nUsage Scenarios:\n"
+                    for key, value in instructions_obj["usage_scenarios"].items():
+                        special_instructions_text += f"  - {key}: {value}\n"
+
+                special_instructions_text += "\n"
+
             device_json = json.dumps(device_context, indent=2, ensure_ascii=False)
-            device_block = f'<DEVICE_CONTEXT source="local">\n{device_json}\n</DEVICE_CONTEXT>'
+            device_block = f'<DEVICE_CONTEXT source="local">{special_instructions_text}{device_json}\n</DEVICE_CONTEXT>'
             context_blocks.append(device_block)
 
         final_prompt = (

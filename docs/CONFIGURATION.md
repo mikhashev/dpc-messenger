@@ -138,6 +138,64 @@ host = 127.0.0.1
 
 ---
 
+### System Settings (`[system]`)
+
+#### `auto_collect_device_info`
+- **Description:** Automatically collect device context on startup
+- **Default:** `true`
+- **Environment Variable:** `DPC_AUTO_COLLECT_DEVICE_INFO`
+- **Valid Values:** `true`, `false`, `yes`, `no`, `1`, `0`
+- **Note:** Generates `~/.dpc/device_context.json` with hardware/software specifications
+
+#### `collect_hardware_specs`
+- **Description:** Include hardware details (CPU, RAM, GPU, storage) in device context
+- **Default:** `true`
+- **Environment Variable:** `DPC_COLLECT_HARDWARE_SPECS`
+- **Valid Values:** `true`, `false`
+- **Requires:** `auto_collect_device_info = true`
+- **Privacy:** Hardware specs use privacy-rounded tiers (e.g., "32GB" instead of "31.8GB")
+
+#### `collect_dev_tools`
+- **Description:** Include development tools and package managers in device context
+- **Default:** `true`
+- **Environment Variable:** `DPC_COLLECT_DEV_TOOLS`
+- **Valid Values:** `true`, `false`
+- **Collects:** Git, Docker, Node, npm, Python, Rust, package managers (pip, poetry, npm, etc.)
+
+#### `collect_ai_models`
+- **Description:** Include installed AI models (e.g., Ollama models) in device context
+- **Default:** `false` (opt-in for privacy)
+- **Environment Variable:** `DPC_COLLECT_AI_MODELS`
+- **Valid Values:** `true`, `false`
+- **Privacy Note:** Disabled by default. Enable only if you want to share compute resources with peers.
+
+**Example Configuration:**
+```ini
+[system]
+auto_collect_device_info = true
+collect_hardware_specs = true
+collect_dev_tools = true
+collect_ai_models = false  # Opt-in only
+```
+
+**Device Context Schema:**
+
+As of schema version **1.1**, device context includes a `special_instructions` block that provides AI systems with interpretation guidelines, privacy rules, and usage scenarios. See [DEVICE_CONTEXT_SPEC.md](DEVICE_CONTEXT_SPEC.md) for complete specification.
+
+**Special Instructions Block:**
+- **Interpretation rules:** How to map GPU specs to model capabilities, CUDA version compatibility
+- **Privacy rules:** Which fields to filter (executable paths), what to share by default
+- **Update protocol:** Auto-refresh behavior, staleness detection (>7 days old)
+- **Usage scenarios:** Local vs remote inference, dev environment detection, cross-platform commands
+
+**Example Use Cases:**
+- AI can recommend "Your RTX 3060 (12GB) can run llama3:13b" without asking about hardware
+- Platform-specific commands: "Windows detected → use winget" vs "Linux → use apt"
+- Privacy-safe sharing: Only OS version and dev tools shared by default, hardware requires firewall rules
+- Staleness detection: If context is >7 days old, AI suggests restarting client to refresh
+
+---
+
 ## Using Environment Variables
 
 Environment variables override config file settings and are useful for:

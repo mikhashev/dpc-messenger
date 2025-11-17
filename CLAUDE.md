@@ -354,6 +354,39 @@ The client automatically collects device and system information on startup and s
 }
 ```
 
+*Special Instructions (schema v1.1+):*
+```json
+{
+  "schema_version": "1.1",
+  "special_instructions": {
+    "interpretation": {
+      "privacy_tiers": "ram_tier and free_tier are privacy-rounded values...",
+      "capability_inference": "Map GPU VRAM to model sizes: 12GB → 13B models...",
+      "version_compatibility": "Match CUDA version with PyTorch/TensorFlow...",
+      "platform_specificity": "Consider OS family when suggesting commands..."
+    },
+    "privacy": {
+      "sensitive_paths": "Never share executable paths - only versions...",
+      "optional_fields": "ai_models requires opt-in (collect_ai_models=true)...",
+      "default_sharing": "Only software.os and dev_tools by default..."
+    },
+    "update_protocol": {
+      "auto_refresh": "Refreshes on client startup...",
+      "opt_in_features": "Enable ai_models with collect_ai_models=true...",
+      "staleness_check": "Recommend refresh if >7 days old..."
+    },
+    "usage_scenarios": {
+      "local_inference": "Consider GPU VRAM and installed models...",
+      "remote_inference": "Match peer GPU capabilities...",
+      "dev_environment": "Prioritize user's package managers...",
+      "cross_platform": "Provide platform-native instructions..."
+    }
+  }
+}
+```
+
+The `special_instructions` block (added in schema v1.1) provides comprehensive guidelines for AI systems on how to interpret and use device context data. This includes privacy rules (which fields to filter), capability inference rules (mapping GPU specs to model sizes), and platform-specific guidance (suggesting appropriate commands for Windows/Linux/macOS). See [docs/DEVICE_CONTEXT_SPEC.md](docs/DEVICE_CONTEXT_SPEC.md) for full specification.
+
 **Cross-Platform Support:**
 - **NVIDIA GPUs**: Full details via nvidia-smi (Windows/Linux/macOS)
 - **AMD GPUs**: rocm-smi (Linux)
@@ -376,12 +409,13 @@ collect_dev_tools = true          # Git, Docker, Node, etc.
 collect_ai_models = false         # Ollama models (opt-in for compute-sharing)
 ```
 
-**Example AI Assistance:**
+**Example AI Assistance** (powered by special_instructions):
 - **GPU-aware**: "Your RTX 3060 (12GB VRAM) can run llama3:13b comfortably"
 - **Driver-aware**: "CUDA 12.8 detected - use PyTorch 2.5+ for compatibility"
 - **Resource-aware**: "You have 24GB RAM - can run 2 models simultaneously"
 - **Platform-specific**: "Windows 10 detected - use WSL2 for better Linux compatibility"
 - **Compute-sharing**: "Alice has RTX 4090 (24GB) - offload training to her GPU"
+- **Privacy-aware**: "Sharing only OS version and dev tools, hardware specs require explicit allow rules"
 
 ---
 
@@ -581,6 +615,7 @@ poetry run pytest tests/test_turn_connectivity.py
 - `docs/QUICK_START.md` - 5-minute setup guide
 - `docs/WEBRTC_SETUP_GUIDE.md` - Production deployment
 - `docs/CONFIGURATION.md` - Complete configuration reference
+- `docs/DEVICE_CONTEXT_SPEC.md` - Device context schema and special instructions specification
 - `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
 - `whitepaper.md` - Project vision and philosophy
 
