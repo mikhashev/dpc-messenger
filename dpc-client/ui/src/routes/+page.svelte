@@ -31,6 +31,7 @@
   let peerInput: string = "";  // RENAMED from peerUri for clarity
   let selectedComputeHost: string = "local";  // "local" or node_id for remote inference
   let selectedRemoteModel: string = "";  // Selected model when using remote compute host
+  let selectedPeerContexts: Set<string> = new Set();  // Set of peer node_ids to fetch context from
 
   // Store provider selection per chat (chatId -> provider alias)
   const chatProviders = writable<Map<string, string>>(new Map());
@@ -100,6 +101,17 @@
     return '🤖 Local AI Assistant';
   }
   
+  // --- PEER CONTEXT SELECTION ---
+  function togglePeerContext(peerId: string) {
+    if (selectedPeerContexts.has(peerId)) {
+      selectedPeerContexts.delete(peerId);
+    } else {
+      selectedPeerContexts.add(peerId);
+    }
+    // Trigger reactivity
+    selectedPeerContexts = selectedPeerContexts;
+  }
+
   // --- CHAT FUNCTIONS ---
   function handleSendMessage() {
     if (!currentInput.trim()) return;
@@ -137,6 +149,11 @@
 
       // Prepare AI query payload with optional compute host and provider/model
       const payload: any = { prompt: text };
+
+      // Add peer contexts if any are selected
+      if (selectedPeerContexts.size > 0) {
+        payload.context_ids = Array.from(selectedPeerContexts);
+      }
 
       if (selectedComputeHost !== "local") {
         // Remote inference - send compute_host and model
@@ -710,7 +727,7 @@
         <div class="chat-title-section">
           <h2>
             {#if $aiChats.has(activeChatId)}
-              🤖 {$aiChats.get(activeChatId).name}
+              🤖 {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
             {:else}
               👤 Chat with {getPeerDisplayName(activeChatId)}
             {/if}
@@ -781,6 +798,35 @@
       </div>
 
       <div class="chat-input">
+        {#if $aiChats.has(activeChatId)}
+          <!-- Peer Context Selector (show for all AI chats) -->
+          {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
+            <div class="peer-context-selector">
+              <div class="peer-context-header">
+                <span class="peer-context-label">🧠 Include Peer Context:</span>
+                <span class="peer-context-hint">
+                  ({selectedPeerContexts.size} selected)
+                </span>
+              </div>
+              <div class="peer-context-checkboxes">
+                {#each $nodeStatus.peer_info as peer}
+                  {@const displayName = peer.name
+                    ? `${peer.name} | ${peer.node_id.slice(0, 15)}...`
+                    : `${peer.node_id.slice(0, 20)}...`}
+                  <label class="peer-context-checkbox">
+                    <input
+                      type="checkbox"
+                      checked={selectedPeerContexts.has(peer.node_id)}
+                      on:change={() => togglePeerContext(peer.node_id)}
+                    />
+                    <span>{displayName}</span>
+                  </label>
+                {/each}
+              </div>
+            </div>
+          {/if}
+        {/if}
+
         {#if activeChatId === 'local_ai'}
           <div class="compute-host-selector">
             <label for="compute-host">🖥️ Compute Host:</label>
@@ -1336,7 +1382,8 @@
     border-radius: 8px;
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 200px);
+    height: calc(100vh - 120px);
+    min-height: 600px;
   }
   
   .chat-header {
@@ -1528,6 +1575,80 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+  }
+
+  /* Peer Context Selector Styles */
+  .peer-context-selector {
+    padding: 0.75rem;
+    background: linear-gradient(135deg, #f8f3ff 0%, #f0f4ff 100%);
+    border-radius: 8px;
+    border: 1px solid #d4c5f9;
+    margin-bottom: 0.5rem;
+  }
+
+  .peer-context-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+
+  .peer-context-label {
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: #5b21b6;
+    margin: 0;
+  }
+
+  .peer-context-hint {
+    font-size: 0.75rem;
+    color: #8b5cf6;
+    font-weight: 500;
+    padding: 0.2rem 0.5rem;
+    background: white;
+    border-radius: 12px;
+  }
+
+  .peer-context-checkboxes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .peer-context-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.7rem;
+    background: white;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-size: 0.85rem;
+    user-select: none;
+  }
+
+  .peer-context-checkbox:hover {
+    border-color: #8b5cf6;
+    background: #faf5ff;
+  }
+
+  .peer-context-checkbox input[type="checkbox"] {
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    margin: 0;
+    padding: 0;
+  }
+
+  .peer-context-checkbox input[type="checkbox"]:checked {
+    accent-color: #8b5cf6;
+  }
+
+  .peer-context-checkbox span {
+    color: #374151;
+    font-weight: 500;
   }
 
   .compute-host-selector {

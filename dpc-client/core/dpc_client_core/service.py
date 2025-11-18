@@ -1500,14 +1500,23 @@ class CoreService:
         if self.device_context:
             device_context_data = self.device_context
 
-        # TODO: Fetch remote contexts if context_ids provided
+        # Fetch remote contexts if context_ids provided
         if context_ids:
+            print(f"  - Fetching contexts from {len(context_ids)} peer(s)")
             for node_id in context_ids:
                 if node_id in self.p2p_manager.peers:
-                    # Fetch context from peer
-                    # context = await self.request_context_from_peer(node_id, prompt)
-                    # aggregated_contexts[node_id] = context
-                    pass
+                    print(f"    • Requesting context from {node_id[:20]}...")
+                    try:
+                        context = await self._request_context_from_peer(node_id, prompt)
+                        if context:
+                            aggregated_contexts[node_id] = context
+                            print(f"    ✓ Received context from {node_id[:20]}...")
+                        else:
+                            print(f"    ✗ No context received from {node_id[:20]}...")
+                    except Exception as e:
+                        print(f"    ✗ Error fetching context from {node_id[:20]}...: {e}")
+                else:
+                    print(f"    ✗ Peer {node_id[:20]}... not connected")
 
         # Assemble final prompt with context
         final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt, device_context_data)
