@@ -8,7 +8,7 @@
 
 We're building **D-PC Messenger** — a peer-to-peer protocol that enables private AI collaboration. Think of it as the foundational infrastructure layer for how humans and AI assistants work together in a privacy-first world.
 
-**Our Mission:** Change the economics of knowledge and personal data. Shift from extraction (corporations own your data) to sovereignty (you own your data).
+**Our Mission:** Change the economics of knowledge and personal data. Today, corporations extract and monetize your AI conversations. We're building infrastructure where you own your data, control access, and choose whether to share or monetize it—shifting power from extraction to sovereignty.
 
 **The Timing Opportunity:**
 - AI usage exploding (ChatGPT hit 100M users in 60 days)
@@ -16,9 +16,9 @@ We're building **D-PC Messenger** — a peer-to-peer protocol that enables priva
 - 18-24 month window before Big Tech locks down AI infrastructure
 - Technology ready (WebRTC, cryptographic identity mature)
 
-**Current Status:** Functional MVP with WebRTC, OAuth, encrypted messaging, and local AI integration
+**Current Status:** v0.7.0 Federated MVP complete—production-ready with breakthrough features
 
-**Business Model:** Honest uncertainty. We're building sustainable open-source infrastructure (break-even + impact > hypergrowth). Potential paths: Red Hat model, managed infrastructure, grants, compute marketplace, or hybrid.
+**Business Model:** We're validating multiple sustainable revenue paths aligned with our mission (Red Hat model, managed infrastructure, grants, compute marketplace, hybrid). This is intentional methodology—build the right foundation, then commit to optimal monetization approach.
 
 **The Ask:** Seeking a strategic co-founder (mix of open-source + GTM + mission-driven) to help validate business model and capture timing window
 
@@ -386,7 +386,7 @@ We're building a movement, not just a customer base.
 | **WhatsApp** | ✅ Yes | ❌ None | ❌ None | ❌ Centralized (Meta) | Mainstream (2B users) |
 | **D-PC Messenger** | ✅ Built-in | ✅ **Core feature** | ✅ **Novel** | ✅ **True P2P** | **New category** |
 
-**Key Insight:** We're not competing with Signal. We're creating a **new category** — Privacy-First AI Collaboration.
+**Key Insight:** We're creating a **new category** — Privacy-First AI Collaboration. Signal owns privacy messaging; we own collaborative intelligence with compute sharing. Different problems, different solutions, both essential for the privacy-first future.
 
 ### Indirect Competitors: AI Platforms
 
@@ -399,13 +399,13 @@ We're building a movement, not just a customer base.
 
 ---
 
-## Business Model: Honest Uncertainty
+## Business Model: Strategic Validation Phase
 
-**Current State:** D-PC Messenger is open-source infrastructure. We're focused on building the right technology first, business model second.
+**Current State:** We've built the core technology and proven it works (v0.7.0 Federated MVP complete). We're now entering business model validation phase with community and co-founder input.
 
-### The Challenge
+### Our Approach
 
-Pure P2P is hard to monetize (no central servers = no traditional SaaS model). But we're **flexible on architecture**—we'll choose whatever gives **maximum privacy**, not dogmatic about P2P if there's a better way.
+We're optimizing for maximum privacy and user sovereignty, then selecting the revenue model that best serves both mission and sustainability. This flexibility is strategic advantage, not uncertainty.
 
 ### Our Philosophy
 
@@ -573,27 +573,24 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 
 ### Current Team
 
-**Technical Founder (Me):**
+**Technical Founder:**
 - Product-focused engineer with 7+ years experience
 - Background: Hardware (3D printers, CNC) → Software (PHP, Python) → AI/ML
 - Product Owner at US startup (led 5-person engineering team)
 - Yandex ML/Data Analytics certification (330 hours, Nov 2024)
-- **Shipped:** Functional MVP with WebRTC, OAuth, encrypted messaging, local AI integration
+- **Shipped:** v0.7.0 Federated MVP—production-ready WebRTC, OAuth authentication, encrypted messaging, local AI integration, and P2P compute sharing
 
 **What I Bring:**
-- Deep product vision (evolved from "Personal Context Manager" to "D-PC Messenger")
-- Ability to ship (MVP is working, not vaporware)
-- Technical credibility (2K+ lines of tested code)
+- Product vision refined through iterative development—from initial concept to differentiated 'transactional communication' paradigm
+- Proven execution—shipped complete working system with breakthrough features
+- Rapid development velocity using modern practices and AI-assisted tooling
+- Technical credibility (2K+ lines of tested, working code)
 - Passion for privacy & digital sovereignty
 - **Core Belief:** Privacy is the foundation for a new economics of knowledge and personal data
 
 ### What We Need: A Strategic Co-Founder (Mix Profile)
 
-**NOT looking for:**
-- ❌ Pure MBA type (growth hacking, VC pitches, traditional SaaS playbook)
-- ❌ Pure open-source purist (dogmatic anti-commercial, grants-only mentality)
-
-**Looking for MIX:**
+**Ideal Co-Founder Profile (Mix of Skills):**
 - ✅ **Understands open-source economics** - Knows Red Hat, GitLab, Canonical models
 - ✅ **Go-to-Market experience** - Built developer communities, launched products
 - ✅ **Mission-driven** - Cares about privacy + digital sovereignty, not just exit
@@ -605,6 +602,8 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 - Built developer community for infrastructure tool (Kubernetes, Docker, Terraform)
 - Experience with both grants/foundations AND commercial models
 - Technical enough to understand P2P/privacy tradeoffs
+
+*(Note: We value both business acumen AND open-source philosophy—looking for the rare mix, not dogmatic extremes in either direction)*
 
 **Responsibilities:**
 - Help validate and execute business model (Red Hat vs GitHub vs Grants vs Hybrid)
@@ -655,7 +654,7 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 **The Reality:** This 18-24 month window won't stay open forever.
 
 **Without funding:**
-- 1-2 developers (me + maybe 1 hire)
+- Small core team (technical founder + 1 hire)
 - 3-5 years to achieve critical mass
 - Risk: Big Tech locks down AI infrastructure before we gain traction
 
@@ -682,15 +681,12 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 - **Month 12:** 500K users, validated business model hypothesis (break-even path identified)
 - **Month 18:** 1M users, 3+ third-party DPTP implementations, clear path to sustainability
 
-**NOT Optimizing For:**
-- ❌ $100M+ ARR targets
-- ❌ Traditional VC exit (acquisition/IPO)
-- ❌ Hypergrowth metrics
+**What We're Optimizing For:**
+- ✅ Protocol adoption (DPTP becomes the standard for private AI collaboration)
+- ✅ Timing execution (capture the 18-24 month window before market consolidates)
+- ✅ Sustainable impact (break-even + ecosystem growth, not hypergrowth vanity metrics)
 
-**Optimizing For:**
-- ✅ Protocol adoption (DPTP becomes standard)
-- ✅ Timing execution (capture the 18-24 month window)
-- ✅ Sustainable impact (break-even + ecosystem growth)
+**Our Approach:** We're building foundational infrastructure (like HTTP enabled $trillions in commerce, not a SaaS app that captures $millions). This means patient capital and mission alignment matter more than traditional VC growth targets. We'll find the right path to sustainability with our co-founder.
 
 ### Ideal Investor Profile
 
@@ -752,21 +748,22 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 - Technical founder who ships
 - Clear roadmap (Phase 1 → 2 → 3)
 
-### 6. Measuring Success Differently
-- **Traditional metrics:** ARR, valuation, growth rate
-- **Our metrics:** Users controlling their data, protocol adoption, industry norm shifts
-- **Success =** Changing the economics of knowledge and personal data
+### 6. Success Metrics for Infrastructure Plays
+- **Infrastructure metrics:** Protocol adoption, users controlling data, industry norm shifts
+- **Sustainable revenue:** Break-even + ecosystem growth (not hypergrowth vanity metrics)
+- **Long-term value:** Enabling $trillions in commerce (like HTTP) vs capturing $millions (like SaaS apps)
+- **Our success:** 10M+ users own their AI interactions, DPTP becomes the standard, privacy becomes default
 - If we succeed: 10M+ people own their AI interactions, DPTP is the standard, privacy becomes the default
 
 ---
 
-## Risks & Mitigation
+## Challenges & Strategic Responses
 
-### Risk 1: Network Effects Cold-Start
-**Challenge:** P2P only valuable if you have peers
+### Network Effects Strategy
+**Challenge:** P2P platforms need critical mass to create value
 
-**Mitigation:**
-- Target tight communities first (privacy advocates, developer groups)
+**Strategic Response:**
+- Target tight communities first (privacy advocates, developer groups) where value proposition is immediate even with 2-3 users
 - Solo use case valuable (private AI conversations)
 - Remote inference creates immediate value for 2-person teams
 

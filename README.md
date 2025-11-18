@@ -135,11 +135,11 @@ If this vision resonates with you, let's connect:
 - ✅ The creator does **NOT store or transmit user messages**
 - ✅ The creator does **NOT control user communications**
 
-**Optional Hub servers:**
-- Provide WebRTC signaling only (connection facilitation)
-- Do NOT relay or store messages
-- Function similar to STUN/TURN servers or BitTorrent trackers
-- Completely optional (Direct TLS works without Hub)
+**Hub Architecture:**
+- Provides WebRTC signaling for NAT traversal (like STUN/TURN servers)
+- Messages flow directly P2P between clients (Hub never sees content)
+- Direct TLS connections work independently of Hub for local networks
+- Hub-free operation mode planned for Phase 3 (DHT-based discovery)
 
 **Legal implication:** This software provides a communication tool, not a communication service. Users are solely responsible for their use of this software and any infrastructure they choose to deploy.
 
@@ -472,108 +472,17 @@ We take security seriously and will respond within 48 hours.
 
 ---
 
-## ⚖️ Legal Notice & Compliance
+## ⚖️ Legal Notice
 
-### Important Disclaimers
+**License:** Multi-license (GPL/LGPL/AGPL/CC0) - see [LICENSE.md](./LICENSE.md)
 
-**THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.**
+**Disclaimer:** This software is provided 'AS IS' without warranty of any kind. Users are responsible for compliance with applicable laws in their jurisdiction, including encryption regulations, data protection laws, and telecommunications requirements.
 
-By using this software, you acknowledge and agree to the following:
+**Security:** For vulnerability reports, contact legoogmiha@gmail.com (do not open public issues).
 
-#### 1. No Warranty or Liability
-- The software is provided for **educational and research purposes only**
-- The creator accepts **no liability** for any damages, losses, or legal consequences arising from the use of this software
-- No warranties are provided regarding fitness for any particular purpose, merchantability, or non-infringement
-- Users assume **all risks** associated with using this software
+**Compliance:** See [docs/LEGAL_COMPLIANCE.md](./docs/LEGAL_COMPLIANCE.md) for detailed information on export controls, data protection requirements, and jurisdiction-specific considerations.
 
-#### 2. User Responsibility for Legal Compliance
-- **YOU ARE SOLELY RESPONSIBLE** for ensuring your use complies with applicable laws in your jurisdiction
-- This includes but is not limited to:
-  - Encryption and cryptography regulations (export controls, key length restrictions)
-  - Data protection laws (GDPR, CCPA, Russian Federal Law No. 152-FZ, etc.)
-  - Telecommunications and messaging regulations
-  - Privacy and surveillance laws
-  - Content restrictions and censorship laws
-
-#### 3. Cryptographic Technology Notice
-- This software contains strong cryptographic features (RSA-2048, TLS 1.2+, AES-256)
-- **Export and use may be restricted** in certain countries
-- Users must verify compliance with applicable export control laws (e.g., U.S. EAR, Wassenaar Arrangement)
-- Some jurisdictions require registration or licensing for cryptographic software
-
-#### 4. Privacy & Data Protection
-- While the software is designed for privacy, **users are responsible** for:
-  - Obtaining necessary consents for data processing
-  - Complying with data localization requirements
-  - Meeting data protection obligations under local law
-  - Maintaining required records and documentation
-
-#### 5. Russian Federation Specific Considerations
-- Users in Russia must comply with:
-  - Federal Law No. 152-FZ on Personal Data
-  - Yarovaya Law (data retention and access requirements)
-  - Roskomnadzor regulations and restrictions
-  - SORM compliance requirements (if applicable)
-  - Encryption registration requirements (FSB/FSTEC)
-- **The creator makes no guarantees of compliance with Russian law**
-- Consult legal counsel before deploying in Russian jurisdiction
-
-#### 6. Prohibited Uses
-The creator **explicitly prohibits** use of this software for:
-- Illegal activities under applicable law
-- Violation of export controls or sanctions
-- Circumventing lawful surveillance or interception orders
-- Activities that violate third-party rights
-- Purposes contrary to public safety or national security
-
-#### 7. Repository Status
-⚠️ **This repository may transition to private access in the future** to further limit distribution and reduce legal exposure. Current users should:
-- Fork or download the code if needed for legitimate research/educational purposes
-- Understand that public access may be revoked at any time without notice
-- Not redistribute without understanding their own legal obligations
-
-#### 8. Indemnification
-By using this software, you agree to **indemnify and hold harmless** the creator from any claims, damages, or legal actions arising from your use of the software.
-
-#### 9. Governing Law & Jurisdiction
-- This software is provided from an undisclosed jurisdiction
-- No specific governing law or jurisdiction is established
-- Users must resolve disputes under their own local law
-
-### Compliance Recommendations
-
-If you intend to deploy this software:
-
-1. **Consult legal counsel** familiar with:
-   - Telecommunications law in your jurisdiction
-   - Data protection and privacy regulations
-   - Cryptography and encryption laws
-   - Export control regulations
-
-2. **Conduct a legal risk assessment** covering:
-   - Licensing requirements
-   - Registration obligations
-   - Data localization mandates
-   - Lawful interception compliance
-
-3. **Implement additional controls** as needed:
-   - User agreements and terms of service
-   - Privacy policies and consent mechanisms
-   - Data processing agreements
-   - Incident response procedures
-
-4. **For Russian users specifically**:
-   - Register cryptographic tools with FSB if required
-   - Comply with operator licensing (if applicable)
-   - Implement Yarovaya Law requirements
-   - Ensure data localization (personal data of Russian citizens)
-
-### Contact for Legal Inquiries
-
-**For legal questions or takedown requests:**
-Email: legoogmiha@gmail.com
-
-**Response time:** Best effort, no guarantees
+**No Warranty:** The creators accept no liability for use, misuse, or legal consequences. Consult legal counsel before deployment in regulated environments.
 
 ---
 

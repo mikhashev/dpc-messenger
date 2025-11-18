@@ -85,22 +85,18 @@ The "D-PC Messenger" is the **first reference implementation** of the D-PC proto
 
 ## 7. Current Status & Next Steps
 
-**Completed in v0.7.0 (Federated MVP):**
-- ✅ **Remote inference** - Basic 2-user compute sharing is working
-- ✅ **Context collaboration** - Secure sharing of personal contexts between peers
-- ✅ **Architecture** - APIs and data structures for advertising/requesting compute resources
-- ✅ **UX/UI** - Intuitive interface for selecting compute hosts and sharing contexts
+**Phase 1 Complete: v0.7.0 Federated MVP ✅**
+- ✅ **Remote inference** - 2-user compute sharing working (proven foundation)
+- ✅ **Context collaboration** - Secure P2P knowledge sharing
+- ✅ **Core architecture** - APIs, data structures, UX/UI for compute and context sharing
+- ✅ **Breakthrough features** - Knowledge Commits + P2P Compute Sharing (both working)
 
-**What's NOT Yet Implemented:**
-- 🔲 **Group chats** - Multi-party collaboration (3+ users)
-- 🔲 **Multi-party knowledge commits** - Collaborative knowledge building across groups
-- 🔲 **Advanced remote inference** - Model discovery, streaming responses, usage tracking
-- 🔲 **Compute marketplace** - Discovery and metering of shared computational resources
+**Phase 2 Expansion: Enhanced Federation (Q1-Q2 2026)**
 
-**Next Development Phase (Enhanced Federation - Q1-Q2 2026):**
-1. **Group Collaboration** - Extend 1-on-1 features to multi-party scenarios
-2. **Remote Inference Enhancements** - Model discovery, usage tracking, streaming
-3. **Collaborative Knowledge Building** - Multi-peer consensus on shared knowledge commits
-4. **Advanced Context Firewall** - Tag-based sharing rules for group contexts
+Building on proven 2-user model:
+- **Group collaboration** - Extend to multi-party scenarios (3+ users)
+- **Advanced remote inference** - Model discovery, streaming responses, usage tracking
+- **Multi-peer knowledge commits** - Collaborative knowledge building across groups
+- **Compute marketplace** - Discovery and metering of shared computational resources
 
 **Our Achievement:** We have successfully built the **"D-PC Messenger,"** a working tool for collaborative intelligence that uniquely combines the sharing of **knowledge (context)** and **computation (inference)** in a private, user-sovereign network. The foundation is solid; now we expand to group scenarios.
