@@ -33,11 +33,11 @@
   let selectedRemoteModel: string = "";  // Selected model when using remote compute host
   let selectedPeerContexts: Set<string> = new Set();  // Set of peer node_ids to fetch context from
 
-  // Resizable chat window state
-  let chatWindowHeight: number = (() => {
-    // Load saved height from localStorage, default to 400px
-    const saved = localStorage.getItem('chatWindowHeight');
-    return saved ? parseInt(saved, 10) : 400;
+  // Resizable chat panel state
+  let chatPanelHeight: number = (() => {
+    // Load saved height from localStorage, default to calc(100vh - 120px)
+    const saved = localStorage.getItem('chatPanelHeight');
+    return saved ? parseInt(saved, 10) : 600;
   })();
   let isResizing: boolean = false;
   let resizeStartY: number = 0;
@@ -148,11 +148,11 @@
     selectedPeerContexts = selectedPeerContexts;
   }
 
-  // --- CHAT WINDOW RESIZE HANDLERS ---
+  // --- CHAT PANEL RESIZE HANDLERS ---
   function startResize(e: MouseEvent) {
     isResizing = true;
     resizeStartY = e.clientY;
-    resizeStartHeight = chatWindowHeight;
+    resizeStartHeight = chatPanelHeight;
 
     // Prevent text selection during resize
     e.preventDefault();
@@ -168,12 +168,12 @@
   function handleResize(e: MouseEvent) {
     if (!isResizing) return;
 
-    // Calculate new height (subtract because Y increases downward)
+    // Calculate new height (add because we want to grow downward)
     const deltaY = e.clientY - resizeStartY;
-    const newHeight = resizeStartHeight - deltaY;
+    const newHeight = resizeStartHeight + deltaY;
 
-    // Enforce min/max constraints
-    chatWindowHeight = Math.max(200, Math.min(800, newHeight));
+    // Enforce minimum constraint only (no maximum)
+    chatPanelHeight = Math.max(300, newHeight);
   }
 
   function stopResize() {
@@ -187,7 +187,7 @@
     document.removeEventListener('mouseup', stopResize);
 
     // Save the new height to localStorage
-    localStorage.setItem('chatWindowHeight', chatWindowHeight.toString());
+    localStorage.setItem('chatPanelHeight', chatPanelHeight.toString());
   }
 
   // --- CHAT FUNCTIONS ---
@@ -800,7 +800,7 @@
     </div>
 
     <!-- Chat Panel -->
-    <div class="chat-panel">
+    <div class="chat-panel" style="height: {chatPanelHeight}px;">
       <div class="chat-header">
         <div class="chat-title-section">
           <h2>
@@ -849,7 +849,7 @@
         </div>
       </div>
 
-      <div class="chat-window" bind:this={chatWindow} style="height: {chatWindowHeight}px;">
+      <div class="chat-window" bind:this={chatWindow}>
         {#if activeMessages.length > 0}
           {#each activeMessages as msg (msg.id)}
             <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'}>
@@ -873,18 +873,6 @@
             <p>No messages yet. Start the conversation!</p>
           </div>
         {/if}
-      </div>
-
-      <!-- Resize Handle -->
-      <!-- svelte-ignore a11y-no-static-element-interactions -->
-      <div
-        class="resize-handle"
-        on:mousedown={startResize}
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label="Resize chat window"
-      >
-        <div class="resize-handle-line"></div>
       </div>
 
       <div class="chat-input">
@@ -981,6 +969,19 @@
             {#if isLoading}Sending...{:else}Send{/if}
           </button>
         </div>
+      </div>
+
+      <!-- Resize Handle -->
+      <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+      <div
+        class="resize-handle"
+        class:resizing={isResizing}
+        on:mousedown={startResize}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize chat panel"
+      >
+        <div class="resize-handle-line"></div>
       </div>
     </div>
   </div>
@@ -1472,8 +1473,8 @@
     border-radius: 8px;
     display: flex;
     flex-direction: column;
-    height: calc(100vh - 120px);
-    min-height: 600px;
+    /* Height is set via inline style */
+    min-height: 300px;
   }
   
   .chat-header {
@@ -1591,10 +1592,10 @@
   }
 
   .chat-window {
+    flex: 1;
     padding: 1rem;
     overflow-y: auto;
     background: #f9f9f9;
-    /* Height is set via inline style */
   }
 
   /* Resize Handle */
@@ -1829,8 +1830,8 @@
 
   .input-row textarea {
     flex: 1;
-    min-height: 60px;
-    max-height: 120px;
+    min-height: 120px;
+    max-height: 240px;
     resize: vertical;
   }
 
