@@ -83,12 +83,24 @@ The "D-PC Messenger" is the **first reference implementation** of the D-PC proto
 *   **PCS (Personal Context Standard):** The `.dpc_access` file will be extended to include rules for compute sharing (e.g., `allow_inference_for = [group:friends]`).
 *   **Federation Hubs:** Will now also list the available compute resources (models) that nodes are willing to share, acting as a "compute discovery" service.
 
-## 7. Next Steps
+## 7. Current Status & Next Steps
 
-This updated vision informs our **Federated MVP (MVP 2.0)**. While the full implementation of compute sharing may be a stretch goal, the architecture must support it from day one.
+**Completed in v0.7.0 (Federated MVP):**
+- ✅ **Remote inference** - Basic 2-user compute sharing is working
+- ✅ **Context collaboration** - Secure sharing of personal contexts between peers
+- ✅ **Architecture** - APIs and data structures for advertising/requesting compute resources
+- ✅ **UX/UI** - Intuitive interface for selecting compute hosts and sharing contexts
 
-1.  **Architecture:** The design of the Federated Hub and the Local Client must include APIs and data structures for advertising and requesting computational resources.
-2.  **UX/UI Design:** The messenger interface must have an intuitive way for users to select a "compute host" for a given query.
-3.  **Roadmap:** We will add "Basic Remote Inference" as a key feature within the MVP 2.0 scope.
+**What's NOT Yet Implemented:**
+- 🔲 **Group chats** - Multi-party collaboration (3+ users)
+- 🔲 **Multi-party knowledge commits** - Collaborative knowledge building across groups
+- 🔲 **Advanced remote inference** - Model discovery, streaming responses, usage tracking
+- 🔲 **Compute marketplace** - Discovery and metering of shared computational resources
 
-**Our Consensus:** We are building the **"D-PC Messenger,"** a tool for collaborative intelligence that uniquely combines the sharing of **knowledge (context)** and **computation (inference)** in a private, user-sovereign network.
+**Next Development Phase (Enhanced Federation - Q1-Q2 2026):**
+1. **Group Collaboration** - Extend 1-on-1 features to multi-party scenarios
+2. **Remote Inference Enhancements** - Model discovery, usage tracking, streaming
+3. **Collaborative Knowledge Building** - Multi-peer consensus on shared knowledge commits
+4. **Advanced Context Firewall** - Tag-based sharing rules for group contexts
+
+**Our Achievement:** We have successfully built the **"D-PC Messenger,"** a working tool for collaborative intelligence that uniquely combines the sharing of **knowledge (context)** and **computation (inference)** in a private, user-sovereign network. The foundation is solid; now we expand to group scenarios.
