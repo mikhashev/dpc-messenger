@@ -33,6 +33,16 @@
   let selectedRemoteModel: string = "";  // Selected model when using remote compute host
   let selectedPeerContexts: Set<string> = new Set();  // Set of peer node_ids to fetch context from
 
+  // Resizable chat window state
+  let chatWindowHeight: number = (() => {
+    // Load saved height from localStorage, default to 400px
+    const saved = localStorage.getItem('chatWindowHeight');
+    return saved ? parseInt(saved, 10) : 400;
+  })();
+  let isResizing: boolean = false;
+  let resizeStartY: number = 0;
+  let resizeStartHeight: number = 0;
+
   // Store provider selection per chat (chatId -> provider alias)
   const chatProviders = writable<Map<string, string>>(new Map());
 
@@ -136,6 +146,48 @@
     }
     // Trigger reactivity
     selectedPeerContexts = selectedPeerContexts;
+  }
+
+  // --- CHAT WINDOW RESIZE HANDLERS ---
+  function startResize(e: MouseEvent) {
+    isResizing = true;
+    resizeStartY = e.clientY;
+    resizeStartHeight = chatWindowHeight;
+
+    // Prevent text selection during resize
+    e.preventDefault();
+
+    // Add body class to prevent text selection
+    document.body.classList.add('resizing');
+
+    // Add global listeners for mouse move and up
+    document.addEventListener('mousemove', handleResize);
+    document.addEventListener('mouseup', stopResize);
+  }
+
+  function handleResize(e: MouseEvent) {
+    if (!isResizing) return;
+
+    // Calculate new height (subtract because Y increases downward)
+    const deltaY = e.clientY - resizeStartY;
+    const newHeight = resizeStartHeight - deltaY;
+
+    // Enforce min/max constraints
+    chatWindowHeight = Math.max(200, Math.min(800, newHeight));
+  }
+
+  function stopResize() {
+    isResizing = false;
+
+    // Remove body class
+    document.body.classList.remove('resizing');
+
+    // Remove global listeners
+    document.removeEventListener('mousemove', handleResize);
+    document.removeEventListener('mouseup', stopResize);
+
+    // Save the new height to localStorage
+    localStorage.setItem('chatWindowHeight', chatWindowHeight.toString());
   }
 
   // --- CHAT FUNCTIONS ---
@@ -797,7 +849,7 @@
         </div>
       </div>
 
-      <div class="chat-window" bind:this={chatWindow}>
+      <div class="chat-window" bind:this={chatWindow} style="height: {chatWindowHeight}px;">
         {#if activeMessages.length > 0}
           {#each activeMessages as msg (msg.id)}
             <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'}>
@@ -821,6 +873,18 @@
             <p>No messages yet. Start the conversation!</p>
           </div>
         {/if}
+      </div>
+
+      <!-- Resize Handle -->
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div
+        class="resize-handle"
+        on:mousedown={startResize}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Resize chat window"
+      >
+        <div class="resize-handle-line"></div>
       </div>
 
       <div class="chat-input">
@@ -1527,12 +1591,50 @@
   }
 
   .chat-window {
-    flex: 1;
     padding: 1rem;
     overflow-y: auto;
     background: #f9f9f9;
+    /* Height is set via inline style */
   }
-  
+
+  /* Resize Handle */
+  .resize-handle {
+    height: 8px;
+    background: linear-gradient(to bottom, #f9f9f9 0%, #e0e0e0 50%, #f9f9f9 100%);
+    cursor: ns-resize;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+    transition: background 0.2s;
+    user-select: none;
+  }
+
+  .resize-handle:hover {
+    background: linear-gradient(to bottom, #e0e0e0 0%, #007bff 50%, #e0e0e0 100%);
+  }
+
+  .resize-handle:active,
+  .resize-handle.resizing {
+    background: linear-gradient(to bottom, #d0d0d0 0%, #0056b3 50%, #d0d0d0 100%);
+  }
+
+  .resize-handle-line {
+    width: 60px;
+    height: 3px;
+    background: #999;
+    border-radius: 2px;
+    pointer-events: none;
+  }
+
+  .resize-handle:hover .resize-handle-line {
+    background: #007bff;
+  }
+
+  .resize-handle:active .resize-handle-line {
+    background: #0056b3;
+  }
+
   .empty-chat {
     display: flex;
     align-items: center;
@@ -2091,5 +2193,11 @@
   .btn-confirm:active {
     transform: translateY(0);
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  }
+
+  /* Prevent text selection during resize */
+  :global(body.resizing) {
+    cursor: ns-resize !important;
+    user-select: none !important;
   }
 </style>
