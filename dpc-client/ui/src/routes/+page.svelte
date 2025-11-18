@@ -59,6 +59,32 @@
   $: if ($knowledgeCommitProposal) {
     showCommitDialog = true;
   }
+
+  // Reactive: Reset compute host if selected peer disconnects
+  $: if (selectedComputeHost !== "local" && $nodeStatus?.p2p_peers) {
+    const isStillConnected = $nodeStatus.p2p_peers.includes(selectedComputeHost);
+    if (!isStillConnected) {
+      console.log(`Compute host ${selectedComputeHost} disconnected, resetting to local`);
+      selectedComputeHost = "local";
+      selectedRemoteModel = "";
+    }
+  }
+
+  // Reactive: Reset selected peer contexts if peers disconnect
+  $: if (selectedPeerContexts.size > 0 && $nodeStatus?.p2p_peers) {
+    const connectedPeers = new Set($nodeStatus.p2p_peers);
+    let needsUpdate = false;
+    for (const peerId of selectedPeerContexts) {
+      if (!connectedPeers.has(peerId)) {
+        selectedPeerContexts.delete(peerId);
+        needsUpdate = true;
+        console.log(`Peer ${peerId} disconnected, removing from selected contexts`);
+      }
+    }
+    if (needsUpdate) {
+      selectedPeerContexts = selectedPeerContexts;
+    }
+  }
   
   function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
     if (!element) return true;

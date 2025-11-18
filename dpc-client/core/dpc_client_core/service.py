@@ -1501,25 +1501,33 @@ class CoreService:
             device_context_data = self.device_context
 
         # Fetch remote contexts if context_ids provided
+        peer_device_contexts = {}
         if context_ids:
             print(f"  - Fetching contexts from {len(context_ids)} peer(s)")
             for node_id in context_ids:
                 if node_id in self.p2p_manager.peers:
                     print(f"    • Requesting context from {node_id[:20]}...")
                     try:
+                        # Fetch personal context
                         context = await self._request_context_from_peer(node_id, prompt)
                         if context:
                             aggregated_contexts[node_id] = context
                             print(f"    ✓ Received context from {node_id[:20]}...")
                         else:
                             print(f"    ✗ No context received from {node_id[:20]}...")
+
+                        # Also fetch device context from peer
+                        device_ctx = await self._request_device_context_from_peer(node_id)
+                        if device_ctx:
+                            peer_device_contexts[node_id] = device_ctx
+                            print(f"    ✓ Received device context from {node_id[:20]}...")
                     except Exception as e:
                         print(f"    ✗ Error fetching context from {node_id[:20]}...: {e}")
                 else:
                     print(f"    ✗ Peer {node_id[:20]}... not connected")
 
         # Assemble final prompt with context
-        final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt, device_context_data)
+        final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt, device_context_data, peer_device_contexts)
 
         response_payload = {}
         status = "OK"
@@ -1609,10 +1617,16 @@ class CoreService:
         elif status != "OK":
             print(f"[Monitor] Query failed (status={status}) - not monitoring")
 
-    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str, device_context: dict = None) -> str:
+    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str, device_context: dict = None, peer_device_contexts: dict = None) -> str:
         """Helper method to assemble the final prompt for the LLM with instruction processing.
 
         Phase 2: Incorporates InstructionBlock and bias mitigation from PCM v2.0
+
+        Args:
+            contexts: Dict of {source_id: PersonalContext}
+            clean_prompt: The user's query
+            device_context: Local device context (optional)
+            peer_device_contexts: Dict of {peer_id: device_context} for peers (optional)
         """
         # Extract instruction blocks and bias settings from contexts
         instruction_blocks = []
@@ -1662,7 +1676,7 @@ class CoreService:
             block = f'<CONTEXT source="{source_label}">\n{json_string}\n</CONTEXT>'
             context_blocks.append(block)
 
-        # Add device context if available
+        # Add device context if available (local)
         if device_context:
             # Extract special instructions if present (schema v1.1+)
             special_instructions_text = ""
@@ -1695,6 +1709,48 @@ class CoreService:
             device_json = json.dumps(device_context, indent=2, ensure_ascii=False)
             device_block = f'<DEVICE_CONTEXT source="local">{special_instructions_text}{device_json}\n</DEVICE_CONTEXT>'
             context_blocks.append(device_block)
+
+        # Add peer device contexts if available
+        if peer_device_contexts:
+            for peer_id, peer_device_ctx in peer_device_contexts.items():
+                # Add peer name if available
+                source_label = peer_id
+                if peer_id in self.peer_metadata:
+                    peer_name = self.peer_metadata[peer_id].get('name')
+                    if peer_name:
+                        source_label = f"{peer_name} ({peer_id})"
+
+                # Extract special instructions if present (schema v1.1+)
+                special_instructions_text = ""
+                if "special_instructions" in peer_device_ctx:
+                    instructions_obj = peer_device_ctx["special_instructions"]
+                    special_instructions_text = "\nDEVICE CONTEXT INTERPRETATION RULES:\n"
+
+                    if "interpretation" in instructions_obj:
+                        special_instructions_text += "\nInterpretation Guidelines:\n"
+                        for key, value in instructions_obj["interpretation"].items():
+                            special_instructions_text += f"  - {key}: {value}\n"
+
+                    if "privacy" in instructions_obj:
+                        special_instructions_text += "\nPrivacy Rules:\n"
+                        for key, value in instructions_obj["privacy"].items():
+                            special_instructions_text += f"  - {key}: {value}\n"
+
+                    if "update_protocol" in instructions_obj:
+                        special_instructions_text += "\nUpdate Protocol:\n"
+                        for key, value in instructions_obj["update_protocol"].items():
+                            special_instructions_text += f"  - {key}: {value}\n"
+
+                    if "usage_scenarios" in instructions_obj:
+                        special_instructions_text += "\nUsage Scenarios:\n"
+                        for key, value in instructions_obj["usage_scenarios"].items():
+                            special_instructions_text += f"  - {key}: {value}\n"
+
+                    special_instructions_text += "\n"
+
+                peer_device_json = json.dumps(peer_device_ctx, indent=2, ensure_ascii=False)
+                peer_device_block = f'<DEVICE_CONTEXT source="{source_label}">{special_instructions_text}{peer_device_json}\n</DEVICE_CONTEXT>'
+                context_blocks.append(peer_device_block)
 
         final_prompt = (
             f"{system_instruction}\n\n"
