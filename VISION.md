@@ -146,6 +146,7 @@ Every Knowledge Commit includes **built-in bias resistance**:
 - You can switch providers freely (open protocols, not vendor lock-in)
 - Privacy enables genuine collaboration (share context with trust, not fear)
 - Computational equality — Anyone can access powerful AI through P2P compute sharing, regardless of hardware
+- Hardware democratization — As local computational power improves (better GPUs, NPUs, edge AI chips) and AI models become more efficient, high-quality AI assistance will shift from cloud-only to local-first. P2P compute sharing bridges the gap during this transition, ensuring equitable access regardless of individual hardware capabilities
 - Humans augment their cognition while maintaining autonomy
 
 **D-PC Messenger is building the foundation for the second future.**
@@ -316,6 +317,9 @@ We're at a rare inflection point where three forces converge to create a narrow 
 - Your data → Stays with you → Under your control
 - Your knowledge → Portable and owned → Transferred between devices/services
 - Your AI conversations → Private → Never used for corporate benefit
+
+**Future Economic Model:**
+- User-controlled data markets — When you own your data sovereignty, you can choose to selectively share or sell specific knowledge (anonymized, aggregated, or raw) to corporations, researchers, or governments on your terms. Instead of corporations extracting value from your data without consent, you become the seller with full transparency and control over pricing, scope, and revocation.
 
 **Impact if we succeed:**
 - 10M+ people own their AI interactions
