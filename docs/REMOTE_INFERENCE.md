@@ -357,7 +357,7 @@ The remote inference feature is open for community contributions:
 
 ## References
 
-- **Whitepaper:** [whitepaper.md](../whitepaper.md) - Original vision for compute sharing
+- **Product Vision:** [PRODUCT_VISION.md](../PRODUCT_VISION.md) - Original vision for compute sharing
 - **Firewall Guide:** [CONFIGURATION.md](./CONFIGURATION.md) - Complete firewall configuration
 - **Protocol Spec:** [specs/dptp_v1.md](../specs/dptp_v1.md) - Message protocol details
 - **Architecture:** [README_WEBRTC_INTEGRATION.md](./README_WEBRTC_INTEGRATION.md) - P2P architecture

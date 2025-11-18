@@ -185,7 +185,8 @@ dpc-messenger/
 │   ├── GITHUB_AUTH_SETUP.md     # GitHub OAuth setup
 │   └── README_WEBRTC_INTEGRATION.md
 │
-├── whitepaper.md         # Project vision & philosophy
+├── PRODUCT_VISION.md     # Product vision & technical philosophy
+├── VISION.md             # Business vision & market opportunity
 ├── LICENSE.md            # Multi-license explanation
 └── README.md             # This file
 ```
@@ -340,9 +341,13 @@ docker-compose -f docker-compose.prod.yml up -d
 - **Environment Variables** - All settings support env var overrides
 - **Config File** - `~/.dpc/config.ini` for persistent settings
 
+### Vision & Philosophy
+- **[VISION.md](./VISION.md)** - Business vision, market opportunity, and mission
+- **[PRODUCT_VISION.md](./PRODUCT_VISION.md)** - Product vision & technical philosophy
+- **[USER_SOVEREIGNTY.md](./docs/USER_SOVEREIGNTY.md)** - Privacy philosophy & digital self-sovereignty
+
 ### Architecture & Design
 - **[KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md)** - Knowledge management architecture with cognitive bias mitigation
-- **[whitepaper.md](./whitepaper.md)** - Project vision & philosophy
 - **[specs/hub_api_v1.md](./specs/hub_api_v1.md)** - Hub API specification
 
 ### Legal
@@ -401,7 +406,7 @@ We welcome contributions of all kinds!
 
 ### How to Contribute
 
-1. **Read the Vision** - Start with our [Whitepaper](./whitepaper.md)
+1. **Read the Vision** - Start with our [Vision Doc](./VISION.md) and [Product Vision](./PRODUCT_VISION.md)
 2. **Sign the CLA** - Required for code contributions ([CLA.md](./CLA.md))
 3. **Find an Issue** - Check [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues)
 4. **Submit a PR** - Follow our contribution guidelines

@@ -617,7 +617,8 @@ poetry run pytest tests/test_turn_connectivity.py
 - `docs/CONFIGURATION.md` - Complete configuration reference
 - `docs/DEVICE_CONTEXT_SPEC.md` - Device context schema and special instructions specification
 - `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
-- `whitepaper.md` - Project vision and philosophy
+- `VISION.md` - Business vision, market opportunity, and mission (investor/co-founder focused)
+- `PRODUCT_VISION.md` - Product vision and technical philosophy
 
 ---
 

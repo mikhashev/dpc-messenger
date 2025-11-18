@@ -109,7 +109,7 @@ This is **digital feudalism**: You work the land (create content), they own ever
 - Messages are **never** stored on servers (peer-to-peer only)
 - Your knowledge belongs to **you**, not a company
 
-**From whitepaper.md:**
+**From PRODUCT_VISION.md:**
 > "We treat a dialogue not as a stream of messages to be saved, but as a **transaction** whose purpose is to **change the state of collective knowledge**. The outcome of a conversation is not an endless scroll of messages, but a clean, structured, and verified 'Knowledge Commit' that updates the Personal Contexts of the participants."
 
 This is revolutionary: Instead of hoarding your messages forever (surveillance capitalism), DPC **extracts knowledge and discards ephemeral chatter**.
@@ -616,11 +616,12 @@ D-PC's answer: You shouldn't have to choose. You can have both.
 
 ## Learn More
 
+- [Business Vision](../VISION.md)
+- [Product Vision](../PRODUCT_VISION.md)
 - [Technical Architecture](../CLAUDE.md)
 - [Backup Implementation](./BACKUP_RESTORE.md)
 - [Firewall Rules](./.dpc_access.example)
 - [Protocol Specification](../specs/DPTP.md)
-- [Whitepaper](../whitepaper.md)
 
 **Questions? Concerns? Contributions?**
 Join our community: [GitHub Discussions](https://github.com/mikhashev/dpc-messenger/discussions)

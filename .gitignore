@@ -84,3 +84,13 @@ logs/
 # 11. AI assistant Editor-Specific Files
 # Prevents AI personal editor settings from being committed.
 .claude/
+
+# 12. Sensitive Legal & Compliance Documents
+# Personal legal analysis and compliance docs - keep private
+LEGAL_COMPLIANCE_SUMMARY.md
+P2P_ARCHITECTURE_LEGAL_DEFENSE.md
+GEOGRAPHIC_RESTRICTIONS.md
+TERMS_OF_SERVICE.md
+COMPUTE_DISCLAIMER.md
+docs/GEOGRAPHIC_RESTRICTIONS.md
+docs/P2P_ARCHITECTURE_LEGAL_DEFENSE.md
