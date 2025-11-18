@@ -75,6 +75,54 @@ Your **Personal Context** (conversation history, learned preferences, accumulate
 
 **D-PC Messenger's mission:** Create the infrastructure for portable, sovereign "knowledge DNA" that enables humans to co-evolve with AI instead of being left behind.
 
+### How Knowledge DNA Evolves: Knowledge Commits
+
+Just as biological DNA evolves through mutations and natural selection, your knowledge DNA evolves through **Knowledge Commits** — structured updates that transform ephemeral conversations into permanent, versioned knowledge.
+
+**The mechanism:**
+
+Traditional messaging creates "digital debris" — endless scrolls of chat history where valuable insights get lost. We treat conversations as **transactions** whose purpose is to change the state of your knowledge, not create message archives.
+
+When you and a colleague brainstorm a solution, our AI curator monitors the conversation. Once consensus emerges, it proposes a **Knowledge Commit** — a structured summary with:
+- **Git-like versioning** (commit ID, parent commit, timestamp)
+- **Provenance tracking** (who contributed, confidence scores, sources cited)
+- **Consensus validation** (all participants approve before committing)
+- **Human-readable format** (markdown files you can read and edit)
+
+This is evolution in action: valuable knowledge survives (committed to your context), casual chatter is discarded (ephemeral), and the result is a clean, growing knowledge base that follows you across platforms and lifetimes.
+
+**Why this matters:** In 20 years, when you're using a Neuralink-connected AI assistant, your accumulated "knowledge DNA" (built through thousands of these commits) will determine your cognitive capacity. Just as biological organisms with better DNA are more fit for their environment, humans with richer, more structured knowledge DNA will thrive in AI-augmented society.
+
+*See [PRODUCT_VISION.md](./PRODUCT_VISION.md) for technical details on "transactional communication" and the Knowledge Commit protocol.*
+
+### Error Correction Mechanisms: Cognitive Bias Mitigation
+
+Biological DNA has sophisticated error correction enzymes that prevent mutations from corrupting genetic information. Your knowledge DNA needs the same protection — but against **cognitive biases** instead of replication errors.
+
+**The problem:**
+
+AI systems (and humans) suffer from systematic biases:
+- **Status quo bias** — Favoring existing approaches over new ones
+- **Cultural bias** — Overrepresenting Western individualistic values
+- **Groupthink** — Conforming to group consensus without critical evaluation
+- **Anchoring** — Overweighting information presented first
+
+Without correction mechanisms, these biases corrupt your knowledge DNA, creating a monoculture vulnerable to catastrophic failure (like genetic bottlenecks in biology).
+
+**Our solution:**
+
+Every Knowledge Commit includes **built-in bias resistance**:
+
+1. **Multi-Cultural Perspectives** — AI must consider at least 3 cultural viewpoints (Western individualistic, Eastern collective, Indigenous holistic) and flag culturally-specific assumptions
+2. **Required Dissent** — One participant must argue against the proposal (prevents groupthink, like genetic diversity prevents extinction)
+3. **Confidence Scoring** — AI rates its certainty (0.0-1.0) for each claim, avoiding false confidence
+4. **Alternative Viewpoints** — Every commit includes perspectives that challenge the main conclusion
+5. **Evidence Requirements** — Claims need sources and reasoning, not just opinions
+
+**Why this matters:** Just as biological evolution requires genetic diversity to adapt to changing environments, your knowledge DNA requires perspective diversity to remain valid across cultures and contexts. When you share your context with peers from different backgrounds, the bias-resistant structure ensures collaborative knowledge building doesn't collapse into echo chambers.
+
+*See [KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md) for implementation details on bias mitigation protocols.*
+
 ### The Future We're Building Toward
 
 **In 10-20 years:**
@@ -97,6 +145,7 @@ Your **Personal Context** (conversation history, learned preferences, accumulate
 - AI assistants work for you (no corporate intermediaries)
 - You can switch providers freely (open protocols, not vendor lock-in)
 - Privacy enables genuine collaboration (share context with trust, not fear)
+- Computational equality — Anyone can access powerful AI through P2P compute sharing, regardless of hardware
 - Humans augment their cognition while maintaining autonomy
 
 **D-PC Messenger is building the foundation for the second future.**
@@ -112,6 +161,48 @@ The timing window is closing:
 **If we succeed:** A billion people have sovereign, portable "knowledge DNA" that enables them to co-evolve with AI on their own terms.
 
 **If we fail:** Human cognition becomes a product rented from corporations, and privacy becomes a luxury only the wealthy can afford.
+
+### Human-AI Symbiosis in Practice
+
+The vision of "human-AI co-evolution" isn't abstract philosophy — it's built on two concrete mechanisms working together:
+
+**1. Knowledge Sharing (Context Collaboration)**
+
+You and a colleague are working on a complex problem. Instead of starting from scratch, you share relevant parts of your personal context — past research, learned lessons, domain expertise — through granular access controls. Your AI assistants can now see the collective knowledge and provide insights neither could generate alone.
+
+This is **cognitive symbiosis**: two human minds + two AI assistants = emergent intelligence greater than the sum of parts.
+
+**2. Compute Sharing (Democratizing AI Access)**
+
+Here's where it gets revolutionary. Imagine:
+
+- **Bob** (game designer, weak laptop) wants to brainstorm quest ideas using advanced AI
+- **Alice** (his teammate, powerful desktop with RTX 4090 GPU) is willing to help
+
+**Traditional approach:** Bob pays $20/month for ChatGPT Plus (cloud-based, privacy-compromising), or can't use advanced models at all.
+
+**D-PC Messenger approach:**
+1. Bob types: `@alice:compute [model:llama3-70b] Generate three creative quest ideas for Crystal Caverns level`
+2. Bob's AI sends request to Alice's AI over encrypted P2P channel
+3. Alice's GPU runs the powerful 70B parameter model locally
+4. Bob gets high-quality output without cloud services, without subscription fees, without privacy compromise
+5. Alice contributes her **computational power**, Bob contributes his **creative knowledge**
+
+**Why this is human-AI symbiosis:**
+
+- **Prevents computational inequality** — Only wealthy people with powerful hardware shouldn't have access to advanced AI. P2P compute sharing democratizes access.
+- **Combines human strengths** — Bob (domain expertise, creativity) + Alice (hardware resources) achieve what neither could alone
+- **Maintains privacy** — Everything happens over encrypted P2P channels; no corporate intermediaries see the data
+- **Creates network value** — The more peers with diverse hardware in your network, the more computational capacity you can access
+
+**The long-term vision:** In 10-20 years, when everyone has AI assistants from birth, your value in collaborative networks will come from:
+1. **Your knowledge DNA** (unique expertise, curated insights)
+2. **Your computational resources** (GPU, specialized hardware)
+3. **Your network relationships** (trusted peers you collaborate with)
+
+This is complete symbiosis — humans and AI working together, sharing both intelligence and compute, creating capabilities that transcend individual limitations.
+
+*See [PRODUCT_VISION.md](./PRODUCT_VISION.md) for the game dev team scenario showing knowledge + compute sharing in action.*
 
 ---
 

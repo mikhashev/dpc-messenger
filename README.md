@@ -7,13 +7,24 @@
 
 ## 🚀 The Vision: A Private Internet for Human-AI Collaboration
 
-The age of AI is here, but it's being built on a broken foundation. We are handing our most sensitive conversations and data to centralized companies, creating a massive privacy crisis.
+**The Immediate Problem:** AI is transforming how we work and think, but it's creating two critical failures:
 
-**D-PC Messenger fixes this.**
+1. **"Digital Debris"** — Endless chat histories where valuable insights get lost in noise. We need conversations that *extract permanent knowledge*, not create message archives.
+2. **"Computational Inequality"** — Only people with powerful hardware (or expensive cloud subscriptions) can use advanced AI. We need *democratized access* through peer-to-peer compute sharing.
 
-It's an open-source, peer-to-peer platform that creates a secure, private network for you and your AI assistants. It's a place where you can collaborate with trusted peers, letting your AIs work together to achieve collective intelligence, without your data ever leaving your control.
+**D-PC Messenger solves both:**
 
-We are not just building a messaging app; we are building the foundational protocol for the future of private, decentralized intelligence.
+- **Knowledge Commits** transform ephemeral conversations into structured, versioned knowledge (like git commits for your personal context)
+- **P2P Compute Sharing** lets you borrow a friend's GPU to run powerful AI models — no cloud, no subscriptions, complete privacy
+- **Context Collaboration** enables your AI assistants to work together by securely sharing relevant knowledge
+
+**The Deeper Mission:** This isn't just productivity software. We're building infrastructure for **human-AI co-evolution** — ensuring humans can maintain cognitive parity as artificial general intelligence emerges.
+
+Your personal context (conversations, insights, learned knowledge) should function like **"DNA for knowledge"** — portable across devices and lifetimes, evolvable through collaborative learning, owned and controlled by you (not extracted by corporations). In 10-20 years, when AI assistants from birth and brain-computer interfaces become mainstream, your accumulated "knowledge DNA" will determine your cognitive capacity in AI-augmented society.
+
+We're racing against a closing window: the infrastructure being built TODAY will determine whether your future AI interactions are sovereign tools under your control, or rented products that extract and monetize your cognition.
+
+**[Read the full vision →](./VISION.md)**
 
 ---
 
