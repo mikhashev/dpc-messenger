@@ -12,6 +12,12 @@ export const p2pMessages = writable<any>(null);
 export const knowledgeCommitProposal = writable<any>(null);
 export const personalContext = writable<any>(null);
 
+// Token tracking stores (Phase 2)
+export const tokenWarning = writable<any>(null);
+
+// Knowledge extraction failure store (Phase 4)
+export const extractionFailure = writable<any>(null);
+
 // AI Providers store
 export const availableProviders = writable<any>(null);
 
@@ -168,6 +174,16 @@ export function connectToCoreService() {
                     console.log("Knowledge commit approved:", message.payload);
                     // Refresh personal context after approval
                     sendCommand("get_personal_context");
+                }
+                // Handle token limit warning (Phase 2)
+                else if (message.event === "token_limit_warning") {
+                    console.log("Token limit warning:", message.payload);
+                    tokenWarning.set(message.payload);
+                }
+                // Handle knowledge extraction failure (Phase 4)
+                else if (message.event === "knowledge_extraction_failed") {
+                    console.error("Knowledge extraction failed:", message.payload);
+                    extractionFailure.set(message.payload);
                 }
                 // Handle get_personal_context response
                 else if (message.command === "get_personal_context" && message.status === "OK") {

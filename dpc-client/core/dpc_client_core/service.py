@@ -22,7 +22,10 @@ from .peer_cache import PeerCache
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
-from dpc_protocol.pcm_core import PCMCore, PersonalContext
+from dpc_protocol.pcm_core import (
+    PCMCore, PersonalContext, InstructionBlock,
+    load_instructions, save_instructions, migrate_instructions_from_personal_context
+)
 from dpc_protocol.utils import parse_dpc_uri
 from datetime import datetime
 
@@ -69,6 +72,13 @@ class CoreService:
 
         # Knowledge Architecture components (Phase 1-6)
         self.pcm_core = PCMCore(DPC_HOME_DIR / "personal.json")
+
+        # Migrate instructions to separate file (one-time operation)
+        migrate_instructions_from_personal_context()
+
+        # Load AI instructions from instructions.json
+        self.instructions = load_instructions()
+        print(f"[OK] AI instructions loaded from instructions.json")
 
         # Auto-collect device context on startup (if enabled)
         self.device_context = None
@@ -514,6 +524,15 @@ class CoreService:
                         )
                 except Exception as e:
                     print(f"Error in conversation monitoring: {e}")
+                    # Broadcast extraction failure event to UI
+                    await self.local_api.broadcast_event(
+                        "knowledge_extraction_failed",
+                        {
+                            "conversation_id": sender_node_id,
+                            "error": str(e),
+                            "reason": "JSON parsing failed or LLM extraction error"
+                        }
+                    )
 
         elif command == "REQUEST_CONTEXT":
             # Context request from peer - handle and respond
@@ -877,6 +896,137 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def get_instructions(self) -> Dict[str, Any]:
+        """Load and return AI instructions for UI display.
+
+        UI Integration: Called when user opens InstructionsEditor component.
+        Returns the InstructionBlock with all settings.
+        """
+        try:
+            instructions = load_instructions()
+            return {
+                "status": "success",
+                "instructions": asdict(instructions)
+            }
+        except Exception as e:
+            print(f"Error loading instructions: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_instructions(self, instructions_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Save updated AI instructions from UI editor.
+
+        UI Integration: Called when user clicks 'Save' in InstructionsEditor.
+
+        Args:
+            instructions_dict: Dictionary representation of InstructionBlock
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            # Create InstructionBlock from dict
+            instructions = InstructionBlock(
+                primary=instructions_dict.get('primary', InstructionBlock().primary),
+                context_update=instructions_dict.get('context_update', InstructionBlock().context_update),
+                verification_protocol=instructions_dict.get('verification_protocol', InstructionBlock().verification_protocol),
+                learning_support=instructions_dict.get('learning_support', InstructionBlock().learning_support),
+                bias_mitigation=instructions_dict.get('bias_mitigation', InstructionBlock().bias_mitigation),
+                collaboration_mode=instructions_dict.get('collaboration_mode', 'individual'),
+                consensus_required=instructions_dict.get('consensus_required', True),
+                ai_curation_enabled=instructions_dict.get('ai_curation_enabled', True),
+                dissent_encouraged=instructions_dict.get('dissent_encouraged', True)
+            )
+
+            # Save to disk
+            save_instructions(instructions)
+
+            # Update in memory
+            self.instructions = instructions
+
+            # Emit event to UI
+            await self.local_api.broadcast_event("instructions_updated", {
+                "message": "AI instructions saved successfully"
+            })
+
+            return {
+                "status": "success",
+                "message": "AI instructions saved successfully"
+            }
+
+        except Exception as e:
+            print(f"Error saving instructions: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def reload_instructions(self) -> Dict[str, Any]:
+        """Reload AI instructions from disk.
+
+        UI Integration: Called when user clicks 'Reload' or when external changes detected.
+
+        Returns:
+            Dict with status, message, and updated instructions
+        """
+        try:
+            instructions = load_instructions()
+
+            # Update in memory
+            self.instructions = instructions
+
+            # Emit event to UI
+            await self.local_api.broadcast_event("instructions_reloaded", {
+                "instructions": asdict(instructions)
+            })
+
+            return {
+                "status": "success",
+                "message": "AI instructions reloaded from disk",
+                "instructions": asdict(instructions)
+            }
+
+        except Exception as e:
+            print(f"Error reloading instructions: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_token_usage(self, conversation_id: str) -> Dict[str, Any]:
+        """Get token usage statistics for a conversation
+
+        UI Integration: Called to display token counter for a chat.
+
+        Args:
+            conversation_id: ID of the conversation to get token usage for
+
+        Returns:
+            Dict with token usage statistics
+        """
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            usage = monitor.get_token_usage()
+
+            return {
+                "status": "success",
+                **usage
+            }
+
+        except Exception as e:
+            print(f"Error getting token usage for {conversation_id}: {e}")
+            return {
+                "status": "error",
+                "message": str(e),
+                "tokens_used": 0,
+                "token_limit": 100000,
+                "usage_percent": 0.0
+            }
+
     async def get_firewall_rules(self) -> Dict[str, Any]:
         """Get current firewall rules as JSON dict for editor.
 
@@ -1127,7 +1277,8 @@ class CoreService:
                 conversation_id=conversation_id,
                 participants=participants,
                 llm_manager=self.llm_manager,
-                knowledge_threshold=0.7  # 70% confidence threshold
+                knowledge_threshold=0.7,  # 70% confidence threshold
+                settings=self.settings  # Pass settings for config (e.g., cultural_perspectives_enabled)
             )
             print(f"Created conversation monitor for {conversation_id} with {len(participants)} participant(s)")
 
@@ -1899,12 +2050,40 @@ class CoreService:
                 provider=provider
             )
             # result is a dict with 'response', 'model', 'provider', 'compute_host'
+            # and potentially 'tokens_used', 'model_max_tokens' for local inference
             response_payload = {
                 "content": result["response"],
                 "model": result["model"],
                 "provider": result["provider"],
                 "compute_host": result["compute_host"]
             }
+
+            # Token tracking (Phase 2) - only for local inference
+            if result.get("compute_host") == "local" and "tokens_used" in result:
+                conversation_id = kwargs.get("conversation_id", "local_ai")
+                monitor = self._get_or_create_conversation_monitor(conversation_id)
+
+                # Set token limit based on model
+                if "model_max_tokens" in result:
+                    monitor.set_token_limit(result["model_max_tokens"])
+
+                # Update token count
+                monitor.update_token_count(result["tokens_used"])
+
+                # Check if we should warn about approaching limit
+                if monitor.should_suggest_extraction():
+                    token_usage = monitor.get_token_usage()
+                    await self.local_api.broadcast_event("token_limit_warning", {
+                        "conversation_id": conversation_id,
+                        "tokens_used": token_usage["tokens_used"],
+                        "token_limit": token_usage["token_limit"],
+                        "usage_percent": token_usage["usage_percent"]
+                    })
+                    print(f"[Token Warning] {conversation_id}: {token_usage['usage_percent']:.1%} of context window used")
+
+                # Include token info in response
+                response_payload["tokens_used"] = result["tokens_used"]
+                response_payload["token_limit"] = result.get("model_max_tokens", 0)
 
         except Exception as e:
             print(f"  - Error during inference: {e}")
@@ -1970,6 +2149,15 @@ class CoreService:
                 print(f"Error in local AI conversation monitoring: {e}")
                 import traceback
                 traceback.print_exc()
+                # Broadcast extraction failure event to UI
+                await self.local_api.broadcast_event(
+                    "knowledge_extraction_failed",
+                    {
+                        "conversation_id": "local_ai",
+                        "error": str(e),
+                        "reason": "JSON parsing failed or LLM extraction error"
+                    }
+                )
         elif not self.auto_knowledge_detection_enabled:
             print(f"[Monitor] Auto-detection is OFF - messages not being monitored")
         elif status != "OK":

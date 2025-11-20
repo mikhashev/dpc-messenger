@@ -72,6 +72,8 @@ class KnowledgeCommitProposal:
                 source=source,
                 confidence=entry_data.get('confidence', 1.0),
                 last_updated=entry_data.get('last_updated', datetime.utcnow().isoformat()),
+                edited_by=entry_data.get('edited_by'),  # Phase 5 - inline editing
+                edited_at=entry_data.get('edited_at'),  # Phase 5 - inline editing
                 usage_count=entry_data.get('usage_count', 0),
                 effectiveness_score=entry_data.get('effectiveness_score', 1.0),
                 review_due=entry_data.get('review_due'),

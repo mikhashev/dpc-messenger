@@ -43,7 +43,8 @@ class ConversationMonitor:
         conversation_id: str,
         participants: List[Dict[str, str]],  # [{node_id, name, context}]
         llm_manager,  # LLMManager instance
-        knowledge_threshold: float = 0.7  # Minimum score to propose commit
+        knowledge_threshold: float = 0.7,  # Minimum score to propose commit
+        settings = None  # Settings instance (optional, for config like cultural_perspectives_enabled)
     ):
         """Initialize conversation monitor
 
@@ -52,11 +53,13 @@ class ConversationMonitor:
             participants: List of participant info dicts
             llm_manager: LLMManager instance for AI analysis
             knowledge_threshold: Score threshold (0.0-1.0) to trigger commit proposal
+            settings: Settings instance for configuration (optional)
         """
         self.conversation_id = conversation_id
         self.participants = participants
         self.llm_manager = llm_manager
         self.knowledge_threshold = knowledge_threshold
+        self.settings = settings
 
         # Message buffer
         self.message_buffer: List[Message] = []
@@ -65,6 +68,11 @@ class ConversationMonitor:
         # Tracking
         self.proposals_created: int = 0
         self.last_analysis_time: Optional[str] = None
+
+        # Token tracking (Phase 2)
+        self.current_token_count: int = 0
+        self.token_limit: int = 100000  # Default limit, will be updated per model
+        self.token_warning_threshold: float = 0.8  # Warn at 80%
 
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
@@ -228,12 +236,60 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         threshold = len(self.participants) * 0.6
         return consensus_count >= threshold
 
+    def _repair_json(self, json_str: str) -> str:
+        """Attempt to repair common JSON malformations from LLM responses.
+
+        Handles:
+        - Missing closing braces
+        - Trailing commas
+        - Missing commas between array/object elements
+        - Markdown code block wrappers
+
+        Args:
+            json_str: Potentially malformed JSON string
+
+        Returns:
+            Repaired JSON string (best effort)
+        """
+        import re
+
+        # Remove markdown code blocks
+        json_str = re.sub(r'```(?:json)?\s*', '', json_str)
+        json_str = json_str.strip()
+
+        # Remove trailing commas before closing brackets/braces
+        json_str = re.sub(r',\s*([}\]])', r'\1', json_str)
+
+        # Count opening and closing braces
+        open_braces = json_str.count('{')
+        close_braces = json_str.count('}')
+        open_brackets = json_str.count('[')
+        close_brackets = json_str.count(']')
+
+        # Add missing closing braces
+        if open_braces > close_braces:
+            json_str += '}' * (open_braces - close_braces)
+
+        # Add missing closing brackets
+        if open_brackets > close_brackets:
+            json_str += ']' * (open_brackets - close_brackets)
+
+        # Try to fix missing commas between array elements (heuristic)
+        # Example: ["item1" "item2"] -> ["item1", "item2"]
+        json_str = re.sub(r'"\s+"', '", "', json_str)
+
+        # Try to fix missing commas between object properties
+        # Example: {"a": 1 "b": 2} -> {"a": 1, "b": 2}
+        json_str = re.sub(r'([}\]0-9"])\s+"', r'\1, "', json_str)
+
+        return json_str
+
     async def _generate_commit_proposal(self) -> KnowledgeCommitProposal:
         """Generate knowledge commit proposal from conversation
 
         Uses bias-aware prompting to extract structured knowledge with:
         - Multi-perspective analysis
-        - Cultural assumptions flagged
+        - Cultural assumptions flagged (if enabled)
         - Alternative viewpoints
         - Confidence scores
         - Devil's advocate critique
@@ -241,55 +297,93 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         Returns:
             KnowledgeCommitProposal object
         """
-        # Load participant cultural contexts
+        # Check if cultural perspectives are enabled
+        cultural_perspectives_enabled = False
+        if self.settings:
+            cultural_perspectives_enabled = self.settings.get_cultural_perspectives_enabled()
+
+        # Load participant cultural contexts (only if enabled)
         cultural_contexts = []
-        for participant in self.participants:
-            if 'context' in participant:
-                context = participant['context']
-                if hasattr(context, 'cognitive_profile') and context.cognitive_profile:
-                    if context.cognitive_profile.cultural_background:
-                        cultural_contexts.append(context.cognitive_profile.cultural_background)
+        if cultural_perspectives_enabled:
+            for participant in self.participants:
+                if 'context' in participant:
+                    context = participant['context']
+                    if hasattr(context, 'cognitive_profile') and context.cognitive_profile:
+                        if context.cognitive_profile.cultural_background:
+                            cultural_contexts.append(context.cognitive_profile.cultural_background)
 
         # Format conversation
         messages_text = self._format_messages_for_analysis(self.message_buffer)
 
-        # Build bias-resistant prompt
-        prompt = f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
-
+        # Build cultural context section (conditional)
+        cultural_section = ""
+        if cultural_perspectives_enabled:
+            cultural_section = f"""
 PARTICIPANTS' CULTURAL CONTEXTS:
 {', '.join(cultural_contexts) if cultural_contexts else 'Not specified'}
+"""
 
-CONVERSATION:
-{messages_text}
-
-TASK: Extract structured knowledge with bias mitigation.
-
-REQUIRED JSON FORMAT (output ONLY this, nothing else):
-{{
+        # Build JSON format with conditional cultural fields
+        if cultural_perspectives_enabled:
+            json_format = """{
   "topic": "brief_topic_name",
   "summary": "One sentence overview",
   "entries": [
-    {{
+    {
       "content": "Knowledge statement",
       "tags": ["tag1", "tag2"],
       "confidence": 0.8,
       "cultural_context": "Universal",
       "sources": ["participant_name"],
       "reasoning": "Why notable"
-    }}
+    }
   ],
   "cultural_perspectives": ["Western individualistic", "Eastern collective"],
   "alternatives": ["Alternative perspective 1"],
   "devil_advocate": "Critical analysis",
   "flagged_assumptions": ["Assumption if any"]
-}}
-
-RULES:
+}"""
+            rules_section = """RULES:
 - Rate confidence 0.0-1.0 for each claim
 - Mark cultural_context as "Universal" or "Context: [specific culture]"
 - Include devil's advocate critique
 - List alternative viewpoints
-- Flag cultural assumptions
+- Flag cultural assumptions"""
+        else:
+            json_format = """{
+  "topic": "brief_topic_name",
+  "summary": "One sentence overview",
+  "entries": [
+    {
+      "content": "Knowledge statement",
+      "tags": ["tag1", "tag2"],
+      "confidence": 0.8,
+      "sources": ["participant_name"],
+      "reasoning": "Why notable"
+    }
+  ],
+  "alternatives": ["Alternative perspective 1"],
+  "devil_advocate": "Critical analysis",
+  "flagged_assumptions": ["Assumption if any"]
+}"""
+            rules_section = """RULES:
+- Rate confidence 0.0-1.0 for each claim
+- Include devil's advocate critique
+- List alternative viewpoints
+- Flag problematic assumptions"""
+
+        # Build bias-resistant prompt
+        prompt = f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract structured knowledge with bias mitigation.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
 
 DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
 
@@ -299,18 +393,42 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                 prompt=prompt
             )
 
-            # Try to extract JSON from response
+            # Try to extract and parse JSON from response (with repair attempts)
             import json
             import re
 
-            # Try to find JSON object in response (handles markdown wrapping)
+            result = None
+            json_str = None
+
+            # Attempt 1: Try to find JSON object in response (handles markdown wrapping)
             json_match = re.search(r'\{(?:[^{}]|\{[^{}]*\})*\}', response, re.DOTALL)
             if json_match:
                 json_str = json_match.group(0)
-                result = json.loads(json_str)
-            else:
-                # Try parsing whole response
-                result = json.loads(response.strip())
+                try:
+                    result = json.loads(json_str)
+                except json.JSONDecodeError:
+                    # Attempt 2: Try repairing the extracted JSON
+                    try:
+                        repaired = self._repair_json(json_str)
+                        result = json.loads(repaired)
+                        print("[JSON Repair] Successfully repaired malformed JSON")
+                    except json.JSONDecodeError as e:
+                        print(f"[JSON Repair] Failed to repair extracted JSON: {e}")
+                        result = None
+
+            # Attempt 3: Try parsing whole response
+            if result is None:
+                try:
+                    result = json.loads(response.strip())
+                except json.JSONDecodeError:
+                    # Attempt 4: Try repairing the whole response
+                    try:
+                        repaired = self._repair_json(response.strip())
+                        result = json.loads(repaired)
+                        print("[JSON Repair] Successfully repaired malformed response")
+                    except json.JSONDecodeError as e:
+                        # All attempts failed
+                        raise ValueError(f"Failed to extract valid JSON after repair attempts: {e}")
 
             # Build knowledge entries
             entries = []
@@ -324,14 +442,15 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                     cultural_perspectives_considered=result.get('cultural_perspectives', [])
                 )
 
-                cultural_context = entry_data.get('cultural_context', 'Universal')
+                # Handle cultural context (only if enabled)
+                cultural_context = entry_data.get('cultural_context', 'Universal') if cultural_perspectives_enabled else 'Universal'
                 entry = KnowledgeEntry(
                     content=entry_data.get('content', ''),
                     tags=entry_data.get('tags', []),
                     source=source,
                     confidence=entry_data.get('confidence', 1.0),
-                    cultural_specific=(cultural_context != 'Universal'),
-                    requires_context=[cultural_context] if cultural_context != 'Universal' else [],
+                    cultural_specific=(cultural_context != 'Universal') if cultural_perspectives_enabled else False,
+                    requires_context=[cultural_context] if (cultural_perspectives_enabled and cultural_context != 'Universal') else [],
                     alternative_viewpoints=result.get('alternatives', [])
                 )
                 entries.append(entry)
@@ -402,6 +521,56 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
             'proposals_created': self.proposals_created,
             'last_analysis': self.last_analysis_time
         }
+
+    # --- Token Tracking Methods (Phase 2) ---
+
+    def set_token_limit(self, limit: int):
+        """Set the token limit for this conversation
+
+        Args:
+            limit: Maximum tokens for the model's context window
+        """
+        self.token_limit = limit
+
+    def update_token_count(self, tokens: int):
+        """Update the current token count
+
+        Args:
+            tokens: Number of tokens to add to the count
+        """
+        self.current_token_count += tokens
+
+    def get_token_usage(self) -> Dict[str, Any]:
+        """Get current token usage statistics
+
+        Returns:
+            Dictionary with token usage info
+        """
+        usage_percent = self.current_token_count / self.token_limit if self.token_limit > 0 else 0.0
+        return {
+            'conversation_id': self.conversation_id,
+            'tokens_used': self.current_token_count,
+            'token_limit': self.token_limit,
+            'usage_percent': usage_percent,
+            'should_warn': usage_percent >= self.token_warning_threshold
+        }
+
+    def should_suggest_extraction(self, threshold: Optional[float] = None) -> bool:
+        """Check if knowledge extraction should be suggested based on token usage
+
+        Args:
+            threshold: Optional custom threshold (uses default if None)
+
+        Returns:
+            True if token usage exceeds threshold
+        """
+        effective_threshold = threshold if threshold is not None else self.token_warning_threshold
+        usage_percent = self.current_token_count / self.token_limit if self.token_limit > 0 else 0.0
+        return usage_percent >= effective_threshold
+
+    def reset_token_count(self):
+        """Reset token count (after knowledge extraction)"""
+        self.current_token_count = 0
 
 
 # Example usage

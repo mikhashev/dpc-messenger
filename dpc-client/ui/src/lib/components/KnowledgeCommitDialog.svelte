@@ -21,6 +21,8 @@
       cultural_specific: boolean;
       requires_context: string[];
       alternative_viewpoints: string[];
+      edited_by?: string | null;  // Phase 5 - inline editing attribution
+      edited_at?: string | null;  // Phase 5 - inline editing timestamp
     }>;
     participants: string[];
     cultural_perspectives: string[];
@@ -31,6 +33,38 @@
 
   let voteComment = '';
   let showDetails = false;
+
+  // Phase 5: Inline editing state
+  let editMode = false;
+  let editedEntries: typeof proposal.entries = [];
+  let currentUserId = ''; // Will be set from nodeStatus
+
+  // Initialize edited entries when entering edit mode
+  function startEditing() {
+    if (proposal) {
+      editedEntries = JSON.parse(JSON.stringify(proposal.entries)); // Deep copy
+      editMode = true;
+    }
+  }
+
+  function cancelEditing() {
+    editMode = false;
+    editedEntries = [];
+  }
+
+  function saveEdits() {
+    if (proposal) {
+      // Update entries with edit attribution
+      const now = new Date().toISOString();
+      editedEntries = editedEntries.map(entry => ({
+        ...entry,
+        edited_by: currentUserId || 'user',
+        edited_at: now
+      }));
+      proposal.entries = editedEntries;
+    }
+    editMode = false;
+  }
 
   function handleVote(vote: 'approve' | 'reject' | 'request_changes') {
     dispatch('vote', {
@@ -59,7 +93,15 @@
     <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="dialog-title">Knowledge Commit Proposal</h2>
-        <button class="close-btn" on:click={close}>&times;</button>
+        <div class="header-actions">
+          {#if !editMode}
+            <button class="btn-edit" on:click={startEditing}>Edit</button>
+          {:else}
+            <button class="btn-save" on:click={saveEdits}>Save</button>
+            <button class="btn-cancel" on:click={cancelEditing}>Cancel</button>
+          {/if}
+          <button class="close-btn" on:click={close}>&times;</button>
+        </div>
       </div>
 
       <div class="modal-body">
@@ -76,16 +118,31 @@
 
         <!-- Knowledge Entries -->
         <div class="section">
-          <h3>Proposed Knowledge ({proposal.entries.length} entries)</h3>
-          {#each proposal.entries as entry, i}
+          <h3>Proposed Knowledge ({editMode ? editedEntries.length : proposal.entries.length} entries)</h3>
+          {#each (editMode ? editedEntries : proposal.entries) as entry, i}
             <div class="entry">
               <div class="entry-header">
                 <span class="entry-number">#{i + 1}</span>
                 <span class="confidence" class:high={entry.confidence >= 0.8} class:medium={entry.confidence >= 0.5 && entry.confidence < 0.8} class:low={entry.confidence < 0.5}>
                   {Math.round(entry.confidence * 100)}% confidence
                 </span>
+                {#if entry.edited_by}
+                  <span class="edited-badge" title="Edited by {entry.edited_by} at {new Date(entry.edited_at || '').toLocaleString()}">
+                    ✏️ Edited
+                  </span>
+                {/if}
               </div>
-              <p class="entry-content">{entry.content}</p>
+
+              {#if editMode}
+                <textarea
+                  class="entry-edit"
+                  bind:value={entry.content}
+                  rows="4"
+                  placeholder="Edit knowledge entry..."
+                ></textarea>
+              {:else}
+                <p class="entry-content">{entry.content}</p>
+              {/if}
 
               {#if entry.tags.length > 0}
                 <div class="tags">
@@ -119,14 +176,16 @@
         <div class="section bias-section">
           <h3>Bias Mitigation</h3>
 
-          <div class="bias-item">
-            <strong>Cultural Perspectives Considered:</strong>
-            <div class="perspectives">
-              {#each proposal.cultural_perspectives as perspective}
-                <span class="perspective-badge">{perspective}</span>
-              {/each}
+          {#if proposal.cultural_perspectives && proposal.cultural_perspectives.length > 0}
+            <div class="bias-item">
+              <strong>Cultural Perspectives Considered:</strong>
+              <div class="perspectives">
+                {#each proposal.cultural_perspectives as perspective}
+                  <span class="perspective-badge">{perspective}</span>
+                {/each}
+              </div>
             </div>
-          </div>
+          {/if}
 
           <div class="bias-item">
             <strong>AI Confidence:</strong>
@@ -156,10 +215,14 @@
         <div class="section checklist">
           <h3>Review Checklist</h3>
           <ul>
-            <li>Is this culturally neutral or are assumptions flagged?</li>
+            {#if proposal.cultural_perspectives && proposal.cultural_perspectives.length > 0}
+              <li>Is this culturally neutral or are assumptions flagged?</li>
+            {/if}
             <li>Are confidence scores reasonable?</li>
             <li>Are alternative views represented?</li>
-            <li>Would this work in different cultural contexts?</li>
+            {#if proposal.cultural_perspectives && proposal.cultural_perspectives.length > 0}
+              <li>Would this work in different cultural contexts?</li>
+            {/if}
           </ul>
         </div>
 
@@ -247,6 +310,48 @@
     color: #333;
   }
 
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .btn-edit, .btn-save, .btn-cancel {
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .btn-edit {
+    background: #2196F3;
+    color: white;
+  }
+
+  .btn-edit:hover {
+    background: #1976D2;
+  }
+
+  .btn-save {
+    background: #4CAF50;
+    color: white;
+  }
+
+  .btn-save:hover {
+    background: #45a049;
+  }
+
+  .btn-cancel {
+    background: #f44336;
+    color: white;
+  }
+
+  .btn-cancel:hover {
+    background: #da190b;
+  }
+
   .modal-body {
     padding: 1.5rem;
     overflow-y: auto;
@@ -318,6 +423,34 @@
     margin: 0.5rem 0;
     line-height: 1.5;
     color: #333;
+  }
+
+  .entry-edit {
+    width: 100%;
+    margin: 0.5rem 0;
+    padding: 0.75rem;
+    border: 2px solid #2196F3;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 1rem;
+    line-height: 1.5;
+    resize: vertical;
+  }
+
+  .entry-edit:focus {
+    outline: none;
+    border-color: #1976D2;
+    box-shadow: 0 0 0 2px rgba(33, 150, 243, 0.1);
+  }
+
+  .edited-badge {
+    background: #ffeb3b;
+    color: #333;
+    padding: 0.25rem 0.5rem;
+    border-radius: 12px;
+    font-size: 0.75rem;
+    font-weight: 500;
+    margin-left: 0.5rem;
   }
 
   .tags {

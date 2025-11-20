@@ -94,6 +94,12 @@ class Settings:
             'collect_ai_models': 'false'         # Collect locally available AI models (opt-in for compute-sharing)
         }
 
+        self._config['knowledge'] = {
+            'token_warning_threshold': '0.8',  # Warn when context window reaches 80%
+            'auto_extraction_enabled': 'true',  # Automatically suggest knowledge extraction
+            'cultural_perspectives_enabled': 'false'  # Include cultural perspective analysis in knowledge extraction
+        }
+
         # Ensure directory exists
         self.dpc_home_dir.mkdir(parents=True, exist_ok=True)
 
@@ -183,6 +189,26 @@ class Settings:
     def get_auto_collect_device_info(self) -> bool:
         """Check if automatic device/system info collection is enabled."""
         value = self.get('system', 'auto_collect_device_info', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_token_warning_threshold(self) -> float:
+        """Get the token warning threshold (0.0-1.0)."""
+        value = self.get('knowledge', 'token_warning_threshold', '0.8')
+        try:
+            threshold = float(value)
+            # Clamp to valid range
+            return max(0.0, min(1.0, threshold))
+        except ValueError:
+            return 0.8  # Default to 80%
+
+    def get_auto_extraction_enabled(self) -> bool:
+        """Check if automatic knowledge extraction is enabled."""
+        value = self.get('knowledge', 'auto_extraction_enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_cultural_perspectives_enabled(self) -> bool:
+        """Check if cultural perspective analysis is enabled in knowledge extraction."""
+        value = self.get('knowledge', 'cultural_perspectives_enabled', 'false')
         return value.lower() in ('true', '1', 'yes')
 
     def set(self, section: str, key: str, value: str):

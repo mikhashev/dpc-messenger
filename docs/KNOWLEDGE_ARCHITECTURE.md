@@ -36,10 +36,10 @@ DPC Messenger transforms ephemeral conversations into permanent, versioned knowl
 
 | System | Context Model | Collaboration | Bias Mitigation | Versioning |
 |--------|--------------|---------------|-----------------|------------|
-| **Claude Code** | `.claud/` markdown files | ❌ Single user | ❌ None | Via git |
+| **Claude Code** | `.claude/` markdown files | ❌ Single user | ❌ None | Via git |
 | **Cursor** | Codebase indexing | ❌ Single user | ❌ None | None |
 | **ChatGPT Memory** | Auto-collected, cloud | ❌ Single user | ❌ None | None |
-| **Personal Context Manager** | JSON + instructions | ❌ Single user | ⚠️ Manual | Manual |
+| **Personal Context Manager** | JSON + instructions | ❌ Single user | ⚠️ Manual | Manual or Via git |
 | **DPC Messenger** | **PCM + Instructions** | ✅ **Multi-user consensus** | ✅ **Built-in** | ✅ **Git-like** |
 
 ### Core Innovation
