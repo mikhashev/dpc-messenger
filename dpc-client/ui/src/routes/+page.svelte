@@ -405,6 +405,10 @@
         return newMap;
       });
 
+      // Clear token usage for this chat (Phase 2)
+      tokenUsageMap = new Map(tokenUsageMap);
+      tokenUsageMap.delete(chatId);
+
       // Backend will create a new monitor on next message
       // (Old monitor's buffer was already cleared by previous extraction)
     }
