@@ -10,20 +10,22 @@
 
   const dispatch = createEventDispatcher();
 
+  type KnowledgeEntry = {
+    content: string;
+    tags: string[];
+    confidence: number;
+    cultural_specific: boolean;
+    requires_context: string[];
+    alternative_viewpoints: string[];
+    edited_by?: string | null;  // Phase 5 - inline editing attribution
+    edited_at?: string | null;  // Phase 5 - inline editing timestamp
+  };
+
   type KnowledgeCommitProposal = {
     proposal_id: string;
     topic: string;
     summary: string;
-    entries: Array<{
-      content: string;
-      tags: string[];
-      confidence: number;
-      cultural_specific: boolean;
-      requires_context: string[];
-      alternative_viewpoints: string[];
-      edited_by?: string | null;  // Phase 5 - inline editing attribution
-      edited_at?: string | null;  // Phase 5 - inline editing timestamp
-    }>;
+    entries: KnowledgeEntry[];
     participants: string[];
     cultural_perspectives: string[];
     alternatives: string[];
@@ -36,7 +38,7 @@
 
   // Phase 5: Inline editing state
   let editMode = false;
-  let editedEntries: typeof proposal.entries = [];
+  let editedEntries: KnowledgeEntry[] = [];
   let currentUserId = ''; // Will be set from nodeStatus
 
   // Initialize edited entries when entering edit mode

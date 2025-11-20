@@ -65,4 +65,8 @@ async def test_local_api_status_command(mock_dpc_env):
 
     finally:
         await service.stop()
-        await service_task
+        service_task.cancel()
+        try:
+            await service_task
+        except asyncio.CancelledError:
+            pass  # Expected when cancelling the task
