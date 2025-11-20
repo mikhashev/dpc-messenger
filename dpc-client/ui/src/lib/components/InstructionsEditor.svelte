@@ -49,10 +49,11 @@
     isLoading = true;
     try {
       const result = await sendCommand('get_instructions', {});
-      if (result.status === 'success') {
-        instructions = result.instructions;
+      // Backend returns: {id, command, status: "OK", payload: {status, instructions}}
+      if (result && result.payload && result.payload.status === 'success') {
+        instructions = result.payload.instructions;
       } else {
-        console.error('Failed to load instructions:', result.message);
+        console.error('Failed to load instructions:', result?.payload?.message || 'Unknown error');
       }
     } catch (error) {
       console.error('Error loading instructions:', error);
@@ -90,8 +91,9 @@
         instructions_dict: editedInstructions
       });
 
-      if (result.status === 'success') {
-        saveMessage = result.message;
+      // Backend returns: {id, command, status: "OK", payload: {status, message}}
+      if (result && result.payload && result.payload.status === 'success') {
+        saveMessage = result.payload.message;
         saveMessageType = 'success';
 
         // Update the displayed instructions
@@ -107,7 +109,7 @@
           saveMessageType = '';
         }, 2000);
       } else {
-        saveMessage = result.message;
+        saveMessage = result?.payload?.message || 'Save failed';
         saveMessageType = 'error';
       }
     } catch (error) {
