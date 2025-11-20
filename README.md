@@ -418,9 +418,10 @@ We welcome contributions of all kinds!
 ### How to Contribute
 
 1. **Read the Vision** - Start with our [Vision Doc](./VISION.md) and [Product Vision](./PRODUCT_VISION.md)
-2. **Sign the CLA** - Required for code contributions ([CLA.md](./CLA.md))
-3. **Find an Issue** - Check [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues)
-4. **Submit a PR** - Follow our contribution guidelines
+2. **Review Guidelines** - See [CONTRIBUTING.md](./CONTRIBUTING.md) for branching workflow and code style
+3. **Sign the CLA** - Required for code contributions ([CLA.md](./CLA.md))
+4. **Find an Issue** - Check [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues)
+5. **Submit a PR** - Follow the `dev` → `main` workflow (see [CONTRIBUTING.md](./CONTRIBUTING.md))
 
 ### Areas We Need Help
 
