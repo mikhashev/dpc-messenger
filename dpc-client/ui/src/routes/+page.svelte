@@ -547,6 +547,15 @@
           return newMap;
         });
 
+        // Update token usage map with data from response (Phase 2)
+        if (message.status === "OK" && message.payload.tokens_used && message.payload.token_limit) {
+          tokenUsageMap = new Map(tokenUsageMap);
+          tokenUsageMap.set(chatId, {
+            used: message.payload.tokens_used,
+            limit: message.payload.token_limit
+          });
+        }
+
         // Clean up the command mapping
         commandToChatMap.delete(responseCommandId);
       }
