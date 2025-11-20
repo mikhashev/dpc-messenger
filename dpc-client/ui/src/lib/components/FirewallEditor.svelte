@@ -179,6 +179,64 @@
     if (!editedRules || !editedRules.node_groups) return;
     editedRules.node_groups[groupName] = editedRules.node_groups[groupName].filter(id => id !== nodeId);
   }
+
+  // Peer Permissions - Node Management Functions
+  function addNodePermission() {
+    if (!editedRules) return;
+    const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
+    if (nodeId && nodeId.startsWith('dpc-node-')) {
+      if (!editedRules.nodes) editedRules.nodes = {};
+      editedRules.nodes[nodeId] = {};
+    } else if (nodeId) {
+      alert('Node ID must start with "dpc-node-"');
+    }
+  }
+
+  function removeNodePermission(nodeId: string) {
+    if (!editedRules || !editedRules.nodes) return;
+    delete editedRules.nodes[nodeId];
+  }
+
+  function addRuleToNode(nodeId: string) {
+    if (!editedRules || !editedRules.nodes) return;
+    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
+    if (resourcePath) {
+      editedRules.nodes[nodeId][resourcePath] = 'allow';
+    }
+  }
+
+  function removeRuleFromNode(nodeId: string, path: string) {
+    if (!editedRules || !editedRules.nodes) return;
+    delete editedRules.nodes[nodeId][path];
+  }
+
+  // Peer Permissions - Group Management Functions
+  function addGroupPermission() {
+    if (!editedRules) return;
+    const groupName = prompt('Enter group name:');
+    if (groupName) {
+      if (!editedRules.groups) editedRules.groups = {};
+      editedRules.groups[groupName] = {};
+    }
+  }
+
+  function removeGroupPermission(groupName: string) {
+    if (!editedRules || !editedRules.groups) return;
+    delete editedRules.groups[groupName];
+  }
+
+  function addRuleToGroup(groupName: string) {
+    if (!editedRules || !editedRules.groups) return;
+    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
+    if (resourcePath) {
+      editedRules.groups[groupName][resourcePath] = 'allow';
+    }
+  }
+
+  function removeRuleFromGroup(groupName: string, path: string) {
+    if (!editedRules || !editedRules.groups) return;
+    delete editedRules.groups[groupName][path];
+  }
 </script>
 
 {#if open && rules}
@@ -437,58 +495,120 @@
             <h3>Peer Permissions</h3>
             <p class="help-text">Individual and group-based access rules for nodes.</p>
 
-            <div class="info-box">
-              <strong>Note:</strong> Peer permission editing via UI is coming soon. For now, edit the JSON file directly at <code>~/.dpc/.dpc_access.json</code>
-            </div>
+            <!-- Individual Nodes Section -->
+            <h4>Individual Nodes</h4>
+            {#if editMode && editedRules}
+              <button class="btn btn-add" on:click={addNodePermission}>+ Add Node</button>
+            {/if}
 
-            {#if displayRules?.nodes}
-              <h4>Individual Nodes</h4>
+            {#if displayRules?.nodes && Object.keys(displayRules.nodes).length > 0}
               {#each Object.entries(displayRules.nodes) as [nodeId, rules]}
                 {#if !nodeId.startsWith('_')}
                   <div class="peer-card">
-                    <h5>{nodeId}</h5>
+                    <div class="group-header">
+                      <h5>{nodeId}</h5>
+                      {#if editMode}
+                        <button class="btn-icon" on:click={() => removeNodePermission(nodeId)} title="Delete node">
+                          🗑️
+                        </button>
+                      {/if}
+                    </div>
+
                     <div class="rule-list">
                       {#each Object.entries(rules) as [path, action]}
                         {#if !path.startsWith('_')}
                           <div class="rule-row">
                             <code class="rule-path">{path}</code>
-                            <span class="action-badge" class:allow={action === 'allow'} class:deny={action === 'deny'}>
-                              {action}
-                            </span>
+                            {#if editMode && editedRules && editedRules.nodes && editedRules.nodes[nodeId]}
+                              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                <select bind:value={editedRules.nodes[nodeId][path]}>
+                                  <option value="allow">allow</option>
+                                  <option value="deny">deny</option>
+                                </select>
+                                <button class="btn-icon-small" on:click={() => removeRuleFromNode(nodeId, path)} title="Delete rule">
+                                  ×
+                                </button>
+                              </div>
+                            {:else}
+                              <span class="action-badge" class:allow={action === 'allow'} class:deny={action === 'deny'}>
+                                {action}
+                              </span>
+                            {/if}
                           </div>
                         {/if}
+                      {:else}
+                        <p class="empty-small">No rules defined for this node</p>
                       {/each}
                     </div>
+
+                    {#if editMode}
+                      <button class="btn-small" on:click={() => addRuleToNode(nodeId)} style="margin-top: 0.5rem;">
+                        + Add Rule
+                      </button>
+                    {/if}
                   </div>
                 {/if}
-              {:else}
-                <p class="empty">No individual node permissions defined.</p>
               {/each}
+            {:else}
+              <p class="empty">No individual node permissions defined.</p>
             {/if}
 
-            {#if displayRules?.groups}
-              <h4>Group Permissions</h4>
+            <!-- Group Permissions Section -->
+            <h4 style="margin-top: 1.5rem;">Group Permissions</h4>
+            {#if editMode && editedRules}
+              <button class="btn btn-add" on:click={addGroupPermission}>+ Add Group</button>
+            {/if}
+
+            {#if displayRules?.groups && Object.keys(displayRules.groups).length > 0}
               {#each Object.entries(displayRules.groups) as [groupName, rules]}
                 {#if !groupName.startsWith('_')}
                   <div class="peer-card">
-                    <h5>Group: {groupName}</h5>
+                    <div class="group-header">
+                      <h5>Group: {groupName}</h5>
+                      {#if editMode}
+                        <button class="btn-icon" on:click={() => removeGroupPermission(groupName)} title="Delete group">
+                          🗑️
+                        </button>
+                      {/if}
+                    </div>
+
                     <div class="rule-list">
                       {#each Object.entries(rules) as [path, action]}
                         {#if !path.startsWith('_')}
                           <div class="rule-row">
                             <code class="rule-path">{path}</code>
-                            <span class="action-badge" class:allow={action === 'allow'} class:deny={action === 'deny'}>
-                              {action}
-                            </span>
+                            {#if editMode && editedRules && editedRules.groups && editedRules.groups[groupName]}
+                              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                <select bind:value={editedRules.groups[groupName][path]}>
+                                  <option value="allow">allow</option>
+                                  <option value="deny">deny</option>
+                                </select>
+                                <button class="btn-icon-small" on:click={() => removeRuleFromGroup(groupName, path)} title="Delete rule">
+                                  ×
+                                </button>
+                              </div>
+                            {:else}
+                              <span class="action-badge" class:allow={action === 'allow'} class:deny={action === 'deny'}>
+                                {action}
+                              </span>
+                            {/if}
                           </div>
                         {/if}
+                      {:else}
+                        <p class="empty-small">No rules defined for this group</p>
                       {/each}
                     </div>
+
+                    {#if editMode}
+                      <button class="btn-small" on:click={() => addRuleToGroup(groupName)} style="margin-top: 0.5rem;">
+                        + Add Rule
+                      </button>
+                    {/if}
                   </div>
                 {/if}
-              {:else}
-                <p class="empty">No group permissions defined.</p>
               {/each}
+            {:else}
+              <p class="empty">No group permissions defined.</p>
             {/if}
           </div>
         {/if}
