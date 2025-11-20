@@ -529,7 +529,13 @@ class CoreService:
             if request_id in self._pending_context_requests:
                 future = self._pending_context_requests[request_id]
                 if not future.done():
-                    future.set_result(context_dict)
+                    # Deserialize dict into PersonalContext object
+                    try:
+                        context_obj = PersonalContext.from_dict(context_dict)
+                        future.set_result(context_obj)
+                    except Exception as e:
+                        print(f"  ✗ Error deserializing context from peer: {e}")
+                        future.set_result(None)
 
         elif command == "REQUEST_DEVICE_CONTEXT":
             # Device context request from peer - handle and respond
@@ -1656,11 +1662,11 @@ class CoreService:
             
             # Wait for response with timeout
             try:
-                context_dict = await asyncio.wait_for(response_future, timeout=5.0)
-                
-                if context_dict:
-                    # Convert dict back to PersonalContext object
-                    return PersonalContext(**context_dict)
+                context = await asyncio.wait_for(response_future, timeout=5.0)
+
+                if context:
+                    # Already a PersonalContext object (deserialized in CONTEXT_RESPONSE handler)
+                    return context
                 
             except asyncio.TimeoutError:
                 print(f"  - Timeout waiting for context from {peer_id}")
