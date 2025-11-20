@@ -114,9 +114,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - N/A (no bug fixes in this release)
 
-### Testing Required
+### Automated Testing Status
 
-Before merging to `main`, the following must be manually verified:
+**✅ Backend Tests:** 58 passed, 2 skipped (pytest)
+- All core functionality tests pass
+- Conversation monitoring, firewall, device context, and local API tests verified
+
+**✅ Frontend Type Check:** 0 errors, 0 warnings (svelte-check)
+- All TypeScript types validated
+- No compilation errors
+
+**⚠️ Deprecation Warnings (Non-blocking):**
+- `datetime.utcnow()` deprecated → migrate to `datetime.now(datetime.UTC)` in future
+- `websockets.legacy` deprecated → upgrade to websockets v14+ API in future
+
+### Manual Testing Required
+
+Before merging to `main`, verify the following Phase 1-6 features:
 
 - [ ] **Phase 2**: Token counter displays correctly and warns at 80%
 - [ ] **Phase 2**: Toast notifications appear on extraction failures
@@ -125,18 +139,19 @@ Before merging to `main`, the following must be manually verified:
 - [ ] **Phase 5**: Inline editing saves with correct attribution
 - [ ] **Phase 6**: Context window overrides work in providers.toml
 
-**Test Commands:**
+**Manual Test Commands:**
 ```bash
-# Backend tests
+# Start backend
 cd dpc-client/core
-poetry run pytest -v
 poetry run python run_service.py
 
-# Frontend tests
+# Start frontend (separate terminal)
 cd dpc-client/ui
-npm run check
-npm run build
 npm run tauri dev
+
+# Build production bundle
+npm run build
+npm run tauri build
 ```
 
 ---
