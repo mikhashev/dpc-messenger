@@ -26,6 +26,9 @@ const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = 3000;
 const API_URL = "ws://127.0.0.1:9999";
 
+// Map to track pending command responses
+const pendingCommands = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void }>();
+
 function startPolling() {
     if (pollingInterval) {
         clearInterval(pollingInterval);
@@ -131,6 +134,13 @@ export function connectToCoreService() {
                 const message = JSON.parse(event.data);
                 coreMessages.set(message);
 
+                // Check if this is a response to a pending command
+                if (message.id && pendingCommands.has(message.id)) {
+                    const { resolve } = pendingCommands.get(message.id)!;
+                    pendingCommands.delete(message.id);
+                    resolve(message.payload);
+                }
+
                 if (message.event === "status_update" ||
                     (message.id && message.command === "get_status" && message.status === "OK")) {
                     nodeStatus.set({ ...message.payload });
@@ -230,20 +240,52 @@ export function resetReconnection() {
     }
 }
 
-export function sendCommand(command: string, payload: any = {}, commandId?: string) {
+export function sendCommand(command: string, payload: any = {}, commandId?: string): Promise<any> | boolean {
     if (!socket || socket.readyState !== WebSocket.OPEN) {
         console.error(`Cannot send command '${command}': WebSocket not connected`);
         return false;
     }
-    
+
     try {
-        const message = { 
-            id: commandId || crypto.randomUUID(),  // Use provided commandId or generate new one
-            command, 
-            payload 
+        const id = commandId || crypto.randomUUID();
+        const message = {
+            id,
+            command,
+            payload
         };
-        socket.send(JSON.stringify(message));
-        return true;
+
+        // For commands that expect a response, return a Promise
+        const expectsResponse = [
+            'get_personal_context',
+            'save_personal_context',
+            'reload_personal_context',
+            'get_firewall_rules',
+            'save_firewall_rules',
+            'reload_firewall',
+            'validate_firewall_rules'
+        ].includes(command);
+
+        if (expectsResponse) {
+            return new Promise((resolve, reject) => {
+                // Store the promise callbacks
+                pendingCommands.set(id, { resolve, reject });
+
+                // Set timeout to reject if no response
+                setTimeout(() => {
+                    if (pendingCommands.has(id)) {
+                        pendingCommands.delete(id);
+                        reject(new Error(`Command '${command}' timed out after 10 seconds`));
+                    }
+                }, 10000);
+
+                // Send the message
+                socket!.send(JSON.stringify(message));
+            });
+        } else {
+            // For commands that don't expect a response, just send
+            socket.send(JSON.stringify(message));
+            return true;
+        }
     } catch (error) {
         console.error(`Error sending command '${command}':`, error);
         return false;

@@ -66,7 +66,7 @@ npm run tauri dev
   - `node.crt` - Your certificate
   - `node.id` - Your node ID
   - `providers.toml` - AI provider config
-  - `.dpc_access` - Firewall rules
+  - `.dpc_access.json` - Firewall rules
   - `personal.json` - Your context
 
 **Note your connection URI** displayed in the terminal:
@@ -354,7 +354,7 @@ poetry run python run_service.py
 
 ### For Users
 
-1. **Configure Context Firewall** - Edit `~/.dpc/.dpc_access`
+1. **Configure Context Firewall** - Edit `~/.dpc/.dpc_access.json`
 2. **Add AI Providers** - Edit `~/.dpc/providers.toml`
 3. **Customize Profile** - Edit `~/.dpc/personal.json`
 4. **Read the Whitepaper** - Understand the vision

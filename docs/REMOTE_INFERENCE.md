@@ -63,13 +63,16 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 
 ### Firewall Integration
 
-**Compute Sharing Permissions** (`.dpc/dpc_access`):
-```ini
-[compute]
-enabled = true
-allow_groups = friends
-allow_nodes = dpc-node-alice-123
-allowed_models = llama3.1:8b, llama3-70b
+**Compute Sharing Permissions** (`~/.dpc/.dpc_access.json`):
+```json
+{
+  "compute": {
+    "enabled": true,
+    "allow_groups": ["friends"],
+    "allow_nodes": ["dpc-node-alice-123"],
+    "allowed_models": ["llama3.1:8b", "llama3-70b"]
+  }
+}
 ```
 
 **Permission Checks:**
@@ -103,25 +106,23 @@ allowed_models = llama3.1:8b, llama3-70b
 
 ### Enabling Compute Sharing
 
-Edit `~/.dpc/.dpc_access` to enable compute sharing:
+Edit `~/.dpc/.dpc_access.json` to enable compute sharing:
 
-```ini
-[compute]
-# Enable compute sharing
-enabled = true
-
-# Allow specific node groups
-allow_groups = friends, colleagues
-
-# Allow specific nodes (optional)
-allow_nodes = dpc-node-alice-abc123
-
-# Restrict to specific models (optional - empty = all models allowed)
-allowed_models = llama3.1:8b, llama3-70b
-
-[node_groups]
-friends = dpc-node-alice-abc123, dpc-node-bob-def456
-colleagues = dpc-node-charlie-ghi789
+```json
+{
+  "_comment": "Firewall access control configuration",
+  "compute": {
+    "_comment": "Compute sharing settings (Remote Inference)",
+    "enabled": true,
+    "allow_groups": ["friends", "colleagues"],
+    "allow_nodes": ["dpc-node-alice-abc123"],
+    "allowed_models": ["llama3.1:8b", "llama3-70b"]
+  },
+  "node_groups": {
+    "friends": ["dpc-node-alice-abc123", "dpc-node-bob-def456"],
+    "colleagues": ["dpc-node-charlie-ghi789"]
+  }
+}
 ```
 
 ### Security Considerations
@@ -149,8 +150,8 @@ colleagues = dpc-node-charlie-ghi789
 ### From the UI
 
 1. **Enable Compute Sharing** (Host Side):
-   - Edit `~/.dpc/.dpc_access`
-   - Add `[compute]` section with permissions
+   - Edit `~/.dpc/.dpc_access.json`
+   - Add `"compute"` section with permissions
    - Restart the client
 
 2. **Connect to Peer**:
@@ -256,7 +257,7 @@ result = await core_service.send_ai_query(
 ```bash
 # Terminal 1: Start Host (powerful PC)
 cd dpc-client/core
-# Edit ~/.dpc/.dpc_access to enable compute sharing
+# Edit ~/.dpc/.dpc_access.json to enable compute sharing
 poetry run python run_service.py
 
 # Terminal 2: Start Requestor (weak laptop)
@@ -270,13 +271,16 @@ poetry run python run_service.py
 ```
 
 **Test 2: Access Denied**
-```bash
-# Host: Disable compute sharing in ~/.dpc/.dpc_access
-[compute]
-enabled = false
+```json
+// Host: Disable compute sharing in ~/.dpc/.dpc_access.json
+{
+  "compute": {
+    "enabled": false
+  }
+}
 
-# Requestor: Try to request inference
-# Expected: Error "Access denied: You are not authorized..."
+// Requestor: Try to request inference
+// Expected: Error "Access denied: You are not authorized..."
 ```
 
 **Test 3: Timeout Handling**
@@ -302,8 +306,8 @@ poetry run pytest tests/test_remote_inference.py -v
 
 **Check firewall config on host:**
 ```bash
-cat ~/.dpc/.dpc_access
-# Ensure [compute] section exists and enabled = true
+cat ~/.dpc/.dpc_access.json
+# Ensure "compute" section exists and enabled = true
 # Ensure requestor is in allow_nodes or allow_groups
 ```
 
@@ -340,7 +344,7 @@ ollama serve  # Ensure service is running
    - Use `allowed_models` to limit which models peers can access
 
 4. **Regular firewall audits**
-   - Review `.dpc_access` periodically
+   - Review `.dpc_access.json` periodically
    - Remove nodes that are no longer trusted
 
 ---

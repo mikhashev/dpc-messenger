@@ -36,7 +36,7 @@ When a peer connection is established, the client automatically sends `GET_PROVI
 - Lines 1048-1099: `_handle_get_providers_request()`
 
 Security checks:
-1. ✅ Is `compute.enabled = true` in requester's `.dpc_access`?
+1. ✅ Is `compute.enabled = true` in requester's `.dpc_access.json`?
 2. ✅ Is requester in `allow_nodes` or `allow_groups`?
 3. ✅ Filter by `allowed_models` (if specified)
 
@@ -72,18 +72,22 @@ Stores peer providers in `peer_metadata` and broadcasts to UI.
 
 ### Alice's Perspective (Sharing Her Compute)
 
-**File:** `~/.dpc/.dpc_access`
+**File:** `~/.dpc/.dpc_access.json`
 
-```ini
-[node_groups]
-friends = dpc-node-bob-456, dpc-node-charlie-789
-colleagues = dpc-node-dave-abc
-
-[compute]
-enabled = true                    # Enable compute sharing
-allow_groups = friends            # Allow friends group
-allow_nodes = dpc-node-eve-xyz   # Allow specific node
-allowed_models = llama3.1:8b, llama3-70b  # Restrict to specific models
+```json
+{
+  "node_groups": {
+    "friends": ["dpc-node-bob-456", "dpc-node-charlie-789"],
+    "colleagues": ["dpc-node-dave-abc"]
+  },
+  "compute": {
+    "_comment": "Enable compute sharing",
+    "enabled": true,
+    "allow_groups": ["friends"],
+    "allow_nodes": ["dpc-node-eve-xyz"],
+    "allowed_models": ["llama3.1:8b", "llama3-70b"]
+  }
+}
 ```
 
 **Security Behavior:**
@@ -100,40 +104,53 @@ allowed_models = llama3.1:8b, llama3-70b  # Restrict to specific models
 **Example Scenarios:**
 
 **Scenario 1: Full Access to All Models**
-```ini
-[compute]
-enabled = true
-allow_nodes = dpc-node-bob-456
-# No allowed_models means Bob can use all your models
+```json
+{
+  "compute": {
+    "enabled": true,
+    "allow_nodes": ["dpc-node-bob-456"],
+    "allowed_models": []
+  }
+}
+// No allowed_models means Bob can use all your models
 ```
 → Bob sees: `llama3.1:8b, llama3-70b, gpt-4` (all your models)
 
 **Scenario 2: Restricted Model Access**
-```ini
-[compute]
-enabled = true
-allow_nodes = dpc-node-bob-456
-allowed_models = llama3.1:8b
+```json
+{
+  "compute": {
+    "enabled": true,
+    "allow_nodes": ["dpc-node-bob-456"],
+    "allowed_models": ["llama3.1:8b"]
+  }
+}
 ```
 → Bob sees: `llama3.1:8b` (only this model)
 
 **Scenario 3: Group-Based Access**
-```ini
-[node_groups]
-friends = dpc-node-bob-456, dpc-node-charlie-789
-
-[compute]
-enabled = true
-allow_groups = friends
-allowed_models = llama3.1:8b, llama3-70b
+```json
+{
+  "node_groups": {
+    "friends": ["dpc-node-bob-456", "dpc-node-charlie-789"]
+  },
+  "compute": {
+    "enabled": true,
+    "allow_groups": ["friends"],
+    "allowed_models": ["llama3.1:8b", "llama3-70b"]
+  }
+}
 ```
 → Bob and Charlie see: `llama3.1:8b, llama3-70b`
 → Dave (not in friends) sees: nothing
 
 **Scenario 4: Compute Disabled**
-```ini
-[compute]
-enabled = false
+```json
+{
+  "compute": {
+    "enabled": false
+  }
+}
 ```
 → Everyone sees: nothing (compute sharing off)
 
@@ -148,7 +165,7 @@ Alice → Bob (WebRTC via Hub)
   ↓
 Bob receives GET_PROVIDERS request
   ↓
-Bob checks firewall (.dpc_access):
+Bob checks firewall (.dpc_access.json):
   - compute.enabled = true ✅
   - Alice in allow_nodes ✅
   - allowed_models = llama3.1:8b, gpt-4 ✅
@@ -229,11 +246,14 @@ Charlie's UI shows: "Alice (no models available)"
 
 **Setup:**
 - Two clients running (Alice, Bob)
-- Bob's `~/.dpc/.dpc_access`:
-  ```ini
-  [compute]
-  enabled = true
-  allow_nodes = <alice-node-id>
+- Bob's `~/.dpc/.dpc_access.json`:
+  ```json
+  {
+    "compute": {
+      "enabled": true,
+      "allow_nodes": ["<alice-node-id>"]
+    }
+  }
   ```
 - Bob has Ollama running with `llama3.1:8b`
 
@@ -275,11 +295,14 @@ Charlie's UI shows: "Alice (no models available)"
 **Setup:**
 - Bob has 3 providers: `llama3.1:8b`, `llama3-70b`, `gpt-4`
 - Bob's firewall restricts models:
-  ```ini
-  [compute]
-  enabled = true
-  allow_nodes = <alice-node-id>
-  allowed_models = llama3.1:8b, gpt-4
+  ```json
+  {
+    "compute": {
+      "enabled": true,
+      "allow_nodes": ["<alice-node-id>"],
+      "allowed_models": ["llama3.1:8b", "gpt-4"]
+    }
+  }
   ```
 
 **Test Steps:**
@@ -302,11 +325,14 @@ Bob's backend:
 
 **Setup:**
 - Bob's firewall:
-  ```ini
-  [compute]
-  enabled = true
-  allow_nodes = dpc-node-charlie-789
-  # Alice is NOT in the allowed list
+  ```json
+  {
+    "compute": {
+      "enabled": true,
+      "allow_nodes": ["dpc-node-charlie-789"]
+    }
+  }
+  // Alice is NOT in the allowed list
   ```
 
 **Test Steps:**
@@ -328,9 +354,12 @@ Bob's backend:
 
 **Setup:**
 - Bob's firewall:
-  ```ini
-  [compute]
-  enabled = false
+  ```json
+  {
+    "compute": {
+      "enabled": false
+    }
+  }
   ```
 
 **Test Steps:**
@@ -351,13 +380,16 @@ Bob's backend:
 
 **Setup:**
 - Bob's firewall:
-  ```ini
-  [node_groups]
-  friends = dpc-node-alice-123, dpc-node-dave-xyz
-
-  [compute]
-  enabled = true
-  allow_groups = friends
+  ```json
+  {
+    "node_groups": {
+      "friends": ["dpc-node-alice-123", "dpc-node-dave-xyz"]
+    },
+    "compute": {
+      "enabled": true,
+      "allow_groups": ["friends"]
+    }
+  }
   ```
 
 **Test Steps:**
@@ -387,7 +419,7 @@ Bob's backend:
 ## Security Considerations
 
 ### 1. Firewall is Mandatory
-- Users MUST configure `.dpc_access` to share compute
+- Users MUST configure `.dpc_access.json` to share compute
 - Default is deny-all (secure by default)
 - Fine-grained control: per-node, per-group, per-model
 
@@ -442,7 +474,7 @@ Bob's backend:
 ### Issue: Peer shows "no models available" but should have access
 
 **Check:**
-1. Bob's `.dpc_access` has `compute.enabled = true`
+1. Bob's `.dpc_access.json` has `compute.enabled = true`
 2. Alice's node_id is in `allow_nodes` or she's in an `allow_groups` group
 3. Bob's backend logs show "Sending N providers" where N > 0
 4. Alice's backend logs show "Received N providers" where N > 0
@@ -467,15 +499,18 @@ poetry run python run_service.py
 **Reason:** The `model` parameter in the inference request doesn't match `allowed_models`.
 
 **Fix:**
-```ini
-# Ensure model is in allowed list
-[compute]
-allowed_models = llama3.1:8b  # Model must match exactly
+```json
+{
+  "compute": {
+    "allowed_models": ["llama3.1:8b"]
+  }
+}
+// Ensure model is in allowed list - must match exactly
 ```
 
 ---
 
-### Issue: Provider list not updating after changing `.dpc_access`
+### Issue: Provider list not updating after changing `.dpc_access.json`
 
 **Cause:** Providers are cached from initial connection.
 

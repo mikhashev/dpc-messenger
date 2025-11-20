@@ -520,10 +520,15 @@ D-PC is built on the foundational ideas of the cypherpunk movement:
 **Good UX (D-PC):**
 ```
 1. Add friend: "Bob" (dpc-node-bob123)
-2. Edit .dpc_access firewall:
-   [node:dpc-node-bob123]
-   personal.json:profile.* = allow
-   work_notes.json:project_alpha.* = allow
+2. Edit .dpc_access.json firewall:
+   {
+     "nodes": {
+       "dpc-node-bob123": {
+         "personal.json:profile.*": "allow",
+         "work_notes.json:project_alpha.*": "allow"
+       }
+     }
+   }
 3. Done! Bob can only access what you specified
 4. Revoke anytime by removing the rule
 ```

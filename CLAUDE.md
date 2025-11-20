@@ -272,7 +272,7 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#device-identity-and-multi-devi
 - Windows: `C:\Users\<username>\.dpc\config.ini`
 - Linux/Mac: `~/.dpc/config.ini`
 - Providers: `~/.dpc/providers.toml` (AI provider configs)
-- Firewall: `~/.dpc/.dpc_access` (context sharing rules)
+- Firewall: `~/.dpc/.dpc_access.json` (context sharing rules)
 - Personal Context: `~/.dpc/personal.json` (auto-generated)
 - Device Context: `~/.dpc/device_context.json` (auto-generated, structured hardware/software info)
 
@@ -417,6 +417,79 @@ collect_ai_models = false         # Ollama models (opt-in for compute-sharing)
 - **Compute-sharing**: "Alice has RTX 4090 (24GB) - offload training to her GPU"
 - **Privacy-aware**: "Sharing only OS version and dev tools, hardware specs require explicit allow rules"
 
+### In-App Configuration Editors
+
+The client provides in-app editors for key configuration files, eliminating the need to manually edit files or restart the service.
+
+**Personal Context Editor:**
+- **Location**: Click **"📚 View Personal Context"** button in sidebar
+- **Features**:
+  - Edit mode with live preview
+  - Editable Profile fields (name, description)
+  - Editable AI Instructions (primary instructions, bias mitigation settings)
+  - Real-time validation
+  - Save changes without restart
+  - Changes apply immediately to active sessions
+- **Editable Fields**:
+  - Profile: Name, description, core values
+  - AI Instructions: Primary instruction text
+  - Bias Mitigation: Multi-perspective analysis, challenge status quo, cultural sensitivity
+- **Read-Only Fields**:
+  - Knowledge topics (managed via Knowledge Commit system)
+  - Commit history
+  - Metadata (version, timestamps)
+
+**Firewall Rules Editor:**
+- **Location**: Click **"🛡️ Firewall Rules"** button in sidebar
+- **Format**: JSON (stored as `~/.dpc/.dpc_access.json`)
+- **UI Style**: Form-based interface matching Personal Context editor (DRY principle)
+- **Features**:
+  - Tab-based navigation (Hub Sharing, Node Groups, Compute Sharing, Peer Permissions)
+  - Native HTML form elements (no Monaco editor)
+  - Edit/Save/Cancel workflow with unsaved changes detection
+  - Real-time validation on save
+  - Hot-reload: Changes apply immediately without restarting service
+- **Tabs**:
+  - **Hub Sharing**: Control what the Hub can see for discovery
+  - **Node Groups**: Define groups of nodes with add/remove functionality
+  - **Compute Sharing**: Enable/configure remote inference with checkboxes and textareas
+  - **Peer Permissions**: View per-node and per-group access rules (read-only for now)
+- **Validation**:
+  - Checks JSON structure
+  - Validates node ID format (`dpc-node-*`)
+  - Validates rule values (`allow`, `deny`)
+  - Validates compute settings (boolean, lists)
+  - Validates node group memberships
+
+**Backend Commands** (available via WebSocket API):
+- `get_personal_context` - Load current personal context
+- `save_personal_context` - Save updated personal context
+- `reload_personal_context` - Reload from disk
+- `get_firewall_rules` - Load current firewall rules as JSON dict
+- `save_firewall_rules` - Save and validate new firewall rules (accepts JSON dict)
+
+**Hot-Reload Mechanism:**
+- Firewall rules reload automatically when saved via UI
+- Personal context updates propagate to active P2P connections
+- No service restart required for configuration changes
+- WebSocket events notify UI of successful updates
+
+**Example Workflow** (Firewall Rules):
+1. Click "🛡️ Firewall Rules" button
+2. Click "Edit" button in header
+3. Use tabs to navigate to desired section (Hub Sharing, Node Groups, etc.)
+4. Edit rules using form elements (selects, inputs, textareas, checkboxes)
+5. Click "Save" button
+6. Backend validates and applies rules
+7. Changes take effect immediately for all new requests
+8. Success message shown in UI, automatically exits edit mode after 2 seconds
+
+**Manual File Editing** (Still Supported):
+- Files can still be edited manually in external editors
+- Use "Reload from Disk" button to apply external changes
+- Backend validates before applying
+- Invalid changes are rejected with error details
+
 ---
 
 ## Development Workflow
@@ -524,17 +597,35 @@ UI connects via WebSocket (localhost:9999) for:
 
 ### Context Firewall Rules
 
-Access control file format (`~/.dpc/.dpc_access`):
-```ini
-[groups]
-friends = alice,bob
-trusted = charlie
-
-[rules]
-allow_all = false
-allow_for = group:friends
-tags_to_share = public,work
-tags_to_hide = private,personal
+Access control file format (`~/.dpc/.dpc_access.json`):
+```json
+{
+  "hub": {
+    "personal.json:profile.name": "allow",
+    "personal.json:profile.description": "allow"
+  },
+  "node_groups": {
+    "friends": ["dpc-node-alice-123", "dpc-node-bob-456"],
+    "trusted": ["dpc-node-charlie-789"]
+  },
+  "groups": {
+    "friends": {
+      "personal.json:profile.*": "allow",
+      "personal.json:knowledge.*": "allow"
+    }
+  },
+  "nodes": {
+    "dpc-node-alice-123": {
+      "personal.json:*": "allow"
+    }
+  },
+  "compute": {
+    "enabled": false,
+    "allow_nodes": [],
+    "allow_groups": [],
+    "allowed_models": []
+  }
+}
 ```
 
 ---
@@ -607,7 +698,7 @@ poetry run pytest tests/test_turn_connectivity.py
 ### Configuration Files
 - `~/.dpc/config.ini` - Client configuration
 - `~/.dpc/providers.toml` - AI provider settings
-- `~/.dpc/.dpc_access` - Context firewall rules
+- `~/.dpc/.dpc_access.json` - Context firewall rules
 - `~/.dpc/node.{key,crt,id}` - Node identity files
 
 ### Important Documentation

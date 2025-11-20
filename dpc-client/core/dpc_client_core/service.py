@@ -54,7 +54,7 @@ class CoreService:
         self.connection_status.set_on_status_change(self._on_connection_status_changed)
 
         # Initialize all major components
-        self.firewall = ContextFirewall(DPC_HOME_DIR / ".dpc_access")
+        self.firewall = ContextFirewall(DPC_HOME_DIR / ".dpc_access.json")
         self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
@@ -753,6 +753,251 @@ class CoreService:
             }
         except Exception as e:
             print(f"Error loading personal context: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_personal_context(self, context_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Save updated personal context from UI editor.
+
+        UI Integration: Called when user clicks 'Save' in ContextViewer.
+
+        Args:
+            context_dict: Dictionary representation of PersonalContext
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            from dpc_protocol.pcm_core import PersonalContext
+            from datetime import datetime, timezone
+
+            # Load current context to preserve metadata
+            current = self.pcm_core.load_context()
+
+            # Ensure current is a PersonalContext object, not a dict
+            if isinstance(current, dict):
+                current = PersonalContext.from_dict(current)
+
+            # Update fields from the editor
+            # Note: We're doing a simple update here. For production, you might want
+            # more sophisticated merging logic
+            if "profile" in context_dict:
+                current.profile.__dict__.update(context_dict["profile"])
+
+            if "instruction" in context_dict:
+                current.instruction.__dict__.update(context_dict["instruction"])
+
+            if "knowledge" in context_dict:
+                # For knowledge, we need to be more careful with the structure
+                # This is a simplified version - full implementation would handle topics properly
+                pass  # Knowledge editing is complex, leave for future enhancement
+
+            # Update timestamp (metadata might be a dict)
+            if isinstance(current.metadata, dict):
+                current.metadata['last_updated'] = datetime.now(timezone.utc).isoformat()
+            else:
+                current.metadata.last_updated = datetime.now(timezone.utc).isoformat()
+
+            # Save to disk
+            self.pcm_core.save_context(current)
+
+            # Reload in P2PManager if it exists
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                self.p2p_manager.local_context = current
+
+            # Emit event to UI
+            await self.local_api.broadcast_event("personal_context_updated", {
+                "message": "Personal context saved successfully"
+            })
+
+            return {
+                "status": "success",
+                "message": "Personal context saved successfully"
+            }
+
+        except Exception as e:
+            print(f"Error saving personal context: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def reload_personal_context(self) -> Dict[str, Any]:
+        """Reload personal context from disk.
+
+        UI Integration: Called when user clicks 'Reload' or when external changes detected.
+
+        Returns:
+            Dict with status, message, and updated context
+        """
+        try:
+            context = self.pcm_core.load_context()
+
+            # Update in P2PManager
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                self.p2p_manager.local_context = context
+
+            # Emit event to UI
+            await self.local_api.broadcast_event("personal_context_reloaded", {
+                "context": asdict(context)
+            })
+
+            return {
+                "status": "success",
+                "message": "Personal context reloaded from disk",
+                "context": asdict(context)
+            }
+
+        except Exception as e:
+            print(f"Error reloading personal context: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_firewall_rules(self) -> Dict[str, Any]:
+        """Get current firewall rules as JSON dict for editor.
+
+        UI Integration: Called when user opens Firewall Editor.
+
+        Returns:
+            Dict with status and rules as JSON object
+        """
+        try:
+            import json
+            rules_text = self.firewall.access_file_path.read_text()
+            rules_dict = json.loads(rules_text)
+            return {
+                "status": "success",
+                "rules": rules_dict,
+                "file_path": str(self.firewall.access_file_path)
+            }
+        except Exception as e:
+            print(f"Error reading firewall rules: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_firewall_rules(self, rules_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Save updated firewall rules from UI editor.
+
+        UI Integration: Called when user clicks 'Save' in Firewall Editor.
+
+        Args:
+            rules_dict: New firewall rules as JSON dict
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            import json
+            from dpc_client_core.firewall import ContextFirewall
+
+            # Validate before saving
+            is_valid, errors = ContextFirewall.validate_config(rules_dict)
+
+            if not is_valid:
+                return {
+                    "status": "error",
+                    "message": "Validation failed",
+                    "errors": errors
+                }
+
+            # Save to file
+            rules_text = json.dumps(rules_dict, indent=2)
+            self.firewall.access_file_path.write_text(rules_text)
+
+            # Reload the firewall
+            success, message = self.firewall.reload()
+
+            if success:
+                # Emit event to UI
+                await self.local_api.broadcast_event("firewall_rules_updated", {
+                    "message": message
+                })
+
+                return {
+                    "status": "success",
+                    "message": message
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": message
+                }
+
+        except Exception as e:
+            print(f"Error saving firewall rules: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def reload_firewall(self) -> Dict[str, Any]:
+        """Reload firewall rules from disk.
+
+        UI Integration: Called when user clicks 'Reload' or when external changes detected.
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            success, message = self.firewall.reload()
+
+            if success:
+                # Emit event to UI
+                await self.local_api.broadcast_event("firewall_reloaded", {
+                    "message": message
+                })
+
+                return {
+                    "status": "success",
+                    "message": message
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": message
+                }
+
+        except Exception as e:
+            print(f"Error reloading firewall: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def validate_firewall_rules(self, rules_text: str) -> Dict[str, Any]:
+        """Validate firewall rules without saving.
+
+        UI Integration: Called on-the-fly while user edits rules.
+
+        Args:
+            rules_text: Firewall rules text to validate
+
+        Returns:
+            Dict with validation status and errors if any
+        """
+        try:
+            from dpc_client_core.firewall import ContextFirewall
+
+            is_valid, errors = ContextFirewall.validate_config(rules_text)
+
+            return {
+                "status": "success",
+                "is_valid": is_valid,
+                "errors": errors
+            }
+
+        except Exception as e:
+            print(f"Error validating firewall rules: {e}")
             return {
                 "status": "error",
                 "message": str(e)

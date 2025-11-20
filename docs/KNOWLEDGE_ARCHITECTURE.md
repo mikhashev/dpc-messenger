@@ -228,7 +228,7 @@ From [cognitive bias guide](https://github.com/mikhashev/personal-context-manage
 │   └── snapshots/
 ├── instructions.yaml             # Global AI behavior rules
 ├── cognitive_profile.json        # Learning preferences, biases
-└── .dpc_access                   # Firewall rules (existing)
+└── .dpc_access.json                   # Firewall rules (existing)
 ```
 
 **Rationale:**

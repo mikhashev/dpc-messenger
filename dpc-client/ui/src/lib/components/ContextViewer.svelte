@@ -3,6 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { sendCommand } from '$lib/coreService';
 
   export let context: PersonalContext | null = null;
   export let open: boolean = false;
@@ -61,8 +62,83 @@
   };
 
   let selectedTab: 'profile' | 'knowledge' | 'instructions' | 'history' = 'profile';
+  let editMode: boolean = false;
+  let editedContext: PersonalContext | null = null;
+  let isSaving: boolean = false;
+  let saveMessage: string = '';
+  let saveMessageType: 'success' | 'error' | '' = '';
+
+  // Enter edit mode
+  function startEditing() {
+    if (!context) return;
+    editMode = true;
+    // Deep copy the context for editing
+    editedContext = JSON.parse(JSON.stringify(context));
+  }
+
+  // Cancel editing
+  function cancelEditing() {
+    editMode = false;
+    editedContext = null;
+    saveMessage = '';
+    saveMessageType = '';
+  }
+
+  // Save changes
+  async function saveChanges() {
+    if (!editedContext) return;
+
+    isSaving = true;
+    saveMessage = '';
+    saveMessageType = '';
+
+    try {
+      const result = await sendCommand('save_personal_context', {
+        context_dict: {
+          profile: editedContext.profile,
+          instruction: editedContext.instruction
+        }
+      });
+
+      if (result.status === 'success') {
+        saveMessage = result.message;
+        saveMessageType = 'success';
+
+        // Update the displayed context
+        if (context) {
+          context.profile = editedContext.profile;
+          context.instruction = editedContext.instruction;
+        }
+
+        // Exit edit mode immediately (so close button works correctly)
+        editMode = false;
+        editedContext = null;
+
+        // Clear success message after short delay
+        setTimeout(() => {
+          saveMessage = '';
+          saveMessageType = '';
+        }, 2000);
+      } else {
+        saveMessage = result.message;
+        saveMessageType = 'error';
+      }
+    } catch (error) {
+      console.error('Error saving context:', error);
+      saveMessage = `Error: ${error}`;
+      saveMessageType = 'error';
+    } finally {
+      isSaving = false;
+    }
+  }
 
   function close() {
+    if (editMode) {
+      const confirmed = confirm('You have unsaved changes. Discard them and close?');
+      if (!confirmed) return;
+    }
+    editMode = false;
+    editedContext = null;
     dispatch('close');
   }
 
@@ -72,9 +148,16 @@
 
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
-      close();
+      if (editMode) {
+        cancelEditing();
+      } else {
+        close();
+      }
     }
   }
+
+  // Get the context to display (edited or original)
+  $: displayContext = editMode && editedContext ? editedContext : context;
 </script>
 
 {#if open && context}
@@ -84,8 +167,25 @@
     <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="context-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="context-dialog-title">Personal Context - {context.profile.name}</h2>
+        <div class="header-actions">
+          {#if !editMode}
+            <button class="btn btn-edit" on:click={startEditing}>Edit</button>
+          {:else}
+            <button class="btn btn-save" on:click={saveChanges} disabled={isSaving}>
+              {isSaving ? 'Saving...' : 'Save'}
+            </button>
+            <button class="btn btn-cancel" on:click={cancelEditing}>Cancel</button>
+          {/if}
+        </div>
         <button class="close-btn" on:click={close}>&times;</button>
       </div>
+
+      <!-- Save Message -->
+      {#if saveMessage}
+        <div class="save-message" class:success={saveMessageType === 'success'} class:error={saveMessageType === 'error'}>
+          {saveMessage}
+        </div>
+      {/if}
 
       <!-- Tabs -->
       <div class="tabs">
@@ -126,17 +226,33 @@
             <div class="info-grid">
               <div class="info-item">
                 <strong>Name:</strong>
-                <span>{context.profile.name}</span>
+                {#if editMode && editedContext}
+                  <input
+                    type="text"
+                    class="edit-input"
+                    bind:value={editedContext.profile.name}
+                  />
+                {:else}
+                  <span>{displayContext?.profile.name}</span>
+                {/if}
               </div>
               <div class="info-item">
                 <strong>Description:</strong>
-                <span>{context.profile.description}</span>
+                {#if editMode && editedContext}
+                  <textarea
+                    class="edit-textarea"
+                    rows="3"
+                    bind:value={editedContext.profile.description}
+                  ></textarea>
+                {:else}
+                  <span>{displayContext?.profile.description}</span>
+                {/if}
               </div>
-              {#if context.profile.core_values.length > 0}
+              {#if displayContext && displayContext.profile.core_values.length > 0}
                 <div class="info-item">
                   <strong>Core Values:</strong>
                   <div class="tags">
-                    {#each context.profile.core_values as value}
+                    {#each displayContext.profile.core_values as value}
                       <span class="tag">{value}</span>
                     {/each}
                   </div>
@@ -199,7 +315,7 @@
                   <span>Version {topic.version}</span>
                   <span>{topic.entries.length} entries</span>
                   {#if topic.markdown_file}
-                    <button class="link-btn" on:click={() => openMarkdownFile(topic.markdown_file)}>
+                    <button class="link-btn" on:click={() => topic.markdown_file && openMarkdownFile(topic.markdown_file)}>
                       View Markdown
                     </button>
                   {/if}
@@ -233,40 +349,74 @@
             <h3>AI Behavior Instructions</h3>
             <div class="instruction-card">
               <strong>Primary Instruction:</strong>
-              <p class="instruction-text">{context.instruction.primary}</p>
+              {#if editMode && editedContext}
+                <textarea
+                  class="edit-textarea instruction-edit"
+                  rows="6"
+                  bind:value={editedContext.instruction.primary}
+                  placeholder="Enter AI behavior instructions..."
+                ></textarea>
+              {:else}
+                <p class="instruction-text">{displayContext?.instruction.primary}</p>
+              {/if}
             </div>
 
             <h4>Bias Mitigation Settings</h4>
             <div class="settings-grid">
               <div class="setting-item">
                 <label>
-                  <input
-                    type="checkbox"
-                    checked={context.instruction.bias_mitigation.require_multi_perspective}
-                    disabled
-                  />
+                  {#if editMode && editedContext}
+                    <input
+                      type="checkbox"
+                      bind:checked={editedContext.instruction.bias_mitigation.require_multi_perspective}
+                    />
+                  {:else}
+                    <input
+                      type="checkbox"
+                      checked={displayContext?.instruction.bias_mitigation.require_multi_perspective}
+                      disabled
+                    />
+                  {/if}
                   Require Multi-Perspective Analysis
                 </label>
               </div>
               <div class="setting-item">
                 <label>
-                  <input
-                    type="checkbox"
-                    checked={context.instruction.bias_mitigation.challenge_status_quo}
-                    disabled
-                  />
+                  {#if editMode && editedContext}
+                    <input
+                      type="checkbox"
+                      bind:checked={editedContext.instruction.bias_mitigation.challenge_status_quo}
+                    />
+                  {:else}
+                    <input
+                      type="checkbox"
+                      checked={displayContext?.instruction.bias_mitigation.challenge_status_quo}
+                      disabled
+                    />
+                  {/if}
                   Challenge Status Quo
                 </label>
               </div>
               <div class="setting-item">
                 <strong>Cultural Sensitivity:</strong>
-                <span>{context.instruction.bias_mitigation.cultural_sensitivity}</span>
+                {#if editMode && editedContext}
+                  <input
+                    type="text"
+                    class="edit-input"
+                    bind:value={editedContext.instruction.bias_mitigation.cultural_sensitivity}
+                    placeholder="e.g., high, medium, context-aware..."
+                  />
+                {:else}
+                  <span>{displayContext?.instruction.bias_mitigation.cultural_sensitivity}</span>
+                {/if}
               </div>
             </div>
 
-            <div class="info-box">
-              <strong>Note:</strong> To edit instructions, modify the personal.json file directly at ~/.dpc/personal.json
-            </div>
+            {#if !editMode}
+              <div class="info-box">
+                <strong>Tip:</strong> Click the 'Edit' button in the header to modify instructions and settings
+              </div>
+            {/if}
           </div>
 
         {:else if selectedTab === 'history'}
@@ -598,6 +748,109 @@
     border-top: 1px solid #e0e0e0;
     display: flex;
     justify-content: flex-end;
+  }
+
+  /* Edit Mode Styles */
+  .header-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin: 0 1rem;
+  }
+
+  .btn {
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .btn-edit {
+    background: #4CAF50;
+    color: white;
+  }
+
+  .btn-edit:hover {
+    background: #45a049;
+  }
+
+  .btn-save {
+    background: #4CAF50;
+    color: white;
+  }
+
+  .btn-save:hover:not(:disabled) {
+    background: #45a049;
+  }
+
+  .btn-cancel {
+    background: #999;
+    color: white;
+  }
+
+  .btn-cancel:hover {
+    background: #777;
+  }
+
+  .save-message {
+    padding: 0.75rem 1.5rem;
+    margin: 0;
+    font-size: 0.9rem;
+  }
+
+  .save-message.success {
+    background: #d4edda;
+    color: #155724;
+    border-bottom: 1px solid #c3e6cb;
+  }
+
+  .save-message.error {
+    background: #f8d7da;
+    color: #721c24;
+    border-bottom: 1px solid #f5c6cb;
+  }
+
+  .edit-input {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.95rem;
+    font-family: inherit;
+    transition: border-color 0.2s;
+  }
+
+  .edit-input:focus {
+    outline: none;
+    border-color: #4CAF50;
+  }
+
+  .edit-textarea {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.95rem;
+    font-family: inherit;
+    resize: vertical;
+    transition: border-color 0.2s;
+  }
+
+  .edit-textarea:focus {
+    outline: none;
+    border-color: #4CAF50;
+  }
+
+  .instruction-edit {
+    margin-top: 0.5rem;
+    min-height: 120px;
   }
 
   .btn-close {

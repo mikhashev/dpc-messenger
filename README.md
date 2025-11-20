@@ -322,7 +322,7 @@ docker-compose -f docker-compose.prod.yml up -d
 - 🔒 End-to-end encryption (DTLS in WebRTC, TLS in Direct)
 - 💾 **Client-side encrypted backups** - AES-256-GCM with PBKDF2 (600k iterations)
 - 🔑 Cryptographic node identities (derived from RSA public keys)
-- 🛡️ Context firewall (.dpc_access) for granular permissions
+- 🛡️ Context firewall (.dpc_access.json) for granular permissions
 - 🔐 JWT authentication with Hub (token blacklisting supported)
 - ✅ No message persistence by default
 - 🔍 Node identity validation (certificates, public keys)

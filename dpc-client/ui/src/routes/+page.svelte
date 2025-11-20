@@ -6,6 +6,7 @@
   import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, availableProviders, peerProviders } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
+  import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import { ask } from '@tauri-apps/plugin-dialog';
 
   console.log("Full D-PC Messenger loading...");
@@ -58,6 +59,7 @@
 
   // Knowledge Architecture UI state
   let showContextViewer: boolean = false;
+  let showFirewallEditor: boolean = false;
   let showCommitDialog: boolean = false;
   let autoKnowledgeDetection: boolean = true;  // Default: enabled
 
@@ -307,6 +309,10 @@
   function loadPersonalContext() {
     sendCommand("get_personal_context");
     showContextViewer = true;
+  }
+
+  function openFirewallEditor() {
+    showFirewallEditor = true;
   }
 
   function handleCommitVote(event: CustomEvent) {
@@ -660,6 +666,10 @@
             📚 View Personal Context
           </button>
 
+          <button class="btn-context" on:click={openFirewallEditor}>
+            🛡️ Firewall Rules
+          </button>
+
           <!-- Auto Knowledge Detection Toggle -->
           <div class="knowledge-toggle">
             <label class="toggle-container">
@@ -999,6 +1009,11 @@
   bind:open={showContextViewer}
   context={$personalContext}
   on:close={() => showContextViewer = false}
+/>
+
+<FirewallEditor
+  bind:open={showFirewallEditor}
+  on:close={() => showFirewallEditor = false}
 />
 
 <!-- Add AI Chat Dialog -->

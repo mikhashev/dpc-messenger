@@ -262,20 +262,26 @@ Guidelines for sharing device context with peers.
 
 #### `default_sharing`
 
-**Rule:** `"By default, only software.os and software.dev_tools should be shared with peers unless explicit firewall allow rules exist. Hardware specifications (GPU, RAM, storage) require explicit authorization via device_context.json:hardware.* = allow rules in .dpc_access file."`
+**Rule:** `"By default, only software.os and software.dev_tools should be shared with peers unless explicit firewall allow rules exist. Hardware specifications (GPU, RAM, storage) require explicit authorization via device_context.json:hardware.* = allow rules in .dpc_access.json file."`
 
 **Purpose:** Privacy-first sharing model.
 
 **Firewall Examples:**
-```ini
-# .dpc_access file
-[node:dpc-node-alice-123]
-device_context.json:hardware.gpu.* = allow  # Share all GPU info
-device_context.json:software.* = allow       # Share all software info
-
-[node:dpc-node-bob-456]
-device_context.json:software.dev_tools.* = allow  # Only dev tools
-device_context.json:hardware.* = deny             # No hardware
+```json
+{
+  "nodes": {
+    "dpc-node-alice-123": {
+      "_comment": "Share all GPU info and software info",
+      "device_context.json:hardware.gpu.*": "allow",
+      "device_context.json:software.*": "allow"
+    },
+    "dpc-node-bob-456": {
+      "_comment": "Only dev tools",
+      "device_context.json:software.dev_tools.*": "allow",
+      "device_context.json:hardware.*": "deny"
+    }
+  }
+}
 ```
 
 ### Update Protocol
@@ -471,25 +477,32 @@ collect_ai_models = false            # Ollama models (default: false, opt-in)
 
 ## Firewall Control
 
-Device context sharing is controlled via `~/.dpc/.dpc_access`:
+Device context sharing is controlled via `~/.dpc/.dpc_access.json`:
 
-```ini
-[node:dpc-node-alice-123]
-# Alice can see all GPU info for compute sharing
-device_context.json:hardware.gpu.* = allow
-device_context.json:hardware.memory.ram_gb = allow
-device_context.json:software.* = allow
-
-[node:dpc-node-bob-456]
-# Bob can only see development environment
-device_context.json:software.dev_tools.* = allow
-device_context.json:software.os.* = allow
-device_context.json:hardware.* = deny
-
-[group:trusted_developers]
-# Share dev environment but not hardware specs
-device_context.json:software.* = allow
-device_context.json:hardware.* = deny
+```json
+{
+  "nodes": {
+    "dpc-node-alice-123": {
+      "_comment": "Alice can see all GPU info for compute sharing",
+      "device_context.json:hardware.gpu.*": "allow",
+      "device_context.json:hardware.memory.ram_gb": "allow",
+      "device_context.json:software.*": "allow"
+    },
+    "dpc-node-bob-456": {
+      "_comment": "Bob can only see development environment",
+      "device_context.json:software.dev_tools.*": "allow",
+      "device_context.json:software.os.*": "allow",
+      "device_context.json:hardware.*": "deny"
+    }
+  },
+  "groups": {
+    "trusted_developers": {
+      "_comment": "Share dev environment but not hardware specs",
+      "device_context.json:software.*": "allow",
+      "device_context.json:hardware.*": "deny"
+    }
+  }
+}
 ```
 
 **Wildcard Rules:**

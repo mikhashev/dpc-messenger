@@ -45,7 +45,7 @@ The backup includes your entire `.dpc` directory:
 ```
 ~/.dpc/
 ├── personal.json        # Your knowledge graph (AI's understanding of you)
-├── .dpc_access          # Social graph (who can access what)
+├── .dpc_access.json          # Social graph (who can access what)
 ├── providers.toml       # AI provider preferences
 ├── node.key             # Cryptographic identity (private key)
 ├── node.crt             # Certificate

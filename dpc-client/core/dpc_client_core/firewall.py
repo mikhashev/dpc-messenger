@@ -1,144 +1,158 @@
 # dpc-client/core/dpc_client_core/firewall.py
 
-import configparser
+import json
 from pathlib import Path
-from typing import List, Dict
+from typing import List, Dict, Tuple, Any
 import fnmatch
+from copy import deepcopy
 
-from dpc_protocol.pcm_core import PersonalContext # For wildcard matching
+from dpc_protocol.pcm_core import PersonalContext  # For wildcard matching
+
 
 class ContextFirewall:
     """
-    Parses and evaluates .dpc_access rules to control access to context data.
+    Parses and evaluates .dpc_access.json rules to control access to context data.
     """
     def __init__(self, access_file_path: Path):
         self.access_file_path = access_file_path
-        self._ensure_file_exists() # Call the new method
-        
-        # We explicitly tell the parser to only use '=' as a delimiter.
-        self.rules = configparser.ConfigParser(
-            allow_no_value=True,
-            delimiters=('=',) 
-        )
+        self._ensure_file_exists()
+        self._load_rules()
 
-        self.rules.optionxform = str # Make parser case-sensitive
-        self.rules.read(access_file_path)
+    def _load_rules(self):
+        """Load and parse rules from JSON file."""
+        try:
+            rules_text = self.access_file_path.read_text()
+            self.rules: Dict[str, Any] = json.loads(rules_text)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in firewall rules: {e}")
+        except Exception as e:
+            raise ValueError(f"Failed to load firewall rules: {e}")
 
         # Parse file groups (aliases for groups of files)
-        self.file_groups: Dict[str, List[str]] = {}
-        if self.rules.has_section('file_groups'):
-            for group_name, files_str in self.rules.items('file_groups'):
-                self.file_groups[group_name] = [f.strip() for f in files_str.split(',')]
+        self.file_groups: Dict[str, List[str]] = self.rules.get('file_groups', {})
 
         # Parse node groups (which nodes belong to which groups)
-        # Format: colleagues = dpc-node-alice-123, dpc-node-bob-456
-        self.node_groups: Dict[str, List[str]] = {}
-        if self.rules.has_section('node_groups'):
-            for group_name, nodes_str in self.rules.items('node_groups'):
-                self.node_groups[group_name] = [n.strip() for n in nodes_str.split(',')]
+        self.node_groups: Dict[str, List[str]] = self.rules.get('node_groups', {})
 
         # Parse compute sharing settings
         self._parse_compute_settings()
 
     def _parse_compute_settings(self):
-        """Parse compute sharing settings from the config file."""
-        self.compute_enabled = False
-        self.compute_allowed_nodes: List[str] = []
-        self.compute_allowed_groups: List[str] = []
-        self.compute_allowed_models: List[str] = []
-
-        if self.rules.has_section('compute'):
-            # Check if compute sharing is enabled
-            if self.rules.has_option('compute', 'enabled'):
-                self.compute_enabled = self.rules.getboolean('compute', 'enabled')
-
-            # Parse allowed nodes
-            if self.rules.has_option('compute', 'allow_nodes'):
-                nodes_str = self.rules.get('compute', 'allow_nodes')
-                self.compute_allowed_nodes = [n.strip() for n in nodes_str.split(',') if n.strip()]
-
-            # Parse allowed groups
-            if self.rules.has_option('compute', 'allow_groups'):
-                groups_str = self.rules.get('compute', 'allow_groups')
-                self.compute_allowed_groups = [g.strip() for g in groups_str.split(',') if g.strip()]
-
-            # Parse allowed models (empty = all models allowed)
-            if self.rules.has_option('compute', 'allowed_models'):
-                models_str = self.rules.get('compute', 'allowed_models')
-                self.compute_allowed_models = [m.strip() for m in models_str.split(',') if m.strip()]
+        """Parse compute sharing settings from the config."""
+        compute = self.rules.get('compute', {})
+        self.compute_enabled = compute.get('enabled', False)
+        self.compute_allowed_nodes: List[str] = compute.get('allow_nodes', [])
+        self.compute_allowed_groups: List[str] = compute.get('allow_groups', [])
+        self.compute_allowed_models: List[str] = compute.get('allowed_models', [])
 
     def _ensure_file_exists(self):
-        """Creates a default, secure .dpc_access file if one doesn't exist."""
+        """Creates a default, secure .dpc_access.json file if one doesn't exist."""
         if not self.access_file_path.exists():
             print(f"Warning: Access control file not found at {self.access_file_path}.")
             print("Creating a default, secure template...")
 
             self.access_file_path.parent.mkdir(parents=True, exist_ok=True)
 
-            default_rules = """
-# D-PC Access Control File
-# This file controls who can access your context data and compute resources.
-# By default, all access is denied.
+            default_rules = {
+                "_comment": "D-PC Access Control File - This file controls who can access your context data and compute resources. By default, all access is denied.",
+                "hub": {
+                    "personal.json:profile.name": "allow",
+                    "personal.json:profile.description": "allow"
+                },
+                "node_groups": {
+                    "_comment": "Define which nodes belong to which groups",
+                    "_example_colleagues": ["dpc-node-alice-123", "dpc-node-bob-456"],
+                    "_example_friends": ["dpc-node-charlie-789"]
+                },
+                "file_groups": {
+                    "_comment": "Define aliases for groups of files",
+                    "_example_work": ["work_*.json"],
+                    "_example_personal": ["personal.json"]
+                },
+                "compute": {
+                    "_comment": "Compute sharing settings (Remote Inference)",
+                    "enabled": False,
+                    "allow_groups": [],
+                    "allow_nodes": [],
+                    "allowed_models": []
+                },
+                "nodes": {
+                    "_comment": "Access rules for specific nodes",
+                    "_example_dpc-node-friend-id-here": {
+                        "personal.json:profile.*": "allow",
+                        "personal.json:name": "allow",
+                        "personal.json:bio": "allow"
+                    }
+                },
+                "groups": {
+                    "_comment": "Access rules for groups of nodes",
+                    "_example_colleagues": {
+                        "work_main.json:availability": "allow",
+                        "work_main.json:skills.*": "allow"
+                    }
+                },
+                "ai_scopes": {
+                    "_comment": "Access rules for AI scopes",
+                    "_example_work": {
+                        "@work:*": "allow"
+                    }
+                },
+                "device_sharing": {
+                    "_comment": "Device context sharing rules",
+                    "_example_basic": {
+                        "device_context.json:hardware.gpu.*": "allow"
+                    }
+                }
+            }
 
-[hub]
-# Allow the hub to see your name and description for discovery.
-personal.json:profile.name = allow
-personal.json:profile.description = allow
-
-# Define node groups (which nodes belong to which groups)
-# [node_groups]
-# colleagues = dpc-node-alice-123, dpc-node-bob-456
-# friends = dpc-node-charlie-789
-
-# Define access rules for groups
-# [group:colleagues]
-# work_main.json:availability = allow
-# work_main.json:skills.* = allow
-
-# Compute sharing settings (Remote Inference)
-# [compute]
-# enabled = false
-# allow_groups = friends
-# allow_nodes = dpc-node-alice-123
-# allowed_models = llama3.1:8b, llama3-70b
-
-# Add rules for specific nodes below.
-# Example for a friend:
-# [node:dpc-node-friend-id-here]
-# personal.json:profile.* = allow
-# personal.json:name = allow
-# personal.json:bio = allow
-# personal.json:skills = allow
-"""
-
-            self.access_file_path.write_text(default_rules)
+            self.access_file_path.write_text(json.dumps(default_rules, indent=2))
             print(f"Default access control file created at {self.access_file_path}")
 
-    def _get_rule_for_resource(self, section: str, resource_path: str) -> str | None:
+    def _get_rule_for_resource(self, section_type: str, section_key: str, resource_path: str) -> str | None:
         """
         Finds the most specific rule for a given resource in a section,
         handling file groups and wildcards correctly.
+
+        Args:
+            section_type: Type of section ('hub', 'nodes', 'groups', 'ai_scopes', 'device_sharing')
+            section_key: Key within the section (e.g., node_id, group_name, or empty for hub)
+            resource_path: Resource path to check (e.g., "personal.json:profile.name")
         """
-        if not self.rules.has_section(section):
+        # Get the rules dict for this section
+        if section_type == 'hub':
+            section_rules = self.rules.get('hub', {})
+        elif section_type == 'nodes':
+            section_rules = self.rules.get('nodes', {}).get(section_key, {})
+        elif section_type == 'groups':
+            section_rules = self.rules.get('groups', {}).get(section_key, {})
+        elif section_type == 'ai_scopes':
+            section_rules = self.rules.get('ai_scopes', {}).get(section_key, {})
+        elif section_type == 'device_sharing':
+            section_rules = self.rules.get('device_sharing', {}).get(section_key, {})
+        else:
+            return None
+
+        if not section_rules:
             return None
 
         parts = resource_path.split(':', 1)
         if len(parts) != 2:
-            return None # Invalid resource path format
-        
-        target_filename, target_json_path = parts
+            return None  # Invalid resource path format
 
-        # Get all rules for the section
-        section_rules = self.rules.items(section)
+        target_filename, target_json_path = parts
 
         best_match_rule = None
         best_match_specificity = -1
 
-        for pattern, value in section_rules:
+        for pattern, value in section_rules.items():
+            # Skip comment fields
+            if pattern.startswith('_'):
+                continue
+
             pattern_parts = pattern.split(':', 1)
             if len(pattern_parts) != 2:
                 continue
-            
+
             file_pattern, path_pattern = pattern_parts
 
             # 1. Check if the file pattern matches
@@ -172,6 +186,9 @@ personal.json:profile.description = allow
         """
         groups = []
         for group_name, node_list in self.node_groups.items():
+            # Skip comment fields
+            if group_name.startswith('_'):
+                continue
             if node_id in node_list:
                 groups.append(group_name)
         return groups
@@ -179,32 +196,46 @@ personal.json:profile.description = allow
     def can_access(self, requester_identity: str, resource_path: str) -> bool:
         """
         Checks if a requester has access to a specific resource path.
-        The order of precedence is: Node > Group > Hub / AI Scope > Default (deny).
+        The order of precedence is: Node > Group > Hub / AI Scope / Device Sharing > Default (deny).
         """
-        # 1. Check for a specific node rule (e.g., [node:dpc-node-boris-xyz])
-        node_section = f"node:{requester_identity}"
-        rule = self._get_rule_for_resource(node_section, resource_path)
-        if rule:
-            return rule.lower() == 'allow'
+        # 1. Check for a specific node rule
+        if requester_identity.startswith('dpc-node-'):
+            rule = self._get_rule_for_resource('nodes', requester_identity, resource_path)
+            if rule:
+                return rule.lower() == 'allow'
 
-        # 2. Check for group rules (e.g., [group:colleagues])
+        # 2. Check for group rules
         # Get all groups this node belongs to
-        groups = self._get_groups_for_node(requester_identity)
-        for group_name in groups:
-            group_section = f"group:{group_name}"
-            rule = self._get_rule_for_resource(group_section, resource_path)
+        if requester_identity.startswith('dpc-node-'):
+            groups = self._get_groups_for_node(requester_identity)
+            for group_name in groups:
+                rule = self._get_rule_for_resource('groups', group_name, resource_path)
+                if rule:
+                    return rule.lower() == 'allow'
+
+        # 3. Check for hub rule
+        if requester_identity == "hub":
+            rule = self._get_rule_for_resource('hub', '', resource_path)
             if rule:
                 return rule.lower() == 'allow'
 
-        # 3. Check for a hub rule or AI scope rule
-        if requester_identity == "hub" or requester_identity.startswith("ai_scope:"):
-            rule = self._get_rule_for_resource(requester_identity, resource_path)
+        # 4. Check for AI scope rule
+        if requester_identity.startswith("ai_scope:"):
+            scope_name = requester_identity[9:]  # Remove "ai_scope:" prefix
+            rule = self._get_rule_for_resource('ai_scopes', scope_name, resource_path)
             if rule:
                 return rule.lower() == 'allow'
 
-        # 4. Default to deny if no specific allow rule is found
+        # 5. Check for device sharing rule
+        if requester_identity.startswith("device_sharing:"):
+            sharing_scope = requester_identity[15:]  # Remove "device_sharing:" prefix
+            rule = self._get_rule_for_resource('device_sharing', sharing_scope, resource_path)
+            if rule:
+                return rule.lower() == 'allow'
+
+        # 6. Default to deny if no specific allow rule is found
         return False
-    
+
     def filter_context_for_peer(self, context: PersonalContext, peer_id: str, query: str = None) -> PersonalContext:
         """
         Filters a PersonalContext based on firewall rules for a specific peer.
@@ -219,7 +250,6 @@ personal.json:profile.description = allow
             Filtered PersonalContext with only allowed fields
         """
         from dataclasses import asdict, fields
-        from copy import deepcopy
 
         # Convert context to dict for manipulation
         context_dict = asdict(context)
@@ -256,7 +286,6 @@ personal.json:profile.description = allow
                         filtered_dict[field_name] = None
 
         # Create new PersonalContext from filtered dict
-        from dpc_protocol.pcm_core import PersonalContext
         return PersonalContext(**filtered_dict)
 
     def can_request_inference(self, requester_node_id: str, model: str = None) -> bool:
@@ -326,8 +355,6 @@ personal.json:profile.description = allow
         Returns:
             Filtered device context dict with only allowed fields
         """
-        from copy import deepcopy
-
         def filter_nested_dict(data: Dict, path_prefix: str) -> Dict:
             """Recursively filter nested dict based on firewall rules."""
             if not isinstance(data, dict):
@@ -392,41 +419,222 @@ personal.json:profile.description = allow
 
         return filtered_context
 
+    @staticmethod
+    def validate_config(config_dict: Dict[str, Any]) -> Tuple[bool, List[str]]:
+        """
+        Validate firewall configuration without applying it.
+
+        Args:
+            config_dict: The JSON configuration dict to validate
+
+        Returns:
+            Tuple of (is_valid, list of error messages)
+        """
+        errors = []
+
+        try:
+            # Validate top-level structure
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', '_comment']
+
+            for key in config_dict.keys():
+                if key not in valid_top_level_keys:
+                    errors.append(f"Unknown top-level key: '{key}'")
+
+            # Validate hub section
+            if 'hub' in config_dict:
+                if not isinstance(config_dict['hub'], dict):
+                    errors.append("'hub' section must be a dictionary")
+                else:
+                    for resource_path, action in config_dict['hub'].items():
+                        if resource_path.startswith('_'):
+                            continue  # Skip comments
+                        if action not in ['allow', 'deny']:
+                            errors.append(f"Invalid action in hub: '{resource_path} = {action}' (should be 'allow' or 'deny')")
+
+            # Validate node_groups section
+            if 'node_groups' in config_dict:
+                if not isinstance(config_dict['node_groups'], dict):
+                    errors.append("'node_groups' section must be a dictionary")
+                else:
+                    for group_name, node_list in config_dict['node_groups'].items():
+                        if group_name.startswith('_'):
+                            continue  # Skip comments
+                        if not isinstance(node_list, list):
+                            errors.append(f"Node group '{group_name}' must be a list of node IDs")
+                        else:
+                            for node_id in node_list:
+                                if not node_id.startswith('dpc-node-'):
+                                    errors.append(f"Invalid node ID in group '{group_name}': '{node_id}' (should start with 'dpc-node-')")
+
+            # Validate file_groups section
+            if 'file_groups' in config_dict:
+                if not isinstance(config_dict['file_groups'], dict):
+                    errors.append("'file_groups' section must be a dictionary")
+                else:
+                    for group_name, file_list in config_dict['file_groups'].items():
+                        if group_name.startswith('_'):
+                            continue  # Skip comments
+                        if not isinstance(file_list, list):
+                            errors.append(f"File group '{group_name}' must be a list of file patterns")
+
+            # Validate compute section
+            if 'compute' in config_dict:
+                compute = config_dict['compute']
+                if not isinstance(compute, dict):
+                    errors.append("'compute' section must be a dictionary")
+                else:
+                    if 'enabled' in compute and not isinstance(compute['enabled'], bool):
+                        errors.append("'compute.enabled' must be a boolean (true or false)")
+
+                    if 'allow_nodes' in compute and not isinstance(compute['allow_nodes'], list):
+                        errors.append("'compute.allow_nodes' must be a list")
+
+                    if 'allow_groups' in compute and not isinstance(compute['allow_groups'], list):
+                        errors.append("'compute.allow_groups' must be a list")
+
+                    if 'allowed_models' in compute and not isinstance(compute['allowed_models'], list):
+                        errors.append("'compute.allowed_models' must be a list")
+
+            # Validate nodes section
+            if 'nodes' in config_dict:
+                if not isinstance(config_dict['nodes'], dict):
+                    errors.append("'nodes' section must be a dictionary")
+                else:
+                    for node_id, rules in config_dict['nodes'].items():
+                        if node_id.startswith('_'):
+                            continue  # Skip comments
+                        if not node_id.startswith('dpc-node-'):
+                            errors.append(f"Invalid node ID: '{node_id}' (should start with 'dpc-node-')")
+                        if not isinstance(rules, dict):
+                            errors.append(f"Rules for node '{node_id}' must be a dictionary")
+                        else:
+                            for resource_path, action in rules.items():
+                                if action not in ['allow', 'deny']:
+                                    errors.append(f"Invalid action for node '{node_id}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
+
+            # Validate groups section
+            if 'groups' in config_dict:
+                if not isinstance(config_dict['groups'], dict):
+                    errors.append("'groups' section must be a dictionary")
+                else:
+                    for group_name, rules in config_dict['groups'].items():
+                        if group_name.startswith('_'):
+                            continue  # Skip comments
+                        if not isinstance(rules, dict):
+                            errors.append(f"Rules for group '{group_name}' must be a dictionary")
+                        else:
+                            for resource_path, action in rules.items():
+                                if action not in ['allow', 'deny']:
+                                    errors.append(f"Invalid action for group '{group_name}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
+
+            # Validate ai_scopes section
+            if 'ai_scopes' in config_dict:
+                if not isinstance(config_dict['ai_scopes'], dict):
+                    errors.append("'ai_scopes' section must be a dictionary")
+                else:
+                    for scope_name, rules in config_dict['ai_scopes'].items():
+                        if scope_name.startswith('_'):
+                            continue  # Skip comments
+                        if not isinstance(rules, dict):
+                            errors.append(f"Rules for AI scope '{scope_name}' must be a dictionary")
+                        else:
+                            for resource_path, action in rules.items():
+                                if action not in ['allow', 'deny']:
+                                    errors.append(f"Invalid action for AI scope '{scope_name}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
+
+            # Validate device_sharing section
+            if 'device_sharing' in config_dict:
+                if not isinstance(config_dict['device_sharing'], dict):
+                    errors.append("'device_sharing' section must be a dictionary")
+                else:
+                    for sharing_scope, rules in config_dict['device_sharing'].items():
+                        if sharing_scope.startswith('_'):
+                            continue  # Skip comments
+                        if not isinstance(rules, dict):
+                            errors.append(f"Rules for device sharing scope '{sharing_scope}' must be a dictionary")
+                        else:
+                            for resource_path, action in rules.items():
+                                if action not in ['allow', 'deny']:
+                                    errors.append(f"Invalid action for device sharing scope '{sharing_scope}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
+
+        except Exception as e:
+            errors.append(f"Validation error: {str(e)}")
+
+        return (len(errors) == 0, errors)
+
+    def reload(self) -> Tuple[bool, str]:
+        """
+        Reload firewall rules from disk.
+
+        Returns:
+            Tuple of (success, message)
+        """
+        try:
+            # Validate the file first
+            config_text = self.access_file_path.read_text()
+            try:
+                config_dict = json.loads(config_text)
+            except json.JSONDecodeError as e:
+                return (False, f"Firewall reload failed - invalid JSON: {str(e)}")
+
+            is_valid, errors = self.validate_config(config_dict)
+
+            if not is_valid:
+                error_msg = "Firewall reload failed - validation errors:\n" + "\n".join(errors)
+                return (False, error_msg)
+
+            # Re-load the rules
+            self._load_rules()
+
+            return (True, "Firewall rules reloaded successfully")
+
+        except Exception as e:
+            return (False, f"Firewall reload failed: {str(e)}")
+
+
 # --- Self-testing block ---
 if __name__ == '__main__':
-    dummy_rules = """
-[file_groups]
-    work = work_*.json
-    personal = personal.json
+    dummy_rules = {
+        "file_groups": {
+            "work": ["work_*.json"],
+            "personal": ["personal.json"]
+        },
+        "node_groups": {
+            "colleagues": ["dpc-node-alice-123", "dpc-node-bob-456"],
+            "friends": ["dpc-node-boris-xyz"]
+        },
+        "hub": {
+            "personal.json:profile.name": "allow",
+            "work_main.json:skills.python": "allow"
+        },
+        "ai_scopes": {
+            "work": {
+                "@work:*": "allow",
+                "@personal:profile.*": "deny"
+            }
+        },
+        "groups": {
+            "colleagues": {
+                "work_main.json:availability": "allow",
+                "work_main.json:skills.*": "allow"
+            }
+        },
+        "nodes": {
+            "dpc-node-boris-xyz": {
+                "personal.json:*": "allow",
+                "work_main.json:public_summary": "allow",
+                "work_main.json:internal_notes": "deny"
+            }
+        }
+    }
 
-[node_groups]
-    colleagues = dpc-node-alice-123, dpc-node-bob-456
-    friends = dpc-node-boris-xyz
-
-[hub]
-    personal.json:profile.name = allow
-    work_main.json:skills.python = allow
-
-[ai_scope:work]
-    @work:* = allow
-    @personal:profile.* = deny
-
-[group:colleagues]
-    work_main.json:availability = allow
-    work_main.json:skills.* = allow
-
-[node:dpc-node-boris-xyz]
-    personal.json:* = allow
-    work_main.json:public_summary = allow
-    work_main.json:internal_notes = deny
-"""
-    test_file = Path("test_access.ini")
-    test_file.write_text(dummy_rules)
+    test_file = Path("test_access.json")
+    test_file.write_text(json.dumps(dummy_rules, indent=2))
 
     firewall = ContextFirewall(test_file)
 
-    print("--- Testing Firewall Logic (v2) ---")
-    
+    print("--- Testing Firewall Logic (JSON version) ---")
+
     # Test Hub access
     assert firewall.can_access("hub", "personal.json:profile.name") == True
     assert firewall.can_access("hub", "personal.json:profile.age") == False
@@ -435,16 +643,16 @@ if __name__ == '__main__':
     # Test AI Scope access
     assert firewall.can_access("ai_scope:work", "work_main.json:availability") == True
     assert firewall.can_access("ai_scope:work", "work_project_alpha.json:details") == True
-    assert firewall.can_access("ai_scope:work", "personal.json:profile.name") == False # Denied by specific rule
+    assert firewall.can_access("ai_scope:work", "personal.json:profile.name") == False  # Denied by specific rule
     print("[PASS] AI Scope tests passed.")
 
     # Test Node access (specificity)
     assert firewall.can_access("dpc-node-boris-xyz", "personal.json:profile.name") == True
     assert firewall.can_access("dpc-node-boris-xyz", "work_main.json:public_summary") == True
-    assert firewall.can_access("dpc-node-boris-xyz", "work_main.json:internal_notes") == False # Denied by specific rule
+    assert firewall.can_access("dpc-node-boris-xyz", "work_main.json:internal_notes") == False  # Denied by specific rule
     print("[PASS] Node tests passed.")
 
-    # Test Group access (NEW!)
+    # Test Group access
     assert firewall.can_access("dpc-node-alice-123", "work_main.json:availability") == True
     assert firewall.can_access("dpc-node-alice-123", "work_main.json:skills.python") == True
     assert firewall.can_access("dpc-node-bob-456", "work_main.json:skills.javascript") == True
