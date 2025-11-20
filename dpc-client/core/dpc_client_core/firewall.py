@@ -44,6 +44,10 @@ class ContextFirewall:
         self.compute_allowed_nodes: List[str] = compute.get('allow_nodes', [])
         self.compute_allowed_groups: List[str] = compute.get('allow_groups', [])
         self.compute_allowed_models: List[str] = compute.get('allowed_models', [])
+        print(f"[Firewall] Compute sharing settings updated: enabled={self.compute_enabled}, "
+              f"allowed_nodes={len(self.compute_allowed_nodes)}, "
+              f"allowed_groups={len(self.compute_allowed_groups)}, "
+              f"allowed_models={len(self.compute_allowed_models)}")
 
     def _ensure_file_exists(self):
         """Creates a default, secure .dpc_access.json file if one doesn't exist."""
@@ -584,7 +588,9 @@ class ContextFirewall:
                 return (False, error_msg)
 
             # Re-load the rules
+            print("[Firewall] Reloading firewall rules from disk...")
             self._load_rules()
+            print("[Firewall] Firewall rules reloaded successfully")
 
             return (True, "Firewall rules reloaded successfully")
 

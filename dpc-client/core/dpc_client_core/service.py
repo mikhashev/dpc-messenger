@@ -806,6 +806,12 @@ class CoreService:
             # Reload in P2PManager if it exists
             if hasattr(self, 'p2p_manager') and self.p2p_manager:
                 self.p2p_manager.local_context = current
+                # Also update display name cache for HELLO messages
+                if current.profile and current.profile.name:
+                    self.p2p_manager.set_display_name(current.profile.name)
+                    # Notify all connected peers of the name change
+                    print("[PersonalContext] Notifying connected peers of name change...")
+                    await self._notify_peers_of_name_change(current.profile.name)
 
             # Emit event to UI
             await self.local_api.broadcast_event("personal_context_updated", {
@@ -840,6 +846,12 @@ class CoreService:
             # Update in P2PManager
             if hasattr(self, 'p2p_manager') and self.p2p_manager:
                 self.p2p_manager.local_context = context
+                # Also update display name cache for HELLO messages
+                if context.profile and context.profile.name:
+                    self.p2p_manager.set_display_name(context.profile.name)
+                    # Notify all connected peers of the name change
+                    print("[PersonalContext] Notifying connected peers of name change...")
+                    await self._notify_peers_of_name_change(context.profile.name)
 
             # Emit event to UI
             await self.local_api.broadcast_event("personal_context_reloaded", {
@@ -916,6 +928,10 @@ class CoreService:
             success, message = self.firewall.reload()
 
             if success:
+                # Notify all connected peers of updated providers (compute sharing settings may have changed)
+                print("[Firewall] Notifying connected peers of provider changes...")
+                await self._notify_peers_of_provider_changes()
+
                 # Emit event to UI
                 await self.local_api.broadcast_event("firewall_rules_updated", {
                     "message": message
@@ -952,6 +968,10 @@ class CoreService:
             success, message = self.firewall.reload()
 
             if success:
+                # Notify all connected peers of updated providers
+                print("[Firewall] Notifying connected peers of provider changes...")
+                await self._notify_peers_of_provider_changes()
+
                 # Emit event to UI
                 await self.local_api.broadcast_event("firewall_reloaded", {
                     "message": message
@@ -1514,6 +1534,69 @@ class CoreService:
             "node_id": peer_id,
             "providers": providers
         })
+
+    async def _notify_peers_of_name_change(self, new_name: str):
+        """
+        Notify all connected peers of name change (e.g., after personal context edit).
+        Sends HELLO message to each peer so they can update their cached display name.
+        """
+        from dpc_protocol.protocol import create_hello_message
+
+        connected_peers = list(self.p2p_manager.peers.keys())
+        if not connected_peers:
+            print("  - No connected peers to notify")
+            return
+
+        for peer_id in connected_peers:
+            try:
+                # Send HELLO message with updated name
+                hello_msg = create_hello_message(self.p2p_manager.node_id, new_name)
+                await self.p2p_manager.send_message_to_peer(peer_id, hello_msg)
+                print(f"  - Notified {peer_id} of name change: {new_name}")
+            except Exception as e:
+                print(f"  - Error notifying {peer_id} of name change: {e}")
+
+    async def _notify_peers_of_provider_changes(self):
+        """
+        Notify all connected peers of provider changes (e.g., after firewall settings change).
+        Sends updated PROVIDERS_RESPONSE to each peer so they can update their cached providers list.
+        """
+        from dpc_protocol.protocol import create_providers_response
+
+        connected_peers = list(self.p2p_manager.peers.keys())
+        if not connected_peers:
+            print("  - No connected peers to notify")
+            return
+
+        for peer_id in connected_peers:
+            try:
+                # Check if compute sharing is enabled and peer is authorized
+                if not self.firewall.can_request_inference(peer_id):
+                    # Send empty provider list (access was revoked or never granted)
+                    response = create_providers_response([])
+                    print(f"  - Notifying {peer_id}: access denied, sending empty providers list")
+                else:
+                    # Get all providers
+                    all_providers = self.llm_manager.get_available_providers()
+
+                    # Filter by allowed models if specified
+                    allowed_models = self.firewall.compute_allowed_models
+                    if allowed_models:
+                        filtered_providers = [
+                            p for p in all_providers
+                            if p["model"] in allowed_models
+                        ]
+                    else:
+                        filtered_providers = all_providers
+
+                    response = create_providers_response(filtered_providers)
+                    print(f"  - Notifying {peer_id}: sending {len(filtered_providers)} providers")
+
+                # Send the updated providers response
+                await self.p2p_manager.send_message_to_peer(peer_id, response)
+
+            except Exception as e:
+                print(f"  - Error notifying {peer_id} of provider changes: {e}")
 
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """
