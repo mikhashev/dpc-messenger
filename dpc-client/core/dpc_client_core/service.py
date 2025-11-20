@@ -1564,39 +1564,63 @@ class CoreService:
         from dpc_protocol.protocol import create_providers_response
 
         connected_peers = list(self.p2p_manager.peers.keys())
+        print(f"  - Found {len(connected_peers)} connected peer(s) to notify")
+
         if not connected_peers:
             print("  - No connected peers to notify")
             return
 
         for peer_id in connected_peers:
+            print(f"  - Processing notification for {peer_id}...")
             try:
                 # Check if compute sharing is enabled and peer is authorized
-                if not self.firewall.can_request_inference(peer_id):
+                can_access = self.firewall.can_request_inference(peer_id)
+                print(f"  - Firewall check for {peer_id}: can_access={can_access}")
+
+                if not can_access:
                     # Send empty provider list (access was revoked or never granted)
                     response = create_providers_response([])
                     print(f"  - Notifying {peer_id}: access denied, sending empty providers list")
                 else:
-                    # Get all providers
-                    all_providers = self.llm_manager.get_available_providers()
+                    # Build provider list (same as _handle_get_providers_request)
+                    all_providers = []
+                    all_models = []
 
-                    # Filter by allowed models if specified
-                    allowed_models = self.firewall.compute_allowed_models
-                    if allowed_models:
-                        filtered_providers = [
-                            p for p in all_providers
-                            if p["model"] in allowed_models
-                        ]
-                    else:
-                        filtered_providers = all_providers
+                    for alias, provider in self.llm_manager.providers.items():
+                        model = provider.model
+                        provider_type = provider.config.get("type", "unknown")
 
+                        all_providers.append({
+                            "alias": alias,
+                            "model": model,
+                            "type": provider_type
+                        })
+                        all_models.append(model)
+
+                    print(f"  - Found {len(all_providers)} total providers")
+
+                    # Filter providers based on firewall allowed_models setting
+                    allowed_models = self.firewall.get_available_models_for_peer(peer_id, all_models)
+
+                    # Only include providers with allowed models
+                    filtered_providers = [
+                        p for p in all_providers
+                        if p["model"] in allowed_models
+                    ]
+
+                    print(f"  - Filtered to {len(filtered_providers)} providers (from {len(all_providers)} total)")
                     response = create_providers_response(filtered_providers)
                     print(f"  - Notifying {peer_id}: sending {len(filtered_providers)} providers")
 
                 # Send the updated providers response
+                print(f"  - Sending PROVIDERS_RESPONSE to {peer_id}...")
                 await self.p2p_manager.send_message_to_peer(peer_id, response)
+                print(f"  - Successfully sent providers to {peer_id}")
 
             except Exception as e:
                 print(f"  - Error notifying {peer_id} of provider changes: {e}")
+                import traceback
+                traceback.print_exc()
 
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """

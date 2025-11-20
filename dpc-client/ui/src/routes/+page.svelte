@@ -112,19 +112,33 @@
     }, 100);
   }
   
-  function getPeerDisplayName(peerId: string): string {
+  // Reactive derived value that maps peer IDs to display names
+  // This ensures Svelte tracks changes to peer_info properly
+  $: peerDisplayNames = (() => {
     if (!$nodeStatus || !$nodeStatus.peer_info) {
-      return peerId.slice(0, 20) + '...';
+      console.log('[PeerNames] No nodeStatus or peer_info');
+      return new Map();
     }
-
-    const peerInfo = $nodeStatus.peer_info.find((p: { node_id: string; name?: string }) => p.node_id === peerId);
-    if (peerInfo && peerInfo.name) {
-      // Show: "Name | dpc-node-abc123..."
-      return `${peerInfo.name} | ${peerId.slice(0, 20)}...`;
+    console.log('[PeerNames] Building display names map from peer_info:', $nodeStatus.peer_info);
+    const names = new Map<string, string>();
+    for (const peer of $nodeStatus.peer_info) {
+      if (peer.name) {
+        const displayName = `${peer.name} | ${peer.node_id.slice(0, 20)}...`;
+        console.log(`[PeerNames] ${peer.node_id.slice(0, 16)}... -> ${displayName}`);
+        names.set(peer.node_id, displayName);
+      } else {
+        const displayName = `${peer.node_id.slice(0, 20)}...`;
+        console.log(`[PeerNames] ${peer.node_id.slice(0, 16)}... -> ${displayName} (no name)`);
+        names.set(peer.node_id, displayName);
+      }
     }
+    console.log('[PeerNames] Final map size:', names.size);
+    return names;
+  })();
 
-    // Just show truncated node_id if no name
-    return peerId.slice(0, 20) + '...';
+  function getPeerDisplayName(peerId: string): string {
+    // Use the reactive map, with fallback for peers not in peer_info yet
+    return peerDisplayNames.get(peerId) || `${peerId.slice(0, 20)}...`;
   }
   
   function getAIModelDisplay(): string {
@@ -771,7 +785,8 @@
 
             <!-- P2P Peer Chats -->
             {#if $nodeStatus.p2p_peers && $nodeStatus.p2p_peers.length > 0}
-              {#each $nodeStatus.p2p_peers as peerId (peerId)}
+              {#each $nodeStatus.p2p_peers as peerId (`${peerId}-${peerDisplayNames.get(peerId)}`)}
+
                 <li class="peer-item">
                   <button
                     type="button"
@@ -1292,6 +1307,7 @@
   .btn-context {
     width: 100%;
     padding: 0.75rem 1rem;
+    margin-bottom: 0.5rem;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     color: white;
     border: none;

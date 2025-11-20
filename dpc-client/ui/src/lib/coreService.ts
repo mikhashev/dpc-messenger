@@ -143,6 +143,9 @@ export function connectToCoreService() {
 
                 if (message.event === "status_update" ||
                     (message.id && message.command === "get_status" && message.status === "OK")) {
+                    if (message.event === "status_update" && message.payload.peer_info) {
+                        console.log('[StatusUpdate] Received status_update with peer_info:', message.payload.peer_info);
+                    }
                     nodeStatus.set({ ...message.payload });
                 } else if (message.event === "new_p2p_message") {
                     p2pMessages.set(message.payload);
