@@ -112,7 +112,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Updated with Phase 1-6 implementation details
 
 ### Fixed
-- N/A (no bug fixes in this release)
+
+**Phase 1: Instructions Editor**
+- Fixed "Failed to load instructions: undefined" error on first panel open
+- Root cause: InstructionsEditor.svelte incorrectly accessed `result.payload.status` instead of `result.status`
+- Fix: Updated loadInstructions and saveChanges to match coreService.ts promise resolution pattern (resolves with payload only)
+- Commit: d09a41b
+
+**Phase 2: Token Counter**
+- Fixed token counter not appearing after AI messages (only showed at 80% warning)
+- Root cause: Frontend only updated tokenUsageMap on warning events, not on every AI response
+- Fix: Extract tokens_used and token_limit from execute_ai_query responses immediately
+- Also fixed: Missing tiktoken dependency in Poetry environment (was in pyproject.toml but not installed)
+- Commit: c382b26
+
+**Phase 6: Context Window for Claude 4.5 Models**
+- Fixed token counter showing 247% warning due to incorrect context window
+- Root cause: MODEL_CONTEXT_WINDOWS missing shorthand model names (claude-haiku-4-5, claude-opus-4-5)
+- Fix: Added Claude 4.5 shorthand model names with 200K token context windows
+- Commit: bb7c725
 
 ### Automated Testing Status
 
