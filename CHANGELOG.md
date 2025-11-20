@@ -125,6 +125,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Extract tokens_used and token_limit from execute_ai_query responses immediately
 - Also fixed: Missing tiktoken dependency in Poetry environment (was in pyproject.toml but not installed)
 - Commit: c382b26
+- Fixed token counter not resetting when "New Chat" button pressed
+- Root cause: handleNewChat cleared chat history but didn't delete token usage from map
+- Fix: Added tokenUsageMap.delete(chatId) to reset counter for new conversations
+- Commit: 093f5d0
 
 **Phase 6: Context Window for Claude 4.5 Models**
 - Fixed token counter showing 247% warning due to incorrect context window
