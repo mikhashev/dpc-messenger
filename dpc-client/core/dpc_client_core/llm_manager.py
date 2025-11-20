@@ -136,6 +136,8 @@ MODEL_CONTEXT_WINDOWS = {
     "claude-3-haiku-20240307": 200000,
     "claude-3-5-sonnet-20240620": 200000,
     "claude-sonnet-4-5-20250929": 200000,
+    "claude-haiku-4-5": 200000,  # Claude Haiku 4.5 (shorthand model name)
+    "claude-opus-4-5": 200000,   # Claude Opus 4.5 (shorthand model name)
 
     # Default fallback
     "default": 4096
