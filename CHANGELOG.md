@@ -61,12 +61,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 #### Phase 6: Provider-Specific Context Window Overrides
 - Enhanced `get_context_window()` method with priority system:
-  1. Check `context_window` field in `providers.toml` (highest priority)
+  1. Check `context_window` field in `providers.json` (highest priority)
   2. Check hardcoded `MODEL_CONTEXT_WINDOWS` dict
   3. Fall back to default (4096 tokens)
-- Updated default `providers.toml` template with documentation and example
+- Updated default `providers.json` template with documentation and example
 - **Use case**: Override context windows for custom models or provider-specific limits
 - Example: `context_window = 131072` for custom Llama fine-tune
+
+#### Phase 7: Configuration System Overhaul (TOML → JSON)
+- **Migrated all configuration files to JSON format** for consistency:
+  - `providers.toml` → `providers.json` (automatic migration with `.backup` files)
+  - `.dpc_access.json` → `privacy_rules.json` (consistent naming without redundant dot prefix)
+  - Backward compatibility: automatic one-time migration on service startup
+- **In-app AI Providers Editor** (`ProvidersEditor.svelte`):
+  - Tab-based UI (Providers List + Add Provider)
+  - Edit/Save/Cancel workflow with unsaved changes detection
+  - Type-specific forms (Ollama, OpenAI Compatible, Anthropic)
+  - API key configuration: `api_key_env` (recommended) or `api_key` (plaintext, local only)
+  - Set default provider, delete providers, context window overrides
+  - Real-time validation and hot-reload (no service restart needed)
+  - Accessibility fixes: dialog tabindex, form-wrapped password fields
+- **Backend commands**:
+  - `get_providers_config` - Load providers configuration for editor
+  - `save_providers_config` - Validate and save with hot-reload
+  - Added constants for all config filenames (DRY principle)
+- **Comprehensive example files**:
+  - `instructions.example.json` - AI instructions with field reference and examples
+  - `providers.example.json` - Multi-provider setup examples with security notes
+  - `privacy_rules.example.json` - Complete firewall rules guide in JSON format
+  - Updated `personal_context_example.json` - Removed inline instruction block, added `metadata.external_files` reference
 
 ### Changed
 
@@ -79,12 +102,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **service.py**
   - Pass `settings` instance to ConversationMonitor
   - Broadcast `knowledge_extraction_failed` events on errors
+  - Added `get_providers_config()` command for ProvidersEditor
+  - Added `save_providers_config()` command with validation
+  - Added constants for config filenames: `PROVIDERS_CONFIG`, `PRIVACY_RULES`, `PERSONAL_CONTEXT`, `KNOWN_PEERS`, `NODE_KEY`
 - **settings.py**
   - Added `cultural_perspectives_enabled` to `[knowledge]` section
   - Added `get_cultural_perspectives_enabled()` method
 - **llm_manager.py**
-  - Updated `get_context_window()` to check `providers.toml` first
-  - Added documentation to default providers.toml template
+  - Migrated from TOML to JSON format (`providers.toml` → `providers.json`)
+  - Added `_migrate_from_toml_if_needed()` for automatic migration
+  - Added `save_config()` method for hot-reload without service restart
+  - Updated `get_context_window()` to check `providers.json` first
+  - Updated `_ensure_config_exists()` to create JSON template
+- **firewall.py**
+  - Added `_migrate_from_old_filename()` to migrate `.dpc_access.json` → `privacy_rules.json`
+  - Updated docstrings to reference new filename
 
 #### Protocol
 - **pcm_core.py**
@@ -97,19 +129,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **+page.svelte**
   - Added token counter display in chat header
   - Added extraction failure state and toast handling
+  - Added "🤖 AI Providers" button in sidebar
+  - Integrated ProvidersEditor modal component
 - **coreService.ts**
   - Added `extractionFailure` writable store
   - Added event handler for `knowledge_extraction_failed`
+  - Added `get_providers_config` and `save_providers_config` to `expectsResponse` array
 - **KnowledgeCommitDialog.svelte**
   - Added edit mode state (`editMode`, `editedEntries`)
   - Added Edit/Save/Cancel button workflow
   - Added textarea editing for entry content
   - Added "✏️ Edited" badge with attribution details
   - Conditionally display cultural perspectives section
+- **ProvidersEditor.svelte** (NEW)
+  - Full-featured AI providers configuration editor
+  - Tab-based interface (Providers List + Add Provider)
+  - Type-specific forms with conditional fields
+  - API key source selection (environment variable vs plaintext)
+  - Real-time validation and save confirmation
+  - Accessibility compliant (ARIA labels, keyboard navigation, form-wrapped password fields)
 
 #### Documentation
 - **KNOWLEDGE_ARCHITECTURE.md**
   - Updated with Phase 1-6 implementation details
+- **CLAUDE.md**
+  - Updated all config file references (`providers.toml` → `providers.json`, `.dpc_access.json` → `privacy_rules.json`)
+- **Example Files**:
+  - Created `instructions.example.json` - Comprehensive AI instructions template with field reference and use-case examples
+  - Created `providers.example.json` - Multi-provider setup guide with security notes
+  - Created `privacy_rules.example.json` - Complete firewall rules documentation in JSON format
+  - Updated `personal_context_example.json` - Removed inline instruction block, added `metadata.external_files` reference
+  - Removed `providers.example.toml` and `.dpc_access.example` (replaced with JSON versions)
 
 ### Fixed
 
@@ -136,6 +186,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fix: Added Claude 4.5 shorthand model names with 200K token context windows
 - Commit: bb7c725
 
+**Phase 7: ProvidersEditor Accessibility**
+- Fixed Svelte a11y warnings in ProvidersEditor component
+- Root causes:
+  - Dialog element missing `tabindex="-1"` attribute
+  - Modal overlay click handler needed ignore directives
+  - Label element without associated control (section heading)
+  - Password field not contained in form element
+- Fixes:
+  - Added `tabindex="-1"` to dialog element for keyboard accessibility
+  - Added `svelte-ignore` comments for semantically correct modal backdrop
+  - Changed `<label>` to `<strong class="form-label">` for section headings
+  - Wrapped password input in `<form on:submit|preventDefault>` to suppress browser warning
+- Commit: e7edd87
+
 ### Automated Testing Status
 
 **✅ Backend Tests:** 58 passed, 2 skipped (pytest)
@@ -152,14 +216,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Manual Testing Required
 
-Before merging to `main`, verify the following Phase 1-6 features:
+Before merging to `main`, verify the following Phase 1-7 features:
 
 - [ ] **Phase 2**: Token counter displays correctly and warns at 80%
 - [ ] **Phase 2**: Toast notifications appear on extraction failures
 - [ ] **Phase 3**: Cultural perspectives toggle works (on/off)
 - [ ] **Phase 4**: JSON repair handles malformed LLM responses
 - [ ] **Phase 5**: Inline editing saves with correct attribution
-- [ ] **Phase 6**: Context window overrides work in providers.toml
+- [ ] **Phase 6**: Context window overrides work in providers.json
+- [ ] **Phase 7**: TOML to JSON migration works automatically on first startup
+- [ ] **Phase 7**: ProvidersEditor opens from sidebar button
+- [ ] **Phase 7**: Add/edit/delete providers works correctly
+- [ ] **Phase 7**: API key configuration (env var vs plaintext) saves correctly
+- [ ] **Phase 7**: Set default provider functionality works
+- [ ] **Phase 7**: Hot-reload applies changes without service restart
+- [ ] **Phase 7**: Validation catches invalid configurations
 
 **Manual Test Commands:**
 ```bash
