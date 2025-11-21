@@ -8,6 +8,7 @@
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
+  import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import Toast from "$lib/components/Toast.svelte";
   import { ask } from '@tauri-apps/plugin-dialog';
 
@@ -63,6 +64,7 @@
   let showContextViewer: boolean = false;
   let showInstructionsEditor: boolean = false;
   let showFirewallEditor: boolean = false;
+  let showProvidersEditor: boolean = false;
   let showCommitDialog: boolean = false;
   let autoKnowledgeDetection: boolean = true;  // Default: enabled
 
@@ -364,6 +366,10 @@
 
   function openFirewallEditor() {
     showFirewallEditor = true;
+  }
+
+  function openProvidersEditor() {
+    showProvidersEditor = true;
   }
 
   function handleCommitVote(event: CustomEvent) {
@@ -738,6 +744,10 @@
             🛡️ Firewall Rules
           </button>
 
+          <button class="btn-context" on:click={openProvidersEditor}>
+            🤖 AI Providers
+          </button>
+
           <!-- Auto Knowledge Detection Toggle -->
           <div class="knowledge-toggle">
             <label class="toggle-container">
@@ -1100,6 +1110,11 @@
 <FirewallEditor
   bind:open={showFirewallEditor}
   on:close={() => showFirewallEditor = false}
+/>
+
+<ProvidersEditor
+  bind:open={showProvidersEditor}
+  on:close={() => showProvidersEditor = false}
 />
 
 <!-- Token Warning Toast (Phase 2) -->

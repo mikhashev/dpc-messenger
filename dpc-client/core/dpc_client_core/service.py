@@ -32,6 +32,13 @@ from datetime import datetime
 # Define the path to the user's D-PC configuration directory
 DPC_HOME_DIR = Path.home() / ".dpc"
 
+# Configuration file names
+PROVIDERS_CONFIG = "providers.json"
+PRIVACY_RULES = "privacy_rules.json"
+PERSONAL_CONTEXT = "personal.json"
+KNOWN_PEERS = "known_peers.json"
+NODE_KEY = "node.key"
+
 class CoreService:
     """
     The main orchestrating class for the D-PC client's backend.
@@ -48,17 +55,17 @@ class CoreService:
         # Initialize offline mode components
         self.token_cache = TokenCache(
             cache_dir=DPC_HOME_DIR,
-            node_key_path=DPC_HOME_DIR / "node.key"
+            node_key_path=DPC_HOME_DIR / NODE_KEY
         )
-        self.peer_cache = PeerCache(DPC_HOME_DIR / "known_peers.json")
+        self.peer_cache = PeerCache(DPC_HOME_DIR / KNOWN_PEERS)
         self.connection_status = ConnectionStatus()
 
         # Set up status change callback
         self.connection_status.set_on_status_change(self._on_connection_status_changed)
 
         # Initialize all major components
-        self.firewall = ContextFirewall(DPC_HOME_DIR / ".dpc_access.json")
-        self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
+        self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
+        self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
             oauth_callback_host=self.settings.get_oauth_callback_host(),
@@ -71,7 +78,7 @@ class CoreService:
         self.local_api = LocalApiServer(core_service=self)
 
         # Knowledge Architecture components (Phase 1-6)
-        self.pcm_core = PCMCore(DPC_HOME_DIR / "personal.json")
+        self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
 
         # Migrate instructions to separate file (one-time operation)
         migrate_instructions_from_personal_context()
@@ -733,7 +740,7 @@ class CoreService:
     
     async def list_providers(self) -> Dict[str, Any]:
         """
-        Returns all available AI providers from providers.toml.
+        Returns all available AI providers from providers.json.
 
         Returns:
             Dictionary with:
@@ -755,6 +762,136 @@ class CoreService:
             "providers": providers_list,
             "default_provider": self.llm_manager.default_provider
         }
+
+    async def get_providers_config(self) -> Dict[str, Any]:
+        """
+        Get full providers configuration for editor.
+
+        Returns:
+            Dictionary with:
+            - status: "success" or "error"
+            - config: Full providers configuration dict
+        """
+        try:
+            import json
+
+            # Ensure config file exists (creates default if missing)
+            self.llm_manager._ensure_config_exists()
+
+            # Read from file
+            with open(self.llm_manager.config_path, 'r') as f:
+                config = json.load(f)
+
+            return {
+                "status": "success",
+                "config": config
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Save and validate providers configuration.
+
+        Args:
+            config_dict: Full providers configuration dictionary
+
+        Returns:
+            Dictionary with status and message/errors
+        """
+        # Validate structure
+        errors = self._validate_providers_config(config_dict)
+        if errors:
+            return {
+                "status": "error",
+                "errors": errors
+            }
+
+        try:
+            # Save to JSON and reload providers
+            self.llm_manager.save_config(config_dict)
+
+            # Broadcast event
+            await self.local_api.broadcast_event("providers_updated", {
+                "message": "AI providers configuration updated"
+            })
+
+            return {
+                "status": "success",
+                "message": "Providers saved successfully"
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    def _validate_providers_config(self, config_dict: Dict[str, Any]) -> list:
+        """
+        Validate providers configuration structure.
+
+        Args:
+            config_dict: Configuration dictionary to validate
+
+        Returns:
+            List of error messages (empty if valid)
+        """
+        errors = []
+
+        # Required top-level fields
+        if "default_provider" not in config_dict:
+            errors.append("Missing 'default_provider' field")
+        if "providers" not in config_dict:
+            errors.append("Missing 'providers' array")
+            return errors
+
+        # Validate each provider
+        provider_aliases = []
+        for i, provider in enumerate(config_dict["providers"]):
+            prefix = f"Provider {i+1}"
+
+            # Required fields for all providers
+            if "alias" not in provider:
+                errors.append(f"{prefix}: Missing 'alias'")
+            else:
+                alias = provider["alias"]
+                if alias in provider_aliases:
+                    errors.append(f"{prefix}: Duplicate alias '{alias}'")
+                provider_aliases.append(alias)
+
+            if "type" not in provider:
+                errors.append(f"{prefix}: Missing 'type'")
+            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic"]:
+                errors.append(f"{prefix}: Invalid type '{provider['type']}'")
+
+            if "model" not in provider:
+                errors.append(f"{prefix}: Missing 'model'")
+
+            # Type-specific required fields
+            provider_type = provider.get("type")
+            if provider_type == "ollama" and "host" not in provider:
+                errors.append(f"{prefix}: Ollama provider missing 'host'")
+            if provider_type == "openai_compatible" and "base_url" not in provider:
+                errors.append(f"{prefix}: OpenAI provider missing 'base_url'")
+
+            # Optional context_window validation
+            if "context_window" in provider:
+                try:
+                    cw = int(provider["context_window"])
+                    if cw <= 0:
+                        errors.append(f"{prefix}: context_window must be positive")
+                except (ValueError, TypeError):
+                    errors.append(f"{prefix}: context_window must be an integer")
+
+        # Check default_provider exists
+        default = config_dict.get("default_provider")
+        if default and default not in provider_aliases:
+            errors.append(f"Default provider '{default}' not found in providers list")
+
+        return errors
 
     def set_peer_metadata(self, node_id: str, **kwargs):
         """Store metadata for a peer (name, etc)."""

@@ -271,8 +271,8 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#device-identity-and-multi-devi
 **Configuration Files:**
 - Windows: `C:\Users\<username>\.dpc\config.ini`
 - Linux/Mac: `~/.dpc/config.ini`
-- Providers: `~/.dpc/providers.toml` (AI provider configs)
-- Firewall: `~/.dpc/.dpc_access.json` (context sharing rules)
+- Providers: `~/.dpc/providers.json` (AI provider configs)
+- Privacy Rules: `~/.dpc/privacy_rules.json` (context sharing rules)
 - Personal Context: `~/.dpc/personal.json` (auto-generated)
 - Device Context: `~/.dpc/device_context.json` (auto-generated, structured hardware/software info)
 
@@ -441,7 +441,7 @@ The client provides in-app editors for key configuration files, eliminating the 
 
 **Firewall Rules Editor:**
 - **Location**: Click **"🛡️ Firewall Rules"** button in sidebar
-- **Format**: JSON (stored as `~/.dpc/.dpc_access.json`)
+- **Format**: JSON (stored as `~/.dpc/privacy_rules.json`)
 - **UI Style**: Form-based interface matching Personal Context editor (DRY principle)
 - **Features**:
   - Tab-based navigation (Hub Sharing, Node Groups, Compute Sharing, Peer Permissions)
@@ -597,7 +597,7 @@ UI connects via WebSocket (localhost:9999) for:
 
 ### Context Firewall Rules
 
-Access control file format (`~/.dpc/.dpc_access.json`):
+Access control file format (`~/.dpc/privacy_rules.json`):
 ```json
 {
   "hub": {
@@ -697,8 +697,8 @@ poetry run pytest tests/test_turn_connectivity.py
 
 ### Configuration Files
 - `~/.dpc/config.ini` - Client configuration
-- `~/.dpc/providers.toml` - AI provider settings
-- `~/.dpc/.dpc_access.json` - Context firewall rules
+- `~/.dpc/providers.json` - AI provider settings
+- `~/.dpc/privacy_rules.json` - Context firewall rules
 - `~/.dpc/node.{key,crt,id}` - Node identity files
 
 ### Important Documentation

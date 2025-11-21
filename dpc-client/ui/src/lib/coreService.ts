@@ -284,7 +284,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_firewall_rules',
             'save_firewall_rules',
             'reload_firewall',
-            'validate_firewall_rules'
+            'validate_firewall_rules',
+            'get_providers_config',
+            'save_providers_config'
         ].includes(command);
 
         if (expectsResponse) {

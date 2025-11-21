@@ -1,7 +1,7 @@
 # dpc-client/core/dpc_client_core/llm_manager.py
 
 import os
-import toml
+import json
 import asyncio
 from pathlib import Path
 from typing import Dict, Any
@@ -147,57 +147,73 @@ class LLMManager:
     """
     Manages all configured AI providers.
     """
-    def __init__(self, config_path: Path = Path.home() / ".dpc" / "providers.toml"):
+    def __init__(self, config_path: Path = Path.home() / ".dpc" / "providers.json"):
         self.config_path = config_path
         self.providers: Dict[str, AIProvider] = {}
         self.default_provider: str | None = None
+        self._migrate_from_toml_if_needed()
         self._load_providers_from_config()
 
+    def _migrate_from_toml_if_needed(self):
+        """Migrates providers.toml to providers.json if needed."""
+        toml_path = self.config_path.parent / "providers.toml"
+
+        # Only migrate if TOML exists and JSON doesn't
+        if toml_path.exists() and not self.config_path.exists():
+            print(f"Migrating {toml_path} to {self.config_path}...")
+            try:
+                # Import toml only if needed for migration
+                import toml
+                config = toml.load(toml_path)
+
+                # Save as JSON
+                with open(self.config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+
+                # Backup TOML file
+                backup_path = toml_path.with_suffix('.toml.backup')
+                toml_path.rename(backup_path)
+                print(f"Migration successful! Original file backed up as {backup_path}")
+            except Exception as e:
+                print(f"Error migrating TOML to JSON: {e}")
+
     def _ensure_config_exists(self):
-        """Creates a default providers.toml file if one doesn't exist."""
+        """Creates a default providers.json file if one doesn't exist."""
         if not self.config_path.exists():
             print(f"Warning: Provider config file not found at {self.config_path}.")
             print("Creating a default template with a local Ollama provider...")
-            
+
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            default_config = """
-# Default AI provider configuration for D-PC.
-# You can add more providers here (e.g., for LM Studio, OpenAI, Anthropic).
-#
-# Optional field: context_window (in tokens)
-# - Overrides the default context window size for a model
-# - Useful for custom models or provider-specific limits
-# Example:
-#   [[providers]]
-#     alias = "custom_llama"
-#     type = "ollama"
-#     model = "llama3.1:8b"
-#     host = "http://127.0.0.1:11434"
-#     context_window = 131072  # 128K tokens
 
-default_provider = "ollama_local"
+            default_config = {
+                "default_provider": "ollama_local",
+                "providers": [
+                    {
+                        "alias": "ollama_local",
+                        "type": "ollama",
+                        "model": "llama3.1:8b",
+                        "host": "http://127.0.0.1:11434",
+                        "context_window": 131072
+                    }
+                ]
+            }
 
-[[providers]]
-  alias = "ollama_local"
-  type = "ollama"
-  model = "llama3.1:8b"
-  host = "http://127.0.0.1:11434"
-  # context_window = 131072  # Optional: Override default context window
-"""
-            self.config_path.write_text(default_config)
+            with open(self.config_path, 'w') as f:
+                json.dump(default_config, f, indent=2)
             print(f"Default provider config created at {self.config_path}")
 
     def _load_providers_from_config(self):
         """Reads the config file and initializes all defined providers."""
-        self._ensure_config_exists() # Call the new method
+        self._ensure_config_exists()
         print(f"Loading AI providers from {self.config_path}...")
         if not self.config_path.exists():
             print(f"Warning: Provider config file not found at {self.config_path}. No providers loaded.")
             return
 
         try:
-            config = toml.load(self.config_path)
+            with open(self.config_path, 'r') as f:
+                config = json.load(f)
+
             self.default_provider = config.get("default_provider")
 
             for provider_config in config.get("providers", []):
@@ -217,13 +233,32 @@ default_provider = "ollama_local"
                         print(f"  - Error loading provider '{alias}': {e}")
                 else:
                     print(f"Warning: Unknown provider type '{provider_type}' for alias '{alias}'.")
-            
+
             if self.default_provider and self.default_provider not in self.providers:
                 print(f"Warning: Default provider '{self.default_provider}' not found in loaded providers.")
                 self.default_provider = None
 
         except Exception as e:
             print(f"Error parsing provider config file: {e}")
+
+    def save_config(self, config_dict: Dict[str, Any]):
+        """
+        Save provider configuration to JSON file and reload providers.
+
+        Args:
+            config_dict: Dictionary containing providers configuration
+        """
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(config_dict, f, indent=2)
+            print(f"Provider configuration saved to {self.config_path}")
+
+            # Reload providers
+            self.providers.clear()
+            self._load_providers_from_config()
+        except Exception as e:
+            print(f"Error saving provider config: {e}")
+            raise
 
     def get_active_model_name(self) -> str:
         """
@@ -394,24 +429,25 @@ default_provider = "ollama_local"
 # --- Self-testing block ---
 async def main_test():
     print("--- Testing LLMManager ---")
-    
-    # Create a dummy providers.toml for testing
-    dummy_config_content = """
-default_provider = "local_ollama"
 
-[[providers]]
-  alias = "local_ollama"
-  type = "ollama"
-  model = "llama3.1:8b"
-  host = "http://127.0.0.1:11434"
-"""
-    config_file = Path("test_providers.toml")
-    # We need to place it where the manager expects to find it, or pass the path
-    # For simplicity, let's assume it's in the user's home .dpc directory
+    # Create a dummy providers.json for testing
+    dummy_config = {
+        "default_provider": "local_ollama",
+        "providers": [
+            {
+                "alias": "local_ollama",
+                "type": "ollama",
+                "model": "llama3.1:8b",
+                "host": "http://127.0.0.1:11434"
+            }
+        ]
+    }
+
     dpc_dir = Path.home() / ".dpc"
     dpc_dir.mkdir(exist_ok=True)
-    test_config_path = dpc_dir / "providers.toml"
-    test_config_path.write_text(dummy_config_content)
+    test_config_path = dpc_dir / "providers.json"
+    with open(test_config_path, 'w') as f:
+        json.dump(dummy_config, f, indent=2)
 
     try:
         manager = LLMManager(config_path=test_config_path)

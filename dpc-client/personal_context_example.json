@@ -73,28 +73,6 @@
     }
   },
   "preferences": null,
-  "instruction": {
-    "primary": "Use this context to provide personalized technical assistance",
-    "context_update": "Suggest updates when new tools or techniques emerge",
-    "verification_protocol": "Provide command examples and documentation references",
-    "learning_support": {
-      "explanations": "Connect to existing networking knowledge",
-      "practice": "Suggest hands-on exercises and lab scenarios",
-      "metacognition": "Help reflect on troubleshooting approaches",
-      "connections": "Link concepts across OSI layers"
-    },
-    "bias_mitigation": {
-      "require_multi_perspective": true,
-      "challenge_status_quo": true,
-      "cultural_sensitivity": "Consider diverse technical backgrounds",
-      "framing_neutrality": true,
-      "evidence_requirement": "citations_preferred"
-    },
-    "collaboration_mode": "individual",
-    "consensus_required": true,
-    "ai_curation_enabled": true,
-    "dissent_encouraged": true
-  },
   "cognitive_profile": null,
   "version": 2,
   "last_commit_id": null,
@@ -106,6 +84,13 @@
     "last_updated": "2025-01-15T10:30:00.000000",
     "storage": "local",
     "format_version": "2.0",
+    "external_files": {
+      "instructions": {
+        "file": "instructions.json",
+        "description": "AI behavior instructions and bias mitigation settings",
+        "last_updated": "2025-01-15T10:30:00.000000"
+      }
+    },
     "external_contexts": {
       "device_context": {
         "file": "device_context.json",

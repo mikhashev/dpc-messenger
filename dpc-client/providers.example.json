@@ -1,0 +1,93 @@
+{
+  "_comment": "D-PC AI Providers Configuration - Manage your local and cloud AI providers. Copy this to ~/.dpc/providers.json and customize.",
+
+  "default_provider": "ollama_local",
+
+  "providers": [
+    {
+      "_comment": "Local Ollama provider - No API key needed",
+      "alias": "ollama_local",
+      "type": "ollama",
+      "model": "llama3.1:8b",
+      "host": "http://127.0.0.1:11434",
+      "context_window": 131072
+    },
+    {
+      "_comment": "Local LM Studio - OpenAI-compatible API",
+      "alias": "lm_studio",
+      "type": "openai_compatible",
+      "model": "lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF",
+      "base_url": "http://127.0.0.1:1234/v1",
+      "api_key": "lm-studio"
+    }
+  ],
+
+  "_examples": {
+    "_comment": "Example configurations for cloud providers - Add these to the providers array above",
+
+    "openai": {
+      "alias": "gpt4_omni",
+      "type": "openai_compatible",
+      "model": "gpt-4o",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "context_window": 128000,
+      "_setup": "Set environment variable: export OPENAI_API_KEY='sk-...'"
+    },
+
+    "anthropic": {
+      "alias": "claude_sonnet",
+      "type": "anthropic",
+      "model": "claude-3-5-sonnet-20240620",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "context_window": 200000,
+      "_setup": "Set environment variable: export ANTHROPIC_API_KEY='sk-ant-...'"
+    },
+
+    "openrouter": {
+      "alias": "openrouter",
+      "type": "openai_compatible",
+      "model": "anthropic/claude-3.5-sonnet",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "_setup": "Set environment variable: export OPENROUTER_API_KEY='sk-or-...'"
+    }
+  },
+
+  "_field_reference": {
+    "_comment": "Reference guide for provider configuration fields",
+    "common_fields": {
+      "alias": "User-friendly name for the provider (must be unique)",
+      "type": "Provider type: 'ollama', 'openai_compatible', or 'anthropic'",
+      "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620')",
+      "context_window": "Optional: Override default context window size in tokens"
+    },
+    "ollama_fields": {
+      "host": "Ollama API endpoint (default: http://127.0.0.1:11434)"
+    },
+    "openai_compatible_fields": {
+      "base_url": "API endpoint URL",
+      "api_key": "API key (plaintext - only use for local providers)",
+      "api_key_env": "Environment variable containing API key (recommended for cloud)"
+    },
+    "anthropic_fields": {
+      "api_key_env": "Environment variable containing Anthropic API key (required)"
+    }
+  },
+
+  "_security_notes": {
+    "_comment": "Best practices for API key management",
+    "recommendations": [
+      "Use 'api_key_env' for cloud providers (stores keys in environment variables)",
+      "Use 'api_key' only for local providers where security is not a concern",
+      "Never commit API keys to version control",
+      "Set environment variables in your shell profile (~/.bashrc, ~/.zshrc)",
+      "On Windows, use System Environment Variables or PowerShell profile"
+    ],
+    "example_setup": {
+      "linux_mac": "Add to ~/.bashrc or ~/.zshrc: export OPENAI_API_KEY='sk-...'",
+      "windows_cmd": "setx OPENAI_API_KEY \"sk-...\"",
+      "windows_powershell": "$env:OPENAI_API_KEY='sk-...'; [Environment]::SetEnvironmentVariable('OPENAI_API_KEY', 'sk-...', 'User')"
+    }
+  }
+}

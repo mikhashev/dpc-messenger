@@ -1,0 +1,107 @@
+{
+  "_comment": "AI Instructions Configuration - Guides how AI assistants interact with your personal context. Copy this to ~/.dpc/instructions.json and customize.",
+
+  "primary": "Use this context to provide personalized technical assistance",
+  "context_update": "Suggest updates when new tools or techniques emerge",
+  "verification_protocol": "Provide command examples and documentation references",
+
+  "learning_support": {
+    "_comment": "How AI should support your learning process",
+    "explanations": "Connect to existing networking knowledge",
+    "practice": "Suggest hands-on exercises and lab scenarios",
+    "metacognition": "Help reflect on troubleshooting approaches",
+    "connections": "Link concepts across OSI layers"
+  },
+
+  "bias_mitigation": {
+    "_comment": "Controls for reducing cognitive biases in AI responses",
+    "require_multi_perspective": true,
+    "challenge_status_quo": true,
+    "cultural_sensitivity": "Consider diverse technical backgrounds",
+    "framing_neutrality": true,
+    "evidence_requirement": "citations_preferred"
+  },
+
+  "collaboration_mode": "individual",
+  "consensus_required": true,
+  "ai_curation_enabled": true,
+  "dissent_encouraged": true,
+
+  "_field_reference": {
+    "_comment": "Reference guide for instruction fields",
+    "core_instructions": {
+      "primary": "Main instruction guiding AI behavior (string)",
+      "context_update": "How AI should suggest knowledge updates (string)",
+      "verification_protocol": "Evidence and reasoning requirements (string)"
+    },
+    "learning_support": {
+      "explanations": "How to connect new concepts to existing knowledge",
+      "practice": "Strategy for generating exercises and practice problems",
+      "metacognition": "How to encourage reflection on learning process",
+      "connections": "How to identify relationships between concepts"
+    },
+    "bias_mitigation": {
+      "require_multi_perspective": "Require AI to consider multiple viewpoints (boolean)",
+      "challenge_status_quo": "Encourage questioning conventional wisdom (boolean)",
+      "cultural_sensitivity": "Consider non-Western/diverse approaches (string description)",
+      "framing_neutrality": "Avoid biased question framing (boolean)",
+      "evidence_requirement": "Level of evidence needed: 'citations_required', 'citations_preferred', 'optional'"
+    },
+    "collaboration_settings": {
+      "collaboration_mode": "Who can contribute: 'individual', 'group', 'public'",
+      "consensus_required": "Require peer agreement for knowledge commits (boolean)",
+      "ai_curation_enabled": "Allow AI to suggest knowledge organization (boolean)",
+      "dissent_encouraged": "Require devil's advocate perspectives (boolean)"
+    }
+  },
+
+  "_examples": {
+    "_comment": "Example configurations for different use cases",
+
+    "software_developer": {
+      "primary": "Provide pragmatic coding advice with working examples",
+      "context_update": "Suggest updates when new frameworks or best practices emerge",
+      "verification_protocol": "Include code snippets and links to official documentation",
+      "learning_support": {
+        "explanations": "Connect to existing language knowledge and design patterns",
+        "practice": "Generate coding challenges and refactoring exercises",
+        "metacognition": "Encourage code review and architectural thinking",
+        "connections": "Link patterns across languages and frameworks"
+      }
+    },
+
+    "researcher": {
+      "primary": "Support research with rigorous analysis and source citations",
+      "context_update": "Alert when new papers or methodologies are published",
+      "verification_protocol": "Require peer-reviewed citations and statistical evidence",
+      "bias_mitigation": {
+        "require_multi_perspective": true,
+        "challenge_status_quo": true,
+        "cultural_sensitivity": "Consider research from non-Western institutions",
+        "framing_neutrality": true,
+        "evidence_requirement": "citations_required"
+      }
+    },
+
+    "student": {
+      "primary": "Support self-directed learning with Socratic guidance",
+      "context_update": "Suggest resources when knowledge gaps are identified",
+      "verification_protocol": "Explain reasoning step-by-step with examples",
+      "learning_support": {
+        "explanations": "Build on prerequisite knowledge incrementally",
+        "practice": "Generate spaced repetition questions and problem sets",
+        "metacognition": "Encourage reflection on study strategies and comprehension",
+        "connections": "Highlight interdisciplinary connections"
+      },
+      "dissent_encouraged": true
+    }
+  },
+
+  "_migration_notes": {
+    "_comment": "Notes for users migrating from personal.json v1.0",
+    "separation_rationale": "Instructions separated from personal.json for clarity and easier editing",
+    "reference_location": "personal.json references this file via metadata.external_files.instructions",
+    "backward_compatibility": "Old personal.json files with inline instruction blocks still supported",
+    "migration_command": "Backend automatically migrates on first load if instructions.json doesn't exist"
+  }
+}
