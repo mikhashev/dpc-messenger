@@ -593,11 +593,25 @@ class CoreService:
             response = payload.get("response")
             error = payload.get("error")
 
+            # Extract token metadata
+            tokens_used = payload.get("tokens_used")
+            model_max_tokens = payload.get("model_max_tokens")
+            prompt_tokens = payload.get("prompt_tokens")
+            response_tokens = payload.get("response_tokens")
+
             if request_id in self._pending_inference_requests:
                 future = self._pending_inference_requests[request_id]
                 if not future.done():
                     if status == "success":
-                        future.set_result(response)
+                        # Return dict with response and token metadata
+                        result_data = {
+                            "response": response,
+                            "tokens_used": tokens_used,
+                            "model_max_tokens": model_max_tokens,
+                            "prompt_tokens": prompt_tokens,
+                            "response_tokens": response_tokens
+                        }
+                        future.set_result(result_data)
                     else:
                         future.set_exception(RuntimeError(error or "Remote inference failed"))
 
@@ -1596,18 +1610,23 @@ class CoreService:
 
         # Remote inference
         try:
-            response = await self._request_inference_from_peer(
+            result_data = await self._request_inference_from_peer(
                 peer_id=compute_host,
                 prompt=prompt,
                 model=model,
                 provider=provider
             )
-            # For remote inference, we know the model/provider if specified
+            # result_data is now a dict with response and token metadata
             return {
-                "response": response,
+                "response": result_data.get("response") if isinstance(result_data, dict) else result_data,
                 "model": model or "unknown",
                 "provider": provider or "unknown",
-                "compute_host": compute_host
+                "compute_host": compute_host,
+                # Include token metadata if available
+                "tokens_used": result_data.get("tokens_used") if isinstance(result_data, dict) else None,
+                "model_max_tokens": result_data.get("model_max_tokens") if isinstance(result_data, dict) else None,
+                "prompt_tokens": result_data.get("prompt_tokens") if isinstance(result_data, dict) else None,
+                "response_tokens": result_data.get("response_tokens") if isinstance(result_data, dict) else None
             }
         except ConnectionError as e:
             raise ValueError(f"Compute host {compute_host} is not connected") from e
@@ -1735,13 +1754,17 @@ class CoreService:
                 else:
                     raise ValueError(f"No provider found for model '{model}'")
 
-            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use)
+            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use, return_metadata=True)
             print(f"  - Inference completed successfully for {peer_id}")
 
-            # Send success response
+            # Send success response with token metadata
             success_response = create_remote_inference_response(
                 request_id=request_id,
-                response=result
+                response=result["response"],
+                tokens_used=result.get("tokens_used"),
+                prompt_tokens=result.get("prompt_tokens"),
+                response_tokens=result.get("response_tokens"),
+                model_max_tokens=result.get("model_max_tokens")
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             print(f"  - Sent inference result to {peer_id}")
@@ -2195,8 +2218,8 @@ class CoreService:
                 "compute_host": result["compute_host"]
             }
 
-            # Token tracking (Phase 2) - only for local inference
-            if result.get("compute_host") == "local" and "tokens_used" in result:
+            # Token tracking (Phase 2) - works for both local and remote inference
+            if "tokens_used" in result:
                 conversation_id = kwargs.get("conversation_id", "local_ai")
                 monitor = self._get_or_create_conversation_monitor(conversation_id)
 

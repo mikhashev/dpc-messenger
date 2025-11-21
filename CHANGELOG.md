@@ -179,6 +179,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root cause: handleNewChat cleared chat history but didn't delete token usage from map
 - Fix: Added tokenUsageMap.delete(chatId) to reset counter for new conversations
 - Commit: 093f5d0
+- Fixed token counter not displaying for remote inference (peer-to-peer compute sharing)
+- Root cause: Token metadata not transmitted from host peer to requesting peer in REMOTE_INFERENCE_RESPONSE
+- Fix: Added token metadata fields (tokens_used, prompt_tokens, response_tokens, model_max_tokens) to protocol message, host peer now calls llm_manager.query() with return_metadata=True, requesting peer extracts and displays token data
+- Impact: Token counting now works identically for both local and remote inference with <1% host overhead
+- Files changed: dpc-protocol/protocol.py, dpc-client/core/service.py (4 locations)
 
 **Phase 6: Context Window for Claude 4.5 Models**
 - Fixed token counter showing 247% warning due to incorrect context window
