@@ -81,6 +81,9 @@
   let showAddAIChatDialog: boolean = false;
   let selectedProviderForNewChat: string = "";
 
+  // Personal context inclusion toggle
+  let includePersonalContext: boolean = true;
+
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
     showCommitDialog = true;
@@ -277,7 +280,10 @@
       });
 
       // Prepare AI query payload with optional compute host and provider/model
-      const payload: any = { prompt: text };
+      const payload: any = {
+        prompt: text,
+        include_context: includePersonalContext  // Add context inclusion flag
+      };
 
       // Add peer contexts if any are selected
       if (selectedPeerContexts.size > 0) {
@@ -978,6 +984,20 @@
 
       <div class="chat-input">
         {#if $aiChats.has(activeChatId)}
+          <!-- Personal Context Toggle -->
+          <div class="context-toggle">
+            <label class="context-checkbox">
+              <input
+                type="checkbox"
+                bind:checked={includePersonalContext}
+              />
+              <span>📚 Include Personal Context (profile, instructions, device info)</span>
+            </label>
+            {#if !includePersonalContext}
+              <span class="context-hint">⚠️ AI won't know your preferences or device specs</span>
+            {/if}
+          </div>
+
           <!-- Peer Context Selector (show for all AI chats) -->
           {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
             <div class="peer-context-selector">
@@ -1881,6 +1901,45 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+  }
+
+  /* Personal Context Toggle Styles */
+  .context-toggle {
+    padding: 0.75rem;
+    background: linear-gradient(135deg, #fff9f3 0%, #fff4e6 100%);
+    border-radius: 8px;
+    border: 1px solid #ffd4a3;
+    margin-bottom: 0.5rem;
+  }
+
+  .context-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    user-select: none;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #374151;
+  }
+
+  .context-checkbox input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    accent-color: #f59e0b;
+  }
+
+  .context-hint {
+    display: block;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: #d97706;
+    font-weight: 500;
+    padding: 0.3rem 0.6rem;
+    background: white;
+    border-radius: 6px;
+    border-left: 3px solid #f59e0b;
   }
 
   /* Peer Context Selector Styles */

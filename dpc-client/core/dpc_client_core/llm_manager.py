@@ -4,7 +4,7 @@ import os
 import json
 import asyncio
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 # Import client libraries
 from openai import AsyncOpenAI
@@ -42,9 +42,19 @@ class OllamaProvider(AIProvider):
     async def generate_response(self, prompt: str) -> str:
         try:
             message = {'role': 'user', 'content': prompt}
+
+            # Build options dict for custom parameters
+            options = {}
+            if self.config.get("context_window"):
+                options["num_ctx"] = self.config["context_window"]
+
             # Add a timeout to the request
             response = await asyncio.wait_for(
-                self.client.chat(model=self.model, messages=[message]),
+                self.client.chat(
+                    model=self.model,
+                    messages=[message],
+                    options=options if options else None
+                ),
                 timeout=60.0 # 60 second timeout
             )
             return response['message']['content']
@@ -52,6 +62,70 @@ class OllamaProvider(AIProvider):
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after 60 seconds.")
         except Exception as e:
             raise RuntimeError(f"Ollama provider '{self.alias}' failed: {e}") from e
+
+    async def get_model_info(self) -> Dict[str, Any]:
+        """Query Ollama for model information including parameters.
+
+        Returns:
+            Dict containing:
+                - modelfile: Raw modelfile content
+                - parameters: Model parameters string
+                - num_ctx: Parsed context window size (or None)
+                - details: Model details (family, parameter_size, etc.)
+        """
+        try:
+            response = await self.client.show(model=self.model)
+
+            # Parse num_ctx from modelfile
+            num_ctx = None
+            modelfile = response.get('modelfile', '')
+            if modelfile:
+                num_ctx = self._parse_num_ctx_from_modelfile(modelfile)
+
+            # Convert details to dict if it's a Pydantic model
+            details = response.get('details')
+            if details:
+                # Handle Pydantic models (they have model_dump method)
+                if hasattr(details, 'model_dump'):
+                    details = details.model_dump(exclude_none=True)
+                elif hasattr(details, 'dict'):
+                    details = details.dict(exclude_none=True)
+                elif isinstance(details, dict):
+                    details = details
+                else:
+                    details = {}
+            else:
+                details = {}
+
+            # Convert modified_at datetime to string if present
+            modified_at = response.get('modified_at')
+            if modified_at and hasattr(modified_at, 'isoformat'):
+                modified_at = modified_at.isoformat()
+
+            return {
+                "modelfile": modelfile,
+                "parameters": response.get('parameters', ''),
+                "num_ctx": num_ctx,
+                "details": details,
+                "template": response.get('template', ''),
+                "modified_at": modified_at,
+            }
+        except Exception as e:
+            raise RuntimeError(f"Failed to get model info for '{self.model}': {e}") from e
+
+    @staticmethod
+    def _parse_num_ctx_from_modelfile(modelfile: str) -> Optional[int]:
+        """Extract num_ctx parameter from modelfile string.
+
+        Args:
+            modelfile: Raw modelfile content
+
+        Returns:
+            Context window size as integer, or None if not found
+        """
+        import re
+        match = re.search(r'PARAMETER\s+num_ctx\s+(\d+)', modelfile, re.IGNORECASE)
+        return int(match.group(1)) if match else None
 
 class OpenAICompatibleProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):

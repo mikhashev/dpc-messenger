@@ -843,6 +843,53 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def query_ollama_model_info(self, provider_alias: str) -> Dict[str, Any]:
+        """
+        Query Ollama provider for model parameters and info.
+
+        Args:
+            provider_alias: Alias of the Ollama provider to query
+
+        Returns:
+            Dictionary with:
+            - status: "success" or "error"
+            - model_info: Dict with modelfile, parameters, num_ctx, details
+            - message: Error message if failed
+        """
+        try:
+            # Check if provider exists
+            if provider_alias not in self.llm_manager.providers:
+                return {
+                    "status": "error",
+                    "message": f"Provider '{provider_alias}' not found"
+                }
+
+            provider = self.llm_manager.providers[provider_alias]
+
+            # Check if it's an Ollama provider
+            from dpc_client_core.llm_manager import OllamaProvider
+            if not isinstance(provider, OllamaProvider):
+                return {
+                    "status": "error",
+                    "message": f"Provider '{provider_alias}' is not an Ollama provider (type: {type(provider).__name__})"
+                }
+
+            # Query model info
+            model_info = await provider.get_model_info()
+
+            return {
+                "status": "success",
+                "model_info": model_info,
+                "provider_alias": provider_alias,
+                "model": provider.model
+            }
+
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to query model info: {str(e)}"
+            }
+
     def _validate_providers_config(self, config_dict: Dict[str, Any]) -> list:
         """
         Validate providers configuration structure.
@@ -2144,7 +2191,7 @@ class CoreService:
 
     # --- AI Query Methods ---
 
-    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, **kwargs):
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
 
@@ -2155,18 +2202,22 @@ class CoreService:
             compute_host: Optional node_id of peer to use for inference (None = local)
             model: Optional model name to use
             provider: Optional provider alias to use
+            include_context: If True, includes personal context, device context, and AI instructions (default: True)
             **kwargs: Additional arguments
         """
         print(f"Orchestrating AI query for command_id {command_id}: '{prompt[:50]}...'")
         print(f"  - Compute host: {compute_host or 'local'}")
         print(f"  - Model: {model or 'default'}")
+        print(f"  - Include context: {include_context}")
 
-        # Start with local context
-        aggregated_contexts = {'local': self.p2p_manager.local_context}
+        # Conditionally include local context based on flag
+        aggregated_contexts = {}
+        if include_context:
+            aggregated_contexts = {'local': self.p2p_manager.local_context}
 
-        # Add device context if available
+        # Add device context if available and include_context is True
         device_context_data = None
-        if self.device_context:
+        if include_context and self.device_context:
             device_context_data = self.device_context
 
         # Fetch remote contexts if context_ids provided
@@ -2195,7 +2246,7 @@ class CoreService:
                 else:
                     print(f"    ✗ Peer {node_id[:20]}... not connected")
 
-        # Assemble final prompt with context
+        # Assemble final prompt (with or without context, depending on include_context flag)
         final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt, device_context_data, peer_device_contexts)
 
         response_payload = {}
@@ -2232,18 +2283,23 @@ class CoreService:
 
                 # Check if we should warn about approaching limit
                 if monitor.should_suggest_extraction():
-                    token_usage = monitor.get_token_usage()
+                    # Use the current model's max tokens (not the monitor's cached value)
+                    # to ensure consistency with what the UI displays
+                    current_limit = result.get("model_max_tokens", monitor.token_limit)
+                    current_usage_percent = monitor.current_token_count / current_limit if current_limit > 0 else 0.0
+
                     await self.local_api.broadcast_event("token_limit_warning", {
                         "conversation_id": conversation_id,
-                        "tokens_used": token_usage["tokens_used"],
-                        "token_limit": token_usage["token_limit"],
-                        "usage_percent": token_usage["usage_percent"]
+                        "tokens_used": monitor.current_token_count,
+                        "token_limit": current_limit,
+                        "usage_percent": current_usage_percent
                     })
-                    print(f"[Token Warning] {conversation_id}: {token_usage['usage_percent']:.1%} of context window used")
+                    print(f"[Token Warning] {conversation_id}: {current_usage_percent:.1%} of context window used ({monitor.current_token_count}/{current_limit} tokens)")
 
-                # Include token info in response
-                response_payload["tokens_used"] = result["tokens_used"]
+                # Include token info in response (send cumulative conversation tokens, not per-query)
+                response_payload["tokens_used"] = monitor.current_token_count  # Cumulative conversation tokens
                 response_payload["token_limit"] = result.get("model_max_tokens", 0)
+                response_payload["this_query_tokens"] = result["tokens_used"]  # Per-query tokens (for debugging)
 
         except Exception as e:
             print(f"  - Error during inference: {e}")

@@ -286,7 +286,8 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'reload_firewall',
             'validate_firewall_rules',
             'get_providers_config',
-            'save_providers_config'
+            'save_providers_config',
+            'query_ollama_model_info'
         ].includes(command);
 
         if (expectsResponse) {

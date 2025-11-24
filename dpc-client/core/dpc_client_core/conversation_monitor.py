@@ -540,6 +540,14 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
         """
         self.current_token_count += tokens
 
+    def set_token_count(self, tokens: int):
+        """Set the current token count (replaces instead of adding)
+
+        Args:
+            tokens: Total tokens in the conversation
+        """
+        self.current_token_count = tokens
+
     def get_token_usage(self) -> Dict[str, Any]:
         """Get current token usage statistics
 

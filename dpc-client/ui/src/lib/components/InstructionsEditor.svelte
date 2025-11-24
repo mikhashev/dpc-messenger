@@ -497,73 +497,114 @@
 
   .section {
     margin-bottom: 2rem;
+    padding: 1.5rem;
+    background: #252525;
+    border: 1px solid #3a3a3a;
+    border-radius: 10px;
   }
 
   .section h3 {
-    margin: 0 0 0.25rem 0;
-    font-size: 1.1rem;
-    color: #fff;
+    margin: 0 0 0.5rem 0;
+    font-size: 1.15rem;
+    color: #ffffff;
+    font-weight: 600;
+    letter-spacing: 0.3px;
   }
 
   .help-text {
-    margin: 0 0 0.75rem 0;
-    font-size: 0.875rem;
-    color: #888;
+    margin: 0 0 1rem 0;
+    font-size: 0.9rem;
+    color: #999;
+    line-height: 1.4;
   }
 
   .instruction-text {
-    background: #2a2a2a;
-    padding: 0.75rem;
-    border-radius: 4px;
-    color: #ddd;
+    background: #1a1a1a;
+    padding: 1rem;
+    border-radius: 6px;
+    border: 1px solid #3a3a3a;
+    color: #e0e0e0;
     white-space: pre-wrap;
-    line-height: 1.5;
+    line-height: 1.6;
+    font-size: 0.95rem;
   }
 
   .settings-grid {
     display: grid;
     grid-template-columns: 1fr;
-    gap: 0.75rem;
+    gap: 1rem;
   }
 
   .setting-item {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    color: #ddd;
+    gap: 0.75rem;
+    padding: 1rem;
+    background: #2a2a2a;
+    border: 2px solid #3a3a3a;
+    border-radius: 8px;
+    color: #e0e0e0;
+    transition: all 0.2s;
+  }
+
+  .setting-item:hover {
+    border-color: #4a4a4a;
+    background: #2f2f2f;
   }
 
   .setting-item label {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.75rem;
     cursor: pointer;
+    flex: 1;
+    user-select: none;
+    font-size: 0.95rem;
+    line-height: 1.5;
   }
 
   .setting-item input[type="checkbox"] {
+    width: 20px;
+    height: 20px;
     cursor: pointer;
+    accent-color: #007acc;
+    flex-shrink: 0;
+  }
+
+  .setting-item input[type="checkbox"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
   }
 
   .setting-item strong {
-    min-width: 150px;
-    color: #aaa;
+    min-width: 160px;
+    color: #90caf9;
+    font-weight: 600;
+    flex-shrink: 0;
+  }
+
+  .setting-item span {
+    color: #e0e0e0;
   }
 
   .edit-textarea,
   .edit-input,
   .edit-select {
     width: 100%;
-    background: #2a2a2a;
-    color: #ddd;
-    border: 1px solid #444;
-    border-radius: 4px;
-    padding: 0.5rem;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    border: 2px solid #3a3a3a;
+    border-radius: 6px;
+    padding: 0.75rem;
     font-family: inherit;
-    font-size: 0.9rem;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    transition: all 0.2s;
   }
 
   .edit-textarea {
     resize: vertical;
+    min-height: 100px;
   }
 
   .edit-textarea:focus,
@@ -571,6 +612,13 @@
   .edit-select:focus {
     outline: none;
     border-color: #007acc;
+    background: #222;
+    box-shadow: 0 0 0 3px rgba(0, 122, 204, 0.1);
+  }
+
+  .edit-input,
+  .edit-select {
+    flex: 1;
   }
 
   .btn {
