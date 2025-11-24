@@ -22,12 +22,22 @@ from .peer_cache import PeerCache
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
-from dpc_protocol.pcm_core import PCMCore, PersonalContext
+from dpc_protocol.pcm_core import (
+    PCMCore, PersonalContext, InstructionBlock,
+    load_instructions, save_instructions, migrate_instructions_from_personal_context
+)
 from dpc_protocol.utils import parse_dpc_uri
 from datetime import datetime
 
 # Define the path to the user's D-PC configuration directory
 DPC_HOME_DIR = Path.home() / ".dpc"
+
+# Configuration file names
+PROVIDERS_CONFIG = "providers.json"
+PRIVACY_RULES = "privacy_rules.json"
+PERSONAL_CONTEXT = "personal.json"
+KNOWN_PEERS = "known_peers.json"
+NODE_KEY = "node.key"
 
 class CoreService:
     """
@@ -45,17 +55,17 @@ class CoreService:
         # Initialize offline mode components
         self.token_cache = TokenCache(
             cache_dir=DPC_HOME_DIR,
-            node_key_path=DPC_HOME_DIR / "node.key"
+            node_key_path=DPC_HOME_DIR / NODE_KEY
         )
-        self.peer_cache = PeerCache(DPC_HOME_DIR / "known_peers.json")
+        self.peer_cache = PeerCache(DPC_HOME_DIR / KNOWN_PEERS)
         self.connection_status = ConnectionStatus()
 
         # Set up status change callback
         self.connection_status.set_on_status_change(self._on_connection_status_changed)
 
         # Initialize all major components
-        self.firewall = ContextFirewall(DPC_HOME_DIR / ".dpc_access.json")
-        self.llm_manager = LLMManager(DPC_HOME_DIR / "providers.toml")
+        self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
+        self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
             oauth_callback_host=self.settings.get_oauth_callback_host(),
@@ -68,7 +78,14 @@ class CoreService:
         self.local_api = LocalApiServer(core_service=self)
 
         # Knowledge Architecture components (Phase 1-6)
-        self.pcm_core = PCMCore(DPC_HOME_DIR / "personal.json")
+        self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
+
+        # Migrate instructions to separate file (one-time operation)
+        migrate_instructions_from_personal_context()
+
+        # Load AI instructions from instructions.json
+        self.instructions = load_instructions()
+        print(f"[OK] AI instructions loaded from instructions.json")
 
         # Auto-collect device context on startup (if enabled)
         self.device_context = None
@@ -514,6 +531,15 @@ class CoreService:
                         )
                 except Exception as e:
                     print(f"Error in conversation monitoring: {e}")
+                    # Broadcast extraction failure event to UI
+                    await self.local_api.broadcast_event(
+                        "knowledge_extraction_failed",
+                        {
+                            "conversation_id": sender_node_id,
+                            "error": str(e),
+                            "reason": "JSON parsing failed or LLM extraction error"
+                        }
+                    )
 
         elif command == "REQUEST_CONTEXT":
             # Context request from peer - handle and respond
@@ -567,11 +593,25 @@ class CoreService:
             response = payload.get("response")
             error = payload.get("error")
 
+            # Extract token metadata
+            tokens_used = payload.get("tokens_used")
+            model_max_tokens = payload.get("model_max_tokens")
+            prompt_tokens = payload.get("prompt_tokens")
+            response_tokens = payload.get("response_tokens")
+
             if request_id in self._pending_inference_requests:
                 future = self._pending_inference_requests[request_id]
                 if not future.done():
                     if status == "success":
-                        future.set_result(response)
+                        # Return dict with response and token metadata
+                        result_data = {
+                            "response": response,
+                            "tokens_used": tokens_used,
+                            "model_max_tokens": model_max_tokens,
+                            "prompt_tokens": prompt_tokens,
+                            "response_tokens": response_tokens
+                        }
+                        future.set_result(result_data)
                     else:
                         future.set_exception(RuntimeError(error or "Remote inference failed"))
 
@@ -714,7 +754,7 @@ class CoreService:
     
     async def list_providers(self) -> Dict[str, Any]:
         """
-        Returns all available AI providers from providers.toml.
+        Returns all available AI providers from providers.json.
 
         Returns:
             Dictionary with:
@@ -736,6 +776,136 @@ class CoreService:
             "providers": providers_list,
             "default_provider": self.llm_manager.default_provider
         }
+
+    async def get_providers_config(self) -> Dict[str, Any]:
+        """
+        Get full providers configuration for editor.
+
+        Returns:
+            Dictionary with:
+            - status: "success" or "error"
+            - config: Full providers configuration dict
+        """
+        try:
+            import json
+
+            # Ensure config file exists (creates default if missing)
+            self.llm_manager._ensure_config_exists()
+
+            # Read from file
+            with open(self.llm_manager.config_path, 'r') as f:
+                config = json.load(f)
+
+            return {
+                "status": "success",
+                "config": config
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Save and validate providers configuration.
+
+        Args:
+            config_dict: Full providers configuration dictionary
+
+        Returns:
+            Dictionary with status and message/errors
+        """
+        # Validate structure
+        errors = self._validate_providers_config(config_dict)
+        if errors:
+            return {
+                "status": "error",
+                "errors": errors
+            }
+
+        try:
+            # Save to JSON and reload providers
+            self.llm_manager.save_config(config_dict)
+
+            # Broadcast event
+            await self.local_api.broadcast_event("providers_updated", {
+                "message": "AI providers configuration updated"
+            })
+
+            return {
+                "status": "success",
+                "message": "Providers saved successfully"
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    def _validate_providers_config(self, config_dict: Dict[str, Any]) -> list:
+        """
+        Validate providers configuration structure.
+
+        Args:
+            config_dict: Configuration dictionary to validate
+
+        Returns:
+            List of error messages (empty if valid)
+        """
+        errors = []
+
+        # Required top-level fields
+        if "default_provider" not in config_dict:
+            errors.append("Missing 'default_provider' field")
+        if "providers" not in config_dict:
+            errors.append("Missing 'providers' array")
+            return errors
+
+        # Validate each provider
+        provider_aliases = []
+        for i, provider in enumerate(config_dict["providers"]):
+            prefix = f"Provider {i+1}"
+
+            # Required fields for all providers
+            if "alias" not in provider:
+                errors.append(f"{prefix}: Missing 'alias'")
+            else:
+                alias = provider["alias"]
+                if alias in provider_aliases:
+                    errors.append(f"{prefix}: Duplicate alias '{alias}'")
+                provider_aliases.append(alias)
+
+            if "type" not in provider:
+                errors.append(f"{prefix}: Missing 'type'")
+            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic"]:
+                errors.append(f"{prefix}: Invalid type '{provider['type']}'")
+
+            if "model" not in provider:
+                errors.append(f"{prefix}: Missing 'model'")
+
+            # Type-specific required fields
+            provider_type = provider.get("type")
+            if provider_type == "ollama" and "host" not in provider:
+                errors.append(f"{prefix}: Ollama provider missing 'host'")
+            if provider_type == "openai_compatible" and "base_url" not in provider:
+                errors.append(f"{prefix}: OpenAI provider missing 'base_url'")
+
+            # Optional context_window validation
+            if "context_window" in provider:
+                try:
+                    cw = int(provider["context_window"])
+                    if cw <= 0:
+                        errors.append(f"{prefix}: context_window must be positive")
+                except (ValueError, TypeError):
+                    errors.append(f"{prefix}: context_window must be an integer")
+
+        # Check default_provider exists
+        default = config_dict.get("default_provider")
+        if default and default not in provider_aliases:
+            errors.append(f"Default provider '{default}' not found in providers list")
+
+        return errors
 
     def set_peer_metadata(self, node_id: str, **kwargs):
         """Store metadata for a peer (name, etc)."""
@@ -875,6 +1045,137 @@ class CoreService:
             return {
                 "status": "error",
                 "message": str(e)
+            }
+
+    async def get_instructions(self) -> Dict[str, Any]:
+        """Load and return AI instructions for UI display.
+
+        UI Integration: Called when user opens InstructionsEditor component.
+        Returns the InstructionBlock with all settings.
+        """
+        try:
+            instructions = load_instructions()
+            return {
+                "status": "success",
+                "instructions": asdict(instructions)
+            }
+        except Exception as e:
+            print(f"Error loading instructions: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_instructions(self, instructions_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Save updated AI instructions from UI editor.
+
+        UI Integration: Called when user clicks 'Save' in InstructionsEditor.
+
+        Args:
+            instructions_dict: Dictionary representation of InstructionBlock
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            # Create InstructionBlock from dict
+            instructions = InstructionBlock(
+                primary=instructions_dict.get('primary', InstructionBlock().primary),
+                context_update=instructions_dict.get('context_update', InstructionBlock().context_update),
+                verification_protocol=instructions_dict.get('verification_protocol', InstructionBlock().verification_protocol),
+                learning_support=instructions_dict.get('learning_support', InstructionBlock().learning_support),
+                bias_mitigation=instructions_dict.get('bias_mitigation', InstructionBlock().bias_mitigation),
+                collaboration_mode=instructions_dict.get('collaboration_mode', 'individual'),
+                consensus_required=instructions_dict.get('consensus_required', True),
+                ai_curation_enabled=instructions_dict.get('ai_curation_enabled', True),
+                dissent_encouraged=instructions_dict.get('dissent_encouraged', True)
+            )
+
+            # Save to disk
+            save_instructions(instructions)
+
+            # Update in memory
+            self.instructions = instructions
+
+            # Emit event to UI
+            await self.local_api.broadcast_event("instructions_updated", {
+                "message": "AI instructions saved successfully"
+            })
+
+            return {
+                "status": "success",
+                "message": "AI instructions saved successfully"
+            }
+
+        except Exception as e:
+            print(f"Error saving instructions: {e}")
+            import traceback
+            traceback.print_exc()
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def reload_instructions(self) -> Dict[str, Any]:
+        """Reload AI instructions from disk.
+
+        UI Integration: Called when user clicks 'Reload' or when external changes detected.
+
+        Returns:
+            Dict with status, message, and updated instructions
+        """
+        try:
+            instructions = load_instructions()
+
+            # Update in memory
+            self.instructions = instructions
+
+            # Emit event to UI
+            await self.local_api.broadcast_event("instructions_reloaded", {
+                "instructions": asdict(instructions)
+            })
+
+            return {
+                "status": "success",
+                "message": "AI instructions reloaded from disk",
+                "instructions": asdict(instructions)
+            }
+
+        except Exception as e:
+            print(f"Error reloading instructions: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_token_usage(self, conversation_id: str) -> Dict[str, Any]:
+        """Get token usage statistics for a conversation
+
+        UI Integration: Called to display token counter for a chat.
+
+        Args:
+            conversation_id: ID of the conversation to get token usage for
+
+        Returns:
+            Dict with token usage statistics
+        """
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            usage = monitor.get_token_usage()
+
+            return {
+                "status": "success",
+                **usage
+            }
+
+        except Exception as e:
+            print(f"Error getting token usage for {conversation_id}: {e}")
+            return {
+                "status": "error",
+                "message": str(e),
+                "tokens_used": 0,
+                "token_limit": 100000,
+                "usage_percent": 0.0
             }
 
     async def get_firewall_rules(self) -> Dict[str, Any]:
@@ -1127,7 +1428,8 @@ class CoreService:
                 conversation_id=conversation_id,
                 participants=participants,
                 llm_manager=self.llm_manager,
-                knowledge_threshold=0.7  # 70% confidence threshold
+                knowledge_threshold=0.7,  # 70% confidence threshold
+                settings=self.settings  # Pass settings for config (e.g., cultural_perspectives_enabled)
             )
             print(f"Created conversation monitor for {conversation_id} with {len(participants)} participant(s)")
 
@@ -1308,18 +1610,23 @@ class CoreService:
 
         # Remote inference
         try:
-            response = await self._request_inference_from_peer(
+            result_data = await self._request_inference_from_peer(
                 peer_id=compute_host,
                 prompt=prompt,
                 model=model,
                 provider=provider
             )
-            # For remote inference, we know the model/provider if specified
+            # result_data is now a dict with response and token metadata
             return {
-                "response": response,
+                "response": result_data.get("response") if isinstance(result_data, dict) else result_data,
                 "model": model or "unknown",
                 "provider": provider or "unknown",
-                "compute_host": compute_host
+                "compute_host": compute_host,
+                # Include token metadata if available
+                "tokens_used": result_data.get("tokens_used") if isinstance(result_data, dict) else None,
+                "model_max_tokens": result_data.get("model_max_tokens") if isinstance(result_data, dict) else None,
+                "prompt_tokens": result_data.get("prompt_tokens") if isinstance(result_data, dict) else None,
+                "response_tokens": result_data.get("response_tokens") if isinstance(result_data, dict) else None
             }
         except ConnectionError as e:
             raise ValueError(f"Compute host {compute_host} is not connected") from e
@@ -1447,13 +1754,17 @@ class CoreService:
                 else:
                     raise ValueError(f"No provider found for model '{model}'")
 
-            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use)
+            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use, return_metadata=True)
             print(f"  - Inference completed successfully for {peer_id}")
 
-            # Send success response
+            # Send success response with token metadata
             success_response = create_remote_inference_response(
                 request_id=request_id,
-                response=result
+                response=result["response"],
+                tokens_used=result.get("tokens_used"),
+                prompt_tokens=result.get("prompt_tokens"),
+                response_tokens=result.get("response_tokens"),
+                model_max_tokens=result.get("model_max_tokens")
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             print(f"  - Sent inference result to {peer_id}")
@@ -1899,12 +2210,40 @@ class CoreService:
                 provider=provider
             )
             # result is a dict with 'response', 'model', 'provider', 'compute_host'
+            # and potentially 'tokens_used', 'model_max_tokens' for local inference
             response_payload = {
                 "content": result["response"],
                 "model": result["model"],
                 "provider": result["provider"],
                 "compute_host": result["compute_host"]
             }
+
+            # Token tracking (Phase 2) - works for both local and remote inference
+            if "tokens_used" in result:
+                conversation_id = kwargs.get("conversation_id", "local_ai")
+                monitor = self._get_or_create_conversation_monitor(conversation_id)
+
+                # Set token limit based on model
+                if "model_max_tokens" in result:
+                    monitor.set_token_limit(result["model_max_tokens"])
+
+                # Update token count
+                monitor.update_token_count(result["tokens_used"])
+
+                # Check if we should warn about approaching limit
+                if monitor.should_suggest_extraction():
+                    token_usage = monitor.get_token_usage()
+                    await self.local_api.broadcast_event("token_limit_warning", {
+                        "conversation_id": conversation_id,
+                        "tokens_used": token_usage["tokens_used"],
+                        "token_limit": token_usage["token_limit"],
+                        "usage_percent": token_usage["usage_percent"]
+                    })
+                    print(f"[Token Warning] {conversation_id}: {token_usage['usage_percent']:.1%} of context window used")
+
+                # Include token info in response
+                response_payload["tokens_used"] = result["tokens_used"]
+                response_payload["token_limit"] = result.get("model_max_tokens", 0)
 
         except Exception as e:
             print(f"  - Error during inference: {e}")
@@ -1970,6 +2309,15 @@ class CoreService:
                 print(f"Error in local AI conversation monitoring: {e}")
                 import traceback
                 traceback.print_exc()
+                # Broadcast extraction failure event to UI
+                await self.local_api.broadcast_event(
+                    "knowledge_extraction_failed",
+                    {
+                        "conversation_id": "local_ai",
+                        "error": str(e),
+                        "reason": "JSON parsing failed or LLM extraction error"
+                    }
+                )
         elif not self.auto_knowledge_detection_enabled:
             print(f"[Monitor] Auto-detection is OFF - messages not being monitored")
         elif status != "OK":

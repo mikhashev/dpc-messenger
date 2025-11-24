@@ -3,10 +3,13 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, availableProviders, peerProviders } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
+  import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
+  import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
+  import Toast from "$lib/components/Toast.svelte";
   import { ask } from '@tauri-apps/plugin-dialog';
 
   console.log("Full D-PC Messenger loading...");
@@ -59,9 +62,20 @@
 
   // Knowledge Architecture UI state
   let showContextViewer: boolean = false;
+  let showInstructionsEditor: boolean = false;
   let showFirewallEditor: boolean = false;
+  let showProvidersEditor: boolean = false;
   let showCommitDialog: boolean = false;
   let autoKnowledgeDetection: boolean = true;  // Default: enabled
+
+  // Token tracking state (Phase 2)
+  let tokenUsageMap: Map<string, {used: number, limit: number}> = new Map();
+  let showTokenWarning: boolean = false;
+  let tokenWarningMessage: string = "";
+
+  // Knowledge extraction failure state (Phase 4)
+  let showExtractionFailure: boolean = false;
+  let extractionFailureMessage: string = "";
 
   // Add AI Chat dialog state
   let showAddAIChatDialog: boolean = false;
@@ -70,6 +84,27 @@
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
     showCommitDialog = true;
+  }
+
+  // Reactive: Handle token warnings (Phase 2)
+  $: if ($tokenWarning) {
+    const {conversation_id, tokens_used, token_limit, usage_percent} = $tokenWarning;
+    // Update token usage map
+    tokenUsageMap = new Map(tokenUsageMap);
+    tokenUsageMap.set(conversation_id, {used: tokens_used, limit: token_limit});
+    // Show warning toast
+    showTokenWarning = true;
+    tokenWarningMessage = `Context window ${Math.round(usage_percent * 100)}% full. Consider ending session to save knowledge.`;
+  }
+
+  // Reactive: Get current chat's token usage
+  $: currentTokenUsage = tokenUsageMap.get(activeChatId) || {used: 0, limit: 0};
+
+  // Reactive: Handle knowledge extraction failures (Phase 4)
+  $: if ($extractionFailure) {
+    const {conversation_id, reason} = $extractionFailure;
+    showExtractionFailure = true;
+    extractionFailureMessage = `Knowledge extraction failed for ${conversation_id}: ${reason}`;
   }
 
   // Reactive: Reset compute host if selected peer disconnects
@@ -325,8 +360,16 @@
     showContextViewer = true;
   }
 
+  function openInstructionsEditor() {
+    showInstructionsEditor = true;
+  }
+
   function openFirewallEditor() {
     showFirewallEditor = true;
+  }
+
+  function openProvidersEditor() {
+    showProvidersEditor = true;
   }
 
   function handleCommitVote(event: CustomEvent) {
@@ -367,6 +410,10 @@
         newMap.set(chatId, []);  // Clear the message array for this chat
         return newMap;
       });
+
+      // Clear token usage for this chat (Phase 2)
+      tokenUsageMap = new Map(tokenUsageMap);
+      tokenUsageMap.delete(chatId);
 
       // Backend will create a new monitor on next message
       // (Old monitor's buffer was already cleared by previous extraction)
@@ -509,6 +556,15 @@
           ));
           return newMap;
         });
+
+        // Update token usage map with data from response (Phase 2)
+        if (message.status === "OK" && message.payload.tokens_used && message.payload.token_limit) {
+          tokenUsageMap = new Map(tokenUsageMap);
+          tokenUsageMap.set(chatId, {
+            used: message.payload.tokens_used,
+            limit: message.payload.token_limit
+          });
+        }
 
         // Clean up the command mapping
         commandToChatMap.delete(responseCommandId);
@@ -680,8 +736,16 @@
             📚 View Personal Context
           </button>
 
+          <button class="btn-context" on:click={openInstructionsEditor}>
+            ⚙️ AI Instructions
+          </button>
+
           <button class="btn-context" on:click={openFirewallEditor}>
             🛡️ Firewall Rules
+          </button>
+
+          <button class="btn-context" on:click={openProvidersEditor}>
+            🤖 AI Providers
           </button>
 
           <!-- Auto Knowledge Detection Toggle -->
@@ -864,6 +928,18 @@
           {/if}
         </div>
 
+        {#if $aiChats.has(activeChatId) && currentTokenUsage.limit > 0}
+          <div class="token-counter">
+            <span class="token-label">Context:</span>
+            <span class="token-value">
+              {currentTokenUsage.used.toLocaleString()} / {currentTokenUsage.limit.toLocaleString()} tokens
+            </span>
+            <span class="token-percentage" class:warning={currentTokenUsage.used / currentTokenUsage.limit >= 0.8}>
+              ({Math.round((currentTokenUsage.used / currentTokenUsage.limit) * 100)}%)
+            </span>
+          </div>
+        {/if}
+
         <div class="chat-actions">
           <button class="btn-new-chat" on:click={() => handleNewChat(activeChatId)}>
             🔄 New Chat
@@ -1026,10 +1102,48 @@
   on:close={() => showContextViewer = false}
 />
 
+<InstructionsEditor
+  bind:open={showInstructionsEditor}
+  on:close={() => showInstructionsEditor = false}
+/>
+
 <FirewallEditor
   bind:open={showFirewallEditor}
   on:close={() => showFirewallEditor = false}
 />
+
+<ProvidersEditor
+  bind:open={showProvidersEditor}
+  on:close={() => showProvidersEditor = false}
+/>
+
+<!-- Token Warning Toast (Phase 2) -->
+{#if showTokenWarning}
+  <Toast
+    message={tokenWarningMessage}
+    type="warning"
+    duration={10000}
+    dismissible={true}
+    onDismiss={() => {
+      showTokenWarning = false;
+      tokenWarning.set(null);
+    }}
+  />
+{/if}
+
+<!-- Knowledge Extraction Failure Toast (Phase 4) -->
+{#if showExtractionFailure}
+  <Toast
+    message={extractionFailureMessage}
+    type="error"
+    duration={8000}
+    dismissible={true}
+    onDismiss={() => {
+      showExtractionFailure = false;
+      extractionFailure.set(null);
+    }}
+  />
+{/if}
 
 <!-- Add AI Chat Dialog -->
 {#if showAddAIChatDialog}
@@ -1570,6 +1684,38 @@
     color: #888;
     font-style: italic;
     margin-left: 0.5rem;
+  }
+
+  .token-counter {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.85rem;
+    padding: 0.4rem 0.8rem;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+  }
+
+  .token-label {
+    color: #666;
+    font-weight: 500;
+  }
+
+  .token-value {
+    font-family: 'Courier New', monospace;
+    color: #333;
+    font-weight: 600;
+  }
+
+  .token-percentage {
+    color: #4CAF50;
+    font-weight: 500;
+  }
+
+  .token-percentage.warning {
+    color: #ff9800;
+    font-weight: 600;
   }
 
   .chat-actions {

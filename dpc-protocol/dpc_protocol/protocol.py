@@ -40,12 +40,29 @@ def create_remote_inference_request(request_id: str, prompt: str, model: str = N
         payload["provider"] = provider
     return {"command": "REMOTE_INFERENCE_REQUEST", "payload": payload}
 
-def create_remote_inference_response(request_id: str, response: str = None, error: str = None) -> Dict[str, Any]:
-    """Creates a remote inference response message."""
+def create_remote_inference_response(
+    request_id: str,
+    response: str = None,
+    error: str = None,
+    tokens_used: int = None,
+    prompt_tokens: int = None,
+    response_tokens: int = None,
+    model_max_tokens: int = None
+) -> Dict[str, Any]:
+    """Creates a remote inference response message with optional token metadata."""
     payload = {"request_id": request_id}
     if response is not None:
         payload["response"] = response
         payload["status"] = "success"
+        # Add token metadata if provided
+        if tokens_used is not None:
+            payload["tokens_used"] = tokens_used
+        if prompt_tokens is not None:
+            payload["prompt_tokens"] = prompt_tokens
+        if response_tokens is not None:
+            payload["response_tokens"] = response_tokens
+        if model_max_tokens is not None:
+            payload["model_max_tokens"] = model_max_tokens
     else:
         payload["error"] = error or "Unknown error"
         payload["status"] = "error"

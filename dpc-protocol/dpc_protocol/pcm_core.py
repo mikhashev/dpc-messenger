@@ -54,6 +54,10 @@ class KnowledgeEntry:
     confidence: float = 1.0
     last_updated: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
+    # Edit tracking (Phase 5 - inline editing with attribution)
+    edited_by: Optional[str] = None  # peer_id or node_id who last edited
+    edited_at: Optional[str] = None  # ISO timestamp of last edit
+
     # Self-improvement metrics (from PCM)
     usage_count: int = 0
     effectiveness_score: float = 1.0
@@ -359,7 +363,155 @@ class PCMCore:
         print(f"Template context file created at {self.file_path}")
 
 
-# --- 3. Usage example (for self-testing the module) ---
+# --- 3. Instructions Management (separate from personal.json) ---
+
+def load_instructions(file_path: Path | None = None) -> InstructionBlock:
+    """
+    Load AI instructions from instructions.json.
+
+    Args:
+        file_path: Path to instructions.json. Defaults to ~/.dpc/instructions.json
+
+    Returns:
+        InstructionBlock instance
+    """
+    if file_path is None:
+        file_path = DPC_HOME_DIR / "instructions.json"
+    else:
+        file_path = Path(file_path)
+
+    # If instructions.json doesn't exist, return default
+    if not file_path.exists():
+        print(f"Instructions file not found at {file_path}. Using default instructions.")
+        return InstructionBlock()
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Handle nested bias_mitigation and learning_support dicts
+        return InstructionBlock(
+            primary=data.get('primary', InstructionBlock().primary),
+            context_update=data.get('context_update', InstructionBlock().context_update),
+            verification_protocol=data.get('verification_protocol', InstructionBlock().verification_protocol),
+            learning_support=data.get('learning_support', InstructionBlock().learning_support),
+            bias_mitigation=data.get('bias_mitigation', InstructionBlock().bias_mitigation),
+            collaboration_mode=data.get('collaboration_mode', 'individual'),
+            consensus_required=data.get('consensus_required', True),
+            ai_curation_enabled=data.get('ai_curation_enabled', True),
+            dissent_encouraged=data.get('dissent_encouraged', True)
+        )
+    except Exception as e:
+        print(f"Error loading instructions from {file_path}: {e}")
+        print("Using default instructions.")
+        return InstructionBlock()
+
+
+def save_instructions(instructions: InstructionBlock, file_path: Path | None = None):
+    """
+    Save AI instructions to instructions.json.
+
+    Args:
+        instructions: InstructionBlock instance to save
+        file_path: Path to instructions.json. Defaults to ~/.dpc/instructions.json
+    """
+    if file_path is None:
+        file_path = DPC_HOME_DIR / "instructions.json"
+    else:
+        file_path = Path(file_path)
+
+    # Ensure parent directory exists
+    file_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Convert to dict and save
+    data = asdict(instructions)
+
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    print(f"Instructions saved to {file_path}")
+
+
+def migrate_instructions_from_personal_context(
+    personal_json_path: Path | None = None,
+    instructions_json_path: Path | None = None
+) -> bool:
+    """
+    One-time migration: Extract instructions from personal.json to instructions.json.
+    Then remove instruction field from personal.json to keep it clean.
+
+    Args:
+        personal_json_path: Path to personal.json. Defaults to ~/.dpc/personal.json
+        instructions_json_path: Path to instructions.json. Defaults to ~/.dpc/instructions.json
+
+    Returns:
+        True if migration was performed, False if no migration needed
+    """
+    if personal_json_path is None:
+        personal_json_path = DPC_HOME_DIR / "personal.json"
+    else:
+        personal_json_path = Path(personal_json_path)
+
+    if instructions_json_path is None:
+        instructions_json_path = DPC_HOME_DIR / "instructions.json"
+    else:
+        instructions_json_path = Path(instructions_json_path)
+
+    # Check if instructions.json already exists - no migration needed
+    if instructions_json_path.exists():
+        print(f"Instructions file already exists at {instructions_json_path}. No migration needed.")
+        return False
+
+    # Check if personal.json exists and has instruction field
+    if not personal_json_path.exists():
+        print(f"Personal context file not found at {personal_json_path}. No migration needed.")
+        return False
+
+    try:
+        # Load personal.json
+        with open(personal_json_path, 'r', encoding='utf-8') as f:
+            personal_data = json.load(f)
+
+        # Check if instruction field exists
+        instruction_data = personal_data.get('instruction')
+        if not instruction_data:
+            print("No instruction field found in personal.json. Creating default instructions.json.")
+            save_instructions(InstructionBlock(), instructions_json_path)
+            return True
+
+        # Extract instructions
+        instructions = InstructionBlock(
+            primary=instruction_data.get('primary', InstructionBlock().primary),
+            context_update=instruction_data.get('context_update', InstructionBlock().context_update),
+            verification_protocol=instruction_data.get('verification_protocol', InstructionBlock().verification_protocol),
+            learning_support=instruction_data.get('learning_support', InstructionBlock().learning_support),
+            bias_mitigation=instruction_data.get('bias_mitigation', InstructionBlock().bias_mitigation),
+            collaboration_mode=instruction_data.get('collaboration_mode', 'individual'),
+            consensus_required=instruction_data.get('consensus_required', True),
+            ai_curation_enabled=instruction_data.get('ai_curation_enabled', True),
+            dissent_encouraged=instruction_data.get('dissent_encouraged', True)
+        )
+
+        # Save to instructions.json
+        save_instructions(instructions, instructions_json_path)
+
+        # Remove instruction field from personal.json
+        del personal_data['instruction']
+
+        # Save cleaned personal.json
+        with open(personal_json_path, 'w', encoding='utf-8') as f:
+            json.dump(personal_data, f, indent=2, ensure_ascii=False)
+
+        print(f"✓ Migration complete: Instructions moved from personal.json to {instructions_json_path}")
+        print(f"✓ personal.json cleaned (instruction field removed)")
+        return True
+
+    except Exception as e:
+        print(f"Error during migration: {e}")
+        return False
+
+
+# --- 4. Usage example (for self-testing the module) ---
 
 if __name__ == '__main__':
     print("--- Testing PCMCore ---")

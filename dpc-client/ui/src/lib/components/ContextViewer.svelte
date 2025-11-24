@@ -17,7 +17,6 @@
       core_values: string[];
     };
     knowledge: Record<string, Topic>;
-    instruction: InstructionBlock;
     cognitive_profile: CognitiveProfile | null;
     version: number;
     commit_history: CommitHistoryItem[];
@@ -41,15 +40,6 @@
     confidence: number;
   };
 
-  type InstructionBlock = {
-    primary: string;
-    bias_mitigation: {
-      require_multi_perspective: boolean;
-      challenge_status_quo: boolean;
-      cultural_sensitivity: string;
-    };
-  };
-
   type CognitiveProfile = {
     cultural_background: string;
     memory_strengths: string[];
@@ -61,7 +51,7 @@
     timestamp: string;
   };
 
-  let selectedTab: 'profile' | 'knowledge' | 'instructions' | 'history' = 'profile';
+  let selectedTab: 'profile' | 'knowledge' | 'history' = 'profile';
   let editMode: boolean = false;
   let editedContext: PersonalContext | null = null;
   let isSaving: boolean = false;
@@ -95,8 +85,7 @@
     try {
       const result = await sendCommand('save_personal_context', {
         context_dict: {
-          profile: editedContext.profile,
-          instruction: editedContext.instruction
+          profile: editedContext.profile
         }
       });
 
@@ -107,7 +96,6 @@
         // Update the displayed context
         if (context) {
           context.profile = editedContext.profile;
-          context.instruction = editedContext.instruction;
         }
 
         // Exit edit mode immediately (so close button works correctly)
@@ -202,13 +190,6 @@
           on:click={() => selectedTab = 'knowledge'}
         >
           Knowledge ({Object.keys(context.knowledge).length})
-        </button>
-        <button
-          class="tab"
-          class:active={selectedTab === 'instructions'}
-          on:click={() => selectedTab = 'instructions'}
-        >
-          AI Instructions
         </button>
         <button
           class="tab"
@@ -342,81 +323,6 @@
             {:else}
               <p class="empty">No knowledge topics yet. They'll appear here as you approve commits.</p>
             {/each}
-          </div>
-
-        {:else if selectedTab === 'instructions'}
-          <div class="section">
-            <h3>AI Behavior Instructions</h3>
-            <div class="instruction-card">
-              <strong>Primary Instruction:</strong>
-              {#if editMode && editedContext}
-                <textarea
-                  class="edit-textarea instruction-edit"
-                  rows="6"
-                  bind:value={editedContext.instruction.primary}
-                  placeholder="Enter AI behavior instructions..."
-                ></textarea>
-              {:else}
-                <p class="instruction-text">{displayContext?.instruction.primary}</p>
-              {/if}
-            </div>
-
-            <h4>Bias Mitigation Settings</h4>
-            <div class="settings-grid">
-              <div class="setting-item">
-                <label>
-                  {#if editMode && editedContext}
-                    <input
-                      type="checkbox"
-                      bind:checked={editedContext.instruction.bias_mitigation.require_multi_perspective}
-                    />
-                  {:else}
-                    <input
-                      type="checkbox"
-                      checked={displayContext?.instruction.bias_mitigation.require_multi_perspective}
-                      disabled
-                    />
-                  {/if}
-                  Require Multi-Perspective Analysis
-                </label>
-              </div>
-              <div class="setting-item">
-                <label>
-                  {#if editMode && editedContext}
-                    <input
-                      type="checkbox"
-                      bind:checked={editedContext.instruction.bias_mitigation.challenge_status_quo}
-                    />
-                  {:else}
-                    <input
-                      type="checkbox"
-                      checked={displayContext?.instruction.bias_mitigation.challenge_status_quo}
-                      disabled
-                    />
-                  {/if}
-                  Challenge Status Quo
-                </label>
-              </div>
-              <div class="setting-item">
-                <strong>Cultural Sensitivity:</strong>
-                {#if editMode && editedContext}
-                  <input
-                    type="text"
-                    class="edit-input"
-                    bind:value={editedContext.instruction.bias_mitigation.cultural_sensitivity}
-                    placeholder="e.g., high, medium, context-aware..."
-                  />
-                {:else}
-                  <span>{displayContext?.instruction.bias_mitigation.cultural_sensitivity}</span>
-                {/if}
-              </div>
-            </div>
-
-            {#if !editMode}
-              <div class="info-box">
-                <strong>Tip:</strong> Click the 'Edit' button in the header to modify instructions and settings
-              </div>
-            {/if}
           </div>
 
         {:else if selectedTab === 'history'}
@@ -669,40 +575,6 @@
     color: #333;
   }
 
-  .instruction-card {
-    background: #f5f5f5;
-    padding: 1rem;
-    border-radius: 6px;
-    margin-bottom: 1rem;
-  }
-
-  .instruction-text {
-    margin: 0.5rem 0 0 0;
-    color: #333;
-    line-height: 1.5;
-  }
-
-  .settings-grid {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    margin-top: 0.75rem;
-  }
-
-  .setting-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .info-box {
-    background: #e3f2fd;
-    border-left: 3px solid #1976d2;
-    padding: 0.75rem;
-    margin-top: 1rem;
-    font-size: 0.9rem;
-  }
-
   .commit-card {
     border-left: 3px solid #4caf50;
     padding: 0.75rem;
@@ -846,11 +718,6 @@
   .edit-textarea:focus {
     outline: none;
     border-color: #4CAF50;
-  }
-
-  .instruction-edit {
-    margin-top: 0.5rem;
-    min-height: 120px;
   }
 
   .btn-close {

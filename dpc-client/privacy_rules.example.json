@@ -1,0 +1,84 @@
+{
+  "_comment": "D-PC Privacy Rules - Controls who can access your context data and compute resources. By default, all access is denied.",
+
+  "hub": {
+    "_comment": "What the Federation Hub can see for discovery (ONLY this data is visible to the Hub)",
+    "personal.json:profile.name": "allow",
+    "personal.json:profile.description": "allow"
+  },
+
+  "node_groups": {
+    "_comment": "Define which nodes belong to which groups for easier permission management",
+    "colleagues": ["dpc-node-alice-123", "dpc-node-bob-456"],
+    "friends": ["dpc-node-charlie-789"],
+    "trusted_developers": ["dpc-node-alice-123"]
+  },
+
+  "file_groups": {
+    "_comment": "Define aliases for groups of context files",
+    "work": ["work_*.json"],
+    "personal": ["personal.json", "health.json"],
+    "learning": ["learning_*.json"]
+  },
+
+  "ai_scopes": {
+    "_comment": "Control what your local AI can access in different modes",
+    "work": {
+      "@work:*": "allow",
+      "@personal:*": "deny"
+    },
+    "personal": {
+      "@personal:*": "allow",
+      "@work:*": "deny"
+    }
+  },
+
+  "device_sharing": {
+    "_comment": "Control what device info is shared (device_context.json)",
+    "basic": {
+      "device_context.json:software.os.*": "allow",
+      "device_context.json:software.runtime.*": "allow",
+      "device_context.json:software.dev_tools.*": "allow",
+      "device_context.json:hardware.*": "deny"
+    },
+    "compute": {
+      "device_context.json:hardware.gpu.*": "allow",
+      "device_context.json:hardware.memory.*": "allow",
+      "device_context.json:software.ai_models.*": "allow"
+    }
+  },
+
+  "groups": {
+    "_comment": "Permissions for node groups",
+    "colleagues": {
+      "work_main.json:availability": "allow",
+      "work_main.json:skills.*": "allow"
+    },
+    "friends": {
+      "personal.json:profile.*": "allow",
+      "@learning:*": "allow"
+    }
+  },
+
+  "nodes": {
+    "_comment": "Permissions for specific nodes",
+    "dpc-node-alice-123": {
+      "personal.json:profile.*": "allow",
+      "@learning:*": "allow",
+      "device_context.json:hardware.gpu.*": "allow",
+      "device_context.json:software.ai_models.*": "allow"
+    },
+    "dpc-node-bob-456": {
+      "work_main.json:availability": "allow",
+      "work_main.json:skills.*": "allow"
+    }
+  },
+
+  "compute": {
+    "_comment": "Remote Inference Permissions - Controls who can use your local AI models. This does NOT share hardware access, only API access to run AI models on your device.",
+    "enabled": false,
+    "allow_nodes": ["dpc-node-alice-123"],
+    "allow_groups": ["trusted_developers"],
+    "allowed_models": ["llama3.1:8b", "llama3:70b"]
+  }
+}

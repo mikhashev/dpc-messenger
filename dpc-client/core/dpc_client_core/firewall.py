@@ -11,12 +11,26 @@ from dpc_protocol.pcm_core import PersonalContext  # For wildcard matching
 
 class ContextFirewall:
     """
-    Parses and evaluates .dpc_access.json rules to control access to context data.
+    Parses and evaluates privacy_rules.json to control access to context data.
     """
     def __init__(self, access_file_path: Path):
         self.access_file_path = access_file_path
+        self._migrate_from_old_filename()
         self._ensure_file_exists()
         self._load_rules()
+
+    def _migrate_from_old_filename(self):
+        """Migrate from old .dpc_access.json to new privacy_rules.json filename."""
+        old_path = self.access_file_path.parent / ".dpc_access.json"
+
+        # Only migrate if old file exists and new file doesn't
+        if old_path.exists() and not self.access_file_path.exists():
+            print(f"Migrating {old_path.name} to {self.access_file_path.name}...")
+            try:
+                old_path.rename(self.access_file_path)
+                print(f"Migration successful!")
+            except Exception as e:
+                print(f"Error migrating privacy rules file: {e}")
 
     def _load_rules(self):
         """Load and parse rules from JSON file."""
@@ -50,7 +64,7 @@ class ContextFirewall:
               f"allowed_models={len(self.compute_allowed_models)}")
 
     def _ensure_file_exists(self):
-        """Creates a default, secure .dpc_access.json file if one doesn't exist."""
+        """Creates a default, secure privacy_rules.json file if one doesn't exist."""
         if not self.access_file_path.exists():
             print(f"Warning: Access control file not found at {self.access_file_path}.")
             print("Creating a default, secure template...")

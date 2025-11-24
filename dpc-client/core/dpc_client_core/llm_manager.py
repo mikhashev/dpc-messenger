@@ -1,7 +1,7 @@
 # dpc-client/core/dpc_client_core/llm_manager.py
 
 import os
-import toml
+import json
 import asyncio
 from pathlib import Path
 from typing import Dict, Any
@@ -10,6 +10,14 @@ from typing import Dict, Any
 from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 import ollama
+
+# Token counting
+try:
+    import tiktoken
+    TIKTOKEN_AVAILABLE = True
+except ImportError:
+    TIKTOKEN_AVAILABLE = False
+    print("Warning: tiktoken not available. Token counting will use estimation for all models.")
 
 # --- Abstract Base Class for all Providers ---
 
@@ -100,49 +108,112 @@ PROVIDER_MAP = {
     "anthropic": AnthropicProvider,
 }
 
+# Default context window sizes for common models (in tokens)
+MODEL_CONTEXT_WINDOWS = {
+    # Ollama models
+    "llama3.1:8b": 131072,  # 128K tokens
+    "llama3.1:13b": 131072,
+    "llama3.1:70b": 131072,
+    "llama3.2:1b": 131072,
+    "llama3.2:3b": 131072,
+    "mistral:7b": 8192,
+    "mixtral:8x7b": 32768,
+    "qwen2.5:7b": 32768,
+    "deepseek-coder-v2:16b": 131072,
+    "codellama:7b": 16384,
+
+    # OpenAI models
+    "gpt-4": 8192,
+    "gpt-4-32k": 32768,
+    "gpt-4-turbo": 128000,
+    "gpt-4o": 128000,
+    "gpt-3.5-turbo": 16384,
+    "gpt-3.5-turbo-16k": 16384,
+
+    # Anthropic models
+    "claude-3-opus-20240229": 200000,
+    "claude-3-sonnet-20240229": 200000,
+    "claude-3-haiku-20240307": 200000,
+    "claude-3-5-sonnet-20240620": 200000,
+    "claude-sonnet-4-5-20250929": 200000,
+    "claude-haiku-4-5": 200000,  # Claude Haiku 4.5 (shorthand model name)
+    "claude-opus-4-5": 200000,   # Claude Opus 4.5 (shorthand model name)
+
+    # Default fallback
+    "default": 4096
+}
+
 class LLMManager:
     """
     Manages all configured AI providers.
     """
-    def __init__(self, config_path: Path = Path.home() / ".dpc" / "providers.toml"):
+    def __init__(self, config_path: Path = Path.home() / ".dpc" / "providers.json"):
         self.config_path = config_path
         self.providers: Dict[str, AIProvider] = {}
         self.default_provider: str | None = None
+        self._migrate_from_toml_if_needed()
         self._load_providers_from_config()
 
+    def _migrate_from_toml_if_needed(self):
+        """Migrates providers.toml to providers.json if needed."""
+        toml_path = self.config_path.parent / "providers.toml"
+
+        # Only migrate if TOML exists and JSON doesn't
+        if toml_path.exists() and not self.config_path.exists():
+            print(f"Migrating {toml_path} to {self.config_path}...")
+            try:
+                # Import toml only if needed for migration
+                import toml
+                config = toml.load(toml_path)
+
+                # Save as JSON
+                with open(self.config_path, 'w') as f:
+                    json.dump(config, f, indent=2)
+
+                # Backup TOML file
+                backup_path = toml_path.with_suffix('.toml.backup')
+                toml_path.rename(backup_path)
+                print(f"Migration successful! Original file backed up as {backup_path}")
+            except Exception as e:
+                print(f"Error migrating TOML to JSON: {e}")
+
     def _ensure_config_exists(self):
-        """Creates a default providers.toml file if one doesn't exist."""
+        """Creates a default providers.json file if one doesn't exist."""
         if not self.config_path.exists():
             print(f"Warning: Provider config file not found at {self.config_path}.")
             print("Creating a default template with a local Ollama provider...")
-            
+
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
-            
-            default_config = """
-# Default AI provider configuration for D-PC.
-# You can add more providers here (e.g., for LM Studio, OpenAI, Anthropic).
 
-default_provider = "ollama_local"
+            default_config = {
+                "default_provider": "ollama_local",
+                "providers": [
+                    {
+                        "alias": "ollama_local",
+                        "type": "ollama",
+                        "model": "llama3.1:8b",
+                        "host": "http://127.0.0.1:11434",
+                        "context_window": 131072
+                    }
+                ]
+            }
 
-[[providers]]
-  alias = "ollama_local"
-  type = "ollama"
-  model = "llama3.1:8b"
-  host = "http://127.0.0.1:11434"
-"""
-            self.config_path.write_text(default_config)
+            with open(self.config_path, 'w') as f:
+                json.dump(default_config, f, indent=2)
             print(f"Default provider config created at {self.config_path}")
 
     def _load_providers_from_config(self):
         """Reads the config file and initializes all defined providers."""
-        self._ensure_config_exists() # Call the new method
+        self._ensure_config_exists()
         print(f"Loading AI providers from {self.config_path}...")
         if not self.config_path.exists():
             print(f"Warning: Provider config file not found at {self.config_path}. No providers loaded.")
             return
 
         try:
-            config = toml.load(self.config_path)
+            with open(self.config_path, 'r') as f:
+                config = json.load(f)
+
             self.default_provider = config.get("default_provider")
 
             for provider_config in config.get("providers", []):
@@ -162,13 +233,32 @@ default_provider = "ollama_local"
                         print(f"  - Error loading provider '{alias}': {e}")
                 else:
                     print(f"Warning: Unknown provider type '{provider_type}' for alias '{alias}'.")
-            
+
             if self.default_provider and self.default_provider not in self.providers:
                 print(f"Warning: Default provider '{self.default_provider}' not found in loaded providers.")
                 self.default_provider = None
 
         except Exception as e:
             print(f"Error parsing provider config file: {e}")
+
+    def save_config(self, config_dict: Dict[str, Any]):
+        """
+        Save provider configuration to JSON file and reload providers.
+
+        Args:
+            config_dict: Dictionary containing providers configuration
+        """
+        try:
+            with open(self.config_path, 'w') as f:
+                json.dump(config_dict, f, indent=2)
+            print(f"Provider configuration saved to {self.config_path}")
+
+            # Reload providers
+            self.providers.clear()
+            self._load_providers_from_config()
+        except Exception as e:
+            print(f"Error saving provider config: {e}")
+            raise
 
     def get_active_model_name(self) -> str:
         """
@@ -219,6 +309,80 @@ default_provider = "ollama_local"
                 return alias
         return None
 
+    def count_tokens(self, text: str, model: str) -> int:
+        """
+        Count tokens in text for a given model.
+
+        Uses tiktoken for OpenAI/Anthropic models (accurate counting).
+        Falls back to character-based estimation (4 chars ≈ 1 token) for Ollama and unknown models.
+
+        Args:
+            text: The text to count tokens for
+            model: The model name (e.g., "gpt-4", "llama3.1:8b")
+
+        Returns:
+            Estimated token count
+        """
+        if not text:
+            return 0
+
+        # Try tiktoken for accurate counting (OpenAI/Anthropic models)
+        if TIKTOKEN_AVAILABLE:
+            try:
+                # Map model names to tiktoken encodings
+                if "gpt-4" in model or "gpt-3.5" in model:
+                    encoding = tiktoken.encoding_for_model(model.split()[0] if " " in model else model)
+                    return len(encoding.encode(text))
+                elif "claude" in model:
+                    # Claude uses similar tokenization to GPT-4
+                    encoding = tiktoken.get_encoding("cl100k_base")
+                    return len(encoding.encode(text))
+            except Exception as e:
+                print(f"Warning: tiktoken failed for model '{model}': {e}. Using estimation.")
+
+        # Fallback: Character-based estimation (4 chars ≈ 1 token)
+        # This works reasonably well for most models
+        return len(text) // 4
+
+    def get_context_window(self, model: str) -> int:
+        """
+        Get the context window size for a given model.
+
+        Priority:
+        1. Check provider config (providers.toml) for context_window field
+        2. Check hardcoded MODEL_CONTEXT_WINDOWS dict
+        3. Return default if not found
+
+        Args:
+            model: The model name (e.g., "gpt-4", "llama3.1:8b")
+
+        Returns:
+            Context window size in tokens
+        """
+        # Phase 6: Check provider config first (providers.toml can override)
+        for alias, provider in self.providers.items():
+            if provider.model == model:
+                # Check if provider config has context_window field
+                context_window_config = provider.config.get('context_window')
+                if context_window_config:
+                    try:
+                        return int(context_window_config)
+                    except (ValueError, TypeError):
+                        print(f"Warning: Invalid context_window value in provider '{alias}' config: {context_window_config}")
+
+        # Check direct match in hardcoded defaults
+        if model in MODEL_CONTEXT_WINDOWS:
+            return MODEL_CONTEXT_WINDOWS[model]
+
+        # Check for partial matches (e.g., "gpt-4" matches "gpt-4-0613")
+        for known_model, window_size in MODEL_CONTEXT_WINDOWS.items():
+            if known_model in model or model in known_model:
+                return window_size
+
+        # Return default
+        print(f"Warning: Context window size unknown for model '{model}'. Using default: {MODEL_CONTEXT_WINDOWS['default']}")
+        return MODEL_CONTEXT_WINDOWS["default"]
+
     async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False):
         """
         Routes a query to the specified provider, or the default provider if None.
@@ -226,7 +390,7 @@ default_provider = "ollama_local"
         Args:
             prompt: The prompt to send to the LLM
             provider_alias: Optional provider alias to use (uses default if None)
-            return_metadata: If True, returns dict with 'response', 'provider', 'model'. If False, returns just the response string.
+            return_metadata: If True, returns dict with 'response', 'provider', 'model', 'tokens_used', 'model_max_tokens'. If False, returns just the response string.
 
         Returns:
             str if return_metadata=False, dict if return_metadata=True
@@ -243,34 +407,47 @@ default_provider = "ollama_local"
         response = await provider.generate_response(prompt)
 
         if return_metadata:
+            # Count tokens in prompt and response
+            prompt_tokens = self.count_tokens(prompt, provider.model)
+            response_tokens = self.count_tokens(response, provider.model)
+            total_tokens = prompt_tokens + response_tokens
+
+            # Get model's context window
+            context_window = self.get_context_window(provider.model)
+
             return {
                 "response": response,
                 "provider": alias_to_use,
-                "model": provider.model
+                "model": provider.model,
+                "tokens_used": total_tokens,
+                "prompt_tokens": prompt_tokens,
+                "response_tokens": response_tokens,
+                "model_max_tokens": context_window
             }
         return response
 
 # --- Self-testing block ---
 async def main_test():
     print("--- Testing LLMManager ---")
-    
-    # Create a dummy providers.toml for testing
-    dummy_config_content = """
-default_provider = "local_ollama"
 
-[[providers]]
-  alias = "local_ollama"
-  type = "ollama"
-  model = "llama3.1:8b"
-  host = "http://127.0.0.1:11434"
-"""
-    config_file = Path("test_providers.toml")
-    # We need to place it where the manager expects to find it, or pass the path
-    # For simplicity, let's assume it's in the user's home .dpc directory
+    # Create a dummy providers.json for testing
+    dummy_config = {
+        "default_provider": "local_ollama",
+        "providers": [
+            {
+                "alias": "local_ollama",
+                "type": "ollama",
+                "model": "llama3.1:8b",
+                "host": "http://127.0.0.1:11434"
+            }
+        ]
+    }
+
     dpc_dir = Path.home() / ".dpc"
     dpc_dir.mkdir(exist_ok=True)
-    test_config_path = dpc_dir / "providers.toml"
-    test_config_path.write_text(dummy_config_content)
+    test_config_path = dpc_dir / "providers.json"
+    with open(test_config_path, 'w') as f:
+        json.dump(dummy_config, f, indent=2)
 
     try:
         manager = LLMManager(config_path=test_config_path)

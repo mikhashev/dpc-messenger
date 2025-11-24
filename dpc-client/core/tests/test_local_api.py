@@ -34,8 +34,30 @@ def mock_dpc_env(tmp_path: Path, monkeypatch):
     monkeypatch.setattr("dpc_protocol.crypto.DPC_HOME_DIR", fake_dpc_home)
     monkeypatch.setattr("dpc_protocol.pcm_core.DPC_HOME_DIR", fake_dpc_home)
     monkeypatch.setattr("dpc_client_core.service.DPC_HOME_DIR", fake_dpc_home)
-    # Add other modules as needed
-    
+
+    # 4. Mock load_node_identity to return consistent node ID
+    from dpc_protocol.crypto import NodeIdentity
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.hazmat.backends import default_backend
+
+    # Generate a real RSA key for the mock
+    mock_private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=2048,
+        backend=default_backend()
+    )
+
+    mock_identity = NodeIdentity(
+        node_id="dpc-node-8b066c7f3d7eb627",
+        private_key=mock_private_key,
+        certificate=None  # Not needed for this test
+    )
+
+    def mock_load_node_identity():
+        return mock_identity
+
+    monkeypatch.setattr("dpc_protocol.crypto.load_node_identity", mock_load_node_identity)
+
     return fake_dpc_home
 
 async def test_local_api_status_command(mock_dpc_env):
@@ -65,4 +87,8 @@ async def test_local_api_status_command(mock_dpc_env):
 
     finally:
         await service.stop()
-        await service_task
+        service_task.cancel()
+        try:
+            await service_task
+        except asyncio.CancelledError:
+            pass  # Expected when cancelling the task
