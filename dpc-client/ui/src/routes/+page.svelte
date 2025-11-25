@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
@@ -84,6 +84,12 @@
   // Personal context inclusion toggle
   let includePersonalContext: boolean = true;
 
+  // Phase 7: Context hash tracking for "Updated" status indicators
+  let currentContextHash: string = "";  // Current hash from backend (when context is saved)
+  let lastSentContextHash: Map<string, string> = new Map();  // Per-conversation: last hash sent to AI
+  let peerContextHashes: Map<string, string> = new Map();  // Per-peer: current hash from backend
+  let lastSentPeerHashes: Map<string, Map<string, string>> = new Map();  // Per-conversation, per-peer: last hash sent
+
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
     showCommitDialog = true;
@@ -103,12 +109,46 @@
   // Reactive: Get current chat's token usage
   $: currentTokenUsage = tokenUsageMap.get(activeChatId) || {used: 0, limit: 0};
 
+  // Phase 7: Reactive: Check if context window is full (100% or more)
+  $: isContextWindowFull = currentTokenUsage.limit > 0 && (currentTokenUsage.used / currentTokenUsage.limit) >= 1.0;
+
   // Reactive: Handle knowledge extraction failures (Phase 4)
   $: if ($extractionFailure) {
     const {conversation_id, reason} = $extractionFailure;
     showExtractionFailure = true;
     extractionFailureMessage = `Knowledge extraction failed for ${conversation_id}: ${reason}`;
   }
+
+  // Phase 7: Handle personal context updates (for "Updated" status indicator)
+  $: if ($contextUpdated) {
+    const { context_hash } = $contextUpdated;
+    if (context_hash) {
+      currentContextHash = context_hash;
+      console.log(`[Context Updated] New hash: ${context_hash.slice(0, 8)}...`);
+    }
+  }
+
+  // Phase 7: Handle peer context updates (for "Updated" status indicators)
+  $: if ($peerContextUpdated) {
+    const { node_id, context_hash } = $peerContextUpdated;
+    if (node_id && context_hash) {
+      peerContextHashes = new Map(peerContextHashes);
+      peerContextHashes.set(node_id, context_hash);
+      console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
+    }
+  }
+
+  // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)
+  $: localContextUpdated = currentContextHash && lastSentContextHash.get(activeChatId) !== currentContextHash;
+
+  // Phase 7: Reactive: Check which peer contexts have changed (not yet sent to AI)
+  $: peerContextsUpdated = new Set(
+    Array.from(peerContextHashes.keys()).filter(nodeId => {
+      const conversationPeerHashes = lastSentPeerHashes.get(activeChatId);
+      if (!conversationPeerHashes) return true;  // Never sent
+      return conversationPeerHashes.get(nodeId) !== peerContextHashes.get(nodeId);
+    })
+  );
 
   // Reactive: Reset compute host if selected peer disconnects
   $: if (selectedComputeHost !== "local" && $nodeStatus?.p2p_peers) {
@@ -282,7 +322,8 @@
       // Prepare AI query payload with optional compute host and provider/model
       const payload: any = {
         prompt: text,
-        include_context: includePersonalContext  // Add context inclusion flag
+        include_context: includePersonalContext,  // Add context inclusion flag
+        conversation_id: activeChatId  // Phase 7: Pass conversation ID for history tracking
       };
 
       // Add peer contexts if any are selected
@@ -421,8 +462,16 @@
       tokenUsageMap = new Map(tokenUsageMap);
       tokenUsageMap.delete(chatId);
 
-      // Backend will create a new monitor on next message
-      // (Old monitor's buffer was already cleared by previous extraction)
+      // Phase 7: Clear context tracking (will show "Updated" badge again on next query)
+      lastSentContextHash = new Map(lastSentContextHash);
+      lastSentContextHash.delete(chatId);
+      lastSentPeerHashes = new Map(lastSentPeerHashes);
+      lastSentPeerHashes.delete(chatId);
+
+      // Phase 7: Reset conversation on backend (clears history, context tracking)
+      sendCommand("reset_conversation", {
+        conversation_id: chatId
+      });
     }
   }
 
@@ -570,6 +619,27 @@
             used: message.payload.tokens_used,
             limit: message.payload.token_limit
           });
+        }
+
+        // Phase 7: Mark context as sent (clears "Updated" status)
+        if (message.status === "OK" && currentContextHash) {
+          lastSentContextHash = new Map(lastSentContextHash);
+          lastSentContextHash.set(chatId, currentContextHash);
+          console.log(`[Context Sent] Marked context as sent for ${chatId}`);
+
+          // Also mark peer contexts as sent if they were included
+          if (selectedPeerContexts.size > 0) {
+            const chatPeerHashes = new Map();
+            for (const peerId of selectedPeerContexts) {
+              const peerHash = peerContextHashes.get(peerId);
+              if (peerHash) {
+                chatPeerHashes.set(peerId, peerHash);
+              }
+            }
+            lastSentPeerHashes = new Map(lastSentPeerHashes);
+            lastSentPeerHashes.set(chatId, chatPeerHashes);
+            console.log(`[Peer Contexts Sent] Marked ${chatPeerHashes.size} peer contexts as sent for ${chatId}`);
+          }
         }
 
         // Clean up the command mapping
@@ -991,7 +1061,12 @@
                 type="checkbox"
                 bind:checked={includePersonalContext}
               />
-              <span>📚 Include Personal Context (profile, instructions, device info)</span>
+              <span>
+                📚 Include Personal Context (profile, instructions, device info)
+                {#if localContextUpdated}
+                  <span class="status-badge updated">Updated</span>
+                {/if}
+              </span>
             </label>
             {#if !includePersonalContext}
               <span class="context-hint">⚠️ AI won't know your preferences or device specs</span>
@@ -1012,13 +1087,19 @@
                   {@const displayName = peer.name
                     ? `${peer.name} | ${peer.node_id.slice(0, 15)}...`
                     : `${peer.node_id.slice(0, 20)}...`}
+                  {@const isPeerContextUpdated = peerContextsUpdated.has(peer.node_id)}
                   <label class="peer-context-checkbox">
                     <input
                       type="checkbox"
                       checked={selectedPeerContexts.has(peer.node_id)}
                       on:change={() => togglePeerContext(peer.node_id)}
                     />
-                    <span>{displayName}</span>
+                    <span>
+                      {displayName}
+                      {#if isPeerContextUpdated}
+                        <span class="status-badge updated">Updated</span>
+                      {/if}
+                    </span>
                   </label>
                 {/each}
               </div>
@@ -1074,8 +1155,11 @@
         <div class="input-row">
           <textarea
             bind:value={currentInput}
-            placeholder={$connectionStatus === 'connected' ? 'Type a message... (Enter to send, Shift+Enter for new line)' : 'Connect to Core Service first...'}
-            disabled={$connectionStatus !== 'connected' || isLoading}
+            placeholder={
+              isContextWindowFull ? 'Context window full - End session to continue' :
+              ($connectionStatus === 'connected' ? 'Type a message... (Enter to send, Shift+Enter for new line)' : 'Connect to Core Service first...')
+            }
+            disabled={$connectionStatus !== 'connected' || isLoading || isContextWindowFull}
             on:keydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -1085,7 +1169,7 @@
           ></textarea>
           <button
             on:click={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim()}
+            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim() || isContextWindowFull}
           >
             {#if isLoading}Sending...{:else}Send{/if}
           </button>
@@ -1940,6 +2024,36 @@
     background: white;
     border-radius: 6px;
     border-left: 3px solid #f59e0b;
+  }
+
+  /* Phase 7: Status Badge Styles (for context update indicators) */
+  .status-badge {
+    display: inline-block;
+    margin-left: 0.5rem;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    border-radius: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .status-badge.updated {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: white;
+    box-shadow: 0 2px 4px rgba(16, 185, 129, 0.3);
+    animation: pulse-badge 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-badge {
+    0%, 100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.8;
+      transform: scale(0.98);
+    }
   }
 
   /* Peer Context Selector Styles */

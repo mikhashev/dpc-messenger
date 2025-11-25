@@ -74,6 +74,12 @@ class ConversationMonitor:
         self.token_limit: int = 100000  # Default limit, will be updated per model
         self.token_warning_threshold: float = 0.8  # Warn at 80%
 
+        # Conversation history tracking (Phase 7: Conversation History)
+        self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
+        self.context_included: bool = False  # Flag: has context been sent in this conversation?
+        self.context_hash: str = ""  # Hash of personal.json + device_context.json when last sent
+        self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer contexts
+
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
 
@@ -579,6 +585,77 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
     def reset_token_count(self):
         """Reset token count (after knowledge extraction)"""
         self.current_token_count = 0
+
+    # --- Conversation History Methods (Phase 7) ---
+
+    def add_message(self, role: str, content: str):
+        """Add a message to the conversation history
+
+        Args:
+            role: 'user' or 'assistant'
+            content: Message content
+        """
+        self.message_history.append({"role": role, "content": content})
+
+    def get_message_history(self) -> List[Dict[str, str]]:
+        """Get the full conversation history
+
+        Returns:
+            List of message dicts with 'role' and 'content' keys
+        """
+        return self.message_history.copy()
+
+    def mark_context_included(self, context_hash: str):
+        """Mark that context has been included in this conversation
+
+        Args:
+            context_hash: SHA256 hash of personal.json + device_context.json
+        """
+        self.context_included = True
+        self.context_hash = context_hash
+
+    def has_context_changed(self, new_hash: str) -> bool:
+        """Check if context files have changed since last inclusion
+
+        Args:
+            new_hash: Current hash of context files
+
+        Returns:
+            True if context has changed
+        """
+        return new_hash != self.context_hash
+
+    def update_peer_context_hash(self, node_id: str, context_hash: str):
+        """Update the stored hash for a peer's context
+
+        Args:
+            node_id: Peer node identifier
+            context_hash: SHA256 hash of peer's context
+        """
+        self.peer_context_hashes[node_id] = context_hash
+
+    def has_peer_context_changed(self, node_id: str, new_hash: str) -> bool:
+        """Check if a peer's context has changed
+
+        Args:
+            node_id: Peer node identifier
+            new_hash: Current hash of peer's context
+
+        Returns:
+            True if peer context has changed or is new
+        """
+        old_hash = self.peer_context_hashes.get(node_id, "")
+        return new_hash != old_hash
+
+    def reset_conversation(self):
+        """Reset conversation history and context tracking (for "New Chat" button)"""
+        self.message_history = []
+        self.context_included = False
+        self.context_hash = ""
+        self.peer_context_hashes = {}
+        self.current_token_count = 0
+        self.message_buffer = []
+        self.knowledge_score = 0.0
 
 
 # Example usage

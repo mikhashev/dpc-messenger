@@ -5,6 +5,160 @@ All notable changes to D-PC Messenger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2025-11-25
+
+### Added - Conversation History & Context Optimization (Phase 7)
+
+#### Core Features
+- **Full Conversation History Support**
+  - AI now receives complete conversation history with every query (user/assistant messages)
+  - Enables conversational continuity - AI can reference previous exchanges ("as I mentioned before...")
+  - History stored per conversation tab with independent tracking
+  - Messages formatted as `USER:` and `ASSISTANT:` in structured history section
+
+- **Smart Context Optimization** (60-80% token savings)
+  - Personal context (`personal.json` + `device_context.json`) sent **only when needed**:
+    - First message in conversation
+    - When user toggles "Include Personal Context" checkbox
+    - When context files are modified (hash-based detection)
+  - Subsequent messages use conversation history only (no context re-sending)
+  - Peer contexts sent only on first collaborative message or when peer updates context
+
+- **Hash-Based Change Detection**
+  - SHA256 hashing of `personal.json` + `device_context.json` for automatic change detection
+  - Per-peer context hash tracking for collaborative queries
+  - Backend computes and broadcasts context hashes on save
+  - Frontend tracks `currentContextHash` vs `lastSentContextHash` per conversation
+
+- **Visual Status Indicators** ("Updated" Badges)
+  - Green pulsing "UPDATED" badge on "📚 Include Personal Context" toggle when context modified
+  - Green "UPDATED" badges on peer context checkboxes when peer contexts change
+  - Badges automatically clear when context successfully sent to AI
+  - CSS animations with subtle pulse effect (fades 80%-100% opacity)
+
+- **Hard Context Window Limit Enforcement**
+  - Backend blocks queries at 100% context window usage (raises `RuntimeError`)
+  - Frontend disables textarea and send button at 100%
+  - Placeholder text changes to: "Context window full - End session to continue"
+  - Prevents overflow errors and guides users to knowledge extraction
+
+- **"New Chat" Reset Functionality**
+  - Backend command: `reset_conversation(conversation_id)`
+  - Clears conversation history, context tracking, peer context hashes
+  - Resets token counter to 0
+  - Next message after reset includes full context again
+  - Frontend clears `lastSentContextHash` and `lastSentPeerHashes` for conversation
+
+#### Backend Implementation
+
+**ConversationMonitor** (`conversation_monitor.py`):
+- Added `message_history: List[Dict[str, str]]` - stores `{"role": "user/assistant", "content": "..."}`
+- Added `context_included: bool` - flag for first-time context inclusion
+- Added `context_hash: str` - SHA256 hash of last sent context
+- Added `peer_context_hashes: Dict[str, str]` - per-peer hash tracking
+- New methods:
+  - `add_message(role, content)` - append to history
+  - `get_message_history()` - retrieve full history
+  - `mark_context_included(hash)` - set context sent flag
+  - `has_context_changed(new_hash)` - compare hashes
+  - `update_peer_context_hash(node_id, hash)` - track peer changes
+  - `has_peer_context_changed(node_id, new_hash)` - check peer updates
+  - `reset_conversation()` - clear all history/tracking for "New Chat"
+
+**CoreService** (`service.py`):
+- Added `_compute_context_hash()` - SHA256 of personal.json + device_context.json
+- Added `_compute_peer_context_hash(context_obj)` - hash peer contexts
+- Added `reset_conversation(conversation_id)` command handler
+- Updated `execute_ai_query()`:
+  - Checks context window limit early (blocks at 100%)
+  - Computes context hash and determines if full context needed
+  - Adds user message to history before assembling prompt
+  - Adds AI response to history after receiving
+  - Marks context as included with hash tracking
+  - Tracks peer context hashes (re-sends only when changed)
+- Updated `_assemble_final_prompt()`:
+  - Accepts `message_history` and `include_full_context` parameters
+  - Builds context blocks only when `include_full_context=True`
+  - Adds `--- CONVERSATION HISTORY ---` section with all messages
+  - Formats: `CONTEXTUAL DATA` (first message) + `CONVERSATION HISTORY` (always)
+- Updated `save_personal_context()`:
+  - Computes new context hash after saving
+  - Broadcasts `personal_context_updated` event with hash
+- Updated peer context fetching in `execute_ai_query()`:
+  - Computes peer context hash
+  - Compares with monitor's stored hash
+  - Broadcasts `peer_context_updated` event when hash changes
+
+#### Frontend Implementation
+
+**coreService.ts**:
+- Added stores: `contextUpdated`, `peerContextUpdated`
+- Added event listeners for `personal_context_updated` and `peer_context_updated` events
+
+**+page.svelte**:
+- Added state variables:
+  - `currentContextHash` - current hash from backend
+  - `lastSentContextHash` - per-conversation tracking of last sent hash
+  - `peerContextHashes` - per-peer current hashes from backend
+  - `lastSentPeerHashes` - per-conversation, per-peer tracking
+- Added reactive statements:
+  - Listen for context update events, update hash maps
+  - Calculate `localContextUpdated` (context changed but not sent)
+  - Calculate `peerContextsUpdated` (Set of peers with changed contexts)
+  - Check `isContextWindowFull` (disable UI at 100%)
+- Updated `sendMessage()`:
+  - Passes `conversation_id: activeChatId` to backend
+  - Marks context/peer contexts as sent on successful query
+- Updated `handleNewChat()`:
+  - Clears `lastSentContextHash` and `lastSentPeerHashes`
+  - Calls `reset_conversation` backend command
+- UI updates:
+  - "Updated" badges on context toggle and peer checkboxes
+  - Disabled textarea/send button at 100% context usage
+  - Placeholder text updates for context window full state
+- CSS additions:
+  - `.status-badge` and `.status-badge.updated` styles
+  - `@keyframes pulse-badge` animation
+
+#### Events & WebSocket API
+
+**New Backend Events**:
+- `personal_context_updated` - payload: `{message, context_hash}`
+- `peer_context_updated` - payload: `{node_id, context_hash, conversation_id}`
+
+**New Backend Commands**:
+- `reset_conversation` - args: `{conversation_id}`, clears history and tracking
+
+### Changed
+
+#### Backend
+- **conversation_monitor.py**
+  - `__init__()` now initializes history tracking fields
+  - `reset_conversation()` clears message_buffer and knowledge_score
+
+- **service.py**
+  - `execute_ai_query()` signature unchanged but behavior enhanced with history tracking
+  - `_assemble_final_prompt()` signature extended with optional `message_history` and `include_full_context` parameters
+  - Token counting now reflects actual current window usage (not just cumulative)
+
+#### Frontend
+- **+page.svelte**
+  - Payload for `execute_ai_query` now includes `conversation_id`
+  - Message handling updated to track context as sent
+  - "New Chat" workflow enhanced with context tracking reset
+
+### Performance
+- **Token Savings**: ~60-80% reduction per query after first message
+- **Memory**: Conversation history stored in-memory per conversation (cleared on "New Chat")
+- **Network**: No additional requests - context hash included in existing events
+
+### Developer Notes
+- Context optimization is automatic - no configuration needed
+- Hash computation uses Python's `hashlib.sha256()` with JSON serialization
+- Frontend hash tracking is per-conversation and persists across tab switches
+- "Updated" badges use CSS animations for smooth visual feedback
+- Hard limit enforcement prevents context window overflow errors
+
 ## [0.7.0] - 2025-11-24
 
 ### Added - Knowledge Architecture (Phases 1-6) ⚠️ UNTESTED

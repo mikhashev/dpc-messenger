@@ -1036,9 +1036,13 @@ class CoreService:
                     print("[PersonalContext] Notifying connected peers of name change...")
                     await self._notify_peers_of_name_change(current.profile.name)
 
-            # Emit event to UI
+            # Phase 7: Compute new context hash after saving
+            new_context_hash = self._compute_context_hash()
+
+            # Emit event to UI with new hash (Phase 7: for status indicators)
             await self.local_api.broadcast_event("personal_context_updated", {
-                "message": "Personal context saved successfully"
+                "message": "Personal context saved successfully",
+                "context_hash": new_context_hash
             })
 
             return {
@@ -1571,6 +1575,40 @@ class CoreService:
 
         except Exception as e:
             print(f"Error toggling auto knowledge detection: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """Reset conversation history and context tracking for "New Chat" button.
+
+        UI Integration: Called when user clicks "New Chat" button.
+
+        Args:
+            conversation_id: The conversation/chat ID to reset
+
+        Returns:
+            Dict with status
+        """
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            monitor.reset_conversation()
+            print(f"[Reset Conversation] Cleared history for {conversation_id}")
+
+            # Broadcast to UI
+            await self.local_api.broadcast_event(
+                "conversation_reset",
+                {"conversation_id": conversation_id}
+            )
+
+            return {
+                "status": "success",
+                "message": "Conversation reset successfully"
+            }
+
+        except Exception as e:
+            print(f"Error resetting conversation: {e}")
             return {
                 "status": "error",
                 "message": str(e)
@@ -2203,21 +2241,55 @@ class CoreService:
             model: Optional model name to use
             provider: Optional provider alias to use
             include_context: If True, includes personal context, device context, and AI instructions (default: True)
-            **kwargs: Additional arguments
+            **kwargs: Additional arguments (including conversation_id)
         """
         print(f"Orchestrating AI query for command_id {command_id}: '{prompt[:50]}...'")
         print(f"  - Compute host: {compute_host or 'local'}")
         print(f"  - Model: {model or 'default'}")
         print(f"  - Include context: {include_context}")
 
+        # Phase 7: Get or create conversation monitor early for history tracking
+        conversation_id = kwargs.get("conversation_id", "local_ai")
+        monitor = self._get_or_create_conversation_monitor(conversation_id)
+
+        # Phase 7: Check if context window is full (hard limit enforcement)
+        if monitor.token_limit > 0:
+            usage_percent = monitor.current_token_count / monitor.token_limit
+            if usage_percent >= 1.0:
+                error_msg = (
+                    f"Context window is full ({monitor.current_token_count}/{monitor.token_limit} tokens). "
+                    "Please end the session to save knowledge and start a new conversation."
+                )
+                print(f"  - BLOCKED: {error_msg}")
+                raise RuntimeError(error_msg)
+
+        # Phase 7: Compute context hash and determine if context should be included
+        current_context_hash = self._compute_context_hash()
+
+        # Determine if we should include full context in this query
+        should_include_full_context = False
+
+        if include_context:
+            # Include context if:
+            # 1. This is the first message (context not yet included), OR
+            # 2. Context files have changed since last inclusion, OR
+            # 3. User just toggled the checkbox (checkbox state change handled by frontend)
+            if not monitor.context_included or monitor.has_context_changed(current_context_hash):
+                should_include_full_context = True
+                print(f"  - Full context will be included (first message or context changed)")
+            else:
+                print(f"  - Context already included, using conversation history only")
+        else:
+            print(f"  - User disabled context inclusion")
+
         # Conditionally include local context based on flag
         aggregated_contexts = {}
-        if include_context:
+        if should_include_full_context:
             aggregated_contexts = {'local': self.p2p_manager.local_context}
 
-        # Add device context if available and include_context is True
+        # Add device context if available and should include full context
         device_context_data = None
-        if include_context and self.device_context:
+        if should_include_full_context and self.device_context:
             device_context_data = self.device_context
 
         # Fetch remote contexts if context_ids provided
@@ -2231,23 +2303,59 @@ class CoreService:
                         # Fetch personal context
                         context = await self._request_context_from_peer(node_id, prompt)
                         if context:
-                            aggregated_contexts[node_id] = context
-                            print(f"    ✓ Received context from {node_id[:20]}...")
+                            # Phase 7: Compute peer context hash
+                            peer_hash = self._compute_peer_context_hash(context)
+
+                            # Include peer context if:
+                            # 1. This is first collaborative message, OR
+                            # 2. Peer's context has changed
+                            if monitor.has_peer_context_changed(node_id, peer_hash):
+                                aggregated_contexts[node_id] = context
+                                monitor.update_peer_context_hash(node_id, peer_hash)
+                                print(f"    ✓ Received context from {node_id[:20]}... (included - new or changed)")
+
+                                # Phase 7: Broadcast peer context update event for UI status indicator
+                                await self.local_api.broadcast_event("peer_context_updated", {
+                                    "node_id": node_id,
+                                    "context_hash": peer_hash,
+                                    "conversation_id": conversation_id
+                                })
+                            else:
+                                print(f"    ✓ Context from {node_id[:20]}... unchanged (using history)")
                         else:
                             print(f"    ✗ No context received from {node_id[:20]}...")
 
-                        # Also fetch device context from peer
-                        device_ctx = await self._request_device_context_from_peer(node_id)
-                        if device_ctx:
-                            peer_device_contexts[node_id] = device_ctx
-                            print(f"    ✓ Received device context from {node_id[:20]}...")
+                        # Also fetch device context from peer if including their personal context
+                        if node_id in aggregated_contexts:
+                            device_ctx = await self._request_device_context_from_peer(node_id)
+                            if device_ctx:
+                                peer_device_contexts[node_id] = device_ctx
+                                print(f"    ✓ Received device context from {node_id[:20]}...")
                     except Exception as e:
                         print(f"    ✗ Error fetching context from {node_id[:20]}...: {e}")
                 else:
                     print(f"    ✗ Peer {node_id[:20]}... not connected")
 
-        # Assemble final prompt (with or without context, depending on include_context flag)
-        final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt, device_context_data, peer_device_contexts)
+        # Phase 7: Add user prompt to conversation history BEFORE assembling prompt
+        monitor.add_message('user', prompt)
+
+        # Phase 7: Get conversation history for message array
+        message_history = monitor.get_message_history()
+
+        # Assemble final prompt (with or without context, message history always included)
+        final_prompt = self._assemble_final_prompt(
+            contexts=aggregated_contexts,
+            clean_prompt=prompt,
+            device_context=device_context_data,
+            peer_device_contexts=peer_device_contexts,
+            message_history=message_history,
+            include_full_context=should_include_full_context
+        )
+
+        # Phase 7: Mark context as included if we just sent it
+        if should_include_full_context:
+            monitor.mark_context_included(current_context_hash)
+            print(f"  - Context marked as included (hash: {current_context_hash[:8]}...)")
 
         response_payload = {}
         status = "OK"
@@ -2268,6 +2376,10 @@ class CoreService:
                 "provider": result["provider"],
                 "compute_host": result["compute_host"]
             }
+
+            # Phase 7: Add AI response to conversation history
+            monitor.add_message('assistant', result["response"])
+            print(f"  - AI response added to conversation history (total messages: {len(message_history) + 1})")
 
             # Token tracking (Phase 2) - works for both local and remote inference
             if "tokens_used" in result:
@@ -2379,16 +2491,61 @@ class CoreService:
         elif status != "OK":
             print(f"[Monitor] Query failed (status={status}) - not monitoring")
 
-    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str, device_context: dict = None, peer_device_contexts: dict = None) -> str:
+    def _compute_context_hash(self) -> str:
+        """Compute SHA256 hash of personal.json + device_context.json for change detection
+
+        Returns:
+            SHA256 hex digest of combined context files
+        """
+        import hashlib
+        import json
+        from dataclasses import asdict
+
+        hash_obj = hashlib.sha256()
+
+        # Hash personal context
+        if self.p2p_manager.local_context:
+            context_dict = asdict(self.p2p_manager.local_context)
+            context_json = json.dumps(context_dict, sort_keys=True)
+            hash_obj.update(context_json.encode('utf-8'))
+
+        # Hash device context
+        if self.device_context:
+            device_json = json.dumps(self.device_context, sort_keys=True)
+            hash_obj.update(device_json.encode('utf-8'))
+
+        return hash_obj.hexdigest()
+
+    def _compute_peer_context_hash(self, context_obj) -> str:
+        """Compute SHA256 hash of a peer's context for change detection
+
+        Args:
+            context_obj: PersonalContext object from peer
+
+        Returns:
+            SHA256 hex digest of peer context
+        """
+        import hashlib
+        import json
+        from dataclasses import asdict
+
+        context_dict = asdict(context_obj)
+        context_json = json.dumps(context_dict, sort_keys=True)
+        return hashlib.sha256(context_json.encode('utf-8')).hexdigest()
+
+    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str, device_context: dict = None, peer_device_contexts: dict = None, message_history: list = None, include_full_context: bool = True) -> str:
         """Helper method to assemble the final prompt for the LLM with instruction processing.
 
         Phase 2: Incorporates InstructionBlock and bias mitigation from PCM v2.0
+        Phase 7: Supports conversation history and context optimization
 
         Args:
-            contexts: Dict of {source_id: PersonalContext}
-            clean_prompt: The user's query
-            device_context: Local device context (optional)
+            contexts: Dict of {source_id: PersonalContext} (only if include_full_context=True)
+            clean_prompt: The user's query (current message)
+            device_context: Local device context (optional, only if include_full_context=True)
             peer_device_contexts: Dict of {peer_id: device_context} for peers (optional)
+            message_history: List of conversation messages (optional, for Phase 7)
+            include_full_context: If True, include context blocks; if False, skip (Phase 7)
         """
         # Extract instruction blocks and bias settings from contexts
         instruction_blocks = []
@@ -2514,13 +2671,35 @@ class CoreService:
                 peer_device_block = f'<DEVICE_CONTEXT source="{source_label}">{special_instructions_text}{peer_device_json}\n</DEVICE_CONTEXT>'
                 context_blocks.append(peer_device_block)
 
-        final_prompt = (
-            f"{system_instruction}\n\n"
-            f"--- CONTEXTUAL DATA ---\n"
-            f'{"\n\n".join(context_blocks)}\n'
-            f"--- END OF CONTEXTUAL DATA ---\n\n"
-            f"USER QUERY: {clean_prompt}"
-        )
+        # Phase 7: Build prompt with optional context and conversation history
+        if include_full_context and context_blocks:
+            # Include full context (first message or context changed)
+            final_prompt = (
+                f"{system_instruction}\n\n"
+                f"--- CONTEXTUAL DATA ---\n"
+                f'{"\n\n".join(context_blocks)}\n'
+                f"--- END OF CONTEXTUAL DATA ---\n\n"
+            )
+        else:
+            # No context or context already included in previous messages
+            final_prompt = f"{system_instruction}\n\n"
+
+        # Phase 7: Add conversation history if provided
+        if message_history and len(message_history) > 0:
+            # Build conversation history section
+            history_lines = []
+            for msg in message_history:
+                role = msg.get('role', 'unknown').upper()
+                content = msg.get('content', '')
+                history_lines.append(f"{role}: {content}")
+
+            final_prompt += "--- CONVERSATION HISTORY ---\n"
+            final_prompt += "\n\n".join(history_lines)
+            final_prompt += "\n--- END OF CONVERSATION HISTORY ---\n\n"
+        else:
+            # No history, just the current query
+            final_prompt += f"USER QUERY: {clean_prompt}"
+
         return final_prompt
 
     def _build_bias_aware_system_instruction(
