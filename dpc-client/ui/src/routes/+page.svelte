@@ -66,7 +66,7 @@
   let showFirewallEditor: boolean = false;
   let showProvidersEditor: boolean = false;
   let showCommitDialog: boolean = false;
-  let autoKnowledgeDetection: boolean = true;  // Default: enabled
+  let autoKnowledgeDetection: boolean = false;  // Default: disabled
 
   // Token tracking state (Phase 2)
   let tokenUsageMap: Map<string, {used: number, limit: number}> = new Map();
@@ -622,12 +622,15 @@
         }
 
         // Phase 7: Mark context as sent (clears "Updated" status)
-        if (message.status === "OK" && currentContextHash) {
-          lastSentContextHash = new Map(lastSentContextHash);
-          lastSentContextHash.set(chatId, currentContextHash);
-          console.log(`[Context Sent] Marked context as sent for ${chatId}`);
+        if (message.status === "OK") {
+          // Update local context hash if it exists
+          if (currentContextHash) {
+            lastSentContextHash = new Map(lastSentContextHash);
+            lastSentContextHash.set(chatId, currentContextHash);
+            console.log(`[Context Sent] Marked context as sent for ${chatId}`);
+          }
 
-          // Also mark peer contexts as sent if they were included
+          // Also mark peer contexts as sent if they were included (independent of local context)
           if (selectedPeerContexts.size > 0) {
             const chatPeerHashes = new Map();
             for (const peerId of selectedPeerContexts) {

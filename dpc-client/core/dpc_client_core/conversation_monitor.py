@@ -80,6 +80,10 @@ class ConversationMonitor:
         self.context_hash: str = ""  # Hash of personal.json + device_context.json when last sent
         self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer contexts
 
+        # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
+        self.peer_context_cache: Dict[str, Any] = {}  # {node_id: PersonalContext} cached peer contexts
+        self.peer_device_context_cache: Dict[str, dict] = {}  # {node_id: device_context_dict} cached device contexts
+
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
 
@@ -656,6 +660,58 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
         self.current_token_count = 0
         self.message_buffer = []
         self.knowledge_score = 0.0
+        # Phase 7: Also clear peer context caches
+        self.peer_context_cache = {}
+        self.peer_device_context_cache = {}
+
+    # Phase 7: Peer context cache management methods
+    def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):
+        """Cache peer's personal context and device context locally
+
+        Args:
+            node_id: Peer's node ID
+            context: PersonalContext object
+            device_context: Device context dict (optional)
+        """
+        self.peer_context_cache[node_id] = context
+        if device_context:
+            self.peer_device_context_cache[node_id] = device_context
+
+    def get_cached_peer_context(self, node_id: str) -> Optional[Any]:
+        """Get cached peer context if available
+
+        Args:
+            node_id: Peer's node ID
+
+        Returns:
+            PersonalContext object or None if not cached
+        """
+        return self.peer_context_cache.get(node_id)
+
+    def get_cached_peer_device_context(self, node_id: str) -> Optional[dict]:
+        """Get cached peer device context if available
+
+        Args:
+            node_id: Peer's node ID
+
+        Returns:
+            Device context dict or None if not cached
+        """
+        return self.peer_device_context_cache.get(node_id)
+
+    def invalidate_peer_context_cache(self, node_id: str):
+        """Invalidate cached peer context (when peer notifies of change)
+
+        Args:
+            node_id: Peer's node ID
+        """
+        if node_id in self.peer_context_cache:
+            del self.peer_context_cache[node_id]
+        if node_id in self.peer_device_context_cache:
+            del self.peer_device_context_cache[node_id]
+        # Also clear the hash so context will be re-included on next query
+        if node_id in self.peer_context_hashes:
+            del self.peer_context_hashes[node_id]
 
 
 # Example usage

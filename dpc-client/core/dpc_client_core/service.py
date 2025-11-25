@@ -633,6 +633,22 @@ class CoreService:
                 # Notify UI of peer list change so names update
                 await self.on_peer_list_change()
 
+        elif command == "CONTEXT_UPDATED":
+            # Phase 7: Peer notifies that their personal context has changed
+            context_hash = payload.get("context_hash")
+            print(f"Received CONTEXT_UPDATED from {sender_node_id[:20]}... (hash: {context_hash[:8] if context_hash else 'none'}...)")
+
+            # Invalidate cached peer context in all conversation monitors
+            for monitor in self.conversation_monitors.values():
+                monitor.invalidate_peer_context_cache(sender_node_id)
+                print(f"  - Invalidated cache for {sender_node_id[:20]}... in conversation {monitor.conversation_id}")
+
+            # Broadcast event to UI so "Updated" badge appears
+            await self.local_api.broadcast_event("peer_context_updated", {
+                "node_id": sender_node_id,
+                "context_hash": context_hash
+            })
+
         else:
             print(f"Unknown P2P message command: {command}")
 
@@ -1044,6 +1060,11 @@ class CoreService:
                 "message": "Personal context saved successfully",
                 "context_hash": new_context_hash
             })
+
+            # Phase 7: Broadcast CONTEXT_UPDATED to all connected peers
+            # This notifies peers to invalidate their cache and re-fetch on next query
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                await self._broadcast_context_updated_to_peers(new_context_hash)
 
             return {
                 "status": "success",
@@ -1958,6 +1979,35 @@ class CoreService:
             except Exception as e:
                 print(f"  - Error notifying {peer_id} of name change: {e}")
 
+    async def _broadcast_context_updated_to_peers(self, context_hash: str):
+        """
+        Phase 7: Broadcast CONTEXT_UPDATED to all connected peers.
+        Notifies peers that personal context has changed so they can invalidate their cache.
+
+        Args:
+            context_hash: New hash of the updated context
+        """
+        connected_peers = list(self.p2p_manager.peers.keys())
+        if not connected_peers:
+            print("  - No connected peers to notify of context update")
+            return
+
+        print(f"  - Broadcasting CONTEXT_UPDATED to {len(connected_peers)} peer(s)...")
+        for peer_id in connected_peers:
+            try:
+                # Send CONTEXT_UPDATED message
+                message = {
+                    "command": "CONTEXT_UPDATED",
+                    "payload": {
+                        "node_id": self.p2p_manager.node_id,
+                        "context_hash": context_hash
+                    }
+                }
+                await self.p2p_manager.send_message_to_peer(peer_id, message)
+                print(f"    ✓ Notified {peer_id[:20]}... of context update")
+            except Exception as e:
+                print(f"    ✗ Error notifying {peer_id[:20]}... of context update: {e}")
+
     async def _notify_peers_of_provider_changes(self):
         """
         Notify all connected peers of provider changes (e.g., after firewall settings change).
@@ -2292,16 +2342,24 @@ class CoreService:
         if should_include_full_context and self.device_context:
             device_context_data = self.device_context
 
-        # Fetch remote contexts if context_ids provided
+        # Phase 7: Fetch remote contexts if context_ids provided (with caching)
         peer_device_contexts = {}
         if context_ids:
-            print(f"  - Fetching contexts from {len(context_ids)} peer(s)")
+            print(f"  - Processing contexts from {len(context_ids)} peer(s)")
             for node_id in context_ids:
                 if node_id in self.p2p_manager.peers:
-                    print(f"    • Requesting context from {node_id[:20]}...")
                     try:
-                        # Fetch personal context
-                        context = await self._request_context_from_peer(node_id, prompt)
+                        # Phase 7: Check cache first (avoid network request if cached)
+                        context = monitor.get_cached_peer_context(node_id)
+                        device_ctx = monitor.get_cached_peer_device_context(node_id)
+
+                        if context:
+                            print(f"    • Using cached context for {node_id[:20]}...")
+                        else:
+                            # Cache miss: Fetch from network
+                            print(f"    • Fetching context from {node_id[:20]}...")
+                            context = await self._request_context_from_peer(node_id, prompt)
+
                         if context:
                             # Phase 7: Compute peer context hash
                             peer_hash = self._compute_peer_context_hash(context)
@@ -2309,32 +2367,59 @@ class CoreService:
                             # Include peer context if:
                             # 1. This is first collaborative message, OR
                             # 2. Peer's context has changed
+
+                            # Check if this is first fetch vs. actual change
+                            is_first_fetch = node_id not in monitor.peer_context_hashes
+
                             if monitor.has_peer_context_changed(node_id, peer_hash):
                                 aggregated_contexts[node_id] = context
                                 monitor.update_peer_context_hash(node_id, peer_hash)
-                                print(f"    ✓ Received context from {node_id[:20]}... (included - new or changed)")
 
-                                # Phase 7: Broadcast peer context update event for UI status indicator
-                                await self.local_api.broadcast_event("peer_context_updated", {
-                                    "node_id": node_id,
-                                    "context_hash": peer_hash,
-                                    "conversation_id": conversation_id
-                                })
+                                if is_first_fetch:
+                                    print(f"    ✓ Context from {node_id[:20]}... (included - first fetch)")
+                                else:
+                                    print(f"    ✓ Context from {node_id[:20]}... (included - context changed)")
+                                    # Phase 7: Only broadcast update event if context actually changed (not first fetch)
+                                    await self.local_api.broadcast_event("peer_context_updated", {
+                                        "node_id": node_id,
+                                        "context_hash": peer_hash,
+                                        "conversation_id": conversation_id
+                                    })
+
+                                # Phase 7: Cache the peer context (so we don't fetch again next time)
+                                # Also fetch device context if we don't have it cached
+                                if not device_ctx:
+                                    device_ctx = await self._request_device_context_from_peer(node_id)
+                                    if device_ctx:
+                                        print(f"    ✓ Received device context from {node_id[:20]}...")
+
+                                # Cache both personal and device contexts
+                                monitor.cache_peer_context(node_id, context, device_ctx)
+
+                                # Add device context to result if we have it
+                                if device_ctx:
+                                    peer_device_contexts[node_id] = device_ctx
+
                             else:
                                 print(f"    ✓ Context from {node_id[:20]}... unchanged (using history)")
+                                # Still add cached device context if available
+                                if device_ctx:
+                                    peer_device_contexts[node_id] = device_ctx
                         else:
                             print(f"    ✗ No context received from {node_id[:20]}...")
-
-                        # Also fetch device context from peer if including their personal context
-                        if node_id in aggregated_contexts:
-                            device_ctx = await self._request_device_context_from_peer(node_id)
-                            if device_ctx:
-                                peer_device_contexts[node_id] = device_ctx
-                                print(f"    ✓ Received device context from {node_id[:20]}...")
                     except Exception as e:
                         print(f"    ✗ Error fetching context from {node_id[:20]}...: {e}")
                 else:
                     print(f"    ✗ Peer {node_id[:20]}... not connected")
+
+        # Phase 7: Update should_include_full_context if peer contexts were added
+        # BugFix: Even if local context wasn't included, if we have peer contexts, we need full context mode
+        if len(aggregated_contexts) > 0 and not should_include_full_context:
+            # Check if we have any peer contexts (non-'local' entries)
+            has_peer_contexts = any(key != 'local' for key in aggregated_contexts.keys())
+            if has_peer_contexts:
+                should_include_full_context = True
+                print(f"  - Including peer contexts in this query (peer context changed)")
 
         # Phase 7: Add user prompt to conversation history BEFORE assembling prompt
         monitor.add_message('user', prompt)
