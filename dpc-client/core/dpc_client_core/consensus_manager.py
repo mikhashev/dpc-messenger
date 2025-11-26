@@ -72,6 +72,7 @@ class ConsensusManager:
         self.on_vote_received: Optional[Callable] = None
         self.on_commit_approved: Optional[Callable] = None
         self.on_commit_rejected: Optional[Callable] = None
+        self.on_commit_applied: Optional[Callable] = None  # Called after commit is applied to personal.json
 
     async def propose_commit(
         self,
@@ -386,6 +387,10 @@ class ConsensusManager:
             print(f"   Markdown: {markdown_filename}")
             print(f"   Signatures: {len(commit.signatures)}")
 
+            # 9. Notify callback (for reloading p2p_manager.local_context and broadcasting CONTEXT_UPDATED)
+            if self.on_commit_applied:
+                await self.on_commit_applied(commit)
+
         except Exception as e:
             print(f"Error applying commit: {e}")
             import traceback
@@ -456,6 +461,72 @@ class ConsensusManager:
             del self.sessions[pid]
 
         return len(to_remove)
+
+    async def handle_proposal_message(self, sender_node_id: str, payload: Dict[str, Any]) -> None:
+        """Handle PROPOSE_KNOWLEDGE_COMMIT message from peer
+
+        Args:
+            sender_node_id: Node ID of the proposer
+            payload: Proposal payload (dict format)
+        """
+        try:
+            # Reconstruct proposal from dict
+            proposal = KnowledgeCommitProposal.from_dict(payload)
+
+            # Create voting session
+            session = VotingSession(
+                proposal=proposal,
+                required_dissenter=proposal.required_dissenter,
+                deadline=datetime.fromisoformat(proposal.vote_deadline) if proposal.vote_deadline else None
+            )
+
+            self.sessions[proposal.proposal_id] = session
+
+            print(f"Received knowledge commit proposal from {sender_node_id}")
+            print(f"  - Topic: {proposal.topic}")
+            print(f"  - Entries: {len(proposal.entries)}")
+            print(f"  - Proposal ID: {proposal.proposal_id}")
+
+            # Notify callback if registered
+            if self.on_proposal_received:
+                await self.on_proposal_received(proposal)
+
+        except Exception as e:
+            print(f"Error handling proposal message from {sender_node_id}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    async def handle_vote_message(self, sender_node_id: str, payload: Dict[str, Any]) -> None:
+        """Handle VOTE_KNOWLEDGE_COMMIT message from peer
+
+        Args:
+            sender_node_id: Node ID of the voter
+            payload: Vote payload (dict format)
+        """
+        try:
+            # Reconstruct vote from dict
+            vote = CommitVote(
+                proposal_id=payload.get('proposal_id'),
+                voter_node_id=sender_node_id,
+                vote=payload.get('vote'),
+                comment=payload.get('comment'),
+                timestamp=payload.get('timestamp', datetime.utcnow().isoformat()),
+                is_required_dissent=payload.get('is_required_dissent', False)
+            )
+
+            # Process vote
+            await self.receive_vote(vote)
+
+            print(f"Received vote from {sender_node_id}: {vote.vote}")
+
+            # Notify callback if registered
+            if self.on_vote_received:
+                await self.on_vote_received(vote)
+
+        except Exception as e:
+            print(f"Error handling vote message from {sender_node_id}: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 # Example usage

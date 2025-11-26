@@ -126,6 +126,9 @@ class CoreService:
             vote_timeout_minutes=10
         )
 
+        # Register callback to reload context and notify peers after commit
+        self.consensus_manager.on_commit_applied = self._on_commit_applied
+
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
@@ -883,6 +886,14 @@ class CoreService:
                 "node_id": sender_node_id,
                 "context_hash": context_hash
             })
+
+        elif command == "PROPOSE_KNOWLEDGE_COMMIT":
+            # Knowledge commit proposal from peer (forward to consensus manager)
+            await self.consensus_manager.handle_proposal_message(sender_node_id, payload)
+
+        elif command == "VOTE_KNOWLEDGE_COMMIT":
+            # Knowledge commit vote from peer (forward to consensus manager)
+            await self.consensus_manager.handle_vote_message(sender_node_id, payload)
 
         else:
             print(f"Unknown P2P message command: {command}")
@@ -2247,6 +2258,42 @@ class CoreService:
                 print(f"  - Notified {peer_id} of name change: {new_name}")
             except Exception as e:
                 print(f"  - Error notifying {peer_id} of name change: {e}")
+
+    async def _on_commit_applied(self, commit):
+        """Callback called after a knowledge commit is applied
+
+        This reloads the local context in p2p_manager and notifies peers.
+
+        Args:
+            commit: The KnowledgeCommit that was applied
+        """
+        try:
+            print(f"[Commit Applied] Reloading local context after commit {commit.commit_id}")
+
+            # Reload context from disk
+            context = self.pcm_core.load_context()
+
+            # Update in P2PManager so context requests return latest data
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                self.p2p_manager.local_context = context
+                print(f"  - Updated p2p_manager.local_context with new knowledge")
+
+            # Compute new context hash
+            new_context_hash = self._compute_context_hash()
+
+            # Broadcast CONTEXT_UPDATED to all connected peers
+            await self._broadcast_context_updated_to_peers(new_context_hash)
+
+            # Also emit event to UI
+            await self.local_api.broadcast_event("personal_context_updated", {
+                "message": f"Knowledge commit applied: {commit.topic}",
+                "context_hash": new_context_hash
+            })
+
+        except Exception as e:
+            print(f"Error in _on_commit_applied: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def _broadcast_context_updated_to_peers(self, context_hash: str):
         """

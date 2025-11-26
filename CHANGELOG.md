@@ -15,6 +15,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Enables knowledge detection for users without Ollama or other local LLMs installed
 
 ### Fixed
+- **Knowledge commit P2P protocol** - Fixed missing handlers for `PROPOSE_KNOWLEDGE_COMMIT` and `VOTE_KNOWLEDGE_COMMIT` messages
+  - Added `handle_proposal_message()` and `handle_vote_message()` to ConsensusManager
+  - Peers can now receive and process knowledge commit proposals and votes
+  - Eliminates "Unknown P2P message command" errors during collaborative knowledge commits
+- **Stale context after commit** - Fixed issue where peers couldn't see newly committed knowledge
+  - Added `on_commit_applied` callback to reload `p2p_manager.local_context` after commit
+  - Context requests now return latest knowledge immediately after commit
+  - Automatically broadcasts `CONTEXT_UPDATED` to all peers after applying commit
+  - Peers' cached contexts are invalidated, forcing fresh fetch on next query
 - **Auto-detection toggle sync** - Fixed backend/frontend state mismatch where auto-detection would run even when UI toggle was OFF
   - Changed backend default from `True` to `False` to match UI default
   - Prevents unwanted knowledge proposals when user has explicitly disabled auto-detection
