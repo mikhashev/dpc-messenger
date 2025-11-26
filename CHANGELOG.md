@@ -5,6 +5,173 @@ All notable changes to D-PC Messenger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0] - 2025-11-26
+
+### Added - Personal Context Schema v2.0 (Modular File System)
+
+#### Core Features
+- **Minimal personal.json** - Profile + metadata only (~3-5 KB instead of 26 KB)
+  - Removed legacy `instruction` field (now in `instructions.json`)
+  - Removed embedded `entries` arrays (now in markdown files)
+  - Added `metadata.external_files` reference system
+  - Format version upgraded to `2.0`
+
+- **Automatic Schema Migration** (`_cleanup_schema_v2`)
+  - One-time migration on service startup
+  - Idempotent operation (safe to run multiple times)
+  - Four-step process:
+    1. Fix instruction field (calls `migrate_instructions_from_personal_context`)
+    2. Export knowledge to versioned markdown files
+    3. Clear entries arrays from JSON
+    4. Update format_version to 2.0
+  - Creates `.json.v1_backup` before migration
+  - Logs file size reduction (typically 80-85%)
+
+- **Knowledge Loading from Markdown**
+  - `get_personal_context()` loads entries from markdown files on demand
+  - Verifies content integrity using SHA256 hashes
+  - Warnings logged for hash mismatches
+  - In-memory only (entries not persisted to JSON)
+
+- **Fixed Instruction Migration Bug**
+  - `migrate_instructions_from_personal_context()` now idempotent
+  - Properly cleans up `instruction` field even when `instructions.json` exists
+  - Adds `metadata.external_files.instructions` reference
+  - Creates backup before modifying files
+
+#### Backend Implementation
+
+**Updated** - `dpc-protocol/dpc_protocol/pcm_core.py`:
+- Fixed `migrate_instructions_from_personal_context()` (lines 435-561)
+  - Now handles CASE 1 (instructions.json exists) correctly
+  - Removes instruction field and adds external_files reference
+  - Creates backups before modification
+  - Returns True only if changes were made
+- **Made Topic optional fields truly optional:**
+  - Changed `key_books`, `preferred_authors`, `learning_strategies` to `Optional[List]` (default: None)
+  - Core fields: `summary`, `entries`, `mastery_level`, `version`, timestamps, `markdown_file`, `commit_id`
+  - Optional fields only included in JSON when user adds them
+  - Updated `from_dict()` to only populate optional fields when present
+
+**Updated** - `dpc-protocol/dpc_protocol/markdown_manager.py`:
+- Added `build_markdown_with_frontmatter()` - builds markdown with frontmatter, returns string
+- Added `parse_markdown_with_frontmatter()` - parses YAML frontmatter from markdown files
+- Added `markdown_to_entries()` - converts markdown content back to KnowledgeEntry objects
+- Refactored `write_markdown_with_frontmatter()` to use new build method
+- All methods handle optional Topic fields gracefully (only render when not None)
+
+**Updated** - `dpc-client/core/dpc_client_core/service.py`:
+- Added `_cleanup_schema_v2()` method (lines 186-357)
+  - Automatic one-time migration on startup
+  - Exports all knowledge topics to versioned markdown files
+  - Preserves commit integrity data (hashes, signatures)
+  - Logs detailed progress and results
+- Updated `get_personal_context()` (lines 1220-1270)
+  - Loads knowledge from markdown files when `markdown_file` is set
+  - Verifies content hashes for integrity
+  - Populates `entries` in-memory for UI display
+- Integrated cleanup into `start()` method (lines 424-429)
+  - Runs before integrity check
+  - Errors don't prevent startup
+
+**Updated** - `dpc-client/ui/src/lib/components/ContextViewer.svelte`:
+- Removed unused "View Markdown" button (was dispatching unhandled event)
+- Removed `openMarkdownFile()` helper function
+- Cleaner topic metadata display
+
+#### File Structure Changes
+
+**Before v2.0:**
+```
+~/.dpc/
+├── personal.json (26 KB)
+│   └── Contains:
+│       - instruction field ❌
+│       - huge entries arrays ❌
+│
+└── instructions.json (1 KB)
+```
+
+**After v2.0:**
+```
+~/.dpc/
+├── personal.json (3-5 KB)
+│   └── Profile + metadata only ✅
+│
+├── personal.json.v1_backup (26 KB)
+├── instructions.json (1 KB)
+│
+└── knowledge/
+    ├── astronomy_commit-a05808d8.md
+    ├── astronomy_commit-def12345.md (newer version)
+    └── alice_collaborative_ai_commit-2153be27.md
+```
+
+#### personal.json v2.0 Structure
+
+```json
+{
+  "profile": {
+    "name": "Mike Windows 10",
+    "description": "My personal context for D-PC.",
+    "core_values": ["Windows"]
+  },
+
+  "knowledge": {
+    "astronomy": {
+      "summary": "The Andromeda Galaxy...",
+      "markdown_file": "knowledge/astronomy_commit-def12345.md",
+      "commit_id": "commit-def12345",
+      "mastery_level": "beginner",
+      "version": 2,
+      "entries": []  // Empty - loaded from markdown
+    }
+  },
+
+  "metadata": {
+    "format_version": "2.0",
+    "external_files": {
+      "instructions": {
+        "file": "instructions.json",
+        "description": "AI behavior instructions",
+        "last_updated": "2025-11-26T..."
+      }
+    }
+  }
+}
+```
+
+#### Benefits
+- **80-85% file size reduction** - personal.json shrinks from 26 KB to 3-5 KB
+- **Git-friendly** - Markdown files are human-readable and diff-friendly
+- **Modular** - Each topic version has its own file
+- **Integrity** - Content hashes detect manual edits
+- **Backup safety** - Original files backed up before migration
+
+#### Multi-Device Sync
+- Recommended method: Backup/Restore workflow
+- Hash-based commit IDs ensure consistency
+- All devices have identical v2.0 schema after sync
+
+#### Documentation
+- Added `docs/PERSONAL_CONTEXT_V2_IMPLEMENTATION.md` - comprehensive implementation guide
+  - Prerequisites and architecture
+  - Minimal schema design
+  - Migration workflow
+  - Testing plan
+  - Multi-device considerations
+- Added `docs/MANUAL_KNOWLEDGE_SAVE.md` - implementation guide for manual knowledge save feature
+  - User flows (solo and collaborative modes)
+  - Backend command handler design
+  - Frontend dialog component specification
+  - Consensus integration
+  - Testing checklist
+
+### Changed
+- **personal.json** - Now references external files via `metadata.external_files`
+- **Knowledge storage** - Entries stored in markdown files, not JSON
+- **Schema version** - Upgraded from v1.x to v2.0
+
 ## [0.9.0] - 2025-11-26
 
 ### Added - Cryptographic Commit Integrity System (Phase 8)

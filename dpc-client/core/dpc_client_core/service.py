@@ -183,6 +183,175 @@ class CoreService:
         except Exception as e:
             print(f"Error notifying UI of status change: {e}")
 
+    async def _cleanup_schema_v2(self):
+        """
+        One-time cleanup to migrate to v2.0 schema.
+
+        Prerequisites:
+            - COMMIT_INTEGRITY must be implemented first
+            - Hash-based commit_ids already in use
+
+        Steps:
+            1. Fix instruction field (via migrate_instructions)
+            2. Export knowledge to versioned markdown files
+            3. Clear entries arrays from JSON
+            4. Update format_version to 2.0
+        """
+        import hashlib
+        from datetime import datetime
+        from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+        from dpc_protocol.pcm_core import PersonalContext
+
+        personal_json_path = DPC_HOME_DIR / "personal.json"
+
+        if not personal_json_path.exists():
+            print("No personal.json found, skipping cleanup")
+            return
+
+        print("=== Schema v2.0 Cleanup ===")
+
+        # Load current data
+        with open(personal_json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Check if already v2.0 and clean
+        if data.get('metadata', {}).get('format_version') == '2.0':
+            has_instruction = 'instruction' in data
+            has_entries = any(
+                len(topic.get('entries', [])) > 0
+                for topic in data.get('knowledge', {}).values()
+            )
+
+            if not has_instruction and not has_entries:
+                print("✓ Already v2.0 and clean")
+                return
+
+        changes_made = False
+
+        # STEP 1: Fix instruction field
+        print("Step 1: Checking instruction field...")
+        if migrate_instructions_from_personal_context():
+            print("  ✓ Instructions migrated")
+            changes_made = True
+
+            # Reload data
+            with open(personal_json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        else:
+            print("  ✓ Instructions already clean")
+
+        # STEP 2: Export knowledge to markdown
+        print("Step 2: Exporting knowledge to markdown...")
+
+        markdown_manager = MarkdownKnowledgeManager()
+        context = PersonalContext.from_dict(data)
+
+        for topic_name, topic in context.knowledge.items():
+            # Skip if already has markdown_file
+            if hasattr(topic, 'markdown_file') and topic.markdown_file:
+                markdown_path = DPC_HOME_DIR / topic.markdown_file
+                if markdown_path.exists():
+                    print(f"  ✓ {topic_name}: Already has markdown")
+                    continue
+
+            # Get commit_id (should be hash-based from COMMIT_INTEGRITY)
+            commit_id = getattr(topic, 'commit_id', None) or context.last_commit_id
+
+            if not commit_id:
+                # Fallback: generate hash-based commit_id
+                print(f"  ⚠️ {topic_name}: No commit_id, generating new one")
+
+                from dpc_protocol.knowledge_commit import KnowledgeCommit
+                from dpc_protocol.commit_integrity import compute_commit_hash
+
+                temp_commit = KnowledgeCommit(
+                    topic=topic_name,
+                    summary=topic.summary,
+                    entries=topic.entries
+                )
+                commit_hash = compute_commit_hash(temp_commit)
+                commit_id = f"commit-{commit_hash[:16]}"
+
+            # Create versioned markdown file
+            safe_name = topic_name.lower().replace(' ', '_').replace("'", '').replace('"', '')
+            markdown_filename = f"{safe_name}_{commit_id}.md"
+            markdown_path = markdown_manager.knowledge_dir / markdown_filename
+
+            # Convert topic to markdown
+            markdown_content = markdown_manager.topic_to_markdown_content(topic)
+
+            # Compute content hash
+            content_hash = hashlib.sha256(markdown_content.encode('utf-8')).hexdigest()[:16]
+
+            # Create frontmatter
+            frontmatter = {
+                'topic': topic_name,
+                'commit_id': commit_id,
+                'content_hash': content_hash,
+                'version': topic.version,
+                'created_at': topic.created_at,
+                'last_modified': topic.last_modified,
+                'mastery_level': topic.mastery_level
+            }
+
+            # If this commit has integrity data (from COMMIT_INTEGRITY)
+            for commit in context.commit_history:
+                if commit.get('commit_id') == commit_id:
+                    frontmatter['commit_hash'] = commit.get('commit_hash', '')
+                    frontmatter['parent_commit'] = commit.get('parent_commit_id', '')
+                    frontmatter['participants'] = commit.get('participants', [])
+                    frontmatter['approved_by'] = commit.get('approved_by', [])
+                    frontmatter['consensus'] = commit.get('consensus', 'unanimous')
+                    frontmatter['signatures'] = commit.get('signatures', {})
+                    break
+
+            # Write markdown file
+            full_content = markdown_manager.build_markdown_with_frontmatter(
+                frontmatter,
+                markdown_content
+            )
+            markdown_path.write_text(full_content, encoding='utf-8')
+
+            # Update JSON metadata
+            data['knowledge'][topic_name]['markdown_file'] = f"knowledge/{markdown_filename}"
+            data['knowledge'][topic_name]['commit_id'] = commit_id
+
+            # Clear entries
+            entry_count = len(data['knowledge'][topic_name].get('entries', []))
+            data['knowledge'][topic_name]['entries'] = []
+
+            print(f"  ✓ {topic_name}: Exported {entry_count} entries to {markdown_filename}")
+            changes_made = True
+
+        # STEP 3: Update format_version
+        if 'metadata' not in data:
+            data['metadata'] = {}
+
+        data['metadata']['format_version'] = '2.0'
+        data['metadata']['last_updated'] = datetime.utcnow().isoformat()
+
+        # STEP 4: Save cleaned personal.json
+        if changes_made:
+            # Backup original
+            import shutil
+            backup_path = personal_json_path.with_suffix('.json.v1_backup')
+            shutil.copy(personal_json_path, backup_path)
+            print(f"✓ Backed up to {backup_path}")
+
+            # Save cleaned version
+            with open(personal_json_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            # Log results
+            original_size = backup_path.stat().st_size
+            new_size = personal_json_path.stat().st_size
+            reduction = ((original_size - new_size) / original_size) * 100
+
+            print(f"✓ Schema v2.0 cleanup complete")
+            print(f"  File size: {original_size} → {new_size} bytes ({reduction:.1f}% reduction)")
+        else:
+            print("No changes needed")
+
     async def _startup_integrity_check(self):
         """Verify all knowledge commits on startup."""
         from dpc_protocol.commit_integrity import verify_markdown_integrity
@@ -247,6 +416,13 @@ class CoreService:
         print("Starting D-PC Core Service...")
 
         self._shutdown_event = asyncio.Event()
+
+        # Run schema cleanup (one-time migration to v2.0)
+        try:
+            await self._cleanup_schema_v2()
+        except Exception as e:
+            print(f"Schema cleanup error: {e}")
+            # Don't fail startup
 
         # Run knowledge integrity check
         print("Running knowledge integrity check...")
@@ -1042,9 +1218,42 @@ class CoreService:
 
         UI Integration: Called when user opens ContextViewer component.
         Returns the full v2.0 PersonalContext with all metadata.
+
+        Loads knowledge from markdown files when markdown_file is set (v2.0 schema).
         """
         try:
+            import hashlib
+            from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+
+            # Load JSON
             context = self.pcm_core.load_context()
+
+            # Load knowledge from markdown files
+            markdown_manager = MarkdownKnowledgeManager()
+
+            for topic_name, topic in context.knowledge.items():
+                if topic.markdown_file:
+                    filepath = DPC_HOME_DIR / topic.markdown_file
+
+                    if filepath.exists():
+                        # Parse markdown with frontmatter
+                        frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(filepath)
+
+                        # Verify integrity
+                        if 'content_hash' in frontmatter:
+                            actual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+                            if actual_hash != frontmatter['content_hash']:
+                                print(
+                                    f"⚠️ Content hash mismatch for {topic_name}: "
+                                    f"{frontmatter['commit_id']}"
+                                )
+
+                        # Convert markdown to entries
+                        entries = markdown_manager.markdown_to_entries(content)
+                        topic.entries = entries  # In-memory only
+                    else:
+                        print(f"Markdown file not found: {topic.markdown_file}")
+
             return {
                 "status": "success",
                 "context": asdict(context)

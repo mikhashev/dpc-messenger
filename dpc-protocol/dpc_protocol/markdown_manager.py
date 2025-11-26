@@ -8,7 +8,7 @@ Provides bidirectional sync between JSON PCM data and markdown files.
 import re
 import yaml
 from pathlib import Path
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 
 from .pcm_core import (
@@ -432,14 +432,13 @@ class MarkdownKnowledgeManager:
 
         return "\n".join(lines)
 
-    def write_markdown_with_frontmatter(
+    def build_markdown_with_frontmatter(
         self,
-        filepath: Path,
         frontmatter: Dict[str, Any],
         content: str
-    ) -> None:
+    ) -> str:
         """
-        Write markdown file with YAML frontmatter.
+        Build markdown content with YAML frontmatter (returns string).
 
         Format:
             ---
@@ -455,9 +454,11 @@ class MarkdownKnowledgeManager:
             # Markdown content here
 
         Args:
-            filepath: Path to markdown file
             frontmatter: Dictionary of frontmatter metadata
             content: Markdown content
+
+        Returns:
+            Complete markdown with frontmatter as string
         """
         lines = ["---"]
 
@@ -487,6 +488,12 @@ class MarkdownKnowledgeManager:
             lines.append(f"version: {frontmatter['version']}")
         if 'author' in frontmatter:
             lines.append(f"author: {frontmatter['author']}")
+        if 'created_at' in frontmatter:
+            lines.append(f"created_at: {frontmatter['created_at']}")
+        if 'last_modified' in frontmatter:
+            lines.append(f"last_modified: {frontmatter['last_modified']}")
+        if 'mastery_level' in frontmatter:
+            lines.append(f"mastery_level: {frontmatter['mastery_level']}")
         lines.append("")
 
         # Consensus Tracking
@@ -540,8 +547,153 @@ class MarkdownKnowledgeManager:
         # Add content
         lines.append(content)
 
-        # Write to file
-        filepath.write_text("\n".join(lines), encoding='utf-8')
+        return "\n".join(lines)
+
+    def write_markdown_with_frontmatter(
+        self,
+        filepath: Path,
+        frontmatter: Dict[str, Any],
+        content: str
+    ) -> None:
+        """
+        Write markdown file with YAML frontmatter.
+
+        Format:
+            ---
+            key: value
+            list_key:
+              - item1
+              - item2
+            dict_key:
+              key1: value1
+              key2: value2
+            ---
+
+            # Markdown content here
+
+        Args:
+            filepath: Path to markdown file
+            frontmatter: Dictionary of frontmatter metadata
+            content: Markdown content
+        """
+        full_content = self.build_markdown_with_frontmatter(frontmatter, content)
+        filepath.write_text(full_content, encoding='utf-8')
+
+    def parse_markdown_with_frontmatter(self, filepath: Path) -> Tuple[Dict[str, Any], str]:
+        """
+        Parse markdown file with YAML frontmatter.
+
+        Args:
+            filepath: Path to markdown file
+
+        Returns:
+            Tuple of (frontmatter_dict, content_string)
+        """
+        if not filepath.exists():
+            raise FileNotFoundError(f"Markdown file not found: {filepath}")
+
+        content = filepath.read_text(encoding='utf-8')
+
+        # Check for frontmatter
+        if not content.startswith('---'):
+            return {}, content
+
+        # Find end of frontmatter
+        end_marker = content.find('\n---\n', 3)
+        if end_marker == -1:
+            end_marker = content.find('\n---\r\n', 3)
+        if end_marker == -1:
+            return {}, content
+
+        # Extract frontmatter and content
+        frontmatter_text = content[4:end_marker]
+        markdown_content = content[end_marker + 5:].strip()
+
+        # Parse YAML frontmatter
+        try:
+            frontmatter = yaml.safe_load(frontmatter_text)
+            if frontmatter is None:
+                frontmatter = {}
+        except yaml.YAMLError:
+            frontmatter = {}
+
+        return frontmatter, markdown_content
+
+    def markdown_to_entries(self, content: str) -> List[KnowledgeEntry]:
+        """
+        Parse markdown content back into KnowledgeEntry objects.
+
+        Args:
+            content: Markdown content (without frontmatter)
+
+        Returns:
+            List of KnowledgeEntry objects
+        """
+        entries = []
+
+        # Find all ### headers (knowledge entries)
+        lines = content.split('\n')
+        current_entry = None
+        current_content_lines = []
+        current_tags = []
+        current_confidence = 0.95
+        current_timestamp = datetime.utcnow().isoformat()
+
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+
+            # Start of new entry
+            if line.startswith('### '):
+                # Save previous entry
+                if current_entry is not None and current_content_lines:
+                    current_entry.content = '\n'.join(current_content_lines).strip()
+                    current_entry.tags = current_tags if current_tags else ['general']
+                    current_entry.confidence = current_confidence
+                    current_entry.last_updated = current_timestamp
+                    entries.append(current_entry)
+
+                # Start new entry
+                tag = line[4:].strip().lower().replace(' ', '_')
+                current_tags = [tag]
+                current_content_lines = []
+                current_entry = KnowledgeEntry(
+                    content="",
+                    tags=[],
+                    confidence=0.95,
+                    last_updated=datetime.utcnow().isoformat()
+                )
+
+            # Parse metadata lines
+            elif line.startswith('*Last Updated:'):
+                match = re.search(r'\*Last Updated:\s*(.+?)\*', line)
+                if match:
+                    current_timestamp = match.group(1)
+
+            elif line.startswith('*Confidence:'):
+                match = re.search(r'\*Confidence:\s*(\d+)%\*', line)
+                if match:
+                    current_confidence = int(match.group(1)) / 100.0
+
+            elif line.startswith('**Tags:**'):
+                tags_text = line.replace('**Tags:**', '').strip()
+                current_tags = [t.strip() for t in tags_text.split(',')]
+
+            # Content lines
+            elif current_entry is not None and line and not line.startswith('*') and not line.startswith('**') and not line.startswith('---'):
+                current_content_lines.append(line)
+
+            i += 1
+
+        # Save last entry
+        if current_entry is not None and current_content_lines:
+            current_entry.content = '\n'.join(current_content_lines).strip()
+            current_entry.tags = current_tags if current_tags else ['general']
+            current_entry.confidence = current_confidence
+            current_entry.last_updated = current_timestamp
+            entries.append(current_entry)
+
+        return entries
 
 
 # Example usage

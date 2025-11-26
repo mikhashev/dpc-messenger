@@ -130,10 +130,6 @@
     dispatch('close');
   }
 
-  function openMarkdownFile(filename: string) {
-    dispatch('open-markdown', { filename });
-  }
-
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
       if (editMode) {
@@ -295,11 +291,6 @@
                 <div class="topic-meta">
                   <span>Version {topic.version}</span>
                   <span>{topic.entries.length} entries</span>
-                  {#if topic.markdown_file}
-                    <button class="link-btn" on:click={() => topic.markdown_file && openMarkdownFile(topic.markdown_file)}>
-                      View Markdown
-                    </button>
-                  {/if}
                 </div>
 
                 {#if topic.entries.length > 0}
