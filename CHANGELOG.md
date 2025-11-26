@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Enables knowledge detection for users without Ollama or other local LLMs installed
 
 ### Fixed
+- **Auto-detection toggle sync** - Fixed backend/frontend state mismatch where auto-detection would run even when UI toggle was OFF
+  - Changed backend default from `True` to `False` to match UI default
+  - Prevents unwanted knowledge proposals when user has explicitly disabled auto-detection
 - **P2PManager broadcast error** - Fixed `AttributeError: 'P2PManager' object has no attribute 'send_to_peer'` by using correct method name `send_message_to_peer()`
 - **Unused CSS selector warning** - Removed unused `.link-btn` selector from `ContextViewer.svelte`
 

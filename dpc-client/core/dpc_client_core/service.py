@@ -131,7 +131,7 @@ class CoreService:
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
 
         # Knowledge extraction settings
-        self.auto_knowledge_detection_enabled: bool = True  # Can be toggled by user
+        self.auto_knowledge_detection_enabled: bool = False  # Can be toggled by user (matches UI default)
 
         self._is_running = False
         self._background_tasks = set()
