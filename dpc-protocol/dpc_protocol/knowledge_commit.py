@@ -10,6 +10,8 @@ from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime
 import uuid
 
+from cryptography.hazmat.primitives.asymmetric import rsa
+
 from .pcm_core import KnowledgeEntry, KnowledgeSource
 
 
@@ -153,9 +155,82 @@ class KnowledgeCommit:
     sources_cited: List[str] = field(default_factory=list)
     dissenting_opinion: Optional[str] = None  # Preserved dissent for historical record
 
+    # Cryptographic integrity (Phase 8)
+    commit_hash: Optional[str] = None  # Full SHA256 hash (64 chars)
+    signatures: Dict[str, str] = field(default_factory=dict)  # node_id -> base64 signature
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for commit history storage"""
         return asdict(self)
+
+    def compute_hash(self) -> str:
+        """
+        Compute hash-based commit ID.
+
+        This creates a content-addressable commit ID based on the
+        SHA256 hash of the commit content. Same content = same hash
+        across all devices.
+
+        Sets:
+            self.commit_hash = full SHA256 hash (64 chars)
+            self.commit_id = "commit-{hash[:16]}"
+
+        Returns:
+            Full hash (64 chars)
+        """
+        from .commit_integrity import compute_commit_hash
+
+        self.commit_hash = compute_commit_hash(self)
+        self.commit_id = f"commit-{self.commit_hash[:16]}"
+
+        return self.commit_hash
+
+    def sign(self, node_id: str, private_key: rsa.RSAPrivateKey):
+        """
+        Sign this commit with node's private key.
+
+        Args:
+            node_id: Node identifier (e.g., "dpc-node-abc123")
+            private_key: RSA private key for signing
+
+        Raises:
+            ValueError: If commit_hash is not computed yet
+        """
+        from .commit_integrity import CommitSigner
+
+        if not self.commit_hash:
+            raise ValueError("Must compute hash before signing (call compute_hash() first)")
+
+        signer = CommitSigner(node_id, private_key)
+        self.signatures[node_id] = signer.sign_commit(self.commit_hash)
+
+    def verify_signatures(self) -> bool:
+        """
+        Verify all signatures in this commit.
+
+        Returns:
+            True if all signatures are valid, False otherwise
+        """
+        from .commit_integrity import CommitSigner
+
+        if not self.commit_hash:
+            return False
+
+        for node_id, signature in self.signatures.items():
+            if not CommitSigner.verify_signature(node_id, self.commit_hash, signature):
+                return False
+
+        return True
+
+    def verify_hash(self) -> bool:
+        """
+        Verify commit hash matches content.
+
+        Returns:
+            True if hash is valid
+        """
+        from .commit_integrity import verify_commit_hash
+        return verify_commit_hash(self)
 
     def format_commit_message(self) -> str:
         """Format as git-style commit message

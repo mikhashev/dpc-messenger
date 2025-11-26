@@ -263,16 +263,41 @@ class ConsensusManager:
             # Could trigger revision workflow here
 
     async def _apply_commit(self, commit: KnowledgeCommit) -> None:
-        """Apply approved commit to local PCM
+        """Apply approved commit to local PCM with cryptographic integrity
 
         Args:
             commit: KnowledgeCommit to apply
         """
         try:
+            import hashlib
+            from dpc_protocol.crypto import load_identity
+            from cryptography.hazmat.primitives import serialization
+
             # Load current context
             context = self.pcm_core.load_context()
 
-            # Add or update topic
+            # 1. Set parent commit (chain of trust)
+            commit.parent_commit_id = context.last_commit_id
+
+            # 2. Compute hash-based commit ID
+            commit.compute_hash()  # Sets commit_hash and commit_id
+
+            print(f"Created commit {commit.commit_id} (hash: {commit.commit_hash[:16]}...)")
+
+            # 3. Sign commit with our private key
+            node_id, key_path, cert_path = load_identity()
+
+            with open(key_path, 'rb') as f:
+                private_key = serialization.load_pem_private_key(
+                    f.read(),
+                    password=None
+                )
+
+            commit.sign(node_id, private_key)
+
+            print(f"Signed commit with {node_id}")
+
+            # 4. Add or update topic
             topic_name = commit.topic
 
             if topic_name in context.knowledge:
@@ -290,31 +315,81 @@ class ConsensusManager:
                     version=1
                 )
 
-            # Update context metadata
+            topic = context.knowledge[topic_name]
+
+            # 5. Update context metadata
             context.version += 1
             context.last_commit_id = commit.commit_id
             context.last_commit_message = commit.summary
             context.last_commit_timestamp = commit.timestamp
 
-            # Add to commit history
+            # 6. Add to commit history with cryptographic fields
             context.commit_history.append({
                 'commit_id': commit.commit_id,
+                'commit_hash': commit.commit_hash,
                 'timestamp': commit.timestamp,
                 'message': commit.summary,
                 'participants': commit.participants,
                 'consensus': commit.consensus_type,
-                'approved_by': commit.approved_by
+                'approved_by': commit.approved_by,
+                'signatures': commit.signatures
             })
 
-            # Save
+            # 7. Create versioned markdown file with frontmatter
+            from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+
+            markdown_manager = MarkdownKnowledgeManager()
+
+            # Compute content hash for markdown
+            markdown_content = markdown_manager.topic_to_markdown_content(topic)
+            content_hash = hashlib.sha256(markdown_content.encode('utf-8')).hexdigest()[:16]
+
+            # Create markdown with frontmatter
+            safe_topic_name = markdown_manager.sanitize_filename(topic_name)
+            markdown_filename = f"{safe_topic_name}_{commit.commit_id}.md"
+            markdown_path = markdown_manager.knowledge_dir / markdown_filename
+
+            frontmatter = {
+                'topic': topic_name,
+                'commit_id': commit.commit_id,
+                'commit_hash': commit.commit_hash,
+                'parent_commit': commit.parent_commit_id or "",
+                'content_hash': content_hash,
+                'timestamp': commit.timestamp,
+                'version': topic.version,
+                'author': node_id,
+                'participants': commit.participants,
+                'approved_by': commit.approved_by,
+                'rejected_by': commit.rejected_by,
+                'consensus': commit.consensus_type,
+                'confidence_score': commit.confidence_score,
+                'signatures': commit.signatures,
+                'cultural_perspectives': commit.cultural_perspectives_considered
+            }
+
+            markdown_manager.write_markdown_with_frontmatter(
+                markdown_path,
+                frontmatter,
+                markdown_content
+            )
+
+            # Update topic reference
+            topic.markdown_file = f"knowledge/{markdown_filename}"
+            topic.commit_id = commit.commit_id
+            topic.entries = []  # Clear entries (markdown is source of truth)
+
+            # 8. Save context
             self.pcm_core.save_context(context)
 
             print(f"✅ Applied commit: {commit.commit_id}")
             print(f"   Topic: {topic_name}")
-            print(f"   Entries: {len(commit.entries)}")
+            print(f"   Markdown: {markdown_filename}")
+            print(f"   Signatures: {len(commit.signatures)}")
 
         except Exception as e:
             print(f"Error applying commit: {e}")
+            import traceback
+            traceback.print_exc()
 
     async def _handle_vote_deadline(self, proposal_id: str) -> None:
         """Handle vote deadline timeout

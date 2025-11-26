@@ -183,6 +183,42 @@ class CoreService:
         except Exception as e:
             print(f"Error notifying UI of status change: {e}")
 
+    async def _startup_integrity_check(self):
+        """Verify all knowledge commits on startup."""
+        from dpc_protocol.commit_integrity import verify_markdown_integrity
+        from dpc_protocol.crypto import DPC_HOME_DIR
+
+        knowledge_dir = DPC_HOME_DIR / "knowledge"
+
+        if not knowledge_dir.exists():
+            print("  No knowledge directory found, skipping integrity check")
+            return
+
+        warnings = []
+        verified_count = 0
+
+        for markdown_file in knowledge_dir.glob("*_commit-*.md"):
+            result = verify_markdown_integrity(markdown_file, knowledge_dir)
+
+            if result['valid']:
+                verified_count += 1
+            else:
+                warnings.extend(result['warnings'])
+
+        if warnings:
+            # Broadcast warning to UI
+            if self.local_api:
+                await self.local_api.broadcast_event("integrity_warnings", {
+                    'count': len(warnings),
+                    'warnings': warnings
+                })
+
+            print(f"  ⚠️ Knowledge integrity: {len(warnings)} issues found")
+            for w in warnings:
+                print(f"    [{w['severity'].upper()}] {w['file']}: {w['message']}")
+        else:
+            print(f"  ✓ Knowledge integrity verified ({verified_count} commits)")
+
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
@@ -192,6 +228,10 @@ class CoreService:
         print("Starting D-PC Core Service...")
 
         self._shutdown_event = asyncio.Event()
+
+        # Run knowledge integrity check
+        print("Running knowledge integrity check...")
+        await self._startup_integrity_check()
 
         # Start all background tasks
         p2p_task = asyncio.create_task(self.p2p_manager.start_server())

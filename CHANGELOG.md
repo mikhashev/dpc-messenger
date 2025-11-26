@@ -5,6 +5,187 @@ All notable changes to D-PC Messenger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2025-11-26
+
+### Added - Cryptographic Commit Integrity System (Phase 8)
+
+#### Core Features
+- **Hash-Based Commit IDs** (Git-style content-addressable storage)
+  - Commit ID = `commit-{SHA256_hash[:16]}` (e.g., `commit-a3f7b2c91d4e5f6a`)
+  - Same content = same hash across all devices (deterministic)
+  - 64-character SHA256 hash stored in `commit_hash` field
+  - Replaces random UUID-based commit IDs
+
+- **Multi-Signature Support**
+  - RSA-PSS signatures with SHA256 for provably secure commits
+  - Uses existing node RSA keys (~/.dpc/node.key)
+  - All participants sign collaborative commits
+  - Base64-encoded signatures stored in frontmatter
+  - Automatic signing on commit creation
+
+- **Versioned Markdown Storage with Frontmatter**
+  - Format: `{topic_name}_{commit_id}.md`
+  - YAML frontmatter with cryptographic verification fields:
+    - `commit_hash` - Full SHA256 hash (verifies metadata integrity)
+    - `content_hash` - Markdown content hash (detects manual tampering)
+    - `signatures` - Multi-party cryptographic signatures (node_id -> base64 signature)
+    - `parent_commit` - Git-style commit chain reference
+    - `participants`, `approved_by`, `rejected_by` - Consensus tracking
+    - `cultural_perspectives` - Bias mitigation metadata
+    - `confidence_score` - AI confidence level
+  - Separate content hash detects manual markdown edits
+
+- **Startup Integrity Verification**
+  - Automatic verification of all commits on service startup
+  - 5 integrity checks per commit:
+    1. Content hash matches actual markdown content
+    2. Commit ID in filename matches frontmatter
+    3. Recomputed commit hash matches stored `commit_hash`
+    4. All signatures are valid (RSA verification)
+    5. Parent commit exists (chain integrity)
+  - Warnings broadcasted to UI via `integrity_warnings` event
+  - Console output: `✓ Knowledge integrity verified (N commits)`
+
+- **Chain of Trust** (Git-style commit history)
+  - Each commit references parent commit via `parent_commit_id`
+  - Linear commit history: `commit-1 → commit-2 → commit-3`
+  - Tamper-evident: changing any commit breaks all descendants
+  - `verify_commit_chain()` validates entire history
+
+#### Backend Implementation
+
+**New Module** - `dpc-protocol/dpc_protocol/commit_integrity.py`:
+- `compute_commit_hash(commit)` - deterministic SHA256 hash computation
+  - Includes: topic, summary, entries, participants, approved_by, timestamps
+  - Excludes: conversation_id, commit_id (circular), signatures (added after hash)
+  - Canonical JSON with sorted keys for determinism
+- `verify_commit_hash(commit)` - recompute and verify hash
+- `CommitSigner` class:
+  - `sign_commit(commit_hash)` - RSA-PSS signature creation
+  - `verify_signature(node_id, commit_hash, signature)` - RSA verification with peer certificates
+- `parse_markdown_with_frontmatter(path)` - parse YAML frontmatter
+- `compute_content_hash(content)` - SHA256 hash of markdown content
+- `verify_markdown_integrity(path)` - comprehensive integrity check
+- `verify_commit_chain(commits)` - validate commit chain
+- Custom exceptions: `IntegrityError`, `SignatureError`, `AuthorizationError`, `ChainIntegrityError`
+
+**Updated** - `dpc-protocol/dpc_protocol/knowledge_commit.py`:
+- Added fields to `KnowledgeCommit`:
+  - `commit_hash: Optional[str]` - Full SHA256 hash (64 chars)
+  - `signatures: Dict[str, str]` - node_id → base64 signature mapping
+- New methods:
+  - `compute_hash()` - computes hash and sets `commit_id` and `commit_hash`
+  - `sign(node_id, private_key)` - signs commit with RSA key
+  - `verify_signatures()` - verifies all signatures in commit
+  - `verify_hash()` - verifies commit hash matches content
+
+**Updated** - `dpc-protocol/dpc_protocol/markdown_manager.py`:
+- Added `topic_to_markdown_content(topic)` - generate content without frontmatter (for hashing)
+- Added `write_markdown_with_frontmatter(filepath, frontmatter, content)`:
+  - Writes YAML frontmatter with structured sections:
+    - Commit Identification
+    - Integrity Verification
+    - Metadata
+    - Consensus Tracking
+    - Cryptographic Signatures
+    - Cultural Context
+  - Properly escapes signature strings in YAML
+
+**Updated** - `dpc-client/core/dpc_client_core/consensus_manager.py`:
+- Updated `_apply_commit()` to use hash-based commit IDs:
+  1. Set parent commit ID from context (chain of trust)
+  2. Compute hash-based commit ID (`commit.compute_hash()`)
+  3. Sign commit with node's private RSA key
+  4. Create versioned markdown file with frontmatter
+  5. Compute content hash of markdown
+  6. Write frontmatter with all cryptographic fields
+  7. Update commit history with `commit_hash` and `signatures`
+- Uses `markdown_manager.sanitize_filename()` for cross-platform compatibility
+
+**Updated** - `dpc-client/core/dpc_client_core/service.py`:
+- Added `_startup_integrity_check()` method:
+  - Scans `~/.dpc/knowledge/` for `*_commit-*.md` files
+  - Calls `verify_markdown_integrity()` on each file
+  - Collects warnings for invalid commits
+  - Broadcasts `integrity_warnings` event to UI
+  - Prints summary to console
+- Integrated into `start()` method (runs before starting servers)
+
+#### Testing
+- **Unit Tests** - `dpc-protocol/tests/test_commit_integrity.py`:
+  - 22 tests, all passing ✓
+  - Test coverage:
+    - Hash computation (deterministic, tamper-evident, excludes volatile fields)
+    - Signature creation and verification
+    - Commit chain validation (valid chains, broken chains, missing parents)
+    - Content hash computation
+    - Filename and commit ID extraction
+    - Full workflow integration (create, hash, sign, verify)
+    - Tampering detection
+    - Serialization with integrity fields
+
+#### Security Properties
+- **Collision-resistant**: SHA256 has 2^256 possible values (astronomically unlikely collision)
+- **Tamper-evident**: Any modification to content changes the hash
+- **Non-repudiable**: Cryptographic signatures prove agreement (can't deny participation)
+- **Verifiable**: Anyone can recompute hashes and verify signatures independently
+- **Chain integrity**: Git-style parent references prevent history rewriting
+
+#### Threat Model
+**Protected Against:**
+- ✅ Accidental tampering (user manually edits markdown)
+- ✅ Intentional tampering (malicious modification of commits)
+- ✅ Repudiation ("I never agreed to that" - signatures prove it)
+- ✅ Commit forgery (creating fake commits requires valid hash + signature)
+
+**Not Protected Against:**
+- ❌ Private key theft (if attacker gets `~/.dpc/node.key`, they can sign as you)
+- ❌ Denial of Service (attacker can delete local markdown files)
+- ❌ Man-in-the-Middle (mitigated by TLS, assumes TLS works correctly)
+
+#### File Structure
+```
+~/.dpc/knowledge/
+├── astronomy_commit-a3f7b2c91d4e5f6a.md  (versioned markdown)
+├── astronomy_commit-b8c9d0e1f2a3b4c5.md  (newer version)
+└── game_design_commit-c1d2e3f4a5b6c7d8.md
+```
+
+#### Example Markdown Output
+```markdown
+---
+# Commit Identification
+topic: astronomy
+commit_id: commit-a3f7b2c91d4e5f6a
+commit_hash: a3f7b2c91d4e5f6a8b9c0d1e2f3g4h5i...
+parent_commit: commit-b8c9d0e1f2a3b4c5
+
+# Integrity Verification
+content_hash: f9e8d7c6b5a49382
+
+# Cryptographic Signatures
+signatures:
+  dpc-node-alice-123: "MEUCIQDXvK...=="
+  dpc-node-bob-456: "MEYCIQCqwL...=="
+---
+
+# Astronomy
+**Summary:** The Andromeda Galaxy is approximately 2.5 million light-years away...
+```
+
+#### Documentation
+- Added `docs/COMMIT_INTEGRITY_IMPLEMENTATION.md` - comprehensive implementation guide
+  - Architecture overview
+  - Hash computation algorithm
+  - Signature workflow
+  - Verification system
+  - Testing plan
+  - Security considerations
+  - FAQ
+
+### Fixed
+- Filename sanitization for cross-platform compatibility (removes colons and invalid characters)
+
 ## [0.8.0] - 2025-11-25
 
 ### Added - Conversation History & Context Optimization (Phase 7)

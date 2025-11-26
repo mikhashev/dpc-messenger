@@ -6,6 +6,7 @@ Provides bidirectional sync between JSON PCM data and markdown files.
 """
 
 import re
+import yaml
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 from datetime import datetime
@@ -370,6 +371,177 @@ class MarkdownKnowledgeManager:
             filepath.unlink()
             return True
         return False
+
+    def topic_to_markdown_content(self, topic: Topic) -> str:
+        """
+        Generate markdown content for a topic (without frontmatter).
+
+        This is used for computing content hashes and for
+        creating versioned markdown files.
+
+        Args:
+            topic: Topic object
+
+        Returns:
+            Markdown content as string (no frontmatter)
+        """
+        lines = []
+
+        # Overview
+        lines.append("## Overview")
+        lines.append("")
+        lines.append(topic.summary)
+        lines.append("")
+
+        # Key books (if any)
+        if topic.key_books:
+            lines.append("## Key Books")
+            lines.append("")
+            for book in topic.key_books:
+                authors_str = ", ".join(book.authors) if book.authors else "Unknown"
+                rating_stars = "⭐" * book.rating
+                lines.append(f"- **{book.title}** by {authors_str} {rating_stars}")
+            lines.append("")
+
+        # Preferred authors (if any)
+        if topic.preferred_authors:
+            lines.append("## Preferred Authors")
+            lines.append("")
+            for author in topic.preferred_authors:
+                lines.append(f"- {author}")
+            lines.append("")
+
+        # Learning strategies (if any)
+        if topic.learning_strategies:
+            lines.append("## Learning Strategies")
+            lines.append("")
+            for strategy in topic.learning_strategies:
+                lines.append(f"- {strategy}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+        # Knowledge Entries
+        if topic.entries:
+            lines.append("## Knowledge Entries")
+            lines.append("")
+
+            for i, entry in enumerate(topic.entries, 1):
+                lines.extend(self._format_knowledge_entry(entry, i))
+
+        return "\n".join(lines)
+
+    def write_markdown_with_frontmatter(
+        self,
+        filepath: Path,
+        frontmatter: Dict[str, Any],
+        content: str
+    ) -> None:
+        """
+        Write markdown file with YAML frontmatter.
+
+        Format:
+            ---
+            key: value
+            list_key:
+              - item1
+              - item2
+            dict_key:
+              key1: value1
+              key2: value2
+            ---
+
+            # Markdown content here
+
+        Args:
+            filepath: Path to markdown file
+            frontmatter: Dictionary of frontmatter metadata
+            content: Markdown content
+        """
+        lines = ["---"]
+
+        # Convert frontmatter to YAML-style format
+        lines.append("# Commit Identification")
+        if 'topic' in frontmatter:
+            lines.append(f"topic: {frontmatter['topic']}")
+        if 'commit_id' in frontmatter:
+            lines.append(f"commit_id: {frontmatter['commit_id']}")
+        if 'commit_hash' in frontmatter:
+            lines.append(f"commit_hash: {frontmatter['commit_hash']}")
+        if 'parent_commit' in frontmatter:
+            lines.append(f"parent_commit: {frontmatter['parent_commit']}")
+        lines.append("")
+
+        # Integrity Verification
+        lines.append("# Integrity Verification")
+        if 'content_hash' in frontmatter:
+            lines.append(f"content_hash: {frontmatter['content_hash']}")
+        lines.append("")
+
+        # Metadata
+        lines.append("# Metadata")
+        if 'timestamp' in frontmatter:
+            lines.append(f"timestamp: {frontmatter['timestamp']}")
+        if 'version' in frontmatter:
+            lines.append(f"version: {frontmatter['version']}")
+        if 'author' in frontmatter:
+            lines.append(f"author: {frontmatter['author']}")
+        lines.append("")
+
+        # Consensus Tracking
+        lines.append("# Consensus Tracking")
+        if 'participants' in frontmatter:
+            lines.append("participants:")
+            for p in frontmatter['participants']:
+                lines.append(f"  - {p}")
+        if 'approved_by' in frontmatter:
+            lines.append("approved_by:")
+            for a in frontmatter['approved_by']:
+                lines.append(f"  - {a}")
+        if 'rejected_by' in frontmatter:
+            lines.append("rejected_by:")
+            if frontmatter['rejected_by']:
+                for r in frontmatter['rejected_by']:
+                    lines.append(f"  - {r}")
+            else:
+                lines.append("  []")
+        if 'consensus' in frontmatter:
+            lines.append(f"consensus: {frontmatter['consensus']}")
+        if 'confidence_score' in frontmatter:
+            lines.append(f"confidence_score: {frontmatter['confidence_score']}")
+        lines.append("")
+
+        # Cryptographic Signatures
+        if 'signatures' in frontmatter and frontmatter['signatures']:
+            lines.append("# Cryptographic Signatures")
+            lines.append("signatures:")
+            for node_id, signature in frontmatter['signatures'].items():
+                lines.append(f"  {node_id}: \"{signature}\"")
+            lines.append("")
+
+        # Cultural Context
+        if 'cultural_perspectives' in frontmatter and frontmatter['cultural_perspectives']:
+            lines.append("# Cultural Context")
+            lines.append("cultural_perspectives:")
+            for p in frontmatter['cultural_perspectives']:
+                lines.append(f"  - {p}")
+            lines.append("")
+
+        lines.append("---")
+        lines.append("")
+
+        # Add topic title
+        if 'topic' in frontmatter:
+            topic_title = frontmatter['topic'].replace('_', ' ').title()
+            lines.append(f"# {topic_title}")
+            lines.append("")
+
+        # Add content
+        lines.append(content)
+
+        # Write to file
+        filepath.write_text("\n".join(lines), encoding='utf-8')
 
 
 # Example usage
