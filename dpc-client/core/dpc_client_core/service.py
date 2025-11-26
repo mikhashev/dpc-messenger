@@ -189,22 +189,39 @@ class CoreService:
         from dpc_protocol.crypto import DPC_HOME_DIR
 
         knowledge_dir = DPC_HOME_DIR / "knowledge"
-
-        if not knowledge_dir.exists():
-            print("  No knowledge directory found, skipping integrity check")
-            return
-
         warnings = []
         verified_count = 0
 
-        for markdown_file in knowledge_dir.glob("*_commit-*.md"):
-            result = verify_markdown_integrity(markdown_file, knowledge_dir)
+        # CHECK 1: Verify existing markdown files
+        if knowledge_dir.exists():
+            for markdown_file in knowledge_dir.glob("*_commit-*.md"):
+                result = verify_markdown_integrity(markdown_file, knowledge_dir)
 
-            if result['valid']:
-                verified_count += 1
-            else:
-                warnings.extend(result['warnings'])
+                if result['valid']:
+                    verified_count += 1
+                else:
+                    warnings.extend(result['warnings'])
 
+        # CHECK 2: Detect orphaned markdown references in personal.json
+        context = self.pcm_core.load_context()
+        orphaned_count = 0
+
+        for topic_name, topic in context.knowledge.items():
+            if topic.markdown_file:
+                markdown_path = DPC_HOME_DIR / topic.markdown_file
+
+                if not markdown_path.exists():
+                    orphaned_count += 1
+                    warnings.append({
+                        'file': topic.markdown_file,
+                        'type': 'missing_markdown',
+                        'severity': 'warning',
+                        'topic': topic_name,
+                        'commit_id': getattr(topic, 'commit_id', 'unknown'),
+                        'message': f'Topic "{topic_name}" references deleted markdown file'
+                    })
+
+        # Report results
         if warnings:
             # Broadcast warning to UI
             if self.local_api:
@@ -214,8 +231,10 @@ class CoreService:
                 })
 
             print(f"  ⚠️ Knowledge integrity: {len(warnings)} issues found")
+            if orphaned_count > 0:
+                print(f"      - {orphaned_count} topics with missing markdown files")
             for w in warnings:
-                print(f"    [{w['severity'].upper()}] {w['file']}: {w['message']}")
+                print(f"    [{w['severity'].upper()}] {w.get('file', w.get('topic'))}: {w['message']}")
         else:
             print(f"  ✓ Knowledge integrity verified ({verified_count} commits)")
 
