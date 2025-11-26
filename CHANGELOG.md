@@ -8,10 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- **Remote inference for knowledge detection** - Knowledge auto-detection and commit proposal generation now use the selected remote host/model instead of always falling back to local Ollama
-  - Added `compute_host`, `model`, `provider` attributes to `ConversationMonitor`
-  - Updated `_calculate_knowledge_score()` and `_generate_commit_proposal()` to pass inference settings to LLM
-  - Backend automatically syncs monitor settings with user's query settings
+- **Knowledge detection inference error** - Fixed `TypeError: LLMManager.query() got an unexpected keyword argument 'compute_host'`
+  - Knowledge detection now correctly runs locally using `provider_alias` parameter
+  - Changed from attempting remote inference (unsupported) to always using local LLM for background analysis
+  - Prevents background knowledge detection from burdening remote peers
 - **P2PManager broadcast error** - Fixed `AttributeError: 'P2PManager' object has no attribute 'send_to_peer'` by using correct method name `send_message_to_peer()`
 - **Unused CSS selector warning** - Removed unused `.link-btn` selector from `ContextViewer.svelte`
 

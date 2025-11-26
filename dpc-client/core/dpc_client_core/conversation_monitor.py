@@ -84,10 +84,8 @@ class ConversationMonitor:
         self.peer_context_cache: Dict[str, Any] = {}  # {node_id: PersonalContext} cached peer contexts
         self.peer_device_context_cache: Dict[str, dict] = {}  # {node_id: device_context_dict} cached device contexts
 
-        # Remote inference settings (for knowledge detection)
-        self.compute_host: str | None = None  # Node ID for remote inference
-        self.model: str | None = None  # Model name for remote inference
-        self.provider: str | None = None  # Provider alias for local inference
+        # Knowledge detection inference settings (always runs locally)
+        self.provider_alias: str | None = None  # Provider alias for local LLM (passed to llm_manager.query())
 
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
@@ -155,15 +153,17 @@ class ConversationMonitor:
     def update_inference_settings(self, compute_host: str | None = None, model: str | None = None, provider: str | None = None):
         """Update inference settings for knowledge detection
 
+        Note: Knowledge detection always runs locally. The compute_host and model
+        parameters are ignored. Only the provider alias is used.
+
         Args:
-            compute_host: Node ID for remote inference (None = local)
-            model: Model name for remote inference
-            provider: Provider alias for local inference
+            compute_host: Node ID for remote inference (IGNORED - knowledge detection runs locally)
+            model: Model name for remote inference (IGNORED - knowledge detection runs locally)
+            provider: Provider alias for local inference (used for knowledge detection)
         """
-        self.compute_host = compute_host
-        self.model = model
-        self.provider = provider
-        print(f"[Monitor {self.conversation_id}] Inference settings updated: compute_host={compute_host or 'local'}, model={model or 'default'}, provider={provider or 'default'}")
+        # Knowledge detection always runs locally - only store provider_alias
+        self.provider_alias = provider
+        print(f"[Monitor {self.conversation_id}] Provider alias for knowledge detection: {provider or 'default'}")
 
     async def _calculate_knowledge_score(self) -> float:
         """Calculate knowledge-worthiness score for conversation segment
@@ -201,12 +201,10 @@ REQUIRED OUTPUT FORMAT (raw JSON only):
 DO NOT include any text before or after the JSON. DO NOT use markdown code blocks. DO NOT explain your analysis outside the JSON."""
 
         try:
-            # Use LLM to analyze (with remote inference settings if configured)
+            # Use LLM to analyze (always runs locally with configured provider)
             response = await self.llm_manager.query(
                 prompt=prompt,
-                compute_host=self.compute_host,
-                model=self.model,
-                provider=self.provider
+                provider_alias=self.provider_alias
             )
 
             # Try to extract JSON if wrapped in markdown or text
@@ -419,12 +417,10 @@ REQUIRED JSON FORMAT (output ONLY this, nothing else):
 DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
 
         try:
-            # Use LLM to generate proposal (with remote inference settings if configured)
+            # Use LLM to generate proposal (always runs locally with configured provider)
             response = await self.llm_manager.query(
                 prompt=prompt,
-                compute_host=self.compute_host,
-                model=self.model,
-                provider=self.provider
+                provider_alias=self.provider_alias
             )
 
             # Try to extract and parse JSON from response (with repair attempts)
