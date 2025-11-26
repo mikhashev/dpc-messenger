@@ -1769,7 +1769,8 @@ class CoreService:
                 participants=participants,
                 llm_manager=self.llm_manager,
                 knowledge_threshold=0.7,  # 70% confidence threshold
-                settings=self.settings  # Pass settings for config (e.g., cultural_perspectives_enabled)
+                settings=self.settings,  # Pass settings for config (e.g., cultural_perspectives_enabled)
+                ai_query_func=self.send_ai_query  # Enable both local and remote inference for knowledge detection
             )
             print(f"Created conversation monitor for {conversation_id} with {len(participants)} participant(s)")
 
