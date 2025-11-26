@@ -1723,7 +1723,7 @@ class CoreService:
         """
         for peer_id in list(self.p2p_manager.peers.keys()):
             try:
-                await self.p2p_manager.send_to_peer(peer_id, message)
+                await self.p2p_manager.send_message_to_peer(peer_id, message)
             except Exception as e:
                 print(f"Failed to broadcast to {peer_id}: {e}")
 
@@ -2784,6 +2784,13 @@ class CoreService:
             try:
                 monitor = self._get_or_create_conversation_monitor("local_ai")
                 print(f"[Monitor] Feeding messages to local_ai monitor (buffer size before: {len(monitor.message_buffer)})")
+
+                # Update monitor's inference settings to match the query (for knowledge detection)
+                monitor.update_inference_settings(
+                    compute_host=compute_host,
+                    model=model,
+                    provider=provider
+                )
 
                 # Feed user message
                 user_message = ConvMessage(

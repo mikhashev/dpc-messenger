@@ -536,15 +536,6 @@
     margin-top: 0.5rem;
   }
 
-  .link-btn {
-    background: none;
-    border: none;
-    color: #1976d2;
-    cursor: pointer;
-    text-decoration: underline;
-    padding: 0;
-  }
-
   .topic-entries {
     margin-top: 0.75rem;
   }

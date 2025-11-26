@@ -5,6 +5,20 @@ All notable changes to D-PC Messenger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **Remote inference for knowledge detection** - Knowledge auto-detection and commit proposal generation now use the selected remote host/model instead of always falling back to local Ollama
+  - Added `compute_host`, `model`, `provider` attributes to `ConversationMonitor`
+  - Updated `_calculate_knowledge_score()` and `_generate_commit_proposal()` to pass inference settings to LLM
+  - Backend automatically syncs monitor settings with user's query settings
+- **P2PManager broadcast error** - Fixed `AttributeError: 'P2PManager' object has no attribute 'send_to_peer'` by using correct method name `send_message_to_peer()`
+- **Unused CSS selector warning** - Removed unused `.link-btn` selector from `ContextViewer.svelte`
+
+### Changed
+- **UI cleanup** - Removed initial greeting messages from AI chats (both local and custom provider chats now start with empty history)
+- **Hub login section** - Moved Hub login buttons to appear directly below Hub status in node-info card for better visual hierarchy
+
 ## [1.0.0] - 2025-11-26
 
 ### Added - Personal Context Schema v2.0 (Modular File System)

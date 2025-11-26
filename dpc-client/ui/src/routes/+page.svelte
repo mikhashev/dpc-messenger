@@ -25,7 +25,7 @@
     model?: string;  // AI model name (for AI responses)
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
-    ['local_ai', [{ id: crypto.randomUUID(), sender: 'ai', text: 'Hello! I am your local AI assistant. How can I help you today?', timestamp: Date.now() }]]
+    ['local_ai', []]
   ]));
   
   let activeChatId: string = 'local_ai';
@@ -517,12 +517,7 @@
     // Initialize chat history
     chatHistories.update(h => {
       const newMap = new Map(h);
-      newMap.set(chatId, [{
-        id: crypto.randomUUID(),
-        sender: 'ai',
-        text: `Hello! I'm powered by ${chatName}. How can I help you today?`,
-        timestamp: Date.now()
-      }]);
+      newMap.set(chatId, []);
       return newMap;
     });
 
@@ -737,6 +732,31 @@
             </span>
           </p>
 
+          <!-- Hub Login -->
+          {#if $nodeStatus.hub_status !== 'Connected'}
+            <div class="hub-login-section">
+              <p class="info-text">Connect to Hub for WebRTC and discovery</p>
+              <div class="hub-login-buttons">
+                <button
+                  on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
+                  class="btn-oauth btn-google"
+                  title="Login with Google"
+                >
+                  <span class="oauth-icon">🔵</span>
+                  Google
+                </button>
+                <button
+                  on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
+                  class="btn-oauth btn-github"
+                  title="Login with GitHub"
+                >
+                  <span class="oauth-icon">⚫</span>
+                  GitHub
+                </button>
+              </div>
+            </div>
+          {/if}
+
           <!-- Direct TLS Connection URIs (NEW - Redesigned) -->
           {#if $nodeStatus.dpc_uris && $nodeStatus.dpc_uris.length > 0}
             <div class="dpc-uris-section">
@@ -862,31 +882,6 @@
             💡 Tip: Enter just node_id for WebRTC, or full dpc:// URI for Direct TLS
           </p>
         </div>
-
-        <!-- Hub Login -->
-        {#if $nodeStatus.hub_status !== 'Connected'}
-          <div class="hub-section">
-            <p class="info-text">Connect to Hub for WebRTC and discovery</p>
-            <div class="hub-login-buttons">
-              <button
-                on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
-                class="btn-oauth btn-google"
-                title="Login with Google"
-              >
-                <span class="oauth-icon">🔵</span>
-                Google
-              </button>
-              <button
-                on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
-                class="btn-oauth btn-github"
-                title="Login with GitHub"
-              >
-                <span class="oauth-icon">⚫</span>
-                GitHub
-              </button>
-            </div>
-          </div>
-        {/if}
 
         <!-- Chat List -->
         <div class="chat-list">
@@ -1374,7 +1369,7 @@
     background: #555;
   }
   
-  .node-info, .connect-section, .hub-section, .context-section, .chat-list {
+  .node-info, .connect-section, .context-section, .chat-list {
     background: white;
     border: 1px solid #e0e0e0;
     border-radius: 8px;
