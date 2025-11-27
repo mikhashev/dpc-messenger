@@ -577,7 +577,9 @@ class MarkdownKnowledgeManager:
             content: Markdown content
         """
         full_content = self.build_markdown_with_frontmatter(frontmatter, content)
-        filepath.write_text(full_content, encoding='utf-8')
+        # Force LF line endings for consistent hashing across platforms
+        with open(filepath, 'w', encoding='utf-8', newline='\n') as f:
+            f.write(full_content)
 
     def parse_markdown_with_frontmatter(self, filepath: Path) -> Tuple[Dict[str, Any], str]:
         """
@@ -592,6 +594,7 @@ class MarkdownKnowledgeManager:
         if not filepath.exists():
             raise FileNotFoundError(f"Markdown file not found: {filepath}")
 
+        # Read with universal newlines to handle both LF and CRLF
         content = filepath.read_text(encoding='utf-8')
 
         # Check for frontmatter
@@ -607,7 +610,16 @@ class MarkdownKnowledgeManager:
 
         # Extract frontmatter and content
         frontmatter_text = content[4:end_marker]
-        markdown_content = content[end_marker + 5:].strip()
+        markdown_content = content[end_marker + 5:].lstrip()  # Only strip leading whitespace
+
+        # Remove topic title if present (added by build_markdown_with_frontmatter)
+        # Title format: "# Topic Name\n\n"
+        if markdown_content.startswith('# '):
+            # Find first line break
+            first_newline = markdown_content.find('\n')
+            if first_newline != -1:
+                # Skip title line and any following blank lines
+                markdown_content = markdown_content[first_newline + 1:].lstrip('\n')
 
         # Parse YAML frontmatter
         try:

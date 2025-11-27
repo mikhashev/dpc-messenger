@@ -285,7 +285,16 @@ def parse_markdown_with_frontmatter(markdown_path: Path) -> Tuple[Dict[str, Any]
 
     # Extract frontmatter and content
     frontmatter_text = content[4:end_marker]
-    markdown_content = content[end_marker + 5:].strip()
+    markdown_content = content[end_marker + 5:].lstrip()  # Only strip leading whitespace
+
+    # Remove topic title if present (added by build_markdown_with_frontmatter)
+    # Title format: "# Topic Name\n\n"
+    if markdown_content.startswith('# '):
+        # Find first line break
+        first_newline = markdown_content.find('\n')
+        if first_newline != -1:
+            # Skip title line and any following blank lines
+            markdown_content = markdown_content[first_newline + 1:].lstrip('\n')
 
     # Parse frontmatter (simple YAML parsing for our use case)
     frontmatter = {}

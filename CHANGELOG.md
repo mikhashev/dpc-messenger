@@ -42,6 +42,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Auto-detection toggle sync** - Fixed backend/frontend state mismatch where auto-detection would run even when UI toggle was OFF
   - Changed backend default from `True` to `False` to match UI default
   - Prevents unwanted knowledge proposals when user has explicitly disabled auto-detection
+- **Knowledge commit hash verification** - Fixed false-positive "hash mismatch" warnings for all knowledge commits
+  - Root cause #1: Content hash computed without topic title during commit creation, but with title during verification
+  - Root cause #2: Windows CRLF line endings in files but LF used for hash computation, causing mismatch
+  - Fixed `markdown_manager.py`: Strip topic title from parsed content before hashing
+  - Fixed `markdown_manager.py`: Force LF line endings when writing files for cross-platform consistency
+  - Fixed `markdown_manager.py`: Preserve trailing whitespace when parsing (changed `.strip()` to `.lstrip()`)
+  - Fixed `commit_integrity.py`: Applied same fixes to duplicate `parse_markdown_with_frontmatter()` function
+  - Impact: All knowledge commits now verify correctly on startup with no false warnings
 - **P2PManager broadcast error** - Fixed `AttributeError: 'P2PManager' object has no attribute 'send_to_peer'` by using correct method name `send_message_to_peer()`
 - **Unused CSS selector warning** - Removed unused `.link-btn` selector from `ContextViewer.svelte`
 
