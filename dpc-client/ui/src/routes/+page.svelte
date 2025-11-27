@@ -218,19 +218,7 @@
     // Use the reactive map, with fallback for peers not in peer_info yet
     return peerDisplayNames.get(peerId) || `${peerId.slice(0, 20)}...`;
   }
-  
-  function getAIModelDisplay(): string {
-    if (!$nodeStatus) {
-      return '🤖 Local AI Assistant';
-    }
-    
-    if ($nodeStatus.active_ai_model) {
-      return `🤖 Local AI Assistant (${$nodeStatus.active_ai_model})`;
-    }
-    
-    return '🤖 Local AI Assistant';
-  }
-  
+
   // --- PEER CONTEXT SELECTION ---
   function togglePeerContext(peerId: string) {
     if (selectedPeerContexts.has(peerId)) {
@@ -687,19 +675,17 @@
 </script>
 
 <main class="container">
-  <h1>D-PC Messenger</h1>
-
   <!-- Status Bar -->
   <div class="status-bar">
     {#if $connectionStatus === 'connected'}
-      <span class="status-connected">Status: connected</span>
+      <span class="status-connected">Backend status: connected</span>
     {:else if $connectionStatus === 'connecting'}
-      <span class="status-connecting">Status: connecting...</span>
+      <span class="status-connecting">Backend status: connecting...</span>
     {:else if $connectionStatus === 'error'}
-      <span class="status-error">Status: error</span>
+      <span class="status-error">Backend status: error</span>
       <button class="btn-small" on:click={handleReconnect}>Retry</button>
     {:else}
-      <span class="status-disconnected">Status: disconnected</span>
+      <span class="status-disconnected">Backend status: disconnected</span>
       <button class="btn-small" on:click={handleReconnect}>Connect</button>
     {/if}
   </div>
@@ -710,8 +696,7 @@
       {#if $connectionStatus === 'connected' && $nodeStatus}
         <!-- Node Info -->
         <div class="node-info">
-          <h2>Your Node</h2>
-          <p><strong>ID:</strong></p>
+          <p><strong>Your Node ID:</strong></p>
           <div class="node-id-container">
             <code class="node-id">{$nodeStatus.node_id}</code>
             <button
@@ -725,37 +710,6 @@
               📋
             </button>
           </div>
-          <p>
-            <strong>Hub:</strong>
-            <span class:hub-connected={$nodeStatus.hub_status === 'Connected'}>
-              {$nodeStatus.hub_status}
-            </span>
-          </p>
-
-          <!-- Hub Login -->
-          {#if $nodeStatus.hub_status !== 'Connected'}
-            <div class="hub-login-section">
-              <p class="info-text">Connect to Hub for WebRTC and discovery</p>
-              <div class="hub-login-buttons">
-                <button
-                  on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
-                  class="btn-oauth btn-google"
-                  title="Login with Google"
-                >
-                  <span class="oauth-icon">🔵</span>
-                  Google
-                </button>
-                <button
-                  on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
-                  class="btn-oauth btn-github"
-                  title="Login with GitHub"
-                >
-                  <span class="oauth-icon">⚫</span>
-                  GitHub
-                </button>
-              </div>
-            </div>
-          {/if}
 
           <!-- Direct TLS Connection URIs (NEW - Redesigned) -->
           {#if $nodeStatus.dpc_uris && $nodeStatus.dpc_uris.length > 0}
@@ -825,6 +779,31 @@
                   {/if}
                 </details>
               {/if}
+            </div>
+          {/if}
+
+          <!-- Hub Login -->
+          {#if $nodeStatus.hub_status !== 'Connected'}
+            <div class="hub-login-section">
+              <p class="info-text">Connect to Hub for WebRTC and discovery</p>
+              <div class="hub-login-buttons">
+                <button
+                  on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
+                  class="btn-oauth btn-google"
+                  title="Login with Google"
+                >
+                  <span class="oauth-icon">🔵</span>
+                  Google
+                </button>
+                <button
+                  on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
+                  class="btn-oauth btn-github"
+                  title="Login with GitHub"
+                >
+                  <span class="oauth-icon">⚫</span>
+                  GitHub
+                </button>
+              </div>
             </div>
           {/if}
         </div>
@@ -1296,14 +1275,7 @@
     margin: 0 auto;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
-  
-  h1 {
-    text-align: center;
-    font-size: 2.5rem;
-    margin-bottom: 1.5rem;
-    color: #1a1a1a;
-  }
-  
+
   .status-bar {
     margin-bottom: 1.5rem;
     padding: 1rem;
