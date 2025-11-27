@@ -739,23 +739,25 @@ class CoreService:
             })
 
             # Feed to conversation monitor for knowledge extraction (Phase 4.2)
-            if self.auto_knowledge_detection_enabled:
-                try:
-                    monitor = self._get_or_create_conversation_monitor(sender_node_id)
+            # Always buffer messages (even when auto-detection is OFF) to enable manual extraction
+            try:
+                monitor = self._get_or_create_conversation_monitor(sender_node_id)
 
-                    # Create ConvMessage object for monitor
-                    conv_message = ConvMessage(
-                        message_id=message_id,
-                        conversation_id=sender_node_id,
-                        sender_node_id=sender_node_id,
-                        sender_name=self.peer_metadata.get(sender_node_id, {}).get("name", sender_node_id),
-                        text=text,
-                        timestamp=datetime.utcnow().isoformat()
-                    )
+                # Create ConvMessage object for monitor
+                conv_message = ConvMessage(
+                    message_id=message_id,
+                    conversation_id=sender_node_id,
+                    sender_node_id=sender_node_id,
+                    sender_name=self.peer_metadata.get(sender_node_id, {}).get("name", sender_node_id),
+                    text=text,
+                    timestamp=datetime.utcnow().isoformat()
+                )
 
-                    # Feed to monitor (automatic knowledge detection)
-                    proposal = await monitor.on_message(conv_message)
+                # Buffer message (always) and optionally auto-detect
+                proposal = await monitor.on_message(conv_message)
 
+                # Only handle automatic proposals if auto-detection is enabled
+                if self.auto_knowledge_detection_enabled:
                     # If proposal generated, broadcast to UI and start voting
                     if proposal:
                         print(f"[Auto-detect] Knowledge proposal generated for {sender_node_id}")
@@ -767,9 +769,10 @@ class CoreService:
                             proposal=proposal,
                             broadcast_func=self._broadcast_to_peers
                         )
-                except Exception as e:
-                    print(f"Error in conversation monitoring: {e}")
-                    # Broadcast extraction failure event to UI
+            except Exception as e:
+                print(f"Error in conversation monitoring: {e}")
+                # Only broadcast extraction failure if auto-detection was enabled
+                if self.auto_knowledge_detection_enabled:
                     await self.local_api.broadcast_event(
                         "knowledge_extraction_failed",
                         {
@@ -1781,9 +1784,10 @@ class CoreService:
                 llm_manager=self.llm_manager,
                 knowledge_threshold=0.7,  # 70% confidence threshold
                 settings=self.settings,  # Pass settings for config (e.g., cultural_perspectives_enabled)
-                ai_query_func=self.send_ai_query  # Enable both local and remote inference for knowledge detection
+                ai_query_func=self.send_ai_query,  # Enable both local and remote inference for knowledge detection
+                auto_detect=self.auto_knowledge_detection_enabled  # Pass auto-detection setting
             )
-            print(f"Created conversation monitor for {conversation_id} with {len(participants)} participant(s)")
+            print(f"Created conversation monitor for {conversation_id} with {len(participants)} participant(s) (auto_detect={self.auto_knowledge_detection_enabled})")
 
         return self.conversation_monitors[conversation_id]
 
@@ -1867,6 +1871,10 @@ class CoreService:
 
             state_text = "enabled" if self.auto_knowledge_detection_enabled else "disabled"
             print(f"Auto knowledge detection {state_text}")
+
+            # Update all existing conversation monitors to reflect the new setting
+            for monitor in self.conversation_monitors.values():
+                monitor.auto_detect = self.auto_knowledge_detection_enabled
 
             return {
                 "status": "success",
@@ -2828,10 +2836,11 @@ class CoreService:
         )
 
         # Feed local AI conversation to monitor (Phase 4.2 - Local AI support)
-        if self.auto_knowledge_detection_enabled and status == "OK":
+        # Always buffer messages (even when auto-detection is OFF) to enable manual extraction
+        if status == "OK":
             try:
                 monitor = self._get_or_create_conversation_monitor("local_ai")
-                print(f"[Monitor] Feeding messages to local_ai monitor (buffer size before: {len(monitor.message_buffer)})")
+                print(f"[Monitor] Buffering messages for local_ai (buffer size before: {len(monitor.message_buffer)})")
 
                 # Update monitor's inference settings to match the query (for knowledge detection)
                 monitor.update_inference_settings(
@@ -2868,36 +2877,39 @@ class CoreService:
 
                 print(f"[Monitor] Buffer size after: {len(monitor.message_buffer)}, Score: {monitor.knowledge_score:.2f}")
 
-                # If proposal generated, broadcast to UI
-                if proposal:
-                    print(f"[Auto-detect] Knowledge proposal generated for local_ai chat")
-                    await self.local_api.broadcast_event(
-                        "knowledge_commit_proposed",
-                        proposal.to_dict()
-                    )
-                    await self.consensus_manager.propose_commit(
-                        proposal=proposal,
-                        broadcast_func=self._broadcast_to_peers
-                    )
+                # Only handle automatic proposals if auto-detection is enabled
+                if self.auto_knowledge_detection_enabled:
+                    # If proposal generated, broadcast to UI
+                    if proposal:
+                        print(f"[Auto-detect] Knowledge proposal generated for local_ai chat")
+                        await self.local_api.broadcast_event(
+                            "knowledge_commit_proposed",
+                            proposal.to_dict()
+                        )
+                        await self.consensus_manager.propose_commit(
+                            proposal=proposal,
+                            broadcast_func=self._broadcast_to_peers
+                        )
+                    else:
+                        print(f"[Monitor] No proposal yet (need 5 messages for auto-detect)")
                 else:
-                    print(f"[Monitor] No proposal yet (need 5 messages for auto-detect)")
+                    print(f"[Monitor] Auto-detection is OFF - messages buffered for manual extraction")
             except Exception as e:
                 print(f"Error in local AI conversation monitoring: {e}")
                 import traceback
                 traceback.print_exc()
-                # Broadcast extraction failure event to UI
-                await self.local_api.broadcast_event(
-                    "knowledge_extraction_failed",
-                    {
-                        "conversation_id": "local_ai",
-                        "error": str(e),
-                        "reason": "JSON parsing failed or LLM extraction error"
-                    }
-                )
-        elif not self.auto_knowledge_detection_enabled:
-            print(f"[Monitor] Auto-detection is OFF - messages not being monitored")
-        elif status != "OK":
-            print(f"[Monitor] Query failed (status={status}) - not monitoring")
+                # Only broadcast extraction failure if auto-detection was enabled
+                if self.auto_knowledge_detection_enabled:
+                    await self.local_api.broadcast_event(
+                        "knowledge_extraction_failed",
+                        {
+                            "conversation_id": "local_ai",
+                            "error": str(e),
+                            "reason": "JSON parsing failed or LLM extraction error"
+                        }
+                    )
+        else:
+            print(f"[Monitor] Query failed (status={status}) - not buffering messages")
 
     def _compute_context_hash(self) -> str:
         """Compute SHA256 hash of personal.json + device_context.json for change detection

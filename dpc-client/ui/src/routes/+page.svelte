@@ -430,11 +430,28 @@
     }
   }
 
-  function toggleAutoKnowledgeDetection() {
-    // bind:checked already updates the variable, just sync to backend
-    sendCommand("toggle_auto_knowledge_detection", {
-      enabled: autoKnowledgeDetection
-    });
+  async function toggleAutoKnowledgeDetection() {
+    // bind:checked already updates the variable, now sync to backend and wait for confirmation
+    const previousState = !autoKnowledgeDetection; // Store previous state in case we need to revert
+
+    try {
+      const result = await sendCommand("toggle_auto_knowledge_detection", {
+        enabled: autoKnowledgeDetection
+      });
+
+      // Check if backend confirmed the change
+      if (result.status === "success") {
+        console.log(`✓ Auto-detection ${result.enabled ? 'enabled' : 'disabled'}`);
+      } else {
+        // Backend failed, revert checkbox
+        console.error("Failed to toggle auto-detection:", result.message);
+        autoKnowledgeDetection = previousState;
+      }
+    } catch (error) {
+      // Network/timeout error, revert checkbox
+      console.error("Error toggling auto-detection:", error);
+      autoKnowledgeDetection = previousState;
+    }
   }
 
   function handleNewChat(chatId: string) {
@@ -1388,12 +1405,7 @@
     background: #f0f0f0;
     border-color: #007bff;
   }
-  
-  .hub-connected {
-    color: #28a745;
-    font-weight: 600;
-  }
-  
+
   .info-text, .small {
     font-size: 0.9rem;
     color: #666;

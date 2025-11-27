@@ -301,7 +301,8 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'validate_firewall_rules',
             'get_providers_config',
             'save_providers_config',
-            'query_ollama_model_info'
+            'query_ollama_model_info',
+            'toggle_auto_knowledge_detection'
         ].includes(command);
 
         if (expectsResponse) {

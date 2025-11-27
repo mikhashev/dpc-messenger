@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Enables knowledge detection for users without Ollama or other local LLMs installed
 
 ### Fixed
+- **Manual knowledge extraction with auto-detection disabled** - Fixed "End Session" button not extracting knowledge when auto-detection toggle is OFF
+  - Root cause: Messages were only buffered when auto-detection was enabled, leaving manual extraction with empty buffer
+  - Added `auto_detect` parameter to ConversationMonitor to separate buffering from auto-proposal generation
+  - Updated service.py to always buffer messages regardless of auto-detection setting
+  - Auto-detection now only controls automatic proposal generation, not message buffering
+  - Runtime toggle updates all existing conversation monitors' auto_detect flags
+  - UI toggle now waits for backend confirmation with error handling and state rollback
+  - Users can now disable auto-detection to avoid interruptions, then manually extract knowledge at end of session
 - **Knowledge commit P2P protocol** - Fixed missing handlers for `PROPOSE_KNOWLEDGE_COMMIT` and `VOTE_KNOWLEDGE_COMMIT` messages
   - Added `handle_proposal_message()` and `handle_vote_message()` to ConsensusManager
   - Peers can now receive and process knowledge commit proposals and votes

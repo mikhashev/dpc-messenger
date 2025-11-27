@@ -45,7 +45,8 @@ class ConversationMonitor:
         llm_manager,  # LLMManager instance
         knowledge_threshold: float = 0.7,  # Minimum score to propose commit
         settings = None,  # Settings instance (optional, for config like cultural_perspectives_enabled)
-        ai_query_func = None  # Callable for AI queries (supports both local and remote inference)
+        ai_query_func = None,  # Callable for AI queries (supports both local and remote inference)
+        auto_detect: bool = True  # Enable/disable automatic detection
     ):
         """Initialize conversation monitor
 
@@ -57,6 +58,7 @@ class ConversationMonitor:
             settings: Settings instance for configuration (optional)
             ai_query_func: Optional callable for AI queries. Signature: async (prompt, compute_host, model, provider) -> dict
                           If provided, enables remote inference for knowledge detection.
+            auto_detect: If True, automatically detect and propose commits. If False, only buffer messages for manual extraction.
         """
         self.conversation_id = conversation_id
         self.participants = participants
@@ -64,6 +66,7 @@ class ConversationMonitor:
         self.knowledge_threshold = knowledge_threshold
         self.settings = settings
         self.ai_query_func = ai_query_func  # Enables both local and remote inference
+        self.auto_detect = auto_detect  # Controls automatic detection vs manual-only
 
         # Message buffer
         self.message_buffer: List[Message] = []
@@ -100,9 +103,14 @@ class ConversationMonitor:
             message: New message to analyze
 
         Returns:
-            KnowledgeCommitProposal if knowledge detected, None otherwise
+            KnowledgeCommitProposal if knowledge detected (when auto_detect=True), None otherwise
         """
+        # Always buffer messages (even if auto_detect is disabled, for manual extraction)
         self.message_buffer.append(message)
+
+        # Only run automatic detection if enabled
+        if not self.auto_detect:
+            return None
 
         # Analyze every 5 messages or if buffer gets large
         if len(self.message_buffer) >= 5:
