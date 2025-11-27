@@ -765,6 +765,8 @@ class CoreService:
                             "knowledge_commit_proposed",
                             proposal.to_dict()
                         )
+                        # Peer chat - broadcast for collaborative knowledge building
+                        print(f"[Peer Chat] Broadcasting knowledge proposal to peers for consensus")
                         await self.consensus_manager.propose_commit(
                             proposal=proposal,
                             broadcast_func=self._broadcast_to_peers
@@ -1823,11 +1825,25 @@ class CoreService:
                     proposal.to_dict()
                 )
 
-                # Start consensus voting
-                await self.consensus_manager.propose_commit(
-                    proposal=proposal,
-                    broadcast_func=self._broadcast_to_peers
-                )
+                # For local_ai conversations, don't broadcast knowledge to peers (privacy)
+                # For peer conversations, broadcast for collaborative consensus
+                if conversation_id == "local_ai":
+                    print(f"[Local AI] Private conversation - knowledge will not be shared with peers")
+                    # Use no-op broadcast function (local-only approval)
+                    async def _no_op_broadcast(message: Dict[str, Any]) -> None:
+                        pass  # Don't send to peers for private conversations
+
+                    await self.consensus_manager.propose_commit(
+                        proposal=proposal,
+                        broadcast_func=_no_op_broadcast
+                    )
+                else:
+                    # Peer conversation - broadcast for collaborative knowledge building
+                    print(f"[Peer Chat] Broadcasting knowledge proposal to peers for consensus")
+                    await self.consensus_manager.propose_commit(
+                        proposal=proposal,
+                        broadcast_func=self._broadcast_to_peers
+                    )
 
                 return {
                     "status": "success",
@@ -2886,9 +2902,14 @@ class CoreService:
                             "knowledge_commit_proposed",
                             proposal.to_dict()
                         )
+                        # Local AI - private conversation, don't broadcast to peers
+                        print(f"[Local AI] Private conversation - knowledge will not be shared with peers")
+                        async def _no_op_broadcast(message: Dict[str, Any]) -> None:
+                            pass  # Don't send to peers for private conversations
+
                         await self.consensus_manager.propose_commit(
                             proposal=proposal,
-                            broadcast_func=self._broadcast_to_peers
+                            broadcast_func=_no_op_broadcast
                         )
                     else:
                         print(f"[Monitor] No proposal yet (need 5 messages for auto-detect)")

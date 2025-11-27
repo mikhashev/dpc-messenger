@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Runtime toggle updates all existing conversation monitors' auto_detect flags
   - UI toggle now waits for backend confirmation with error handling and state rollback
   - Users can now disable auto-detection to avoid interruptions, then manually extract knowledge at end of session
+- **Privacy leak in local AI conversations using remote inference** - Fixed knowledge from private AI chats being broadcasted to compute hosts
+  - Root cause: Knowledge commit proposals were broadcasted to ALL connected peers, including compute hosts used only for remote inference
+  - Local AI conversations are now truly private - knowledge proposals no longer sent to peers
+  - Peer chats still broadcast knowledge proposals for collaborative consensus (unchanged)
+  - Context update notifications (`CONTEXT_UPDATED`) still broadcasted to all peers so "Updated" badges work correctly
+  - Fixed in both manual extraction (End Session) and automatic detection code paths
+  - Impact: When using remote inference in Local AI Assistant, the compute host only executes queries and doesn't receive your private knowledge
 - **Knowledge commit P2P protocol** - Fixed missing handlers for `PROPOSE_KNOWLEDGE_COMMIT` and `VOTE_KNOWLEDGE_COMMIT` messages
   - Added `handle_proposal_message()` and `handle_vote_message()` to ConsensusManager
   - Peers can now receive and process knowledge commit proposals and votes
