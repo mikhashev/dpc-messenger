@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Markdown rendering for AI responses** - AI messages now display with rich markdown formatting
+  - Integrated `@humanspeak/svelte-markdown` (v0.8.13) with Svelte 5 runes support
+  - GitHub-style formatting for headers, code blocks, lists, tables, blockquotes, and links
+  - Built-in XSS protection - renders without `@html`, making it secure for LLM-generated content
+  - Dynamic toggle button in chat header to switch between markdown and plain text views
+  - User preference persists across sessions via localStorage (default: enabled)
+  - 50-200x performance improvement with intelligent token caching for repeated content
+  - Created reusable `MarkdownMessage` component for consistent styling
 - **Remote inference for knowledge detection** - Knowledge auto-detection now supports remote inference for users without local LLMs
   - ConversationMonitor accepts `ai_query_func` callback for flexible inference routing
   - Automatically uses selected compute host/model for background knowledge analysis

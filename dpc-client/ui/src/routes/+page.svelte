@@ -10,6 +10,7 @@
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import Toast from "$lib/components/Toast.svelte";
+  import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
   import { ask } from '@tauri-apps/plugin-dialog';
 
   console.log("Full D-PC Messenger loading...");
@@ -83,6 +84,17 @@
 
   // Personal context inclusion toggle
   let includePersonalContext: boolean = true;
+
+  // Markdown rendering toggle (with localStorage persistence)
+  let enableMarkdown: boolean = (() => {
+    const saved = localStorage.getItem('enableMarkdown');
+    return saved !== null ? saved === 'true' : true; // Default: enabled
+  })();
+
+  // Save markdown preference to localStorage when changed
+  $: {
+    localStorage.setItem('enableMarkdown', enableMarkdown.toString());
+  }
 
   // Phase 7: Context hash tracking for "Updated" status indicators
   let currentContextHash: string = "";  // Current hash from backend (when context is saved)
@@ -1017,6 +1029,16 @@
           <button class="btn-end-session" on:click={() => handleEndSession(activeChatId)}>
             📚 End Session & Save Knowledge
           </button>
+          {#if $aiChats.has(activeChatId)}
+            <button
+              class="btn-markdown-toggle"
+              class:active={enableMarkdown}
+              on:click={() => enableMarkdown = !enableMarkdown}
+              title={enableMarkdown ? 'Disable markdown rendering' : 'Enable markdown rendering'}
+            >
+              {enableMarkdown ? '📝 Markdown' : '📄 Plain Text'}
+            </button>
+          {/if}
         </div>
       </div>
 
@@ -1036,7 +1058,11 @@
                 </strong>
                 <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
               </div>
-              <p>{msg.text}</p>
+              {#if msg.sender === 'ai' && enableMarkdown}
+                <MarkdownMessage content={msg.text} />
+              {:else}
+                <p>{msg.text}</p>
+              {/if}
             </div>
           {/each}
         {:else}
@@ -1851,6 +1877,38 @@
   }
 
   .btn-end-session:active {
+    transform: translateY(0);
+  }
+
+  .btn-markdown-toggle {
+    padding: 0.6rem 1rem;
+    background: linear-gradient(135deg, #6c757d 0%, #5a6268 100%);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+    opacity: 0.7;
+  }
+
+  .btn-markdown-toggle.active {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    opacity: 1;
+  }
+
+  .btn-markdown-toggle:hover {
+    transform: translateY(-1px);
+    opacity: 1;
+  }
+
+  .btn-markdown-toggle.active:hover {
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  }
+
+  .btn-markdown-toggle:active {
     transform: translateY(0);
   }
 
