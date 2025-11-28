@@ -223,6 +223,94 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
 {"command": "AI_QUERY", "payload": {"query": "...", "use_context": [...]}}
 ```
 
+### Conversation History & Context Optimization (Phase 7)
+
+**Overview:**
+D-PC Messenger uses a hybrid approach combining full conversation history with smart context optimization to balance conversational continuity with token efficiency.
+
+**Key Features:**
+- **Full Conversation History**: All user/assistant messages sent with every query
+- **Context Optimization**: Personal/device/peer contexts sent only when needed (60-80% token savings)
+- **Hash-Based Change Detection**: Automatic detection of context file modifications
+- **Visual Status Indicators**: "Updated" badges show when context has changed
+- **Hard Limit Enforcement**: Blocks queries at 100% context window usage
+
+**How It Works:**
+
+**First Message in Conversation:**
+```
+[System Instruction]
+
+--- CONTEXTUAL DATA ---
+<CONTEXT source="local">
+{personal.json content}
+</CONTEXT>
+<DEVICE_CONTEXT source="local">
+{device_context.json content}
+</DEVICE_CONTEXT>
+--- END OF CONTEXTUAL DATA ---
+
+--- CONVERSATION HISTORY ---
+USER: What GPU programming frameworks should I use?
+--- END OF CONVERSATION HISTORY ---
+```
+
+**Subsequent Messages (context already sent):**
+```
+[System Instruction]
+
+--- CONVERSATION HISTORY ---
+USER: What GPU programming frameworks should I use?
+ASSISTANT: [previous response about CUDA, OpenCL, etc.]
+USER: Which one is best for my RTX 3060?
+--- END OF CONVERSATION HISTORY ---
+```
+
+**When Context is Re-sent:**
+1. **First message** in a new conversation or after "New Chat"
+2. **User toggles** "Include Personal Context" checkbox (off → on)
+3. **Context files modified** (detected via SHA256 hash comparison)
+4. **Peer context updated** (collaborative query with changed peer context)
+
+**Backend Implementation:**
+- **ConversationMonitor** tracks:
+  - `message_history` - full conversation (user/assistant messages)
+  - `context_hash` - SHA256 of personal.json + device_context.json
+  - `peer_context_hashes` - per-peer context tracking
+  - `context_included` - boolean flag (context sent in this conversation?)
+- **CoreService** methods:
+  - `_compute_context_hash()` - SHA256 hashing
+  - `_assemble_final_prompt()` - builds prompt with optional context + always includes history
+  - `reset_conversation()` - clears history/tracking for "New Chat" button
+
+**Frontend Implementation:**
+- **State tracking**:
+  - `currentContextHash` - current hash from backend (updated on save)
+  - `lastSentContextHash` - per-conversation tracking of last sent hash
+  - `peerContextHashes` - per-peer current hashes
+  - `lastSentPeerHashes` - per-conversation, per-peer tracking
+- **Visual indicators**:
+  - Green "UPDATED" badge on context toggle when hash mismatch detected
+  - Green "UPDATED" badges on peer checkboxes when peer contexts changed
+  - Badges clear automatically when context successfully sent
+- **Hard limit UI**:
+  - Textarea/send button disabled at 100% context usage
+  - Placeholder text: "Context window full - End session to continue"
+
+**Events:**
+- `personal_context_updated` - broadcasted when user saves personal context (includes new hash)
+- `peer_context_updated` - broadcasted when peer context change detected (includes node_id, hash)
+
+**Commands:**
+- `reset_conversation(conversation_id)` - clears history, resets tracking
+
+**Token Efficiency Example** (llama3.1:8b with 128K context):
+- Personal context: ~5,000 tokens
+- Device context: ~2,000 tokens
+- First query: 7,000 (context) + 100 (user) + 2,000 (AI) = 9,100 tokens
+- Second query: 0 (no context) + 400 (history) + 100 (user) + 2,000 (AI) = 2,500 tokens
+- **Savings**: 72% fewer tokens per query after first message
+
 ### Node Identity System
 
 - Node IDs: `dpc-node-[16 hex chars]` (SHA256 hash of RSA public key)

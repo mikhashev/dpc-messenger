@@ -130,10 +130,6 @@
     dispatch('close');
   }
 
-  function openMarkdownFile(filename: string) {
-    dispatch('open-markdown', { filename });
-  }
-
   function handleKeydown(event: KeyboardEvent) {
     if (event.key === 'Escape') {
       if (editMode) {
@@ -295,11 +291,6 @@
                 <div class="topic-meta">
                   <span>Version {topic.version}</span>
                   <span>{topic.entries.length} entries</span>
-                  {#if topic.markdown_file}
-                    <button class="link-btn" on:click={() => topic.markdown_file && openMarkdownFile(topic.markdown_file)}>
-                      View Markdown
-                    </button>
-                  {/if}
                 </div>
 
                 {#if topic.entries.length > 0}
@@ -543,15 +534,6 @@
     font-size: 0.85rem;
     color: #999;
     margin-top: 0.5rem;
-  }
-
-  .link-btn {
-    background: none;
-    border: none;
-    color: #1976d2;
-    cursor: pointer;
-    text-decoration: underline;
-    padding: 0;
   }
 
   .topic-entries {

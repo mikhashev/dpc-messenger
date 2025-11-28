@@ -24,6 +24,10 @@ export const availableProviders = writable<any>(null);
 // Peer Providers store (node_id -> provider list)
 export const peerProviders = writable<Map<string, any[]>>(new Map());
 
+// Phase 7: Context update stores (for status indicators)
+export const contextUpdated = writable<any>(null);
+export const peerContextUpdated = writable<any>(null);
+
 let socket: WebSocket | null = null;
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempts = 0;
@@ -185,6 +189,16 @@ export function connectToCoreService() {
                     console.error("Knowledge extraction failed:", message.payload);
                     extractionFailure.set(message.payload);
                 }
+                // Phase 7: Handle personal context update (for status indicators)
+                else if (message.event === "personal_context_updated") {
+                    console.log("Personal context updated:", message.payload);
+                    contextUpdated.set(message.payload);
+                }
+                // Phase 7: Handle peer context update (for status indicators)
+                else if (message.event === "peer_context_updated") {
+                    console.log("Peer context updated:", message.payload);
+                    peerContextUpdated.set(message.payload);
+                }
                 // Handle get_personal_context response
                 else if (message.command === "get_personal_context" && message.status === "OK") {
                     console.log("Personal context loaded:", message.payload);
@@ -286,7 +300,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'reload_firewall',
             'validate_firewall_rules',
             'get_providers_config',
-            'save_providers_config'
+            'save_providers_config',
+            'query_ollama_model_info',
+            'toggle_auto_knowledge_detection'
         ].includes(command);
 
         if (expectsResponse) {

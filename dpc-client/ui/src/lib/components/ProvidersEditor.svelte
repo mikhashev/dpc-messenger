@@ -35,6 +35,25 @@
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
 
+  // Model info query state
+  let showModelInfo: boolean = false;
+  let modelInfoData: any = null;
+  let modelInfoLoading: boolean = false;
+  let modelInfoError: string = '';
+  let queriedProviderAlias: string = '';
+
+  // Context window presets
+  const CONTEXT_WINDOW_PRESETS = [
+    { label: '2K tokens', value: 2048 },
+    { label: '4K tokens', value: 4096 },
+    { label: '8K tokens', value: 8192 },
+    { label: '16K tokens', value: 16384 },
+    { label: '32K tokens', value: 32768 },
+    { label: '64K tokens', value: 65536 },
+    { label: '128K tokens', value: 131072 },
+    { label: '256K tokens', value: 262144 },
+  ];
+
   // New provider form
   let newProvider: Provider = {
     alias: '',
@@ -224,6 +243,63 @@
     resetNewProviderForm();
     selectedTab = 'list';
   }
+
+  // Query Ollama model info
+  async function queryModelInfo(providerAlias: string) {
+    modelInfoLoading = true;
+    modelInfoError = '';
+    modelInfoData = null;
+    queriedProviderAlias = providerAlias;
+    showModelInfo = true;
+
+    try {
+      const result = await sendCommand('query_ollama_model_info', {
+        provider_alias: providerAlias
+      });
+
+      if (result.status === 'success') {
+        modelInfoData = result.model_info;
+      } else {
+        modelInfoError = result.message || 'Failed to query model info';
+      }
+    } catch (error) {
+      modelInfoError = `Error: ${error}`;
+    } finally {
+      modelInfoLoading = false;
+    }
+  }
+
+  // Close model info modal
+  function closeModelInfo() {
+    showModelInfo = false;
+    modelInfoData = null;
+    modelInfoError = '';
+    queriedProviderAlias = '';
+  }
+
+  // Use detected context window value
+  function useDetectedContextWindow(providerAlias: string, numCtx: number) {
+    if (!editedConfig) {
+      // Not in edit mode - enter edit mode first
+      startEditing();
+      // Wait for next tick to ensure editedConfig is set
+      setTimeout(() => {
+        const index = editedConfig?.providers.findIndex(p => p.alias === providerAlias);
+        if (index !== undefined && index !== -1 && editedConfig) {
+          editedConfig.providers[index].context_window = numCtx;
+          editedConfig = editedConfig; // Trigger reactivity
+          closeModelInfo();
+        }
+      }, 0);
+    } else {
+      const index = editedConfig.providers.findIndex(p => p.alias === providerAlias);
+      if (index !== -1) {
+        editedConfig.providers[index].context_window = numCtx;
+        editedConfig = editedConfig; // Trigger reactivity
+        closeModelInfo();
+      }
+    }
+  }
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
@@ -400,12 +476,38 @@
 
                     <div class="form-group">
                       <label for="context-window-{i}">Context Window (optional)</label>
-                      <input
-                        id="context-window-{i}"
-                        type="number"
-                        bind:value={editedConfig.providers[i].context_window}
-                        placeholder="Auto-detected"
-                      />
+                      <select
+                        id="context-window-select-{i}"
+                        value={editedConfig.providers[i].context_window || ''}
+                        on:change={(e) => {
+                          if (!editedConfig) return;
+                          const val = (e.target as HTMLSelectElement).value;
+                          if (val === 'custom') {
+                            editedConfig.providers[i].context_window = undefined;
+                          } else if (val === '') {
+                            editedConfig.providers[i].context_window = undefined;
+                          } else {
+                            editedConfig.providers[i].context_window = parseInt(val);
+                          }
+                          editedConfig = editedConfig;
+                        }}
+                      >
+                        <option value="">Auto-detected</option>
+                        {#each CONTEXT_WINDOW_PRESETS as preset}
+                          <option value={preset.value}>{preset.label}</option>
+                        {/each}
+                        <option value="custom">Custom...</option>
+                      </select>
+
+                      {#if editedConfig.providers[i].context_window && !CONTEXT_WINDOW_PRESETS.some(p => p.value === editedConfig?.providers[i].context_window)}
+                        <input
+                          id="context-window-custom-{i}"
+                          type="number"
+                          bind:value={editedConfig.providers[i].context_window}
+                          placeholder="Enter custom value"
+                          class="custom-context-input"
+                        />
+                      {/if}
                     </div>
 
                     {#if provider.alias !== displayConfig.default_provider}
@@ -445,6 +547,12 @@
 
                     {#if provider.context_window}
                       <p><strong>Context Window:</strong> {provider.context_window.toLocaleString()} tokens</p>
+                    {/if}
+
+                    {#if provider.type === 'ollama'}
+                      <button class="btn-query-info" on:click={() => queryModelInfo(provider.alias)}>
+                        🔍 Query Model Info
+                      </button>
                     {/if}
                   </div>
                 {/if}
@@ -515,6 +623,91 @@
       {#if saveMessage}
         <div class="save-message {saveMessageType}">{saveMessage}</div>
       {/if}
+    </div>
+  </div>
+{/if}
+
+<!-- Model Info Modal -->
+{#if showModelInfo}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="modal-overlay" on:click={closeModelInfo} role="presentation">
+    <div class="modal model-info-modal" on:click|stopPropagation role="dialog" aria-labelledby="model-info-title" tabindex="-1">
+      <div class="modal-header">
+        <h2 id="model-info-title">🔍 Model Information</h2>
+        <button class="close-btn" on:click={closeModelInfo} aria-label="Close">×</button>
+      </div>
+
+      <div class="modal-body">
+        {#if modelInfoLoading}
+          <div class="loading-state">
+            <p>Querying Ollama for model information...</p>
+          </div>
+        {:else if modelInfoError}
+          <div class="error-state">
+            <p class="error-text">❌ {modelInfoError}</p>
+          </div>
+        {:else if modelInfoData}
+          <div class="model-info-content">
+            <div class="info-section">
+              <h3>Context Window</h3>
+              {#if modelInfoData.num_ctx}
+                <p class="detected-value">
+                  <strong>Detected:</strong> {modelInfoData.num_ctx.toLocaleString()} tokens
+                </p>
+                <button class="btn-use-detected" on:click={() => useDetectedContextWindow(queriedProviderAlias, modelInfoData.num_ctx)}>
+                  Use This Value
+                </button>
+              {:else}
+                <div class="info-box warning-box">
+                  <p class="info-title">⚠️ No Custom Context Window Detected</p>
+                  <p class="info-text">
+                    This model doesn't have a custom <code>num_ctx</code> parameter in its modelfile.
+                    It will use Ollama's default (typically <strong>2,048 tokens</strong>).
+                  </p>
+                  <p class="info-text">
+                    To increase it, use the dropdown in edit mode to select a larger context window.
+                  </p>
+                </div>
+              {/if}
+            </div>
+
+            {#if modelInfoData.details && Object.keys(modelInfoData.details).length > 0}
+              <div class="info-section">
+                <h3>Model Details</h3>
+                <div class="details-grid">
+                  {#if modelInfoData.details.family}
+                    <p><strong>Family:</strong> {modelInfoData.details.family}</p>
+                  {/if}
+                  {#if modelInfoData.details.parameter_size}
+                    <p><strong>Parameter Size:</strong> {modelInfoData.details.parameter_size}</p>
+                  {/if}
+                  {#if modelInfoData.details.quantization_level}
+                    <p><strong>Quantization:</strong> {modelInfoData.details.quantization_level}</p>
+                  {/if}
+                  {#if modelInfoData.details.format}
+                    <p><strong>Format:</strong> {modelInfoData.details.format}</p>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
+            {#if modelInfoData.modelfile}
+              <details class="modelfile-section">
+                <summary><h3>Raw Modelfile</h3></summary>
+                <pre class="modelfile-content">{modelInfoData.modelfile}</pre>
+              </details>
+            {/if}
+
+            {#if modelInfoData.parameters}
+              <details class="parameters-section">
+                <summary><h3>Parameters</h3></summary>
+                <pre class="parameters-content">{modelInfoData.parameters}</pre>
+              </details>
+            {/if}
+          </div>
+        {/if}
+      </div>
     </div>
   </div>
 {/if}
@@ -860,5 +1053,199 @@
     background: #dc3545;
     color: #fff;
     white-space: pre-line;
+  }
+
+  /* Query Model Info Button */
+  .btn-query-info {
+    background: #007bff;
+    color: #fff;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    margin-top: 10px;
+  }
+
+  .btn-query-info:hover {
+    background: #0056b3;
+  }
+
+  /* Custom Context Window Input */
+  .custom-context-input {
+    margin-top: 8px;
+    width: 100%;
+    padding: 8px;
+    border: 1px solid #444;
+    background: #2a2a2a;
+    color: #fff;
+    border-radius: 4px;
+  }
+
+  /* Model Info Modal */
+  .model-info-modal {
+    max-width: 700px;
+  }
+
+  .model-info-content {
+    padding: 0;
+  }
+
+  .info-section {
+    padding: 20px;
+    border-bottom: 1px solid #333;
+  }
+
+  .info-section:last-child {
+    border-bottom: none;
+  }
+
+  .info-section h3 {
+    margin: 0 0 15px 0;
+    font-size: 1.1rem;
+    color: #fff;
+  }
+
+  .detected-value {
+    font-size: 1.1rem;
+    margin: 10px 0;
+    padding: 14px;
+    background: rgba(0, 123, 255, 0.1);
+    border-radius: 6px;
+    border-left: 4px solid #007bff;
+    color: #e0e0e0;
+    line-height: 1.6;
+  }
+
+  .detected-value strong {
+    color: #90caf9;
+  }
+
+  .btn-use-detected {
+    background: #28a745;
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    margin-top: 10px;
+  }
+
+  .btn-use-detected:hover {
+    background: #218838;
+  }
+
+  .details-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 10px;
+  }
+
+  .details-grid p {
+    margin: 5px 0;
+    padding: 12px;
+    background: #2a2a2a;
+    border-radius: 4px;
+    color: #e0e0e0;
+    line-height: 1.5;
+  }
+
+  .details-grid p strong {
+    color: #90caf9;
+  }
+
+  .modelfile-section,
+  .parameters-section {
+    padding: 15px 20px;
+    border-top: 1px solid #333;
+  }
+
+  .modelfile-section summary,
+  .parameters-section summary {
+    cursor: pointer;
+    font-weight: bold;
+    user-select: none;
+    color: #e0e0e0;
+  }
+
+  .modelfile-section summary:hover,
+  .parameters-section summary:hover {
+    color: #90caf9;
+  }
+
+  .modelfile-section summary h3,
+  .parameters-section summary h3 {
+    display: inline;
+    font-size: 1rem;
+  }
+
+  .modelfile-content,
+  .parameters-content {
+    background: #1a1a1a;
+    padding: 15px;
+    border-radius: 4px;
+    overflow-x: auto;
+    font-size: 0.85rem;
+    line-height: 1.6;
+    margin-top: 10px;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    color: #d0d0d0;
+    border: 1px solid #333;
+  }
+
+  /* Info boxes */
+  .info-box {
+    padding: 16px;
+    border-radius: 6px;
+    margin: 10px 0;
+    border: 2px solid;
+  }
+
+  .warning-box {
+    background: rgba(255, 193, 7, 0.1);
+    border-color: #ffc107;
+  }
+
+  .info-title {
+    font-weight: bold;
+    font-size: 1rem;
+    margin: 0 0 10px 0;
+    color: #ffc107;
+  }
+
+  .info-text {
+    margin: 8px 0;
+    line-height: 1.6;
+    color: #e0e0e0;
+  }
+
+  .info-text code {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    color: #90caf9;
+  }
+
+  .info-text strong {
+    color: #fff;
+  }
+
+  .loading-state,
+  .error-state {
+    padding: 40px 20px;
+    text-align: center;
+  }
+
+  .loading-state p {
+    color: #999;
+    font-size: 1rem;
+  }
+
+  .error-text {
+    color: #dc3545;
+    font-size: 1rem;
   }
 </style>

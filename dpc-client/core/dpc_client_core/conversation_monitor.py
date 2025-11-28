@@ -44,22 +44,29 @@ class ConversationMonitor:
         participants: List[Dict[str, str]],  # [{node_id, name, context}]
         llm_manager,  # LLMManager instance
         knowledge_threshold: float = 0.7,  # Minimum score to propose commit
-        settings = None  # Settings instance (optional, for config like cultural_perspectives_enabled)
+        settings = None,  # Settings instance (optional, for config like cultural_perspectives_enabled)
+        ai_query_func = None,  # Callable for AI queries (supports both local and remote inference)
+        auto_detect: bool = True  # Enable/disable automatic detection
     ):
         """Initialize conversation monitor
 
         Args:
             conversation_id: Unique conversation identifier
             participants: List of participant info dicts
-            llm_manager: LLMManager instance for AI analysis
+            llm_manager: LLMManager instance for AI analysis (used if ai_query_func is None)
             knowledge_threshold: Score threshold (0.0-1.0) to trigger commit proposal
             settings: Settings instance for configuration (optional)
+            ai_query_func: Optional callable for AI queries. Signature: async (prompt, compute_host, model, provider) -> dict
+                          If provided, enables remote inference for knowledge detection.
+            auto_detect: If True, automatically detect and propose commits. If False, only buffer messages for manual extraction.
         """
         self.conversation_id = conversation_id
         self.participants = participants
         self.llm_manager = llm_manager
         self.knowledge_threshold = knowledge_threshold
         self.settings = settings
+        self.ai_query_func = ai_query_func  # Enables both local and remote inference
+        self.auto_detect = auto_detect  # Controls automatic detection vs manual-only
 
         # Message buffer
         self.message_buffer: List[Message] = []
@@ -74,6 +81,21 @@ class ConversationMonitor:
         self.token_limit: int = 100000  # Default limit, will be updated per model
         self.token_warning_threshold: float = 0.8  # Warn at 80%
 
+        # Conversation history tracking (Phase 7: Conversation History)
+        self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
+        self.context_included: bool = False  # Flag: has context been sent in this conversation?
+        self.context_hash: str = ""  # Hash of personal.json + device_context.json when last sent
+        self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer contexts
+
+        # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
+        self.peer_context_cache: Dict[str, Any] = {}  # {node_id: PersonalContext} cached peer contexts
+        self.peer_device_context_cache: Dict[str, dict] = {}  # {node_id: device_context_dict} cached device contexts
+
+        # Knowledge detection inference settings (supports both local and remote)
+        self.compute_host: str | None = None  # Node ID for remote inference (None = local)
+        self.model: str | None = None  # Model name for remote/local inference
+        self.provider_alias: str | None = None  # Provider alias for local inference
+
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
 
@@ -81,9 +103,14 @@ class ConversationMonitor:
             message: New message to analyze
 
         Returns:
-            KnowledgeCommitProposal if knowledge detected, None otherwise
+            KnowledgeCommitProposal if knowledge detected (when auto_detect=True), None otherwise
         """
+        # Always buffer messages (even if auto_detect is disabled, for manual extraction)
         self.message_buffer.append(message)
+
+        # Only run automatic detection if enabled
+        if not self.auto_detect:
+            return None
 
         # Analyze every 5 messages or if buffer gets large
         if len(self.message_buffer) >= 5:
@@ -137,6 +164,27 @@ class ConversationMonitor:
 
         return None
 
+    def update_inference_settings(self, compute_host: str | None = None, model: str | None = None, provider: str | None = None):
+        """Update inference settings for knowledge detection
+
+        Knowledge detection can use either local or remote inference:
+        - If compute_host is None: Uses local LLM with provider_alias
+        - If compute_host is set: Uses remote peer's LLM with specified model
+
+        Args:
+            compute_host: Node ID for remote inference (None = local)
+            model: Model name for remote inference
+            provider: Provider alias for local inference
+        """
+        self.compute_host = compute_host
+        self.model = model
+        self.provider_alias = provider
+
+        if compute_host:
+            print(f"[Monitor {self.conversation_id}] Knowledge detection: REMOTE inference on {compute_host}, model={model or 'default'}")
+        else:
+            print(f"[Monitor {self.conversation_id}] Knowledge detection: LOCAL inference, provider={provider or 'default'}")
+
     async def _calculate_knowledge_score(self) -> float:
         """Calculate knowledge-worthiness score for conversation segment
 
@@ -173,10 +221,21 @@ REQUIRED OUTPUT FORMAT (raw JSON only):
 DO NOT include any text before or after the JSON. DO NOT use markdown code blocks. DO NOT explain your analysis outside the JSON."""
 
         try:
-            # Use LLM to analyze
-            response = await self.llm_manager.query(
-                prompt=prompt
-            )
+            # Use AI query function if available (supports remote inference), otherwise use llm_manager (local only)
+            if self.ai_query_func:
+                result = await self.ai_query_func(
+                    prompt=prompt,
+                    compute_host=self.compute_host,
+                    model=self.model,
+                    provider=self.provider_alias
+                )
+                response = result["response"]
+            else:
+                # Fallback to direct llm_manager call (local only)
+                response = await self.llm_manager.query(
+                    prompt=prompt,
+                    provider_alias=self.provider_alias
+                )
 
             # Try to extract JSON if wrapped in markdown or text
             import json
@@ -388,10 +447,21 @@ REQUIRED JSON FORMAT (output ONLY this, nothing else):
 DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
 
         try:
-            # Use LLM to generate proposal
-            response = await self.llm_manager.query(
-                prompt=prompt
-            )
+            # Use AI query function if available (supports remote inference), otherwise use llm_manager (local only)
+            if self.ai_query_func:
+                result = await self.ai_query_func(
+                    prompt=prompt,
+                    compute_host=self.compute_host,
+                    model=self.model,
+                    provider=self.provider_alias
+                )
+                response = result["response"]
+            else:
+                # Fallback to direct llm_manager call (local only)
+                response = await self.llm_manager.query(
+                    prompt=prompt,
+                    provider_alias=self.provider_alias
+                )
 
             # Try to extract and parse JSON from response (with repair attempts)
             import json
@@ -540,6 +610,14 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
         """
         self.current_token_count += tokens
 
+    def set_token_count(self, tokens: int):
+        """Set the current token count (replaces instead of adding)
+
+        Args:
+            tokens: Total tokens in the conversation
+        """
+        self.current_token_count = tokens
+
     def get_token_usage(self) -> Dict[str, Any]:
         """Get current token usage statistics
 
@@ -571,6 +649,129 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
     def reset_token_count(self):
         """Reset token count (after knowledge extraction)"""
         self.current_token_count = 0
+
+    # --- Conversation History Methods (Phase 7) ---
+
+    def add_message(self, role: str, content: str):
+        """Add a message to the conversation history
+
+        Args:
+            role: 'user' or 'assistant'
+            content: Message content
+        """
+        self.message_history.append({"role": role, "content": content})
+
+    def get_message_history(self) -> List[Dict[str, str]]:
+        """Get the full conversation history
+
+        Returns:
+            List of message dicts with 'role' and 'content' keys
+        """
+        return self.message_history.copy()
+
+    def mark_context_included(self, context_hash: str):
+        """Mark that context has been included in this conversation
+
+        Args:
+            context_hash: SHA256 hash of personal.json + device_context.json
+        """
+        self.context_included = True
+        self.context_hash = context_hash
+
+    def has_context_changed(self, new_hash: str) -> bool:
+        """Check if context files have changed since last inclusion
+
+        Args:
+            new_hash: Current hash of context files
+
+        Returns:
+            True if context has changed
+        """
+        return new_hash != self.context_hash
+
+    def update_peer_context_hash(self, node_id: str, context_hash: str):
+        """Update the stored hash for a peer's context
+
+        Args:
+            node_id: Peer node identifier
+            context_hash: SHA256 hash of peer's context
+        """
+        self.peer_context_hashes[node_id] = context_hash
+
+    def has_peer_context_changed(self, node_id: str, new_hash: str) -> bool:
+        """Check if a peer's context has changed
+
+        Args:
+            node_id: Peer node identifier
+            new_hash: Current hash of peer's context
+
+        Returns:
+            True if peer context has changed or is new
+        """
+        old_hash = self.peer_context_hashes.get(node_id, "")
+        return new_hash != old_hash
+
+    def reset_conversation(self):
+        """Reset conversation history and context tracking (for "New Chat" button)"""
+        self.message_history = []
+        self.context_included = False
+        self.context_hash = ""
+        self.peer_context_hashes = {}
+        self.current_token_count = 0
+        self.message_buffer = []
+        self.knowledge_score = 0.0
+        # Phase 7: Also clear peer context caches
+        self.peer_context_cache = {}
+        self.peer_device_context_cache = {}
+
+    # Phase 7: Peer context cache management methods
+    def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):
+        """Cache peer's personal context and device context locally
+
+        Args:
+            node_id: Peer's node ID
+            context: PersonalContext object
+            device_context: Device context dict (optional)
+        """
+        self.peer_context_cache[node_id] = context
+        if device_context:
+            self.peer_device_context_cache[node_id] = device_context
+
+    def get_cached_peer_context(self, node_id: str) -> Optional[Any]:
+        """Get cached peer context if available
+
+        Args:
+            node_id: Peer's node ID
+
+        Returns:
+            PersonalContext object or None if not cached
+        """
+        return self.peer_context_cache.get(node_id)
+
+    def get_cached_peer_device_context(self, node_id: str) -> Optional[dict]:
+        """Get cached peer device context if available
+
+        Args:
+            node_id: Peer's node ID
+
+        Returns:
+            Device context dict or None if not cached
+        """
+        return self.peer_device_context_cache.get(node_id)
+
+    def invalidate_peer_context_cache(self, node_id: str):
+        """Invalidate cached peer context (when peer notifies of change)
+
+        Args:
+            node_id: Peer's node ID
+        """
+        if node_id in self.peer_context_cache:
+            del self.peer_context_cache[node_id]
+        if node_id in self.peer_device_context_cache:
+            del self.peer_device_context_cache[node_id]
+        # Also clear the hash so context will be re-included on next query
+        if node_id in self.peer_context_hashes:
+            del self.peer_context_hashes[node_id]
 
 
 # Example usage

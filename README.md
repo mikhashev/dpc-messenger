@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.7.0
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.8.0
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
 ---
@@ -65,6 +65,7 @@ If this vision resonates with you, let's connect:
 - 👤 **User Sovereignty** - You own your data, identity, and encryption keys ([read more](./docs/USER_SOVEREIGNTY.md))
 - 💾 **Encrypted Backups** - AES-256-GCM encrypted backups with no backdoors ([guide](./docs/BACKUP_RESTORE.md))
 - 🤝 **Human-AI Collaboration** - Work with your AI assistant, then share contexts with trusted peers so their AIs can contribute too
+- 💬 **Conversation History** - Full conversational continuity with smart context optimization (60-80% token savings)
 - 📚 **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - 🏠 **Local-First** - Your data stays on your device
 - 🌐 **Internet-Wide** - Connect to anyone, anywhere via WebRTC

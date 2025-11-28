@@ -3,13 +3,14 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import Toast from "$lib/components/Toast.svelte";
+  import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
   import { ask } from '@tauri-apps/plugin-dialog';
 
   console.log("Full D-PC Messenger loading...");
@@ -25,7 +26,7 @@
     model?: string;  // AI model name (for AI responses)
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
-    ['local_ai', [{ id: crypto.randomUUID(), sender: 'ai', text: 'Hello! I am your local AI assistant. How can I help you today?', timestamp: Date.now() }]]
+    ['local_ai', []]
   ]));
   
   let activeChatId: string = 'local_ai';
@@ -66,7 +67,7 @@
   let showFirewallEditor: boolean = false;
   let showProvidersEditor: boolean = false;
   let showCommitDialog: boolean = false;
-  let autoKnowledgeDetection: boolean = true;  // Default: enabled
+  let autoKnowledgeDetection: boolean = false;  // Default: disabled
 
   // Token tracking state (Phase 2)
   let tokenUsageMap: Map<string, {used: number, limit: number}> = new Map();
@@ -80,6 +81,26 @@
   // Add AI Chat dialog state
   let showAddAIChatDialog: boolean = false;
   let selectedProviderForNewChat: string = "";
+
+  // Personal context inclusion toggle
+  let includePersonalContext: boolean = true;
+
+  // Markdown rendering toggle (with localStorage persistence)
+  let enableMarkdown: boolean = (() => {
+    const saved = localStorage.getItem('enableMarkdown');
+    return saved !== null ? saved === 'true' : true; // Default: enabled
+  })();
+
+  // Save markdown preference to localStorage when changed
+  $: {
+    localStorage.setItem('enableMarkdown', enableMarkdown.toString());
+  }
+
+  // Phase 7: Context hash tracking for "Updated" status indicators
+  let currentContextHash: string = "";  // Current hash from backend (when context is saved)
+  let lastSentContextHash: Map<string, string> = new Map();  // Per-conversation: last hash sent to AI
+  let peerContextHashes: Map<string, string> = new Map();  // Per-peer: current hash from backend
+  let lastSentPeerHashes: Map<string, Map<string, string>> = new Map();  // Per-conversation, per-peer: last hash sent
 
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
@@ -100,12 +121,46 @@
   // Reactive: Get current chat's token usage
   $: currentTokenUsage = tokenUsageMap.get(activeChatId) || {used: 0, limit: 0};
 
+  // Phase 7: Reactive: Check if context window is full (100% or more)
+  $: isContextWindowFull = currentTokenUsage.limit > 0 && (currentTokenUsage.used / currentTokenUsage.limit) >= 1.0;
+
   // Reactive: Handle knowledge extraction failures (Phase 4)
   $: if ($extractionFailure) {
     const {conversation_id, reason} = $extractionFailure;
     showExtractionFailure = true;
     extractionFailureMessage = `Knowledge extraction failed for ${conversation_id}: ${reason}`;
   }
+
+  // Phase 7: Handle personal context updates (for "Updated" status indicator)
+  $: if ($contextUpdated) {
+    const { context_hash } = $contextUpdated;
+    if (context_hash) {
+      currentContextHash = context_hash;
+      console.log(`[Context Updated] New hash: ${context_hash.slice(0, 8)}...`);
+    }
+  }
+
+  // Phase 7: Handle peer context updates (for "Updated" status indicators)
+  $: if ($peerContextUpdated) {
+    const { node_id, context_hash } = $peerContextUpdated;
+    if (node_id && context_hash) {
+      peerContextHashes = new Map(peerContextHashes);
+      peerContextHashes.set(node_id, context_hash);
+      console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
+    }
+  }
+
+  // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)
+  $: localContextUpdated = currentContextHash && lastSentContextHash.get(activeChatId) !== currentContextHash;
+
+  // Phase 7: Reactive: Check which peer contexts have changed (not yet sent to AI)
+  $: peerContextsUpdated = new Set(
+    Array.from(peerContextHashes.keys()).filter(nodeId => {
+      const conversationPeerHashes = lastSentPeerHashes.get(activeChatId);
+      if (!conversationPeerHashes) return true;  // Never sent
+      return conversationPeerHashes.get(nodeId) !== peerContextHashes.get(nodeId);
+    })
+  );
 
   // Reactive: Reset compute host if selected peer disconnects
   $: if (selectedComputeHost !== "local" && $nodeStatus?.p2p_peers) {
@@ -175,19 +230,7 @@
     // Use the reactive map, with fallback for peers not in peer_info yet
     return peerDisplayNames.get(peerId) || `${peerId.slice(0, 20)}...`;
   }
-  
-  function getAIModelDisplay(): string {
-    if (!$nodeStatus) {
-      return '🤖 Local AI Assistant';
-    }
-    
-    if ($nodeStatus.active_ai_model) {
-      return `🤖 Local AI Assistant (${$nodeStatus.active_ai_model})`;
-    }
-    
-    return '🤖 Local AI Assistant';
-  }
-  
+
   // --- PEER CONTEXT SELECTION ---
   function togglePeerContext(peerId: string) {
     if (selectedPeerContexts.has(peerId)) {
@@ -277,7 +320,11 @@
       });
 
       // Prepare AI query payload with optional compute host and provider/model
-      const payload: any = { prompt: text };
+      const payload: any = {
+        prompt: text,
+        include_context: includePersonalContext,  // Add context inclusion flag
+        conversation_id: activeChatId  // Phase 7: Pass conversation ID for history tracking
+      };
 
       // Add peer contexts if any are selected
       if (selectedPeerContexts.size > 0) {
@@ -395,11 +442,28 @@
     }
   }
 
-  function toggleAutoKnowledgeDetection() {
-    // bind:checked already updates the variable, just sync to backend
-    sendCommand("toggle_auto_knowledge_detection", {
-      enabled: autoKnowledgeDetection
-    });
+  async function toggleAutoKnowledgeDetection() {
+    // bind:checked already updates the variable, now sync to backend and wait for confirmation
+    const previousState = !autoKnowledgeDetection; // Store previous state in case we need to revert
+
+    try {
+      const result = await sendCommand("toggle_auto_knowledge_detection", {
+        enabled: autoKnowledgeDetection
+      });
+
+      // Check if backend confirmed the change
+      if (result.status === "success") {
+        console.log(`✓ Auto-detection ${result.enabled ? 'enabled' : 'disabled'}`);
+      } else {
+        // Backend failed, revert checkbox
+        console.error("Failed to toggle auto-detection:", result.message);
+        autoKnowledgeDetection = previousState;
+      }
+    } catch (error) {
+      // Network/timeout error, revert checkbox
+      console.error("Error toggling auto-detection:", error);
+      autoKnowledgeDetection = previousState;
+    }
   }
 
   function handleNewChat(chatId: string) {
@@ -415,8 +479,16 @@
       tokenUsageMap = new Map(tokenUsageMap);
       tokenUsageMap.delete(chatId);
 
-      // Backend will create a new monitor on next message
-      // (Old monitor's buffer was already cleared by previous extraction)
+      // Phase 7: Clear context tracking (will show "Updated" badge again on next query)
+      lastSentContextHash = new Map(lastSentContextHash);
+      lastSentContextHash.delete(chatId);
+      lastSentPeerHashes = new Map(lastSentPeerHashes);
+      lastSentPeerHashes.delete(chatId);
+
+      // Phase 7: Reset conversation on backend (clears history, context tracking)
+      sendCommand("reset_conversation", {
+        conversation_id: chatId
+      });
     }
   }
 
@@ -462,12 +534,7 @@
     // Initialize chat history
     chatHistories.update(h => {
       const newMap = new Map(h);
-      newMap.set(chatId, [{
-        id: crypto.randomUUID(),
-        sender: 'ai',
-        text: `Hello! I'm powered by ${chatName}. How can I help you today?`,
-        timestamp: Date.now()
-      }]);
+      newMap.set(chatId, []);
       return newMap;
     });
 
@@ -566,6 +633,30 @@
           });
         }
 
+        // Phase 7: Mark context as sent (clears "Updated" status)
+        if (message.status === "OK") {
+          // Update local context hash if it exists
+          if (currentContextHash) {
+            lastSentContextHash = new Map(lastSentContextHash);
+            lastSentContextHash.set(chatId, currentContextHash);
+            console.log(`[Context Sent] Marked context as sent for ${chatId}`);
+          }
+
+          // Also mark peer contexts as sent if they were included (independent of local context)
+          if (selectedPeerContexts.size > 0) {
+            const chatPeerHashes = new Map();
+            for (const peerId of selectedPeerContexts) {
+              const peerHash = peerContextHashes.get(peerId);
+              if (peerHash) {
+                chatPeerHashes.set(peerId, peerHash);
+              }
+            }
+            lastSentPeerHashes = new Map(lastSentPeerHashes);
+            lastSentPeerHashes.set(chatId, chatPeerHashes);
+            console.log(`[Peer Contexts Sent] Marked ${chatPeerHashes.size} peer contexts as sent for ${chatId}`);
+          }
+        }
+
         // Clean up the command mapping
         commandToChatMap.delete(responseCommandId);
       }
@@ -613,19 +704,17 @@
 </script>
 
 <main class="container">
-  <h1>D-PC Messenger</h1>
-
   <!-- Status Bar -->
   <div class="status-bar">
     {#if $connectionStatus === 'connected'}
-      <span class="status-connected">Status: connected</span>
+      <span class="status-connected">Backend status: connected</span>
     {:else if $connectionStatus === 'connecting'}
-      <span class="status-connecting">Status: connecting...</span>
+      <span class="status-connecting">Backend status: connecting...</span>
     {:else if $connectionStatus === 'error'}
-      <span class="status-error">Status: error</span>
+      <span class="status-error">Backend status: error</span>
       <button class="btn-small" on:click={handleReconnect}>Retry</button>
     {:else}
-      <span class="status-disconnected">Status: disconnected</span>
+      <span class="status-disconnected">Backend status: disconnected</span>
       <button class="btn-small" on:click={handleReconnect}>Connect</button>
     {/if}
   </div>
@@ -636,8 +725,7 @@
       {#if $connectionStatus === 'connected' && $nodeStatus}
         <!-- Node Info -->
         <div class="node-info">
-          <h2>Your Node</h2>
-          <p><strong>ID:</strong></p>
+          <p><strong>Your Node ID:</strong></p>
           <div class="node-id-container">
             <code class="node-id">{$nodeStatus.node_id}</code>
             <button
@@ -651,12 +739,6 @@
               📋
             </button>
           </div>
-          <p>
-            <strong>Hub:</strong>
-            <span class:hub-connected={$nodeStatus.hub_status === 'Connected'}>
-              {$nodeStatus.hub_status}
-            </span>
-          </p>
 
           <!-- Direct TLS Connection URIs (NEW - Redesigned) -->
           {#if $nodeStatus.dpc_uris && $nodeStatus.dpc_uris.length > 0}
@@ -728,6 +810,31 @@
               {/if}
             </div>
           {/if}
+
+          <!-- Hub Login -->
+          {#if $nodeStatus.hub_status !== 'Connected'}
+            <div class="hub-login-section">
+              <p class="info-text">Connect to Hub for WebRTC and discovery</p>
+              <div class="hub-login-buttons">
+                <button
+                  on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
+                  class="btn-oauth btn-google"
+                  title="Login with Google"
+                >
+                  <span class="oauth-icon">🔵</span>
+                  Google
+                </button>
+                <button
+                  on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
+                  class="btn-oauth btn-github"
+                  title="Login with GitHub"
+                >
+                  <span class="oauth-icon">⚫</span>
+                  GitHub
+                </button>
+              </div>
+            </div>
+          {/if}
         </div>
 
         <!-- Personal Context Button (Knowledge Architecture) -->
@@ -783,31 +890,6 @@
             💡 Tip: Enter just node_id for WebRTC, or full dpc:// URI for Direct TLS
           </p>
         </div>
-
-        <!-- Hub Login -->
-        {#if $nodeStatus.hub_status !== 'Connected'}
-          <div class="hub-section">
-            <p class="info-text">Connect to Hub for WebRTC and discovery</p>
-            <div class="hub-login-buttons">
-              <button
-                on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
-                class="btn-oauth btn-google"
-                title="Login with Google"
-              >
-                <span class="oauth-icon">🔵</span>
-                Google
-              </button>
-              <button
-                on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
-                class="btn-oauth btn-github"
-                title="Login with GitHub"
-              >
-                <span class="oauth-icon">⚫</span>
-                GitHub
-              </button>
-            </div>
-          </div>
-        {/if}
 
         <!-- Chat List -->
         <div class="chat-list">
@@ -947,6 +1029,16 @@
           <button class="btn-end-session" on:click={() => handleEndSession(activeChatId)}>
             📚 End Session & Save Knowledge
           </button>
+          {#if $aiChats.has(activeChatId)}
+            <button
+              class="btn-markdown-toggle"
+              class:active={enableMarkdown}
+              on:click={() => enableMarkdown = !enableMarkdown}
+              title={enableMarkdown ? 'Disable markdown rendering' : 'Enable markdown rendering'}
+            >
+              {enableMarkdown ? '📝 Markdown' : '📄 Plain Text'}
+            </button>
+          {/if}
         </div>
       </div>
 
@@ -966,7 +1058,11 @@
                 </strong>
                 <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
               </div>
-              <p>{msg.text}</p>
+              {#if msg.sender === 'ai' && enableMarkdown}
+                <MarkdownMessage content={msg.text} />
+              {:else}
+                <p>{msg.text}</p>
+              {/if}
             </div>
           {/each}
         {:else}
@@ -978,6 +1074,25 @@
 
       <div class="chat-input">
         {#if $aiChats.has(activeChatId)}
+          <!-- Personal Context Toggle -->
+          <div class="context-toggle">
+            <label class="context-checkbox">
+              <input
+                type="checkbox"
+                bind:checked={includePersonalContext}
+              />
+              <span>
+                📚 Include Personal Context (profile, instructions, device info)
+                {#if localContextUpdated}
+                  <span class="status-badge updated">Updated</span>
+                {/if}
+              </span>
+            </label>
+            {#if !includePersonalContext}
+              <span class="context-hint">⚠️ AI won't know your preferences or device specs</span>
+            {/if}
+          </div>
+
           <!-- Peer Context Selector (show for all AI chats) -->
           {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
             <div class="peer-context-selector">
@@ -992,13 +1107,19 @@
                   {@const displayName = peer.name
                     ? `${peer.name} | ${peer.node_id.slice(0, 15)}...`
                     : `${peer.node_id.slice(0, 20)}...`}
+                  {@const isPeerContextUpdated = peerContextsUpdated.has(peer.node_id)}
                   <label class="peer-context-checkbox">
                     <input
                       type="checkbox"
                       checked={selectedPeerContexts.has(peer.node_id)}
                       on:change={() => togglePeerContext(peer.node_id)}
                     />
-                    <span>{displayName}</span>
+                    <span>
+                      {displayName}
+                      {#if isPeerContextUpdated}
+                        <span class="status-badge updated">Updated</span>
+                      {/if}
+                    </span>
                   </label>
                 {/each}
               </div>
@@ -1054,8 +1175,11 @@
         <div class="input-row">
           <textarea
             bind:value={currentInput}
-            placeholder={$connectionStatus === 'connected' ? 'Type a message... (Enter to send, Shift+Enter for new line)' : 'Connect to Core Service first...'}
-            disabled={$connectionStatus !== 'connected' || isLoading}
+            placeholder={
+              isContextWindowFull ? 'Context window full - End session to continue' :
+              ($connectionStatus === 'connected' ? 'Type a message... (Enter to send, Shift+Enter for new line)' : 'Connect to Core Service first...')
+            }
+            disabled={$connectionStatus !== 'connected' || isLoading || isContextWindowFull}
             on:keydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
@@ -1065,7 +1189,7 @@
           ></textarea>
           <button
             on:click={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim()}
+            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim() || isContextWindowFull}
           >
             {#if isLoading}Sending...{:else}Send{/if}
           </button>
@@ -1194,14 +1318,7 @@
     margin: 0 auto;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
-  
-  h1 {
-    text-align: center;
-    font-size: 2.5rem;
-    margin-bottom: 1.5rem;
-    color: #1a1a1a;
-  }
-  
+
   .status-bar {
     margin-bottom: 1.5rem;
     padding: 1rem;
@@ -1267,7 +1384,7 @@
     background: #555;
   }
   
-  .node-info, .connect-section, .hub-section, .context-section, .chat-list {
+  .node-info, .connect-section, .context-section, .chat-list {
     background: white;
     border: 1px solid #e0e0e0;
     border-radius: 8px;
@@ -1314,12 +1431,7 @@
     background: #f0f0f0;
     border-color: #007bff;
   }
-  
-  .hub-connected {
-    color: #28a745;
-    font-weight: 600;
-  }
-  
+
   .info-text, .small {
     font-size: 0.9rem;
     color: #666;
@@ -1768,6 +1880,38 @@
     transform: translateY(0);
   }
 
+  .btn-markdown-toggle {
+    padding: 0.6rem 1rem;
+    background: linear-gradient(135deg, #6c757d 0%, #5a6268 100%);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+    opacity: 0.7;
+  }
+
+  .btn-markdown-toggle.active {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    opacity: 1;
+  }
+
+  .btn-markdown-toggle:hover {
+    transform: translateY(-1px);
+    opacity: 1;
+  }
+
+  .btn-markdown-toggle.active:hover {
+    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+  }
+
+  .btn-markdown-toggle:active {
+    transform: translateY(0);
+  }
+
   .chat-window {
     flex: 1;
     padding: 1rem;
@@ -1881,6 +2025,75 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+  }
+
+  /* Personal Context Toggle Styles */
+  .context-toggle {
+    padding: 0.75rem;
+    background: linear-gradient(135deg, #fff9f3 0%, #fff4e6 100%);
+    border-radius: 8px;
+    border: 1px solid #ffd4a3;
+    margin-bottom: 0.5rem;
+  }
+
+  .context-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+    user-select: none;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #374151;
+  }
+
+  .context-checkbox input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    accent-color: #f59e0b;
+  }
+
+  .context-hint {
+    display: block;
+    margin-top: 0.5rem;
+    font-size: 0.75rem;
+    color: #d97706;
+    font-weight: 500;
+    padding: 0.3rem 0.6rem;
+    background: white;
+    border-radius: 6px;
+    border-left: 3px solid #f59e0b;
+  }
+
+  /* Phase 7: Status Badge Styles (for context update indicators) */
+  .status-badge {
+    display: inline-block;
+    margin-left: 0.5rem;
+    padding: 0.15rem 0.5rem;
+    font-size: 0.7rem;
+    font-weight: 600;
+    border-radius: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .status-badge.updated {
+    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    color: white;
+    box-shadow: 0 2px 4px rgba(16, 185, 129, 0.3);
+    animation: pulse-badge 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse-badge {
+    0%, 100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.8;
+      transform: scale(0.98);
+    }
   }
 
   /* Peer Context Selector Styles */

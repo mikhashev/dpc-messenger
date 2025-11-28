@@ -70,22 +70,24 @@ class KnowledgeEntry:
 
 @dataclass
 class Topic:
+    # Core fields (always present)
     summary: str
-    key_books: List[Book] = field(default_factory=list)
-    preferred_authors: List[str] = field(default_factory=list)
-
-    # v2.0 enhancements
     entries: List[KnowledgeEntry] = field(default_factory=list)
     mastery_level: Literal["beginner", "intermediate", "advanced"] = "beginner"
-    learning_strategies: List[str] = field(default_factory=list)
 
-    # Versioning
+    # Versioning (core)
     version: int = 1
     created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
     last_modified: str = field(default_factory=lambda: datetime.utcnow().isoformat())
 
-    # Linked markdown file (NEW - from Claude Code pattern)
+    # v2.0 - Linked markdown file
     markdown_file: Optional[str] = None  # e.g., "knowledge/python_learning.md"
+    commit_id: Optional[str] = None  # Hash-based commit ID
+
+    # Optional fields (None by default - user adds when needed)
+    key_books: Optional[List[Book]] = None
+    preferred_authors: Optional[List[str]] = None
+    learning_strategies: Optional[List[str]] = None
 
 @dataclass
 class Profile:
@@ -206,8 +208,6 @@ class PersonalContext:
         knowledge_data = data.get('knowledge', {})
         knowledge = {}
         for topic_name, topic_content in knowledge_data.items():
-            books = [Book(**book_data) for book_data in topic_content.get('key_books', [])]
-
             # v2 fields for KnowledgeEntry
             entries_data = topic_content.get('entries', [])
             entries = []
@@ -228,18 +228,29 @@ class PersonalContext:
                     alternative_viewpoints=entry_data.get('alternative_viewpoints', [])
                 ))
 
-            knowledge[topic_name] = Topic(
-                summary=topic_content.get('summary', ''),
-                key_books=books,
-                preferred_authors=topic_content.get('preferred_authors', []),
-                entries=entries,
-                mastery_level=topic_content.get('mastery_level', 'beginner'),
-                learning_strategies=topic_content.get('learning_strategies', []),
-                version=topic_content.get('version', 1),
-                created_at=topic_content.get('created_at', datetime.utcnow().isoformat()),
-                last_modified=topic_content.get('last_modified', datetime.utcnow().isoformat()),
-                markdown_file=topic_content.get('markdown_file')
-            )
+            # Core fields
+            topic_kwargs = {
+                'summary': topic_content.get('summary', ''),
+                'entries': entries,
+                'mastery_level': topic_content.get('mastery_level', 'beginner'),
+                'version': topic_content.get('version', 1),
+                'created_at': topic_content.get('created_at', datetime.utcnow().isoformat()),
+                'last_modified': topic_content.get('last_modified', datetime.utcnow().isoformat()),
+                'markdown_file': topic_content.get('markdown_file'),
+                'commit_id': topic_content.get('commit_id')
+            }
+
+            # Optional fields - only include if present
+            if 'key_books' in topic_content and topic_content['key_books']:
+                topic_kwargs['key_books'] = [Book(**book_data) for book_data in topic_content['key_books']]
+
+            if 'preferred_authors' in topic_content and topic_content['preferred_authors']:
+                topic_kwargs['preferred_authors'] = topic_content['preferred_authors']
+
+            if 'learning_strategies' in topic_content and topic_content['learning_strategies']:
+                topic_kwargs['learning_strategies'] = topic_content['learning_strategies']
+
+            knowledge[topic_name] = Topic(**topic_kwargs)
 
         # Load v2 fields if present (backward compatibility)
         instruction_data = data.get('instruction', {})
@@ -437,15 +448,16 @@ def migrate_instructions_from_personal_context(
     instructions_json_path: Path | None = None
 ) -> bool:
     """
-    One-time migration: Extract instructions from personal.json to instructions.json.
-    Then remove instruction field from personal.json to keep it clean.
+    Migrate instructions from personal.json to instructions.json.
+
+    IDEMPOTENT: Safe to run multiple times.
 
     Args:
         personal_json_path: Path to personal.json. Defaults to ~/.dpc/personal.json
         instructions_json_path: Path to instructions.json. Defaults to ~/.dpc/instructions.json
 
     Returns:
-        True if migration was performed, False if no migration needed
+        True if changes were made, False if no changes needed
     """
     if personal_json_path is None:
         personal_json_path = DPC_HOME_DIR / "personal.json"
@@ -457,54 +469,103 @@ def migrate_instructions_from_personal_context(
     else:
         instructions_json_path = Path(instructions_json_path)
 
-    # Check if instructions.json already exists - no migration needed
-    if instructions_json_path.exists():
-        print(f"Instructions file already exists at {instructions_json_path}. No migration needed.")
-        return False
-
-    # Check if personal.json exists and has instruction field
     if not personal_json_path.exists():
-        print(f"Personal context file not found at {personal_json_path}. No migration needed.")
+        print("No personal.json found, skipping migration")
         return False
 
     try:
-        # Load personal.json
         with open(personal_json_path, 'r', encoding='utf-8') as f:
             personal_data = json.load(f)
 
-        # Check if instruction field exists
-        instruction_data = personal_data.get('instruction')
-        if not instruction_data:
-            print("No instruction field found in personal.json. Creating default instructions.json.")
-            save_instructions(InstructionBlock(), instructions_json_path)
-            return True
+        changes_made = False
 
-        # Extract instructions
-        instructions = InstructionBlock(
-            primary=instruction_data.get('primary', InstructionBlock().primary),
-            context_update=instruction_data.get('context_update', InstructionBlock().context_update),
-            verification_protocol=instruction_data.get('verification_protocol', InstructionBlock().verification_protocol),
-            learning_support=instruction_data.get('learning_support', InstructionBlock().learning_support),
-            bias_mitigation=instruction_data.get('bias_mitigation', InstructionBlock().bias_mitigation),
-            collaboration_mode=instruction_data.get('collaboration_mode', 'individual'),
-            consensus_required=instruction_data.get('consensus_required', True),
-            ai_curation_enabled=instruction_data.get('ai_curation_enabled', True),
-            dissent_encouraged=instruction_data.get('dissent_encouraged', True)
-        )
+        # CASE 1: instructions.json exists
+        if instructions_json_path.exists():
+            print(f"Instructions file exists at {instructions_json_path}")
 
-        # Save to instructions.json
-        save_instructions(instructions, instructions_json_path)
+            # Check if personal.json still has instruction field
+            if 'instruction' in personal_data:
+                print("  → Cleaning up legacy instruction field")
 
-        # Remove instruction field from personal.json
-        del personal_data['instruction']
+                # Remove instruction field
+                del personal_data['instruction']
+                changes_made = True
+
+                # Add external_files reference
+                if 'external_files' not in personal_data.get('metadata', {}):
+                    personal_data.setdefault('metadata', {})['external_files'] = {}
+
+                from datetime import datetime
+                personal_data['metadata']['external_files']['instructions'] = {
+                    "file": "instructions.json",
+                    "description": "AI behavior instructions",
+                    "last_updated": datetime.utcnow().isoformat()
+                }
+
+                print("  ✓ Removed instruction field")
+                print("  ✓ Added external_files reference")
+            else:
+                print("  ✓ Already clean")
+                return False
+
+        # CASE 2: instructions.json doesn't exist
+        else:
+            if 'instruction' not in personal_data:
+                print("No instruction field found")
+                return False
+
+            print("Migrating instructions to separate file...")
+
+            # Extract instruction
+            instruction_data = personal_data['instruction']
+
+            # Create InstructionBlock from data
+            instructions = InstructionBlock(
+                primary=instruction_data.get('primary', InstructionBlock().primary),
+                context_update=instruction_data.get('context_update', InstructionBlock().context_update),
+                verification_protocol=instruction_data.get('verification_protocol', InstructionBlock().verification_protocol),
+                learning_support=instruction_data.get('learning_support', InstructionBlock().learning_support),
+                bias_mitigation=instruction_data.get('bias_mitigation', InstructionBlock().bias_mitigation),
+                collaboration_mode=instruction_data.get('collaboration_mode', 'individual'),
+                consensus_required=instruction_data.get('consensus_required', True),
+                ai_curation_enabled=instruction_data.get('ai_curation_enabled', True),
+                dissent_encouraged=instruction_data.get('dissent_encouraged', True)
+            )
+
+            # Save to instructions.json
+            save_instructions(instructions, instructions_json_path)
+            print(f"  ✓ Created {instructions_json_path}")
+
+            # Remove from personal.json
+            del personal_data['instruction']
+
+            # Add external_files reference
+            from datetime import datetime
+            personal_data.setdefault('metadata', {})['external_files'] = {
+                'instructions': {
+                    "file": "instructions.json",
+                    "description": "AI behavior instructions",
+                    "last_updated": datetime.utcnow().isoformat()
+                }
+            }
+
+            changes_made = True
 
         # Save cleaned personal.json
-        with open(personal_json_path, 'w', encoding='utf-8') as f:
-            json.dump(personal_data, f, indent=2, ensure_ascii=False)
+        if changes_made:
+            # Backup original
+            import shutil
+            backup_path = personal_json_path.with_suffix('.json.backup')
+            shutil.copy(personal_json_path, backup_path)
+            print(f"  ✓ Backed up to {backup_path}")
 
-        print(f"✓ Migration complete: Instructions moved from personal.json to {instructions_json_path}")
-        print(f"✓ personal.json cleaned (instruction field removed)")
-        return True
+            # Save cleaned version
+            with open(personal_json_path, 'w', encoding='utf-8') as f:
+                json.dump(personal_data, f, indent=2, ensure_ascii=False)
+
+            print(f"  ✓ Updated {personal_json_path}")
+
+        return changes_made
 
     except Exception as e:
         print(f"Error during migration: {e}")

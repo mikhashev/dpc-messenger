@@ -126,12 +126,15 @@ class CoreService:
             vote_timeout_minutes=10
         )
 
+        # Register callback to reload context and notify peers after commit
+        self.consensus_manager.on_commit_applied = self._on_commit_applied
+
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
 
         # Knowledge extraction settings
-        self.auto_knowledge_detection_enabled: bool = True  # Can be toggled by user
+        self.auto_knowledge_detection_enabled: bool = False  # Can be toggled by user (matches UI default)
 
         self._is_running = False
         self._background_tasks = set()
@@ -183,6 +186,230 @@ class CoreService:
         except Exception as e:
             print(f"Error notifying UI of status change: {e}")
 
+    async def _cleanup_schema_v2(self):
+        """
+        One-time cleanup to migrate to v2.0 schema.
+
+        Prerequisites:
+            - COMMIT_INTEGRITY must be implemented first
+            - Hash-based commit_ids already in use
+
+        Steps:
+            1. Fix instruction field (via migrate_instructions)
+            2. Export knowledge to versioned markdown files
+            3. Clear entries arrays from JSON
+            4. Update format_version to 2.0
+        """
+        import hashlib
+        from datetime import datetime
+        from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+        from dpc_protocol.pcm_core import PersonalContext
+
+        personal_json_path = DPC_HOME_DIR / "personal.json"
+
+        if not personal_json_path.exists():
+            print("No personal.json found, skipping cleanup")
+            return
+
+        print("=== Schema v2.0 Cleanup ===")
+
+        # Load current data
+        with open(personal_json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Check if already v2.0 and clean
+        if data.get('metadata', {}).get('format_version') == '2.0':
+            has_instruction = 'instruction' in data
+            has_entries = any(
+                len(topic.get('entries', [])) > 0
+                for topic in data.get('knowledge', {}).values()
+            )
+
+            if not has_instruction and not has_entries:
+                print("✓ Already v2.0 and clean")
+                return
+
+        changes_made = False
+
+        # STEP 1: Fix instruction field
+        print("Step 1: Checking instruction field...")
+        if migrate_instructions_from_personal_context():
+            print("  ✓ Instructions migrated")
+            changes_made = True
+
+            # Reload data
+            with open(personal_json_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        else:
+            print("  ✓ Instructions already clean")
+
+        # STEP 2: Export knowledge to markdown
+        print("Step 2: Exporting knowledge to markdown...")
+
+        markdown_manager = MarkdownKnowledgeManager()
+        context = PersonalContext.from_dict(data)
+
+        for topic_name, topic in context.knowledge.items():
+            # Skip if already has markdown_file
+            if hasattr(topic, 'markdown_file') and topic.markdown_file:
+                markdown_path = DPC_HOME_DIR / topic.markdown_file
+                if markdown_path.exists():
+                    print(f"  ✓ {topic_name}: Already has markdown")
+                    continue
+
+            # Get commit_id (should be hash-based from COMMIT_INTEGRITY)
+            commit_id = getattr(topic, 'commit_id', None) or context.last_commit_id
+
+            if not commit_id:
+                # Fallback: generate hash-based commit_id
+                print(f"  ⚠️ {topic_name}: No commit_id, generating new one")
+
+                from dpc_protocol.knowledge_commit import KnowledgeCommit
+                from dpc_protocol.commit_integrity import compute_commit_hash
+
+                temp_commit = KnowledgeCommit(
+                    topic=topic_name,
+                    summary=topic.summary,
+                    entries=topic.entries
+                )
+                commit_hash = compute_commit_hash(temp_commit)
+                commit_id = f"commit-{commit_hash[:16]}"
+
+            # Create versioned markdown file
+            safe_name = topic_name.lower().replace(' ', '_').replace("'", '').replace('"', '')
+            markdown_filename = f"{safe_name}_{commit_id}.md"
+            markdown_path = markdown_manager.knowledge_dir / markdown_filename
+
+            # Convert topic to markdown
+            markdown_content = markdown_manager.topic_to_markdown_content(topic)
+
+            # Compute content hash
+            content_hash = hashlib.sha256(markdown_content.encode('utf-8')).hexdigest()[:16]
+
+            # Create frontmatter
+            frontmatter = {
+                'topic': topic_name,
+                'commit_id': commit_id,
+                'content_hash': content_hash,
+                'version': topic.version,
+                'created_at': topic.created_at,
+                'last_modified': topic.last_modified,
+                'mastery_level': topic.mastery_level
+            }
+
+            # If this commit has integrity data (from COMMIT_INTEGRITY)
+            for commit in context.commit_history:
+                if commit.get('commit_id') == commit_id:
+                    frontmatter['commit_hash'] = commit.get('commit_hash', '')
+                    frontmatter['parent_commit'] = commit.get('parent_commit_id', '')
+                    frontmatter['participants'] = commit.get('participants', [])
+                    frontmatter['approved_by'] = commit.get('approved_by', [])
+                    frontmatter['consensus'] = commit.get('consensus', 'unanimous')
+                    frontmatter['signatures'] = commit.get('signatures', {})
+                    break
+
+            # Write markdown file
+            full_content = markdown_manager.build_markdown_with_frontmatter(
+                frontmatter,
+                markdown_content
+            )
+            markdown_path.write_text(full_content, encoding='utf-8')
+
+            # Update JSON metadata
+            data['knowledge'][topic_name]['markdown_file'] = f"knowledge/{markdown_filename}"
+            data['knowledge'][topic_name]['commit_id'] = commit_id
+
+            # Clear entries
+            entry_count = len(data['knowledge'][topic_name].get('entries', []))
+            data['knowledge'][topic_name]['entries'] = []
+
+            print(f"  ✓ {topic_name}: Exported {entry_count} entries to {markdown_filename}")
+            changes_made = True
+
+        # STEP 3: Update format_version
+        if 'metadata' not in data:
+            data['metadata'] = {}
+
+        data['metadata']['format_version'] = '2.0'
+        data['metadata']['last_updated'] = datetime.utcnow().isoformat()
+
+        # STEP 4: Save cleaned personal.json
+        if changes_made:
+            # Backup original
+            import shutil
+            backup_path = personal_json_path.with_suffix('.json.v1_backup')
+            shutil.copy(personal_json_path, backup_path)
+            print(f"✓ Backed up to {backup_path}")
+
+            # Save cleaned version
+            with open(personal_json_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            # Log results
+            original_size = backup_path.stat().st_size
+            new_size = personal_json_path.stat().st_size
+            reduction = ((original_size - new_size) / original_size) * 100
+
+            print(f"✓ Schema v2.0 cleanup complete")
+            print(f"  File size: {original_size} → {new_size} bytes ({reduction:.1f}% reduction)")
+        else:
+            print("No changes needed")
+
+    async def _startup_integrity_check(self):
+        """Verify all knowledge commits on startup."""
+        from dpc_protocol.commit_integrity import verify_markdown_integrity
+        from dpc_protocol.crypto import DPC_HOME_DIR
+
+        knowledge_dir = DPC_HOME_DIR / "knowledge"
+        warnings = []
+        verified_count = 0
+
+        # CHECK 1: Verify existing markdown files
+        if knowledge_dir.exists():
+            for markdown_file in knowledge_dir.glob("*_commit-*.md"):
+                result = verify_markdown_integrity(markdown_file, knowledge_dir)
+
+                if result['valid']:
+                    verified_count += 1
+                else:
+                    warnings.extend(result['warnings'])
+
+        # CHECK 2: Detect orphaned markdown references in personal.json
+        context = self.pcm_core.load_context()
+        orphaned_count = 0
+
+        for topic_name, topic in context.knowledge.items():
+            if topic.markdown_file:
+                markdown_path = DPC_HOME_DIR / topic.markdown_file
+
+                if not markdown_path.exists():
+                    orphaned_count += 1
+                    warnings.append({
+                        'file': topic.markdown_file,
+                        'type': 'missing_markdown',
+                        'severity': 'warning',
+                        'topic': topic_name,
+                        'commit_id': getattr(topic, 'commit_id', 'unknown'),
+                        'message': f'Topic "{topic_name}" references deleted markdown file'
+                    })
+
+        # Report results
+        if warnings:
+            # Broadcast warning to UI
+            if self.local_api:
+                await self.local_api.broadcast_event("integrity_warnings", {
+                    'count': len(warnings),
+                    'warnings': warnings
+                })
+
+            print(f"  ⚠️ Knowledge integrity: {len(warnings)} issues found")
+            if orphaned_count > 0:
+                print(f"      - {orphaned_count} topics with missing markdown files")
+            for w in warnings:
+                print(f"    [{w['severity'].upper()}] {w.get('file', w.get('topic'))}: {w['message']}")
+        else:
+            print(f"  ✓ Knowledge integrity verified ({verified_count} commits)")
+
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
@@ -192,6 +419,17 @@ class CoreService:
         print("Starting D-PC Core Service...")
 
         self._shutdown_event = asyncio.Event()
+
+        # Run schema cleanup (one-time migration to v2.0)
+        try:
+            await self._cleanup_schema_v2()
+        except Exception as e:
+            print(f"Schema cleanup error: {e}")
+            # Don't fail startup
+
+        # Run knowledge integrity check
+        print("Running knowledge integrity check...")
+        await self._startup_integrity_check()
 
         # Start all background tasks
         p2p_task = asyncio.create_task(self.p2p_manager.start_server())
@@ -501,23 +739,25 @@ class CoreService:
             })
 
             # Feed to conversation monitor for knowledge extraction (Phase 4.2)
-            if self.auto_knowledge_detection_enabled:
-                try:
-                    monitor = self._get_or_create_conversation_monitor(sender_node_id)
+            # Always buffer messages (even when auto-detection is OFF) to enable manual extraction
+            try:
+                monitor = self._get_or_create_conversation_monitor(sender_node_id)
 
-                    # Create ConvMessage object for monitor
-                    conv_message = ConvMessage(
-                        message_id=message_id,
-                        conversation_id=sender_node_id,
-                        sender_node_id=sender_node_id,
-                        sender_name=self.peer_metadata.get(sender_node_id, {}).get("name", sender_node_id),
-                        text=text,
-                        timestamp=datetime.utcnow().isoformat()
-                    )
+                # Create ConvMessage object for monitor
+                conv_message = ConvMessage(
+                    message_id=message_id,
+                    conversation_id=sender_node_id,
+                    sender_node_id=sender_node_id,
+                    sender_name=self.peer_metadata.get(sender_node_id, {}).get("name", sender_node_id),
+                    text=text,
+                    timestamp=datetime.utcnow().isoformat()
+                )
 
-                    # Feed to monitor (automatic knowledge detection)
-                    proposal = await monitor.on_message(conv_message)
+                # Buffer message (always) and optionally auto-detect
+                proposal = await monitor.on_message(conv_message)
 
+                # Only handle automatic proposals if auto-detection is enabled
+                if self.auto_knowledge_detection_enabled:
                     # If proposal generated, broadcast to UI and start voting
                     if proposal:
                         print(f"[Auto-detect] Knowledge proposal generated for {sender_node_id}")
@@ -525,13 +765,16 @@ class CoreService:
                             "knowledge_commit_proposed",
                             proposal.to_dict()
                         )
+                        # Peer chat - broadcast for collaborative knowledge building
+                        print(f"[Peer Chat] Broadcasting knowledge proposal to peers for consensus")
                         await self.consensus_manager.propose_commit(
                             proposal=proposal,
                             broadcast_func=self._broadcast_to_peers
                         )
-                except Exception as e:
-                    print(f"Error in conversation monitoring: {e}")
-                    # Broadcast extraction failure event to UI
+            except Exception as e:
+                print(f"Error in conversation monitoring: {e}")
+                # Only broadcast extraction failure if auto-detection was enabled
+                if self.auto_knowledge_detection_enabled:
                     await self.local_api.broadcast_event(
                         "knowledge_extraction_failed",
                         {
@@ -632,6 +875,30 @@ class CoreService:
                 self.set_peer_metadata(sender_node_id, name=peer_name)
                 # Notify UI of peer list change so names update
                 await self.on_peer_list_change()
+
+        elif command == "CONTEXT_UPDATED":
+            # Phase 7: Peer notifies that their personal context has changed
+            context_hash = payload.get("context_hash")
+            print(f"Received CONTEXT_UPDATED from {sender_node_id[:20]}... (hash: {context_hash[:8] if context_hash else 'none'}...)")
+
+            # Invalidate cached peer context in all conversation monitors
+            for monitor in self.conversation_monitors.values():
+                monitor.invalidate_peer_context_cache(sender_node_id)
+                print(f"  - Invalidated cache for {sender_node_id[:20]}... in conversation {monitor.conversation_id}")
+
+            # Broadcast event to UI so "Updated" badge appears
+            await self.local_api.broadcast_event("peer_context_updated", {
+                "node_id": sender_node_id,
+                "context_hash": context_hash
+            })
+
+        elif command == "PROPOSE_KNOWLEDGE_COMMIT":
+            # Knowledge commit proposal from peer (forward to consensus manager)
+            await self.consensus_manager.handle_proposal_message(sender_node_id, payload)
+
+        elif command == "VOTE_KNOWLEDGE_COMMIT":
+            # Knowledge commit vote from peer (forward to consensus manager)
+            await self.consensus_manager.handle_vote_message(sender_node_id, payload)
 
         else:
             print(f"Unknown P2P message command: {command}")
@@ -843,6 +1110,53 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def query_ollama_model_info(self, provider_alias: str) -> Dict[str, Any]:
+        """
+        Query Ollama provider for model parameters and info.
+
+        Args:
+            provider_alias: Alias of the Ollama provider to query
+
+        Returns:
+            Dictionary with:
+            - status: "success" or "error"
+            - model_info: Dict with modelfile, parameters, num_ctx, details
+            - message: Error message if failed
+        """
+        try:
+            # Check if provider exists
+            if provider_alias not in self.llm_manager.providers:
+                return {
+                    "status": "error",
+                    "message": f"Provider '{provider_alias}' not found"
+                }
+
+            provider = self.llm_manager.providers[provider_alias]
+
+            # Check if it's an Ollama provider
+            from dpc_client_core.llm_manager import OllamaProvider
+            if not isinstance(provider, OllamaProvider):
+                return {
+                    "status": "error",
+                    "message": f"Provider '{provider_alias}' is not an Ollama provider (type: {type(provider).__name__})"
+                }
+
+            # Query model info
+            model_info = await provider.get_model_info()
+
+            return {
+                "status": "success",
+                "model_info": model_info,
+                "provider_alias": provider_alias,
+                "model": provider.model
+            }
+
+        except Exception as e:
+            return {
+                "status": "error",
+                "message": f"Failed to query model info: {str(e)}"
+            }
+
     def _validate_providers_config(self, config_dict: Dict[str, Any]) -> list:
         """
         Validate providers configuration structure.
@@ -920,9 +1234,42 @@ class CoreService:
 
         UI Integration: Called when user opens ContextViewer component.
         Returns the full v2.0 PersonalContext with all metadata.
+
+        Loads knowledge from markdown files when markdown_file is set (v2.0 schema).
         """
         try:
+            import hashlib
+            from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+
+            # Load JSON
             context = self.pcm_core.load_context()
+
+            # Load knowledge from markdown files
+            markdown_manager = MarkdownKnowledgeManager()
+
+            for topic_name, topic in context.knowledge.items():
+                if topic.markdown_file:
+                    filepath = DPC_HOME_DIR / topic.markdown_file
+
+                    if filepath.exists():
+                        # Parse markdown with frontmatter
+                        frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(filepath)
+
+                        # Verify integrity
+                        if 'content_hash' in frontmatter:
+                            actual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
+                            if actual_hash != frontmatter['content_hash']:
+                                print(
+                                    f"⚠️ Content hash mismatch for {topic_name}: "
+                                    f"{frontmatter['commit_id']}"
+                                )
+
+                        # Convert markdown to entries
+                        entries = markdown_manager.markdown_to_entries(content)
+                        topic.entries = entries  # In-memory only
+                    else:
+                        print(f"Markdown file not found: {topic.markdown_file}")
+
             return {
                 "status": "success",
                 "context": asdict(context)
@@ -989,10 +1336,19 @@ class CoreService:
                     print("[PersonalContext] Notifying connected peers of name change...")
                     await self._notify_peers_of_name_change(current.profile.name)
 
-            # Emit event to UI
+            # Phase 7: Compute new context hash after saving
+            new_context_hash = self._compute_context_hash()
+
+            # Emit event to UI with new hash (Phase 7: for status indicators)
             await self.local_api.broadcast_event("personal_context_updated", {
-                "message": "Personal context saved successfully"
+                "message": "Personal context saved successfully",
+                "context_hash": new_context_hash
             })
+
+            # Phase 7: Broadcast CONTEXT_UPDATED to all connected peers
+            # This notifies peers to invalidate their cache and re-fetch on next query
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                await self._broadcast_context_updated_to_peers(new_context_hash)
 
             return {
                 "status": "success",
@@ -1383,7 +1739,7 @@ class CoreService:
         """
         for peer_id in list(self.p2p_manager.peers.keys()):
             try:
-                await self.p2p_manager.send_to_peer(peer_id, message)
+                await self.p2p_manager.send_message_to_peer(peer_id, message)
             except Exception as e:
                 print(f"Failed to broadcast to {peer_id}: {e}")
 
@@ -1429,9 +1785,11 @@ class CoreService:
                 participants=participants,
                 llm_manager=self.llm_manager,
                 knowledge_threshold=0.7,  # 70% confidence threshold
-                settings=self.settings  # Pass settings for config (e.g., cultural_perspectives_enabled)
+                settings=self.settings,  # Pass settings for config (e.g., cultural_perspectives_enabled)
+                ai_query_func=self.send_ai_query,  # Enable both local and remote inference for knowledge detection
+                auto_detect=self.auto_knowledge_detection_enabled  # Pass auto-detection setting
             )
-            print(f"Created conversation monitor for {conversation_id} with {len(participants)} participant(s)")
+            print(f"Created conversation monitor for {conversation_id} with {len(participants)} participant(s) (auto_detect={self.auto_knowledge_detection_enabled})")
 
         return self.conversation_monitors[conversation_id]
 
@@ -1467,11 +1825,25 @@ class CoreService:
                     proposal.to_dict()
                 )
 
-                # Start consensus voting
-                await self.consensus_manager.propose_commit(
-                    proposal=proposal,
-                    broadcast_func=self._broadcast_to_peers
-                )
+                # For local_ai conversations, don't broadcast knowledge to peers (privacy)
+                # For peer conversations, broadcast for collaborative consensus
+                if conversation_id == "local_ai":
+                    print(f"[Local AI] Private conversation - knowledge will not be shared with peers")
+                    # Use no-op broadcast function (local-only approval)
+                    async def _no_op_broadcast(message: Dict[str, Any]) -> None:
+                        pass  # Don't send to peers for private conversations
+
+                    await self.consensus_manager.propose_commit(
+                        proposal=proposal,
+                        broadcast_func=_no_op_broadcast
+                    )
+                else:
+                    # Peer conversation - broadcast for collaborative knowledge building
+                    print(f"[Peer Chat] Broadcasting knowledge proposal to peers for consensus")
+                    await self.consensus_manager.propose_commit(
+                        proposal=proposal,
+                        broadcast_func=self._broadcast_to_peers
+                    )
 
                 return {
                     "status": "success",
@@ -1516,6 +1888,10 @@ class CoreService:
             state_text = "enabled" if self.auto_knowledge_detection_enabled else "disabled"
             print(f"Auto knowledge detection {state_text}")
 
+            # Update all existing conversation monitors to reflect the new setting
+            for monitor in self.conversation_monitors.values():
+                monitor.auto_detect = self.auto_knowledge_detection_enabled
+
             return {
                 "status": "success",
                 "enabled": self.auto_knowledge_detection_enabled,
@@ -1524,6 +1900,40 @@ class CoreService:
 
         except Exception as e:
             print(f"Error toggling auto knowledge detection: {e}")
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """Reset conversation history and context tracking for "New Chat" button.
+
+        UI Integration: Called when user clicks "New Chat" button.
+
+        Args:
+            conversation_id: The conversation/chat ID to reset
+
+        Returns:
+            Dict with status
+        """
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            monitor.reset_conversation()
+            print(f"[Reset Conversation] Cleared history for {conversation_id}")
+
+            # Broadcast to UI
+            await self.local_api.broadcast_event(
+                "conversation_reset",
+                {"conversation_id": conversation_id}
+            )
+
+            return {
+                "status": "success",
+                "message": "Conversation reset successfully"
+            }
+
+        except Exception as e:
+            print(f"Error resetting conversation: {e}")
             return {
                 "status": "error",
                 "message": str(e)
@@ -1873,6 +2283,71 @@ class CoreService:
             except Exception as e:
                 print(f"  - Error notifying {peer_id} of name change: {e}")
 
+    async def _on_commit_applied(self, commit):
+        """Callback called after a knowledge commit is applied
+
+        This reloads the local context in p2p_manager and notifies peers.
+
+        Args:
+            commit: The KnowledgeCommit that was applied
+        """
+        try:
+            print(f"[Commit Applied] Reloading local context after commit {commit.commit_id}")
+
+            # Reload context from disk
+            context = self.pcm_core.load_context()
+
+            # Update in P2PManager so context requests return latest data
+            if hasattr(self, 'p2p_manager') and self.p2p_manager:
+                self.p2p_manager.local_context = context
+                print(f"  - Updated p2p_manager.local_context with new knowledge")
+
+            # Compute new context hash
+            new_context_hash = self._compute_context_hash()
+
+            # Broadcast CONTEXT_UPDATED to all connected peers
+            await self._broadcast_context_updated_to_peers(new_context_hash)
+
+            # Also emit event to UI
+            await self.local_api.broadcast_event("personal_context_updated", {
+                "message": f"Knowledge commit applied: {commit.topic}",
+                "context_hash": new_context_hash
+            })
+
+        except Exception as e:
+            print(f"Error in _on_commit_applied: {e}")
+            import traceback
+            traceback.print_exc()
+
+    async def _broadcast_context_updated_to_peers(self, context_hash: str):
+        """
+        Phase 7: Broadcast CONTEXT_UPDATED to all connected peers.
+        Notifies peers that personal context has changed so they can invalidate their cache.
+
+        Args:
+            context_hash: New hash of the updated context
+        """
+        connected_peers = list(self.p2p_manager.peers.keys())
+        if not connected_peers:
+            print("  - No connected peers to notify of context update")
+            return
+
+        print(f"  - Broadcasting CONTEXT_UPDATED to {len(connected_peers)} peer(s)...")
+        for peer_id in connected_peers:
+            try:
+                # Send CONTEXT_UPDATED message
+                message = {
+                    "command": "CONTEXT_UPDATED",
+                    "payload": {
+                        "node_id": self.p2p_manager.node_id,
+                        "context_hash": context_hash
+                    }
+                }
+                await self.p2p_manager.send_message_to_peer(peer_id, message)
+                print(f"    ✓ Notified {peer_id[:20]}... of context update")
+            except Exception as e:
+                print(f"    ✗ Error notifying {peer_id[:20]}... of context update: {e}")
+
     async def _notify_peers_of_provider_changes(self):
         """
         Notify all connected peers of provider changes (e.g., after firewall settings change).
@@ -2144,7 +2619,7 @@ class CoreService:
 
     # --- AI Query Methods ---
 
-    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, **kwargs):
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
 
@@ -2155,48 +2630,157 @@ class CoreService:
             compute_host: Optional node_id of peer to use for inference (None = local)
             model: Optional model name to use
             provider: Optional provider alias to use
-            **kwargs: Additional arguments
+            include_context: If True, includes personal context, device context, and AI instructions (default: True)
+            **kwargs: Additional arguments (including conversation_id)
         """
         print(f"Orchestrating AI query for command_id {command_id}: '{prompt[:50]}...'")
         print(f"  - Compute host: {compute_host or 'local'}")
         print(f"  - Model: {model or 'default'}")
+        print(f"  - Include context: {include_context}")
 
-        # Start with local context
-        aggregated_contexts = {'local': self.p2p_manager.local_context}
+        # Phase 7: Get or create conversation monitor early for history tracking
+        conversation_id = kwargs.get("conversation_id", "local_ai")
+        monitor = self._get_or_create_conversation_monitor(conversation_id)
 
-        # Add device context if available
+        # Phase 7: Check if context window is full (hard limit enforcement)
+        if monitor.token_limit > 0:
+            usage_percent = monitor.current_token_count / monitor.token_limit
+            if usage_percent >= 1.0:
+                error_msg = (
+                    f"Context window is full ({monitor.current_token_count}/{monitor.token_limit} tokens). "
+                    "Please end the session to save knowledge and start a new conversation."
+                )
+                print(f"  - BLOCKED: {error_msg}")
+                raise RuntimeError(error_msg)
+
+        # Phase 7: Compute context hash and determine if context should be included
+        current_context_hash = self._compute_context_hash()
+
+        # Determine if we should include full context in this query
+        should_include_full_context = False
+
+        if include_context:
+            # Include context if:
+            # 1. This is the first message (context not yet included), OR
+            # 2. Context files have changed since last inclusion, OR
+            # 3. User just toggled the checkbox (checkbox state change handled by frontend)
+            if not monitor.context_included or monitor.has_context_changed(current_context_hash):
+                should_include_full_context = True
+                print(f"  - Full context will be included (first message or context changed)")
+            else:
+                print(f"  - Context already included, using conversation history only")
+        else:
+            print(f"  - User disabled context inclusion")
+
+        # Conditionally include local context based on flag
+        aggregated_contexts = {}
+        if should_include_full_context:
+            aggregated_contexts = {'local': self.p2p_manager.local_context}
+
+        # Add device context if available and should include full context
         device_context_data = None
-        if self.device_context:
+        if should_include_full_context and self.device_context:
             device_context_data = self.device_context
 
-        # Fetch remote contexts if context_ids provided
+        # Phase 7: Fetch remote contexts if context_ids provided (with caching)
         peer_device_contexts = {}
         if context_ids:
-            print(f"  - Fetching contexts from {len(context_ids)} peer(s)")
+            print(f"  - Processing contexts from {len(context_ids)} peer(s)")
             for node_id in context_ids:
                 if node_id in self.p2p_manager.peers:
-                    print(f"    • Requesting context from {node_id[:20]}...")
                     try:
-                        # Fetch personal context
-                        context = await self._request_context_from_peer(node_id, prompt)
+                        # Phase 7: Check cache first (avoid network request if cached)
+                        context = monitor.get_cached_peer_context(node_id)
+                        device_ctx = monitor.get_cached_peer_device_context(node_id)
+
                         if context:
-                            aggregated_contexts[node_id] = context
-                            print(f"    ✓ Received context from {node_id[:20]}...")
+                            print(f"    • Using cached context for {node_id[:20]}...")
+                        else:
+                            # Cache miss: Fetch from network
+                            print(f"    • Fetching context from {node_id[:20]}...")
+                            context = await self._request_context_from_peer(node_id, prompt)
+
+                        if context:
+                            # Phase 7: Compute peer context hash
+                            peer_hash = self._compute_peer_context_hash(context)
+
+                            # Include peer context if:
+                            # 1. This is first collaborative message, OR
+                            # 2. Peer's context has changed
+
+                            # Check if this is first fetch vs. actual change
+                            is_first_fetch = node_id not in monitor.peer_context_hashes
+
+                            if monitor.has_peer_context_changed(node_id, peer_hash):
+                                aggregated_contexts[node_id] = context
+                                monitor.update_peer_context_hash(node_id, peer_hash)
+
+                                if is_first_fetch:
+                                    print(f"    ✓ Context from {node_id[:20]}... (included - first fetch)")
+                                else:
+                                    print(f"    ✓ Context from {node_id[:20]}... (included - context changed)")
+                                    # Phase 7: Only broadcast update event if context actually changed (not first fetch)
+                                    await self.local_api.broadcast_event("peer_context_updated", {
+                                        "node_id": node_id,
+                                        "context_hash": peer_hash,
+                                        "conversation_id": conversation_id
+                                    })
+
+                                # Phase 7: Cache the peer context (so we don't fetch again next time)
+                                # Also fetch device context if we don't have it cached
+                                if not device_ctx:
+                                    device_ctx = await self._request_device_context_from_peer(node_id)
+                                    if device_ctx:
+                                        print(f"    ✓ Received device context from {node_id[:20]}...")
+
+                                # Cache both personal and device contexts
+                                monitor.cache_peer_context(node_id, context, device_ctx)
+
+                                # Add device context to result if we have it
+                                if device_ctx:
+                                    peer_device_contexts[node_id] = device_ctx
+
+                            else:
+                                print(f"    ✓ Context from {node_id[:20]}... unchanged (using history)")
+                                # Still add cached device context if available
+                                if device_ctx:
+                                    peer_device_contexts[node_id] = device_ctx
                         else:
                             print(f"    ✗ No context received from {node_id[:20]}...")
-
-                        # Also fetch device context from peer
-                        device_ctx = await self._request_device_context_from_peer(node_id)
-                        if device_ctx:
-                            peer_device_contexts[node_id] = device_ctx
-                            print(f"    ✓ Received device context from {node_id[:20]}...")
                     except Exception as e:
                         print(f"    ✗ Error fetching context from {node_id[:20]}...: {e}")
                 else:
                     print(f"    ✗ Peer {node_id[:20]}... not connected")
 
-        # Assemble final prompt with context
-        final_prompt = self._assemble_final_prompt(aggregated_contexts, prompt, device_context_data, peer_device_contexts)
+        # Phase 7: Update should_include_full_context if peer contexts were added
+        # BugFix: Even if local context wasn't included, if we have peer contexts, we need full context mode
+        if len(aggregated_contexts) > 0 and not should_include_full_context:
+            # Check if we have any peer contexts (non-'local' entries)
+            has_peer_contexts = any(key != 'local' for key in aggregated_contexts.keys())
+            if has_peer_contexts:
+                should_include_full_context = True
+                print(f"  - Including peer contexts in this query (peer context changed)")
+
+        # Phase 7: Add user prompt to conversation history BEFORE assembling prompt
+        monitor.add_message('user', prompt)
+
+        # Phase 7: Get conversation history for message array
+        message_history = monitor.get_message_history()
+
+        # Assemble final prompt (with or without context, message history always included)
+        final_prompt = self._assemble_final_prompt(
+            contexts=aggregated_contexts,
+            clean_prompt=prompt,
+            device_context=device_context_data,
+            peer_device_contexts=peer_device_contexts,
+            message_history=message_history,
+            include_full_context=should_include_full_context
+        )
+
+        # Phase 7: Mark context as included if we just sent it
+        if should_include_full_context:
+            monitor.mark_context_included(current_context_hash)
+            print(f"  - Context marked as included (hash: {current_context_hash[:8]}...)")
 
         response_payload = {}
         status = "OK"
@@ -2218,6 +2802,10 @@ class CoreService:
                 "compute_host": result["compute_host"]
             }
 
+            # Phase 7: Add AI response to conversation history
+            monitor.add_message('assistant', result["response"])
+            print(f"  - AI response added to conversation history (total messages: {len(message_history) + 1})")
+
             # Token tracking (Phase 2) - works for both local and remote inference
             if "tokens_used" in result:
                 conversation_id = kwargs.get("conversation_id", "local_ai")
@@ -2232,18 +2820,23 @@ class CoreService:
 
                 # Check if we should warn about approaching limit
                 if monitor.should_suggest_extraction():
-                    token_usage = monitor.get_token_usage()
+                    # Use the current model's max tokens (not the monitor's cached value)
+                    # to ensure consistency with what the UI displays
+                    current_limit = result.get("model_max_tokens", monitor.token_limit)
+                    current_usage_percent = monitor.current_token_count / current_limit if current_limit > 0 else 0.0
+
                     await self.local_api.broadcast_event("token_limit_warning", {
                         "conversation_id": conversation_id,
-                        "tokens_used": token_usage["tokens_used"],
-                        "token_limit": token_usage["token_limit"],
-                        "usage_percent": token_usage["usage_percent"]
+                        "tokens_used": monitor.current_token_count,
+                        "token_limit": current_limit,
+                        "usage_percent": current_usage_percent
                     })
-                    print(f"[Token Warning] {conversation_id}: {token_usage['usage_percent']:.1%} of context window used")
+                    print(f"[Token Warning] {conversation_id}: {current_usage_percent:.1%} of context window used ({monitor.current_token_count}/{current_limit} tokens)")
 
-                # Include token info in response
-                response_payload["tokens_used"] = result["tokens_used"]
+                # Include token info in response (send cumulative conversation tokens, not per-query)
+                response_payload["tokens_used"] = monitor.current_token_count  # Cumulative conversation tokens
                 response_payload["token_limit"] = result.get("model_max_tokens", 0)
+                response_payload["this_query_tokens"] = result["tokens_used"]  # Per-query tokens (for debugging)
 
         except Exception as e:
             print(f"  - Error during inference: {e}")
@@ -2259,10 +2852,18 @@ class CoreService:
         )
 
         # Feed local AI conversation to monitor (Phase 4.2 - Local AI support)
-        if self.auto_knowledge_detection_enabled and status == "OK":
+        # Always buffer messages (even when auto-detection is OFF) to enable manual extraction
+        if status == "OK":
             try:
                 monitor = self._get_or_create_conversation_monitor("local_ai")
-                print(f"[Monitor] Feeding messages to local_ai monitor (buffer size before: {len(monitor.message_buffer)})")
+                print(f"[Monitor] Buffering messages for local_ai (buffer size before: {len(monitor.message_buffer)})")
+
+                # Update monitor's inference settings to match the query (for knowledge detection)
+                monitor.update_inference_settings(
+                    compute_host=compute_host,
+                    model=model,
+                    provider=provider
+                )
 
                 # Feed user message
                 user_message = ConvMessage(
@@ -2292,47 +2893,100 @@ class CoreService:
 
                 print(f"[Monitor] Buffer size after: {len(monitor.message_buffer)}, Score: {monitor.knowledge_score:.2f}")
 
-                # If proposal generated, broadcast to UI
-                if proposal:
-                    print(f"[Auto-detect] Knowledge proposal generated for local_ai chat")
-                    await self.local_api.broadcast_event(
-                        "knowledge_commit_proposed",
-                        proposal.to_dict()
-                    )
-                    await self.consensus_manager.propose_commit(
-                        proposal=proposal,
-                        broadcast_func=self._broadcast_to_peers
-                    )
+                # Only handle automatic proposals if auto-detection is enabled
+                if self.auto_knowledge_detection_enabled:
+                    # If proposal generated, broadcast to UI
+                    if proposal:
+                        print(f"[Auto-detect] Knowledge proposal generated for local_ai chat")
+                        await self.local_api.broadcast_event(
+                            "knowledge_commit_proposed",
+                            proposal.to_dict()
+                        )
+                        # Local AI - private conversation, don't broadcast to peers
+                        print(f"[Local AI] Private conversation - knowledge will not be shared with peers")
+                        async def _no_op_broadcast(message: Dict[str, Any]) -> None:
+                            pass  # Don't send to peers for private conversations
+
+                        await self.consensus_manager.propose_commit(
+                            proposal=proposal,
+                            broadcast_func=_no_op_broadcast
+                        )
+                    else:
+                        print(f"[Monitor] No proposal yet (need 5 messages for auto-detect)")
                 else:
-                    print(f"[Monitor] No proposal yet (need 5 messages for auto-detect)")
+                    print(f"[Monitor] Auto-detection is OFF - messages buffered for manual extraction")
             except Exception as e:
                 print(f"Error in local AI conversation monitoring: {e}")
                 import traceback
                 traceback.print_exc()
-                # Broadcast extraction failure event to UI
-                await self.local_api.broadcast_event(
-                    "knowledge_extraction_failed",
-                    {
-                        "conversation_id": "local_ai",
-                        "error": str(e),
-                        "reason": "JSON parsing failed or LLM extraction error"
-                    }
-                )
-        elif not self.auto_knowledge_detection_enabled:
-            print(f"[Monitor] Auto-detection is OFF - messages not being monitored")
-        elif status != "OK":
-            print(f"[Monitor] Query failed (status={status}) - not monitoring")
+                # Only broadcast extraction failure if auto-detection was enabled
+                if self.auto_knowledge_detection_enabled:
+                    await self.local_api.broadcast_event(
+                        "knowledge_extraction_failed",
+                        {
+                            "conversation_id": "local_ai",
+                            "error": str(e),
+                            "reason": "JSON parsing failed or LLM extraction error"
+                        }
+                    )
+        else:
+            print(f"[Monitor] Query failed (status={status}) - not buffering messages")
 
-    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str, device_context: dict = None, peer_device_contexts: dict = None) -> str:
+    def _compute_context_hash(self) -> str:
+        """Compute SHA256 hash of personal.json + device_context.json for change detection
+
+        Returns:
+            SHA256 hex digest of combined context files
+        """
+        import hashlib
+        import json
+        from dataclasses import asdict
+
+        hash_obj = hashlib.sha256()
+
+        # Hash personal context
+        if self.p2p_manager.local_context:
+            context_dict = asdict(self.p2p_manager.local_context)
+            context_json = json.dumps(context_dict, sort_keys=True)
+            hash_obj.update(context_json.encode('utf-8'))
+
+        # Hash device context
+        if self.device_context:
+            device_json = json.dumps(self.device_context, sort_keys=True)
+            hash_obj.update(device_json.encode('utf-8'))
+
+        return hash_obj.hexdigest()
+
+    def _compute_peer_context_hash(self, context_obj) -> str:
+        """Compute SHA256 hash of a peer's context for change detection
+
+        Args:
+            context_obj: PersonalContext object from peer
+
+        Returns:
+            SHA256 hex digest of peer context
+        """
+        import hashlib
+        import json
+        from dataclasses import asdict
+
+        context_dict = asdict(context_obj)
+        context_json = json.dumps(context_dict, sort_keys=True)
+        return hashlib.sha256(context_json.encode('utf-8')).hexdigest()
+
+    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str, device_context: dict = None, peer_device_contexts: dict = None, message_history: list = None, include_full_context: bool = True) -> str:
         """Helper method to assemble the final prompt for the LLM with instruction processing.
 
         Phase 2: Incorporates InstructionBlock and bias mitigation from PCM v2.0
+        Phase 7: Supports conversation history and context optimization
 
         Args:
-            contexts: Dict of {source_id: PersonalContext}
-            clean_prompt: The user's query
-            device_context: Local device context (optional)
+            contexts: Dict of {source_id: PersonalContext} (only if include_full_context=True)
+            clean_prompt: The user's query (current message)
+            device_context: Local device context (optional, only if include_full_context=True)
             peer_device_contexts: Dict of {peer_id: device_context} for peers (optional)
+            message_history: List of conversation messages (optional, for Phase 7)
+            include_full_context: If True, include context blocks; if False, skip (Phase 7)
         """
         # Extract instruction blocks and bias settings from contexts
         instruction_blocks = []
@@ -2458,13 +3112,35 @@ class CoreService:
                 peer_device_block = f'<DEVICE_CONTEXT source="{source_label}">{special_instructions_text}{peer_device_json}\n</DEVICE_CONTEXT>'
                 context_blocks.append(peer_device_block)
 
-        final_prompt = (
-            f"{system_instruction}\n\n"
-            f"--- CONTEXTUAL DATA ---\n"
-            f'{"\n\n".join(context_blocks)}\n'
-            f"--- END OF CONTEXTUAL DATA ---\n\n"
-            f"USER QUERY: {clean_prompt}"
-        )
+        # Phase 7: Build prompt with optional context and conversation history
+        if include_full_context and context_blocks:
+            # Include full context (first message or context changed)
+            final_prompt = (
+                f"{system_instruction}\n\n"
+                f"--- CONTEXTUAL DATA ---\n"
+                f'{"\n\n".join(context_blocks)}\n'
+                f"--- END OF CONTEXTUAL DATA ---\n\n"
+            )
+        else:
+            # No context or context already included in previous messages
+            final_prompt = f"{system_instruction}\n\n"
+
+        # Phase 7: Add conversation history if provided
+        if message_history and len(message_history) > 0:
+            # Build conversation history section
+            history_lines = []
+            for msg in message_history:
+                role = msg.get('role', 'unknown').upper()
+                content = msg.get('content', '')
+                history_lines.append(f"{role}: {content}")
+
+            final_prompt += "--- CONVERSATION HISTORY ---\n"
+            final_prompt += "\n\n".join(history_lines)
+            final_prompt += "\n--- END OF CONVERSATION HISTORY ---\n\n"
+        else:
+            # No history, just the current query
+            final_prompt += f"USER QUERY: {clean_prompt}"
+
         return final_prompt
 
     def _build_bias_aware_system_instruction(
