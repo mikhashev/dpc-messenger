@@ -1,6 +1,7 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
 > **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.8.0
+> **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
 ---
@@ -516,6 +517,19 @@ Special thanks to all contributors and early testers!
 | **Mobile Clients** | 🔲 Planned (Phase 2) |
 | **Test Coverage** | 🚧 In Progress |
 | **Documentation** | ✅ Good |
+
+---
+
+## 💝 Support Development
+
+D-PC Messenger is developed with the assistance of AI-powered tools to accelerate innovation and maintain code quality. If you find this project valuable and would like to support its continued development and promotion, consider making a donation:
+
+**Cryptocurrency Donations:**
+- **Bitcoin:** `bc1qfev88vx2yem48hfj04udjgn3938afg5yvdr92x`
+- **Ethereum:** `0xB019Ae32a98fd206881f691fFe021A2B2520Ce9d`
+- **TON:** `UQDWa0-nCyNM1jghk1PBRcjBt4Lxvs86wflNGHHQtxfyx-8J`
+
+Your support helps cover AI-assisted development costs and enables faster delivery of new features. Every contribution, no matter the size, is deeply appreciated and directly contributes to building privacy-first infrastructure for human-AI collaboration.
 
 ---
 
