@@ -67,6 +67,7 @@ If this vision resonates with you, let's connect:
 - 💾 **Encrypted Backups** - AES-256-GCM encrypted backups with no backdoors ([guide](./docs/BACKUP_RESTORE.md))
 - 🤝 **Human-AI Collaboration** - Work with your AI assistant, then share contexts with trusted peers so their AIs can contribute too
 - 💬 **Conversation History** - Full conversational continuity with smart context optimization (60-80% token savings)
+- 📝 **Rich Markdown Rendering** - AI responses display with GitHub-style formatting, intelligent caching (50-200x faster)
 - 📚 **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - 🏠 **Local-First** - Your data stays on your device
 - 🌐 **Internet-Wide** - Connect to anyone, anywhere via WebRTC
@@ -370,7 +371,7 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ## 🛣️ Roadmap
 
-### Phase 1: Federated MVP ✅ (Completed - v0.7.0)
+### Phase 1: Federated MVP ✅ (Completed - v0.8.0)
 - ✅ Direct TLS P2P connections
 - ✅ WebRTC with NAT traversal
 - ✅ Federation Hub for discovery
@@ -513,7 +514,7 @@ Special thanks to all contributors and early testers!
 | **Hub Server** | ✅ Production Ready |
 | **Crypto Identity** | ✅ v0.5.0 |
 | **Knowledge Architecture** | ✅ v2.0 (Phase 4.2 Complete) |
-| **Desktop Client** | ✅ Beta (v0.7.0) |
+| **Desktop Client** | ✅ Beta (v0.8.0) |
 | **Mobile Clients** | 🔲 Planned (Phase 2) |
 | **Test Coverage** | 🚧 In Progress |
 | **Documentation** | ✅ Good |

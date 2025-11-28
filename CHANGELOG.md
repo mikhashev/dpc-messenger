@@ -5,7 +5,7 @@ All notable changes to D-PC Messenger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.8.0] - 2025-11-28
 
 ### Added
 - **Markdown rendering for AI responses** - AI messages now display with rich markdown formatting
@@ -61,13 +61,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **P2PManager broadcast error** - Fixed `AttributeError: 'P2PManager' object has no attribute 'send_to_peer'` by using correct method name `send_message_to_peer()`
 - **Unused CSS selector warning** - Removed unused `.link-btn` selector from `ContextViewer.svelte`
 
-### Changed
-- **UI cleanup** - Removed initial greeting messages from AI chats (both local and custom provider chats now start with empty history)
-- **Hub login section** - Moved Hub login buttons to appear directly below Hub status in node-info card for better visual hierarchy
+### Added
 
-## [1.0.0] - 2025-11-26
-
-### Added - Personal Context Schema v2.0 (Modular File System)
+**Personal Context Schema v2.0 (Modular File System)**
 
 #### Core Features
 - **Minimal personal.json** - Profile + metadata only (~3-5 KB instead of 26 KB)
@@ -227,14 +223,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Consensus integration
   - Testing checklist
 
-### Changed
-- **personal.json** - Now references external files via `metadata.external_files`
-- **Knowledge storage** - Entries stored in markdown files, not JSON
-- **Schema version** - Upgraded from v1.x to v2.0
-
-## [0.9.0] - 2025-11-26
-
-### Added - Cryptographic Commit Integrity System (Phase 8)
+**Cryptographic Commit Integrity System (Phase 8)**
 
 #### Core Features
 - **Hash-Based Commit IDs** (Git-style content-addressable storage)
@@ -410,12 +399,7 @@ signatures:
   - Security considerations
   - FAQ
 
-### Fixed
-- Filename sanitization for cross-platform compatibility (removes colons and invalid characters)
-
-## [0.8.0] - 2025-11-25
-
-### Added - Conversation History & Context Optimization (Phase 7)
+**Conversation History & Context Optimization (Phase 7)**
 
 #### Core Features
 - **Full Conversation History Support**
@@ -566,6 +550,18 @@ signatures:
 - Frontend hash tracking is per-conversation and persists across tab switches
 - "Updated" badges use CSS animations for smooth visual feedback
 - Hard limit enforcement prevents context window overflow errors
+
+### Changed
+- **personal.json** - Now references external files via `metadata.external_files`
+- **Knowledge storage** - Entries stored in markdown files, not JSON
+- **Schema version** - Upgraded from v1.x to v2.0
+- **UI cleanup** - Removed initial greeting messages from AI chats (both local and custom provider chats now start with empty history)
+- **Hub login section** - Moved Hub login buttons to appear directly below Hub status in node-info card for better visual hierarchy
+
+### Fixed (Additional)
+- **Filename sanitization** - Cross-platform compatibility (removes colons and invalid characters)
+
+---
 
 ## [0.7.0] - 2025-11-24
 
