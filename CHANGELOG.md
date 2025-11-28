@@ -5,6 +5,43 @@ All notable changes to D-PC Messenger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **External IP discovery via STUN servers** - Your public IP address now displays automatically in the UI
+  - New standalone STUN discovery module (`stun_discovery.py`) for detecting external IP without WebRTC connections
+  - Background task runs on startup and refreshes every 5 minutes
+  - External URIs displayed in new "External (Internet)" section with green badges
+  - Discovers public IP from STUN servers for sharing with remote peers via email/messaging
+  - Works immediately on startup - no WebRTC connection required
+  - Automatic IP change detection and UI updates
+
+- **All STUN/TURN servers now configurable in config.ini** - No hardcoded servers in production code
+  - STUN servers configurable in `[webrtc] stun_servers` in `~/.dpc/config.ini`
+  - TURN servers configurable in `[turn] servers` (with credentials) and `fallback_servers` (public)
+  - Users can customize servers for regional availability (e.g., China, Russia)
+  - Environment variable overrides: `DPC_WEBRTC_STUN_SERVERS`, `DPC_TURN_SERVERS`
+  - Maximum flexibility for international users facing regional server blocks
+
+- **Configurable max_tokens for AI providers** - Customize response length per provider
+  - Anthropic providers now read `max_tokens` from `providers.json` configuration
+  - Defaults to 4096 tokens if not specified
+  - Set different limits for different providers (e.g., haiku=2048, sonnet=8192, opus=16384)
+  - Omit or set to `null` to use model's maximum token limit
+  - No more truncated AI responses with Anthropic Claude
+
+### Changed
+- **STUN discovery architecture** - Dual-source external IP detection
+  - Priority: Standalone STUN discovery (always available) → WebRTC ICE candidates (when active)
+  - Avoids duplicate IPs from multiple sources
+  - Faster initial discovery (5 seconds vs waiting for WebRTC connection)
+  - `P2PManager.get_external_ips()` aggregates from both WebRTC peers and standalone discovery
+
+### Fixed
+- **Settings validation** - STUN servers return empty list (not hardcoded defaults) if config missing
+  - Clear warning message: "No STUN servers configured in config.ini"
+  - Forces users to configure servers explicitly for their region
+
 ## [0.8.0] - 2025-11-28
 
 ### Added

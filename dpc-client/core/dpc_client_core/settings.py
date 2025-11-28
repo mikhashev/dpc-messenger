@@ -83,8 +83,19 @@ class Settings:
         }
 
         self._config['turn'] = {
-            'username': '',  # Leave empty - set via environment variable DPC_TURN_USERNAME
-            'credential': '',  # Leave empty - set via environment variable DPC_TURN_CREDENTIAL
+            'username': '',  # Leave empty or set via environment variable DPC_TURN_USERNAME
+            'credential': '',  # Leave empty or set via environment variable DPC_TURN_CREDENTIAL
+            # TURN server URLs (used only when username/credential are set)
+            'servers': 'stun:stun.relay.metered.ca:80,turn:global.relay.metered.ca:80,turn:global.relay.metered.ca:80?transport=tcp,turn:global.relay.metered.ca:443,turns:global.relay.metered.ca:443?transport=tcp',
+            # Fallback TURN servers (public, may be unreliable)
+            'fallback_servers': 'turn:openrelay.metered.ca:80,turn:openrelay.metered.ca:443,turn:openrelay.metered.ca:443?transport=tcp',
+            'fallback_username': 'openrelayproject',
+            'fallback_credential': 'openrelayproject'
+        }
+
+        self._config['webrtc'] = {
+            # STUN servers for NAT traversal (discovering public IP)
+            'stun_servers': 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:global.stun.twilio.com:3478,stun:stun.rtc.yandex.net:3478'
         }
 
         self._config['system'] = {
@@ -210,6 +221,68 @@ class Settings:
         """Check if cultural perspective analysis is enabled in knowledge extraction."""
         value = self.get('knowledge', 'cultural_perspectives_enabled', 'false')
         return value.lower() in ('true', '1', 'yes')
+
+    def get_stun_servers(self) -> list[str]:
+        """
+        Get list of STUN server URLs from configuration.
+
+        Returns:
+            List of STUN server URLs (e.g., ['stun:stun.l.google.com:19302', ...])
+        """
+        try:
+            servers_str = self.get('webrtc', 'stun_servers')
+            # Split by comma and strip whitespace
+            servers = [s.strip() for s in servers_str.split(',') if s.strip()]
+            return servers if servers else []
+        except KeyError:
+            # If config is missing, return empty list (no hardcoded defaults)
+            print("[Warning] No STUN servers configured in config.ini [webrtc] stun_servers")
+            return []
+
+    def get_turn_servers(self) -> list[str]:
+        """
+        Get list of TURN server URLs from configuration.
+        Used when TURN credentials are provided.
+
+        Returns:
+            List of TURN server URLs (e.g., ['turn:global.relay.metered.ca:80', ...])
+        """
+        try:
+            servers_str = self.get('turn', 'servers', '')
+            servers = [s.strip() for s in servers_str.split(',') if s.strip()]
+            return servers
+        except KeyError:
+            return []
+
+    def get_turn_fallback_servers(self) -> list[str]:
+        """
+        Get list of fallback TURN server URLs (public servers).
+
+        Returns:
+            List of fallback TURN server URLs
+        """
+        try:
+            servers_str = self.get('turn', 'fallback_servers', '')
+            servers = [s.strip() for s in servers_str.split(',') if s.strip()]
+            return servers
+        except KeyError:
+            return []
+
+    def get_turn_fallback_username(self) -> Optional[str]:
+        """Get fallback TURN server username."""
+        try:
+            username = self.get('turn', 'fallback_username', '')
+            return username if username else None
+        except KeyError:
+            return None
+
+    def get_turn_fallback_credential(self) -> Optional[str]:
+        """Get fallback TURN server credential."""
+        try:
+            credential = self.get('turn', 'fallback_credential', '')
+            return credential if credential else None
+        except KeyError:
+            return None
 
     def set(self, section: str, key: str, value: str):
         """Set a configuration value in the config file."""

@@ -96,6 +96,30 @@ class P2PManager:
         if self.on_peer_list_change:
             await self.on_peer_list_change()
 
+    def get_external_ips(self) -> list[str]:
+        """
+        Get external IP addresses discovered via STUN servers from WebRTC connections.
+
+        Returns:
+            List of unique external IP addresses
+        """
+        external_ips = set()
+
+        # Check all WebRTC peer connections
+        for peer in self.peers.values():
+            if isinstance(peer, WebRTCPeerConnection):
+                external_ip = peer.get_external_ip()
+                if external_ip:
+                    external_ips.add(external_ip)
+
+        # Also check pending WebRTC connections
+        for peer in self._pending_webrtc.values():
+            external_ip = peer.get_external_ip()
+            if external_ip:
+                external_ips.add(external_ip)
+
+        return sorted(list(external_ips))
+
     # --- Direct TLS Connection Methods (existing code) ---
 
     async def start_server(self, host: str = "0.0.0.0", port: int = 8888):

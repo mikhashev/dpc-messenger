@@ -22,6 +22,7 @@ from .peer_cache import PeerCache
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
+from .stun_discovery import discover_external_ip
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
     load_instructions, save_instructions, migrate_instructions_from_personal_context
@@ -135,6 +136,9 @@ class CoreService:
 
         # Knowledge extraction settings
         self.auto_knowledge_detection_enabled: bool = False  # Can be toggled by user (matches UI default)
+
+        # External IP discovery (via STUN)
+        self._external_ip: str | None = None  # Will be populated by STUN discovery
 
         self._is_running = False
         self._background_tasks = set()
@@ -440,6 +444,11 @@ class CoreService:
         api_task.set_name("local_api")
         self._background_tasks.add(api_task)
 
+        # Start STUN discovery task (background, non-blocking)
+        stun_task = asyncio.create_task(self._discover_external_ip())
+        stun_task.set_name("stun_discovery")
+        self._background_tasks.add(stun_task)
+
         # Wait a moment for P2P server to start
         await asyncio.sleep(0.5)
 
@@ -527,7 +536,47 @@ class CoreService:
         await self.local_api.stop()
         await self.hub_client.close()
         print("D-PC Core Service shut down.")
-    
+
+    async def _discover_external_ip(self):
+        """
+        Background task to discover external IP address via STUN servers.
+        Runs on startup and periodically refreshes.
+        """
+        try:
+            # Get STUN servers from configuration
+            stun_servers = self.settings.get_stun_servers()
+
+            # Perform initial discovery
+            print("[STUN Discovery] Discovering external IP address...")
+            external_ip = await discover_external_ip(stun_servers, timeout=5.0)
+
+            if external_ip:
+                self._external_ip = external_ip
+                print(f"[OK] External IP discovered: {external_ip}")
+
+                # Notify UI of status update (to refresh external URIs)
+                await self.local_api.broadcast_event("status_update", await self.get_status())
+            else:
+                print("[Warning] Could not discover external IP via STUN servers")
+
+            # Periodically refresh external IP (every 5 minutes)
+            while self._is_running:
+                await asyncio.sleep(300)  # 5 minutes
+
+                external_ip = await discover_external_ip(stun_servers, timeout=5.0)
+
+                if external_ip and external_ip != self._external_ip:
+                    print(f"[STUN Discovery] External IP changed: {self._external_ip} → {external_ip}")
+                    self._external_ip = external_ip
+
+                    # Notify UI
+                    await self.local_api.broadcast_event("status_update", await self.get_status())
+
+        except asyncio.CancelledError:
+            print("[STUN Discovery] Task cancelled")
+        except Exception as e:
+            print(f"[STUN Discovery] Error: {e}")
+
     async def _monitor_hub_connection(self):
         """Background task to monitor hub connection and auto-reconnect if needed."""
         while self._is_running:
@@ -1003,6 +1052,31 @@ class CoreService:
                 "uri": uri
             })
 
+        # Get external IPs discovered via STUN servers
+        # Priority: 1) Standalone STUN discovery (always available)
+        #           2) WebRTC connection STUN discovery (only when WebRTC active)
+        external_ips = []
+
+        # Add standalone STUN-discovered IP first (if available)
+        if self._external_ip:
+            external_ips.append(self._external_ip)
+
+        # Add WebRTC-discovered IPs (avoid duplicates)
+        webrtc_ips = self.p2p_manager.get_external_ips()
+        for ip in webrtc_ips:
+            if ip not in external_ips:
+                external_ips.append(ip)
+
+        # Build external URIs
+        external_uris = []
+        for ip in external_ips:
+            uri = f"dpc://{ip}:{dpc_port}?node_id={self.p2p_manager.node_id}"
+            external_uris.append({
+                "ip": ip,
+                "port": dpc_port,
+                "uri": uri
+            })
+
         return {
             "node_id": self.p2p_manager.node_id,
             "hub_status": "Connected" if hub_connected else "Disconnected",
@@ -1017,6 +1091,9 @@ class CoreService:
             # Direct TLS connection URIs
             "local_ips": local_ips,
             "dpc_uris": dpc_uris,
+            # External URIs (from STUN server discovery)
+            "external_ips": external_ips,
+            "external_uris": external_uris,
         }
     
     async def list_providers(self) -> Dict[str, Any]:

@@ -740,7 +740,7 @@
             </button>
           </div>
 
-          <!-- Direct TLS Connection URIs (NEW - Redesigned) -->
+          <!-- Direct TLS Connection URIs (Local Network) -->
           {#if $nodeStatus.dpc_uris && $nodeStatus.dpc_uris.length > 0}
             <div class="dpc-uris-section">
               <details class="uri-details" open>
@@ -762,6 +762,42 @@
                           alert('✓ URI copied!');
                         }}
                         title="Copy URI"
+                      >
+                        📋
+                      </button>
+                    </div>
+                    <details class="uri-full-details">
+                      <summary class="show-uri-btn">Full URI ▼</summary>
+                      <code class="uri-full-text">{uri}</code>
+                    </details>
+                  </div>
+                {/each}
+              </details>
+            </div>
+          {/if}
+
+          <!-- External URIs (From STUN Servers) -->
+          {#if $nodeStatus.external_uris && $nodeStatus.external_uris.length > 0}
+            <div class="dpc-uris-section">
+              <details class="uri-details" open>
+                <summary class="uri-summary">
+                  <span class="uri-icon">🌐</span>
+                  <span class="uri-title">External (Internet) ({$nodeStatus.external_uris.length})</span>
+                </summary>
+                <div class="uri-help-text">
+                  Your public IP address(es) discovered via STUN servers
+                </div>
+                {#each $nodeStatus.external_uris as { ip, uri }}
+                  <div class="uri-card">
+                    <div class="uri-card-header">
+                      <span class="ip-badge external">{ip}</span>
+                      <button
+                        class="copy-btn-icon"
+                        on:click={() => {
+                          navigator.clipboard.writeText(uri);
+                          alert('✓ External URI copied!');
+                        }}
+                        title="Copy External URI"
                       >
                         📋
                       </button>
@@ -2412,6 +2448,12 @@
     background: #e7f1ff;
     border-radius: 6px;
     border: 1px solid #b3d7ff;
+  }
+
+  .ip-badge.external {
+    color: #0d6e2b;
+    background: #d1f4e0;
+    border: 1px solid #7fd99f;
   }
 
   .copy-btn-icon {
