@@ -1,101 +1,127 @@
 {
   "profile": {
-    "name": "Bob",
-    "description": "A Linux enthusiast and network engineer.",
+    "name": "Alice Smith",
+    "description": "Software engineer with focus on distributed systems and privacy tech.",
     "core_values": [
+      "Privacy",
       "Open Source",
-      "Simplicity",
-      "Privacy"
+      "Continuous Learning"
     ]
   },
   "knowledge": {
-    "linux_networking": {
-      "summary": "I have experience with iptables, BGP, and network troubleshooting.",
-      "key_books": [
-        {
-          "title": "TCP/IP Illustrated",
-          "author": "W. Richard Stevens",
-          "year": 1994,
-          "key_insights": [
-            "Deep understanding of TCP/IP protocols",
-            "Packet-level analysis techniques"
-          ]
-        }
-      ],
-      "preferred_authors": [
-        "W. Richard Stevens",
-        "Brendan Gregg"
-      ],
-      "entries": [
-        {
-          "content": "Wireshark is my go-to tool for network packet analysis and troubleshooting",
-          "tags": [
-            "networking",
-            "tools",
-            "troubleshooting"
-          ],
-          "source": {
-            "type": "manual_edit",
-            "conversation_id": null,
-            "participants": [],
-            "timestamp": "2025-01-15T10:30:00.000000",
-            "consensus_status": "draft",
-            "approved_by": [],
-            "dissenting_opinions": [],
-            "commit_id": null,
-            "cultural_perspectives_considered": [],
-            "confidence_score": 1.0,
-            "sources_cited": []
-          },
-          "confidence": 1.0,
-          "last_updated": "2025-01-15T10:30:00.000000",
-          "usage_count": 0,
-          "effectiveness_score": 1.0,
-          "review_due": null,
-          "cultural_specific": false,
-          "requires_context": [],
-          "alternative_viewpoints": [
-            "tcpdump is preferred by some for command-line efficiency",
-            "tshark provides scriptable packet analysis"
-          ]
-        }
-      ],
+    "rust_programming": {
+      "summary": "Rust is a systems programming language focused on safety, concurrency, and performance.",
+      "entries": [],
       "mastery_level": "intermediate",
-      "learning_strategies": [
-        "Hands-on lab practice",
-        "Reading RFCs",
-        "Building network topologies in GNS3"
-      ],
+      "version": 1,
+      "created_at": "2025-01-15T10:00:00.000000",
+      "last_modified": "2025-01-15T10:00:00.000000",
+      "markdown_file": "knowledge/rust_programming_commit-abc123def456.md",
+      "commit_id": "commit-abc123def456",
+      "key_books": null,
+      "preferred_authors": null,
+      "learning_strategies": null
+    },
+    "distributed_systems": {
+      "summary": "Distributed systems enable computation across multiple networked computers with consensus protocols like Raft and Paxos.",
+      "entries": [],
+      "mastery_level": "advanced",
       "version": 1,
       "created_at": "2025-01-10T08:00:00.000000",
-      "last_modified": "2025-01-15T10:30:00.000000",
-      "markdown_file": null
+      "last_modified": "2025-01-18T14:30:00.000000",
+      "markdown_file": "knowledge/distributed_systems_commit-def789ghi012.md",
+      "commit_id": "commit-def789ghi012",
+      "key_books": null,
+      "preferred_authors": null,
+      "learning_strategies": null
+    },
+    "webrtc_nat_traversal": {
+      "summary": "WebRTC uses ICE (Interactive Connectivity Establishment) with STUN and TURN servers for NAT traversal in peer-to-peer connections.",
+      "entries": [],
+      "mastery_level": "intermediate",
+      "version": 1,
+      "created_at": "2025-01-20T16:45:00.000000",
+      "last_modified": "2025-01-20T16:45:00.000000",
+      "markdown_file": "knowledge/webrtc_nat_traversal_commit-ghi345jkl678.md",
+      "commit_id": "commit-ghi345jkl678",
+      "key_books": null,
+      "preferred_authors": null,
+      "learning_strategies": null
     }
   },
   "preferences": null,
   "cognitive_profile": null,
-  "version": 2,
-  "last_commit_id": null,
-  "last_commit_message": null,
-  "last_commit_timestamp": "2025-01-15T10:30:00.000000",
-  "commit_history": [],
-  "metadata": {
-    "created": "2025-01-10T08:00:00.000000",
-    "last_updated": "2025-01-15T10:30:00.000000",
-    "storage": "local",
-    "format_version": "2.0",
-    "external_files": {
-      "instructions": {
-        "file": "instructions.json",
-        "description": "AI behavior instructions and bias mitigation settings",
-        "last_updated": "2025-01-15T10:30:00.000000"
+  "version": 3,
+  "last_commit_id": "commit-ghi345jkl678",
+  "last_commit_message": "WebRTC uses ICE (Interactive Connectivity Establishment) with STUN and TURN servers for NAT traversal in peer-to-peer connections.",
+  "last_commit_timestamp": "2025-01-20T16:45:00.000000",
+  "commit_history": [
+    {
+      "commit_id": "commit-abc123def456",
+      "commit_hash": "abc123def456789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+      "timestamp": "2025-01-15T10:00:00.000000",
+      "message": "Rust is a systems programming language focused on safety, concurrency, and performance.",
+      "participants": [
+        "dpc-node-alice-example"
+      ],
+      "consensus": "unanimous",
+      "approved_by": [
+        "dpc-node-alice-example"
+      ],
+      "signatures": {
+        "dpc-node-alice-example": "BASE64_SIGNATURE_EXAMPLE_REDACTED_FOR_PRIVACY=="
       }
     },
+    {
+      "commit_id": "commit-def789ghi012",
+      "commit_hash": "def789ghi012345def789ghi012345def789ghi012345def789ghi012345def78",
+      "timestamp": "2025-01-18T14:30:00.000000",
+      "message": "Distributed systems enable computation across multiple networked computers with consensus protocols like Raft and Paxos.",
+      "participants": [
+        "dpc-node-alice-example"
+      ],
+      "consensus": "unanimous",
+      "approved_by": [
+        "dpc-node-alice-example"
+      ],
+      "signatures": {
+        "dpc-node-alice-example": "BASE64_SIGNATURE_EXAMPLE_REDACTED_FOR_PRIVACY=="
+      }
+    },
+    {
+      "commit_id": "commit-ghi345jkl678",
+      "commit_hash": "ghi345jkl678901ghi345jkl678901ghi345jkl678901ghi345jkl678901ghi34",
+      "timestamp": "2025-01-20T16:45:00.000000",
+      "message": "WebRTC uses ICE (Interactive Connectivity Establishment) with STUN and TURN servers for NAT traversal in peer-to-peer connections.",
+      "participants": [
+        "dpc-node-alice-example"
+      ],
+      "consensus": "unanimous",
+      "approved_by": [
+        "dpc-node-alice-example"
+      ],
+      "signatures": {
+        "dpc-node-alice-example": "BASE64_SIGNATURE_EXAMPLE_REDACTED_FOR_PRIVACY=="
+      }
+    }
+  ],
+  "metadata": {
+    "created": "2025-01-10T08:00:00.000000",
+    "last_updated": "2025-01-20T16:45:00.000000",
+    "storage": "local",
+    "format_version": "2.0",
     "external_contexts": {
       "device_context": {
         "file": "device_context.json",
-        "schema_version": "1.0",
-        "last_updated": "2025-01-15T10:30:00.000000"
+        "schema_version": "1.1",
+        "last_updated": "2025-01-20T16:45:00.000000"
+      }
+    },
+    "external_files": {
+      "instructions": {
+        "file": "instructions.json",
+        "description": "AI behavior instructions",
+        "last_updated": "2025-01-15T10:00:00.000000"
       }
     }
   }

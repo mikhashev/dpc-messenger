@@ -1,26 +1,29 @@
 # D-PC Client
 
 > **Desktop application for private P2P messaging with collaborative AI**
-> 
-> **Status:** Beta | **License:** GPL v3 | **Version:** 0.5.0
+>
+> **Status:** Beta | **License:** GPL v3 | **Version:** 0.8.0
 
 The D-PC Client is a desktop application built with Tauri (Rust) and SvelteKit that enables secure peer-to-peer communication with collaborative AI capabilities. It supports both Direct TLS connections (local network) and WebRTC connections (internet-wide).
 
 ---
 
-## 🌟 Features
+## Features
 
-- 🔒 **End-to-End Encrypted P2P** - Direct connections between peers
-- 🌐 **WebRTC** - Connect across NAT/firewalls using STUN/TURN
-- 🏠 **Local AI** - Ollama, GPT, Claude integration
-- 🤝 **Context Sharing** - Collaborate using shared personal contexts
-- 🛡️ **Context Firewall** - Granular permission control
-- 🔑 **Cryptographic Identity** - Automatic node_id registration
-- ⚡ **Lightweight** - ~150MB memory footprint
+- **End-to-End Encrypted P2P** - Direct connections between peers
+- **WebRTC** - Connect across NAT/firewalls using STUN/TURN
+- **IPv6 Support** - Dual-stack connectivity (IPv4 + IPv6)
+- **Local AI** - Ollama, GPT, Claude integration
+- **Context Sharing** - Collaborate using shared personal contexts
+- **Knowledge Commits** - Git-like versioned knowledge with bias mitigation
+- **Context Firewall** - Granular permission control
+- **Cryptographic Identity** - Automatic node_id registration
+- **Encrypted Backups** - AES-256-GCM with user-controlled passphrases
+- **Lightweight** - ~150MB memory footprint
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -60,7 +63,7 @@ The D-PC Client is a desktop application built with Tauri (Rust) and SvelteKit t
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -84,12 +87,16 @@ poetry run python run_service.py
 ```
 
 **Configuration Files Created:**
-- `~/.dpc/node.key` - Private key (keep secret!)
-- `~/.dpc/node.crt` - Public certificate
-- `~/.dpc/node.id` - Your node ID
-- `~/.dpc/providers.toml` - AI provider settings
-- `~/.dpc/.dpc_access` - Context firewall rules
-- `~/.dpc/personal.json` - Your personal context
+- `~/.dpc/node.key` - RSA private key (keep secret!)
+- `~/.dpc/node.crt` - X.509 self-signed certificate
+- `~/.dpc/node.id` - Your cryptographic node ID (e.g., dpc-node-e07fb59e46f34940)
+- `~/.dpc/config.ini` - Client configuration (ports, STUN/TURN servers, OAuth settings)
+- `~/.dpc/providers.json` - AI provider settings (Ollama, OpenAI, Anthropic)
+- `~/.dpc/privacy_rules.json` - Context firewall rules (what peers can access)
+- `~/.dpc/personal.json` - Your personal context (PCM v2.0 with knowledge commits)
+- `~/.dpc/device_context.json` - Auto-collected hardware/software info (schema v1.1)
+- `~/.dpc/instructions.json` - AI behavior instructions and bias mitigation settings
+- `~/.dpc/known_peers.json` - Cached peer information
 
 #### 2. Frontend Setup (UI)
 
@@ -108,51 +115,68 @@ npm run tauri build
 
 ---
 
-## 🔧 Configuration
+## Configuration
 
-### Any AI Providers (`~/.dpc/providers.toml`)
+### AI Providers (`~/.dpc/providers.json`)
 
-```toml
-# Default provider (used if not specified)
-default_provider = "ollama_local"
-
-# Ollama (local AI)
-[providers.ollama_local]
-type = "ollama"
-base_url = "http://localhost:11434"
-model = "llama3.2:latest"
-
-# OpenAI
-[providers.openai]
-type = "openai"
-api_key = "sk-..."  # Your API key
-model = "gpt-4"
-
-# Anthropic Claude
-[providers.anthropic]
-type = "anthropic"
-api_key = "sk-ant-..."  # Your API key
-model = "claude-3-5-sonnet-20241022"
+```json
+{
+  "default_provider": "ollama_local",
+  "providers": {
+    "ollama_local": {
+      "type": "ollama",
+      "base_url": "http://localhost:11434",
+      "model": "llama3.2:latest"
+    },
+    "openai_gpt4": {
+      "type": "openai",
+      "api_key": "sk-...",
+      "model": "gpt-4",
+      "max_tokens": 4096
+    },
+    "claude_sonnet": {
+      "type": "anthropic",
+      "api_key": "sk-ant-...",
+      "model": "claude-3-5-sonnet-20241022",
+      "max_tokens": 8192
+    }
+  }
+}
 ```
 
-### Context Firewall (`~/.dpc/.dpc_access`)
+### Context Firewall (`~/.dpc/privacy_rules.json`)
 
 Control what information peers can access:
 
-```toml
-# Hub access (public profile)
-[hub]
-public.json:name = "allow"
-public.json:description = "allow"
-public.json:expertise = "allow"
-
-# Peer access (private connections)
-[peer.dpc-node-friend123]
-personal.json:projects = "allow"
-personal.json:skills = "allow"
-
-[peer.dpc-node-colleague456]
-work.json:current_project = "allow"
+```json
+{
+  "hub": {
+    "personal.json:profile.name": "allow",
+    "personal.json:profile.description": "allow"
+  },
+  "node_groups": {
+    "friends": ["dpc-node-alice-123", "dpc-node-bob-456"],
+    "coworkers": ["dpc-node-charlie-789"]
+  },
+  "groups": {
+    "friends": {
+      "personal.json:profile.*": "allow",
+      "personal.json:knowledge.*": "allow"
+    }
+  },
+  "nodes": {
+    "dpc-node-alice-123": {
+      "personal.json:*": "allow",
+      "device_context.json:*": "allow"
+    }
+  },
+  "compute": {
+    "enabled": false,
+    "allow_nodes": [],
+    "allow_groups": [],
+    "allowed_models": []
+  }
+}
 ```
 
 ### Hub Connection (`core/dpc_client_core/service.py`)
@@ -170,7 +194,7 @@ self.hub_client = HubClient(api_base_url="https://abc123.ngrok.io")
 
 ---
 
-## 🎮 Usage
+## Usage
 
 ### Running the Application
 
@@ -248,7 +272,7 @@ npm run tauri build
 
 ---
 
-## 🛠️ Development
+## Development
 
 ### Project Structure
 
@@ -318,7 +342,7 @@ npm run format
 
 ---
 
-## 📚 API Reference
+## API Reference
 
 ### WebSocket API (UI ↔ Backend)
 
@@ -365,7 +389,7 @@ The backend exposes a WebSocket server at `ws://127.0.0.1:9999`.
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 ### Backend Issues
 
@@ -477,7 +501,7 @@ class LocalApiServer:
 
 ---
 
-## 🔒 Security
+## Security
 
 ### Best Practices
 
@@ -507,7 +531,7 @@ class LocalApiServer:
 
 ---
 
-## 📊 Performance
+## Performance
 
 ### Resource Usage (Typical)
 
@@ -528,7 +552,7 @@ class LocalApiServer:
 
 ---
 
-## 🚢 Deployment
+## Deployment
 
 ### Desktop Distribution
 
@@ -557,22 +581,37 @@ For organizations deploying to multiple machines:
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions! See the main [CONTRIBUTING.md](../CONTRIBUTING.md) for guidelines.
 
 ### Areas for Contribution
 
-- 🐛 Bug fixes
-- ✨ Feature implementations
-- 📝 Documentation improvements
-- 🧪 Test coverage
-- 🎨 UI/UX enhancements
-- 🌍 Internationalization
+- Bug fixes
+- Feature implementations
+- Documentation improvements
+- Test coverage
+- UI/UX enhancements
+- Internationalization
 
 ---
 
-## 📄 License
+## Documentation
+
+### Protocol & Architecture
+- **[DPTP Specification](../specs/dptp_v1.md)** - Formal protocol documentation
+- **[Protocol Library Docs](../dpc-protocol/README.md)** - API reference for dpc-protocol
+- **[Knowledge Architecture](../docs/KNOWLEDGE_ARCHITECTURE.md)** - Knowledge commit system
+
+### Guides
+- **[Quick Start](../docs/QUICK_START.md)** - 5-minute setup
+- **[WebRTC Setup](../docs/WEBRTC_SETUP_GUIDE.md)** - Production deployment
+- **[Configuration Guide](../docs/CONFIGURATION.md)** - Complete config reference
+- **[Backup & Restore](../docs/BACKUP_RESTORE.md)** - Encrypted backups
+
+---
+
+## License
 
 This component is licensed under **GPL v3**. See [LICENSE](../LICENSE.md) for details.
 
@@ -580,7 +619,7 @@ This component is licensed under **GPL v3**. See [LICENSE](../LICENSE.md) for de
 
 ---
 
-## 📞 Support
+## Support
 
 - **Issues:** [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues)
 - **Discussions:** [GitHub Discussions](https://github.com/mikhashev/dpc-messenger/discussions)
@@ -591,7 +630,7 @@ This component is licensed under **GPL v3**. See [LICENSE](../LICENSE.md) for de
 
 <div align="center">
 
-**[⬅️ Back to Main README](../README.md)** | **[📖 WebRTC Setup Guide](../docs/WEBRTC_SETUP_GUIDE.md)** | **[🚀 Quick Start](../docs/QUICK_START.md)**
+**[Back to Main README](../README.md)** | **[WebRTC Setup Guide](../docs/WEBRTC_SETUP_GUIDE.md)** | **[Quick Start](../docs/QUICK_START.md)**
 
 *Part of the D-PC Messenger project*
 

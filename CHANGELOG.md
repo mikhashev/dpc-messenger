@@ -8,6 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Comprehensive DPTP protocol specification** - Formal documentation at `specs/dptp_v1.md`
+  - Message format, types, and wire protocol details
+  - Node identity system specification (RSA-2048, X.509 certificates)
+  - Connection flows for Direct TLS and WebRTC
+  - Security considerations and implementation guidelines
+  - Complete reference for protocol implementers
+
+- **Protocol library documentation** - Comprehensive README at `dpc-protocol/README.md`
+  - Full API reference for crypto, protocol, and PCM modules
+  - Installation and usage examples with code snippets
+  - Testing guide and development instructions
+  - Links to formal DPTP specification
+
+### Changed
+- **README.md cleanup** - Removed all emojis for more professional presentation
+  - Updated footer with: "A small step for AI, a giant leap for all humanity"
+  - Added DPTP specification link in "For Developers" section
+  - Cleaner, more accessible documentation
+
+- **CLAUDE.md updates** - Added references to new documentation
+  - Link to DPTP specification (`specs/dptp_v1.md`)
+  - Link to protocol library documentation (`dpc-protocol/README.md`)
+  - Updated Important Documentation section
+
+### Added
 - **IPv6 support for direct P2P connections** - Full dual-stack (IPv4 + IPv6) connectivity
   - Dual-stack server binding: Listens on both IPv4 and IPv6 simultaneously
   - Configuration: Set `listen_host = dual` (default), `0.0.0.0` (IPv4 only), or `::` (IPv6 only) in `~/.dpc/config.ini`
