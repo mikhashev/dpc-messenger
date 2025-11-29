@@ -5,6 +5,135 @@ All notable changes to D-PC Messenger will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Comprehensive DPTP protocol specification** - Formal documentation at `specs/dptp_v1.md`
+  - Message format, types, and wire protocol details
+  - Node identity system specification (RSA-2048, X.509 certificates)
+  - Connection flows for Direct TLS and WebRTC
+  - Security considerations and implementation guidelines
+  - Complete reference for protocol implementers
+
+- **Protocol library documentation** - Comprehensive README at `dpc-protocol/README.md`
+  - Full API reference for crypto, protocol, and PCM modules
+  - Installation and usage examples with code snippets
+  - Testing guide and development instructions
+  - Links to formal DPTP specification
+
+### Changed
+- **README.md cleanup** - Removed all emojis for more professional presentation
+  - Updated footer with: "A small step for AI, a giant leap for all humanity"
+  - Added DPTP specification link in "For Developers" section
+  - Cleaner, more accessible documentation
+
+- **CLAUDE.md updates** - Added references to new documentation
+  - Link to DPTP specification (`specs/dptp_v1.md`)
+  - Link to protocol library documentation (`dpc-protocol/README.md`)
+  - Updated Important Documentation section
+
+### Added
+- **IPv6 support for direct P2P connections** - Full dual-stack (IPv4 + IPv6) connectivity
+  - Dual-stack server binding: Listens on both IPv4 and IPv6 simultaneously
+  - Configuration: Set `listen_host = dual` (default), `0.0.0.0` (IPv4 only), or `::` (IPv6 only) in `~/.dpc/config.ini`
+  - Automatic IPv6 address detection (local and global addresses)
+  - IPv6 URI support with bracket notation: `dpc://[2001:db8::1]:8888?node_id=...`
+  - Teredo IPv6 support: Global Teredo addresses (`2001:0::/32`) automatically promoted to External section
+  - Enables NAT-free connections for peers with native IPv6 or Teredo tunneling
+  - Cross-platform IPv6 detection: Socket method, hostname resolution, and platform-specific commands
+  - Smart filtering: Excludes link-local (`fe80::/10`) and ULA (`fc00::/7`) from external addresses
+
+- **Connection timeout and diagnostics** - Better error handling for failed connections
+  - Configurable connection timeout (default: 30 seconds for full connection, 10 seconds for port test)
+  - New `test_port_connectivity()` method for pre-flight port accessibility checks
+  - Exposed via WebSocket API as `test_port` command for UI integration
+  - Fast failure detection instead of relying on OS default timeouts
+
+- **External IP connection support in Connect to Peer field** - Single input field now supports all connection methods
+  - Existing `dpc://` URI format works with external IPs: `dpc://203.0.113.5:8888?node_id=dpc-node-abc...`
+  - Added connection help with examples for all three methods (WebRTC, Local Network, External IP)
+  - Enables secure TLS connections when peers share external IPs via trusted channels (email, Signal, etc.)
+  - Requires port forwarding on peer's router (default port 8888)
+  - No Hub dependency for external IP connections - completely peer-to-peer with X.509 certificate validation
+  - **Note:** Feature not yet tested with external IPs across internet
+
+- **External IP discovery via STUN servers** - Your public IP address now displays automatically in the UI
+  - New standalone STUN discovery module (`stun_discovery.py`) for detecting external IP without WebRTC connections
+  - Background task runs on startup and refreshes every 5 minutes
+  - External URIs displayed in new "External (Internet)" section with green badges
+  - Discovers public IP from STUN servers for sharing with remote peers via email/messaging
+  - Works immediately on startup - no WebRTC connection required
+  - Automatic IP change detection and UI updates
+
+- **All STUN/TURN servers now configurable in config.ini** - No hardcoded servers in production code
+  - STUN servers configurable in `[webrtc] stun_servers` in `~/.dpc/config.ini`
+  - TURN servers configurable in `[turn] servers` (with credentials) and `fallback_servers` (public)
+  - Users can customize servers for regional availability (e.g., China, Russia)
+  - Environment variable overrides: `DPC_WEBRTC_STUN_SERVERS`, `DPC_TURN_SERVERS`
+  - Maximum flexibility for international users facing regional server blocks
+
+- **Configurable max_tokens for AI providers** - Customize response length per provider
+  - Anthropic providers now read `max_tokens` from `providers.json` configuration
+  - Defaults to 4096 tokens if not specified
+  - Set different limits for different providers (e.g., haiku=2048, sonnet=8192, opus=16384)
+  - Omit or set to `null` to use model's maximum token limit
+  - No more truncated AI responses with Anthropic Claude
+
+### Changed
+- **Context-aware AI system instructions** - AI now adapts instructions based on whether personal context is enabled
+  - When context disabled: AI receives "Answer based on conversation history and general knowledge" instead of expecting `<CONTEXT>` tags
+  - Eliminates confusing "I don't see any JSON data blobs in `<CONTEXT>` tags" responses
+  - Cleaner user experience for context-free queries while preserving conversation history
+  - Backend: `_build_bias_aware_system_instruction()` now accepts `include_full_context` parameter
+
+- **Message ID format updated for group chat support** - Message IDs now include node ID prefix for global uniqueness
+  - New format: `{node_id_short}-{command_id}-{user|ai}` (e.g., `46f34940-abc123-user`)
+  - Enables tracking individual participants in future multi-user group chats
+  - Prevents message ID collisions across different users and AI instances
+  - Maintains backward compatibility with existing code
+
+- **STUN discovery architecture** - Dual-source external IP detection
+  - Priority: Standalone STUN discovery (always available) → WebRTC ICE candidates (when active)
+  - Avoids duplicate IPs from multiple sources
+  - Faster initial discovery (5 seconds vs waiting for WebRTC connection)
+  - `P2PManager.get_external_ips()` aggregates from both WebRTC peers and standalone discovery
+
+- **Connection timeout increased** - Direct TLS connection timeout extended from 10 to 30 seconds
+  - Accommodates slower networks and long-distance connections
+  - Port test timeout: 10 seconds (unchanged)
+  - Prevents premature connection failures on high-latency networks
+
+- **Improved error messages for connection failures** - More actionable diagnostics for users
+  - Timeout errors now explain port forwarding requirements for external IP connections
+  - ConnectionRefusedError provides firewall and service status guidance
+  - Recommends WebRTC for NAT/firewall scenarios (no port forwarding needed)
+  - Error messages distinguish between network issues, firewall blocks, and service unavailability
+
+### Fixed
+- **Knowledge extraction routing to wrong AI provider in multi-chat scenarios** - Critical bug where "End Session" button used wrong AI model
+  - Root cause: Hardcoded `"local_ai"` conversation_id caused all AI chats to share same message buffer and provider settings
+  - When Chat 1 (claude_haiku) and Chat 2 (ollama_local) were both active, Chat 2's provider settings overwrote Chat 1's
+  - Clicking "End Session" in Chat 1 would incorrectly use ollama_local for knowledge extraction instead of claude_haiku
+  - Fixed: Use actual `conversation_id` parameter instead of hardcoded string in 3 locations (monitor creation, user message, AI message)
+  - Impact: Each AI chat now maintains independent message buffers and provider settings
+
+- **Hardcoded user identity in knowledge commits** - User attribution was generic instead of using actual node ID and display name
+  - Root cause: `sender_node_id="user"` and `sender_name="User"` hardcoded in ConvMessage creation
+  - Knowledge commits showed generic "User (user)" instead of real identity like "Mike Windows 10 (dpc-node-e07fb59e46f34940)"
+  - Fixed: Use `self.p2p_manager.node_id` and `self.p2p_manager.get_display_name()`
+  - Impact: Proper attribution in knowledge commits, enables future multi-device support and knowledge sharing
+
+- **Teredo IPv6 addresses not appearing in External section** - Global Teredo addresses were incorrectly classified as private
+  - Root cause: Python's `ipaddress` module incorrectly marks Teredo (`2001:0::/32`) as `is_private=True`
+  - Impact: Teredo addresses only showed in Local Network section instead of External (Internet)
+  - Fixed: Added explicit Teredo network check in `_is_global_ipv6()` before relying on `is_global` flag
+  - Global Teredo addresses now correctly promoted to External section for internet-wide connectivity
+  - Enables NAT-free P2P connections via Teredo tunneling (IPv6-over-IPv4)
+
+- **Settings validation** - STUN servers return empty list (not hardcoded defaults) if config missing
+  - Clear warning message: "No STUN servers configured in config.ini"
+  - Forces users to configure servers explicitly for their region
+
 ## [0.8.0] - 2025-11-28
 
 ### Added

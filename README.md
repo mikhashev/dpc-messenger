@@ -6,7 +6,7 @@
 
 ---
 
-## 🚀 The Vision: A Private Internet for Human-AI Collaboration
+## The Vision: A Private Internet for Human-AI Collaboration
 
 **The Immediate Problem:** AI is transforming how we work and think, but it's creating two critical failures:
 
@@ -29,29 +29,29 @@ We're racing against a closing window: the infrastructure being built TODAY will
 
 ---
 
-## 🤝 Join the Mission: Seeking a Business Co-Founder
+## Join the Mission: Seeking a Business Co-Founder
 
 The core technology is built, but the mission to build a world-changing company has just begun.
 
 I am a product-focused technical founder looking for a business-focused co-founder to be my partner. If you have a passion for privacy, a deep understanding of go-to-market strategy, and the drive to build a global community, I want to talk to you.
 
 If this vision resonates with you, let's connect:
-📧 [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com) | 💼 [LinkedIn](https://www.linkedin.com/in/mikemikhashev) | 🐦 [X/Twitter](https://x.com/mikeshev4enko)
+[legoogmiha@gmail.com](mailto:legoogmiha@gmail.com) | [LinkedIn](https://www.linkedin.com/in/mikemikhashev) | [X/Twitter](https://x.com/mikeshev4enko)
 
 ---
 
-## 🧠 What is D-PC Messenger?
+## What is D-PC Messenger?
 
 **D-PC Messenger** (Decentralized Personal Context) is a **privacy-first, peer-to-peer platform for human-AI collaboration**.
 
 **The Core Idea:** Imagine you're working with your personal AI assistant (ChatGPT, Claude, or local Ollama). Now imagine securely sharing relevant context with a trusted friend so *their* AI assistant can help too - without compromising privacy or relying on centralized servers.
 
 **How it works:**
-- 🤝 **You + Your AI** - Chat with your personal AI assistant about anything
-- 💬 **Collaborate with Humans** - Connect directly with trusted peers via encrypted P2P messaging
-- 📚 **Share Context Securely** - Share conversation histories, documents, or knowledge with peers
-- 🧠 **Their AI Gets Smarter** - Your shared context helps their AI give better, more informed answers
-- 🔒 **Complete Privacy** - All data stays on your devices, encrypted end-to-end, with granular access control
+- **You + Your AI** - Chat with your personal AI assistant about anything
+- **Collaborate with Humans** - Connect directly with trusted peers via encrypted P2P messaging
+- **Share Context Securely** - Share conversation histories, documents, or knowledge with peers
+- **Their AI Gets Smarter** - Your shared context helps their AI give better, more informed answers
+- **Complete Privacy** - All data stays on your devices, encrypted end-to-end, with granular access control
 
 **Real-world example:** You're researching a technical topic with your AI assistant. You share your conversation history with a colleague. Their AI can now see your research and provide complementary insights, creating a **collective intelligence** between humans and their AI assistants.
 
@@ -59,32 +59,32 @@ If this vision resonates with you, let's connect:
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
 ### For End Users
-- 🔒 **True Privacy** - Messages never touch servers, only peers
-- 👤 **User Sovereignty** - You own your data, identity, and encryption keys ([read more](./docs/USER_SOVEREIGNTY.md))
-- 💾 **Encrypted Backups** - AES-256-GCM encrypted backups with no backdoors ([guide](./docs/BACKUP_RESTORE.md))
-- 🤝 **Human-AI Collaboration** - Work with your AI assistant, then share contexts with trusted peers so their AIs can contribute too
-- 💬 **Conversation History** - Full conversational continuity with smart context optimization (60-80% token savings)
-- 📝 **Rich Markdown Rendering** - AI responses display with GitHub-style formatting, intelligent caching (50-200x faster)
-- 📚 **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
-- 🏠 **Local-First** - Your data stays on your device
-- 🌐 **Internet-Wide** - Connect to anyone, anywhere via WebRTC
-- 📶 **Offline Mode** - Works seamlessly when Hub is unavailable with cached tokens and Direct TLS
-- 🔐 **Cryptographic Identity** - Self-sovereign node IDs based on public keys
-- 🛡️ **Context Firewall** - Granular control over what data you share
+- **True Privacy** - Messages never touch servers, only peers
+- **User Sovereignty** - You own your data, identity, and encryption keys ([read more](./docs/USER_SOVEREIGNTY.md))
+- **Encrypted Backups** - AES-256-GCM encrypted backups with no backdoors ([guide](./docs/BACKUP_RESTORE.md))
+- **Human-AI Collaboration** - Work with your AI assistant, then share contexts with trusted peers so their AIs can contribute too
+- **Conversation History** - Full conversational continuity with smart context optimization (60-80% token savings)
+- **Rich Markdown Rendering** - AI responses display with GitHub-style formatting, intelligent caching (50-200x faster)
+- **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
+- **Local-First** - Your data stays on your device
+- **Internet-Wide** - Connect to anyone, anywhere via WebRTC
+- **Offline Mode** - Works seamlessly when Hub is unavailable with cached tokens and Direct TLS
+- **Cryptographic Identity** - Self-sovereign node IDs based on public keys
+- **Context Firewall** - Granular control over what data you share
 
 ### For Developers
-- 📖 **Open Protocol** - Extensible DPTP (D-PC Transfer Protocol)
-- 🧩 **Modular Design** - Clear separation of concerns
-- 🧠 **Knowledge Architecture** - Git-like knowledge commits with cognitive bias mitigation ([architecture doc](./docs/KNOWLEDGE_ARCHITECTURE.md))
-- 🔧 **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude)
-- 🚀 **Production Ready** - Docker deployment, OAuth, rate limiting
+- **Open Protocol** - Extensible [DPTP (D-PC Transfer Protocol)](./specs/dptp_v1.md)
+- **Modular Design** - Clear separation of concerns
+- **Knowledge Architecture** - Git-like knowledge commits with cognitive bias mitigation ([architecture doc](./docs/KNOWLEDGE_ARCHITECTURE.md))
+- **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude)
+- **Production Ready** - Docker deployment, OAuth, rate limiting
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -128,7 +128,7 @@ If this vision resonates with you, let's connect:
    - Hub only for initial signaling
    - **Messages never pass through Hub** - Direct P2P connection
 
-### ⚠️ Important: True Peer-to-Peer Architecture
+### Important: True Peer-to-Peer Architecture
 
 **D-PC Messenger is NOT a messaging service.** It is peer-to-peer communication software.
 
@@ -148,7 +148,7 @@ If this vision resonates with you, let's connect:
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 dpc-messenger/
@@ -207,7 +207,7 @@ dpc-messenger/
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -277,13 +277,13 @@ poetry run python -m dpc_client_core.cli_backup create
 # Store it on USB drive or encrypted cloud storage
 ```
 
-📖 **See [docs/QUICK_START.md](./docs/QUICK_START.md) for detailed instructions.**
-📖 **Backup guide: [docs/BACKUP_RESTORE.md](./docs/BACKUP_RESTORE.md)**
-📖 **GitHub OAuth: [docs/GITHUB_AUTH_SETUP.md](./docs/GITHUB_AUTH_SETUP.md)**
+**See [docs/QUICK_START.md](./docs/QUICK_START.md) for detailed instructions.**
+**Backup guide: [docs/BACKUP_RESTORE.md](./docs/BACKUP_RESTORE.md)**
+**GitHub OAuth: [docs/GITHUB_AUTH_SETUP.md](./docs/GITHUB_AUTH_SETUP.md)**
 
 ---
 
-## 🌐 Production Deployment
+## Production Deployment
 
 ### Deploy Hub to VPS
 
@@ -305,11 +305,11 @@ docker-compose -f docker-compose.prod.yml up -d
 # See docs/WEBRTC_SETUP_GUIDE.md for complete instructions
 ```
 
-📖 **Full guide: [docs/WEBRTC_SETUP_GUIDE.md](./docs/WEBRTC_SETUP_GUIDE.md)**
+**Full guide: [docs/WEBRTC_SETUP_GUIDE.md](./docs/WEBRTC_SETUP_GUIDE.md)**
 
 ---
 
-## 🔑 Authentication & Security
+## Authentication & Security
 
 ### Authentication Flow (v0.6.0)
 
@@ -322,18 +322,18 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ### Security Features
 
-- 🔒 End-to-end encryption (DTLS in WebRTC, TLS in Direct)
-- 💾 **Client-side encrypted backups** - AES-256-GCM with PBKDF2 (600k iterations)
-- 🔑 Cryptographic node identities (derived from RSA public keys)
-- 🛡️ Context firewall (.dpc_access.json) for granular permissions
-- 🔐 JWT authentication with Hub (token blacklisting supported)
-- ✅ No message persistence by default
-- 🔍 Node identity validation (certificates, public keys)
-- 🚫 **No backdoors** - If you lose your passphrase, data is permanently unrecoverable (by design)
+- End-to-end encryption (DTLS in WebRTC, TLS in Direct)
+- **Client-side encrypted backups** - AES-256-GCM with PBKDF2 (600k iterations)
+- Cryptographic node identities (derived from RSA public keys)
+- Context firewall (.dpc_access.json) for granular permissions
+- JWT authentication with Hub (token blacklisting supported)
+- No message persistence by default
+- Node identity validation (certificates, public keys)
+- **No backdoors** - If you lose your passphrase, data is permanently unrecoverable (by design)
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 ### Getting Started
 - **[QUICK_START.md](./docs/QUICK_START.md)** - 5-minute setup guide
@@ -369,52 +369,52 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ---
 
-## 🛣️ Roadmap
+## Roadmap
 
-### Phase 1: Federated MVP ✅ (Completed - v0.8.0)
-- ✅ Direct TLS P2P connections
-- ✅ WebRTC with NAT traversal
-- ✅ Federation Hub for discovery
-- ✅ OAuth authentication (Google + GitHub)
-- ✅ Cryptographic node identity system
-- ✅ Token blacklist and logout
-- ✅ **Encrypted local backups** (AES-256-GCM with user-controlled passphrases)
-- ✅ Local AI integration
-- ✅ Offline mode with graceful degradation
-- ✅ **Remote inference** - Share compute power with trusted peers ([guide](./docs/REMOTE_INFERENCE.md))
-- ✅ **Knowledge Commit System** - Git-like versioned knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
-  - ✅ Personal Context Model (PCM) v2.0
-  - ✅ Knowledge topics with entries, tags, and confidence scoring
-  - ✅ Automatic conversation monitoring and knowledge extraction
-  - ✅ Multi-perspective bias mitigation (Western, Eastern, Indigenous viewpoints)
-  - ✅ Knowledge commit proposals with approval workflow
-  - ✅ Git-style versioning with commit history
-  - ✅ User-controlled auto-detection toggle
+### Phase 1: Federated MVP (Completed - v0.8.0)
+- Direct TLS P2P connections
+- WebRTC with NAT traversal
+- Federation Hub for discovery
+- OAuth authentication (Google + GitHub)
+- Cryptographic node identity system
+- Token blacklist and logout
+- **Encrypted local backups** (AES-256-GCM with user-controlled passphrases)
+- Local AI integration
+- Offline mode with graceful degradation
+- **Remote inference** - Share compute power with trusted peers ([guide](./docs/REMOTE_INFERENCE.md))
+- **Knowledge Commit System** - Git-like versioned knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
+  - Personal Context Model (PCM) v2.0
+  - Knowledge topics with entries, tags, and confidence scoring
+  - Automatic conversation monitoring and knowledge extraction
+  - Multi-perspective bias mitigation (Western, Eastern, Indigenous viewpoints)
+  - Knowledge commit proposals with approval workflow
+  - Git-style versioning with commit history
+  - User-controlled auto-detection toggle
 
-### Phase 2: Enhanced Federation (Next - Q1-Q2 2026) ⏳
+### Phase 2: Enhanced Federation (Next - Q1-Q2 2026)
 **Current Starting Point for Development**
 
-- 🔲 Multi-hub federation
-- 🔲 Advanced context firewall with tag-based sharing
-- 🔲 **Peer-to-peer knowledge sharing** - Share knowledge commits between peers
-- 🔲 **Collaborative knowledge building** - Multi-peer consensus on shared knowledge
-- 🔲 **Remote inference enhancements** - Model discovery, streaming responses, usage tracking
-- 🔲 **Hub-assisted backup** (encrypted backup storage on Hub)
-- 🔲 **QR code backup transfer** (for mobile devices)
-- 🔲 Mobile clients (Android, iOS)
-- 🔲 Dedicated TURN server deployment
+- Multi-hub federation
+- Advanced context firewall with tag-based sharing
+- **Peer-to-peer knowledge sharing** - Share knowledge commits between peers
+- **Collaborative knowledge building** - Multi-peer consensus on shared knowledge
+- **Remote inference enhancements** - Model discovery, streaming responses, usage tracking
+- **Hub-assisted backup** (encrypted backup storage on Hub)
+- **QR code backup transfer** (for mobile devices)
+- Mobile clients (Android, iOS)
+- Dedicated TURN server deployment
 
 ### Phase 3: True P2P (Future - 2026-2027)
-- 🔲 DHT-based peer discovery
-- 🔲 Hub-free operation mode
-- 🔲 **Social recovery** (Shamir Secret Sharing for backup passphrases)
-- 🔲 **Hardware wallet integration** (Ledger, YubiKey, TPM)
-- 🔲 Blockchain-based identity (optional)
-- 🔲 Full decentralization
+- DHT-based peer discovery
+- Hub-free operation mode
+- **Social recovery** (Shamir Secret Sharing for backup passphrases)
+- **Hardware wallet integration** (Ledger, YubiKey, TPM)
+- Blockchain-based identity (optional)
+- Full decentralization
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions of all kinds!
 
@@ -428,12 +428,12 @@ We welcome contributions of all kinds!
 
 ### Areas We Need Help
 
-- 🐛 Bug fixes and testing
-- 📝 Documentation improvements
-- 🌍 Internationalization (i18n)
-- 🎨 UI/UX enhancements
-- 🔐 Security audits
-- 🧪 Protocol implementation
+- Bug fixes and testing
+- Documentation improvements
+- Internationalization (i18n)
+- UI/UX enhancements
+- Security audits
+- Protocol implementation
 
 ### Community
 
@@ -443,7 +443,7 @@ We welcome contributions of all kinds!
 
 ---
 
-## 📜 Licensing
+## Licensing
 
 D-PC uses a **Progressive Copyleft** strategy:
 
@@ -455,16 +455,16 @@ D-PC uses a **Progressive Copyleft** strategy:
 | **Protocol Specs** | CC0 | Use freely, no restrictions |
 
 **TL;DR for most users:**
-- ✅ Use the app freely (no strings attached)
-- ✅ Use protocol libraries in your app (LGPL is friendly)
-- ✅ Run your own Hub (source required if modified)
-- ❌ Can't create proprietary messenger fork (or buy Commercial License)
+- Use the app freely (no strings attached)
+- Use protocol libraries in your app (LGPL is friendly)
+- Run your own Hub (source required if modified)
+- Can't create proprietary messenger fork (or buy Commercial License)
 
-📖 **See [LICENSE.md](./LICENSE.md) for detailed information.**
+**See [LICENSE.md](./LICENSE.md) for detailed information.**
 
 ---
 
-## 🔒 Security
+## Security
 
 ### Reporting Vulnerabilities
 
@@ -476,7 +476,7 @@ We take security seriously and will respond within 48 hours.
 
 ---
 
-## ⚖️ Legal Notice
+## Legal Notice
 
 **License:** Multi-license (GPL/LGPL/AGPL/CC0) - see [LICENSE.md](./LICENSE.md)
 
@@ -490,7 +490,7 @@ We take security seriously and will respond within 48 hours.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 D-PC Messenger builds on the shoulders of giants:
 
@@ -503,25 +503,25 @@ Special thanks to all contributors and early testers!
 
 ---
 
-## 📊 Project Status
+## Project Status
 
 | Metric | Status |
 |--------|--------|
-| **Architecture** | ✅ Stable |
-| **Core Protocol** | ✅ v1.0 |
-| **WebRTC** | ✅ Working |
-| **Direct TLS** | ✅ Working |
-| **Hub Server** | ✅ Production Ready |
-| **Crypto Identity** | ✅ v0.5.0 |
-| **Knowledge Architecture** | ✅ v2.0 (Phase 4.2 Complete) |
-| **Desktop Client** | ✅ Beta (v0.8.0) |
-| **Mobile Clients** | 🔲 Planned (Phase 2) |
-| **Test Coverage** | 🚧 In Progress |
-| **Documentation** | ✅ Good |
+| **Architecture** | Stable |
+| **Core Protocol** | v1.0 |
+| **WebRTC** | Working |
+| **Direct TLS** | Working |
+| **Hub Server** | Production Ready |
+| **Crypto Identity** | v0.5.0 |
+| **Knowledge Architecture** | v2.0 (Phase 4.2 Complete) |
+| **Desktop Client** | Beta (v0.8.0) |
+| **Mobile Clients** | Planned (Phase 2) |
+| **Test Coverage** | In Progress |
+| **Documentation** | Good |
 
 ---
 
-## 💝 Support Development
+## Support Development
 
 D-PC Messenger is developed with the assistance of AI-powered tools to accelerate innovation and maintain code quality. If you find this project valuable and would like to support its continued development and promotion, consider making a donation:
 
@@ -534,7 +534,7 @@ Your support helps cover AI-assisted development costs and enables faster delive
 
 ---
 
-## 📞 Support & Contact
+## Support & Contact
 
 - **GitHub Issues:** [Report bugs](https://github.com/mikhashev/dpc-messenger/issues)
 - **GitHub Discussions:** [Ask questions](https://github.com/mikhashev/dpc-messenger/discussions)
@@ -545,8 +545,8 @@ Your support helps cover AI-assisted development costs and enables faster delive
 
 <div align="center">
 
-**Made with ❤️ by the D-PC Community**
+**A small step for AI, a giant leap for all humanity.**
 
-[⭐ Star on GitHub](https://github.com/mikhashev/dpc-messenger) | [📖 Documentation](./docs/) | [💬 Discussions](https://github.com/mikhashev/dpc-messenger/discussions)
+[Star on GitHub](https://github.com/mikhashev/dpc-messenger) | [Documentation](./docs/) | [Discussions](https://github.com/mikhashev/dpc-messenger/discussions)
 
 </div>

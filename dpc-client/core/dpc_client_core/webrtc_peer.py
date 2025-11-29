@@ -34,49 +34,47 @@ class WebRTCPeerConnection:
         turn_credential = settings.get_turn_credential()
 
         # Create RTCConfiguration with STUN and TURN servers for NAT traversal
-        ice_servers = [
-            # STUN servers (for discovering public IP)
-            RTCIceServer(urls=["stun:stun.l.google.com:19302"]),
-            RTCIceServer(urls=["stun:stun1.l.google.com:19302"]),
-            RTCIceServer(urls=["stun:global.stun.twilio.com:3478"]),
-        ]
+        # Load STUN servers from configuration (allows user customization)
+        stun_urls = settings.get_stun_servers()
+        ice_servers = [RTCIceServer(urls=[url]) for url in stun_urls]
 
         # Add TURN servers if credentials are configured
         if turn_username and turn_credential:
-            # Metered.ca TURN servers (user's account)
-            ice_servers.append(
-                RTCIceServer(
-                    urls=[
-                        "stun:stun.relay.metered.ca:80",
-                        "turn:global.relay.metered.ca:80",
-                        "turn:global.relay.metered.ca:80?transport=tcp",
-                        "turn:global.relay.metered.ca:443",
-                        "turns:global.relay.metered.ca:443?transport=tcp",
-                    ],
-                    username=turn_username,
-                    credential=turn_credential
+            # Load TURN server URLs from config.ini
+            turn_urls = settings.get_turn_servers()
+            if turn_urls:
+                ice_servers.append(
+                    RTCIceServer(
+                        urls=turn_urls,
+                        username=turn_username,
+                        credential=turn_credential
+                    )
                 )
-            )
-            print(f"[WebRTC] Using configured TURN credentials (username: {turn_username[:8]}...)")
+                print(f"[WebRTC] Using configured TURN servers ({len(turn_urls)} URLs) with username: {turn_username[:8]}...")
+            else:
+                print("[WebRTC] Warning: TURN credentials provided but no TURN server URLs in config.ini [turn] servers")
         else:
             print("[WebRTC] Warning: No TURN credentials configured")
             print("         Set DPC_TURN_USERNAME and DPC_TURN_CREDENTIAL environment variables")
-            print("         or add [turn] section to ~/.dpc/config.ini")
+            print("         or add [turn] username/credential to ~/.dpc/config.ini")
             print("         WebRTC connections may fail without TURN relay!")
 
-            # Fallback: Try free OpenRelay servers (unreliable)
-            ice_servers.extend([
-                RTCIceServer(
-                    urls=[
-                        "turn:openrelay.metered.ca:80",
-                        "turn:openrelay.metered.ca:443",
-                        "turn:openrelay.metered.ca:443?transport=tcp"
-                    ],
-                    username="openrelayproject",
-                    credential="openrelayproject"
-                ),
-            ])
-            print("[WebRTC] Falling back to free OpenRelay servers (may not work)")
+            # Fallback: Try free public TURN servers from config (if configured)
+            fallback_urls = settings.get_turn_fallback_servers()
+            fallback_username = settings.get_turn_fallback_username()
+            fallback_credential = settings.get_turn_fallback_credential()
+
+            if fallback_urls and fallback_username and fallback_credential:
+                ice_servers.append(
+                    RTCIceServer(
+                        urls=fallback_urls,
+                        username=fallback_username,
+                        credential=fallback_credential
+                    )
+                )
+                print(f"[WebRTC] Using fallback public TURN servers ({len(fallback_urls)} URLs) - may be unreliable")
+            else:
+                print("[WebRTC] No fallback TURN servers configured in config.ini")
 
         configuration = RTCConfiguration(
             iceServers=ice_servers,
@@ -425,6 +423,33 @@ class WebRTCPeerConnection:
             print(f"[{self.node_id}] Keepalive cancelled (sent {ping_count} pings)")
         except Exception as e:
             print(f"[{self.node_id}] Keepalive loop error: {e}")
+
+    def get_external_ip(self) -> str | None:
+        """
+        Extract external IP address from server reflexive (srflx) ICE candidates.
+
+        Returns:
+            External IP address if found in SDP, None otherwise
+        """
+        if not self.pc or not self.pc.localDescription:
+            return None
+
+        try:
+            import re
+            sdp = self.pc.localDescription.sdp
+
+            # Match srflx candidates in SDP
+            # Format: a=candidate:<foundation> <component> <protocol> <priority> <ip> <port> typ srflx
+            srflx_pattern = r'a=candidate:\S+ \S+ \S+ \S+ (\d+\.\d+\.\d+\.\d+) \S+ typ srflx'
+            matches = re.findall(srflx_pattern, sdp)
+
+            if matches:
+                # Return the first external IP found
+                return matches[0]
+        except Exception as e:
+            print(f"[{self.node_id}] Error extracting external IP from SDP: {e}")
+
+        return None
 
     async def close(self):
         """Close the WebRTC connection."""

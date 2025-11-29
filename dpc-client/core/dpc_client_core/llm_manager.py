@@ -156,17 +156,22 @@ class AnthropicProvider(AIProvider):
         super().__init__(alias, config)
         api_key_env = config.get("api_key_env")
         api_key = os.getenv(api_key_env) if api_key_env else None
-        
+
         if not api_key:
             raise ValueError(f"API key environment variable not set for Anthropic provider '{self.alias}'")
 
         self.client = AsyncAnthropic(api_key=api_key)
 
+        # Read max_tokens from config (optional, defaults to 4096  if not specified)
+        # Set to None or omit from config to use model's maximum
+        self.max_tokens = config.get("max_tokens", 4096)
+
     async def generate_response(self, prompt: str) -> str:
         try:
+            # Use configured max_tokens or default (Anthropic requires max_tokens parameter)
             message = await self.client.messages.create(
                 model=self.model,
-                max_tokens=2048, # Anthropic requires max_tokens
+                max_tokens=self.max_tokens if self.max_tokens else 4096,
                 messages=[{"role": "user", "content": prompt}],
             )
             return message.content[0].text

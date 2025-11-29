@@ -740,7 +740,7 @@
             </button>
           </div>
 
-          <!-- Direct TLS Connection URIs (NEW - Redesigned) -->
+          <!-- Direct TLS Connection URIs (Local Network) -->
           {#if $nodeStatus.dpc_uris && $nodeStatus.dpc_uris.length > 0}
             <div class="dpc-uris-section">
               <details class="uri-details" open>
@@ -762,6 +762,42 @@
                           alert('✓ URI copied!');
                         }}
                         title="Copy URI"
+                      >
+                        📋
+                      </button>
+                    </div>
+                    <details class="uri-full-details">
+                      <summary class="show-uri-btn">Full URI ▼</summary>
+                      <code class="uri-full-text">{uri}</code>
+                    </details>
+                  </div>
+                {/each}
+              </details>
+            </div>
+          {/if}
+
+          <!-- External URIs (From STUN Servers) -->
+          {#if $nodeStatus.external_uris && $nodeStatus.external_uris.length > 0}
+            <div class="dpc-uris-section">
+              <details class="uri-details" open>
+                <summary class="uri-summary">
+                  <span class="uri-icon">🌐</span>
+                  <span class="uri-title">External (Internet) ({$nodeStatus.external_uris.length})</span>
+                </summary>
+                <div class="uri-help-text">
+                  Your public IP address(es) discovered via STUN servers
+                </div>
+                {#each $nodeStatus.external_uris as { ip, uri }}
+                  <div class="uri-card">
+                    <div class="uri-card-header">
+                      <span class="ip-badge external">{ip}</span>
+                      <button
+                        class="copy-btn-icon"
+                        on:click={() => {
+                          navigator.clipboard.writeText(uri);
+                          alert('✓ External URI copied!');
+                        }}
+                        title="Copy External URI"
                       >
                         📋
                       </button>
@@ -876,19 +912,24 @@
           </div>
         </div>
 
-        <!-- Connect to Peer - UPDATED PLACEHOLDER -->
+        <!-- Connect to Peer -->
         <div class="connect-section">
           <h3>Connect to Peer</h3>
-          <input 
-            type="text" 
+          <input
+            type="text"
             bind:value={peerInput}
-            placeholder="dpc://... or node_id"
+            placeholder="node_id or dpc://IP:port?node_id=..."
             on:keydown={(e) => e.key === 'Enter' && handleConnectPeer()}
           />
           <button on:click={handleConnectPeer}>Connect</button>
-          <p class="small">
-            💡 Tip: Enter just node_id for WebRTC, or full dpc:// URI for Direct TLS
-          </p>
+          <div class="connection-help">
+            <p class="small"><strong>Connection Methods:</strong></p>
+            <p class="small">
+              🌐 <strong>WebRTC (via Hub):</strong> <code>dpc-node-abc123...</code><br/>
+              🏠 <strong>Local Network:</strong> <code>dpc://192.168.1.100:8888?node_id=dpc-node-abc123...</code><br/>
+              🌍 <strong>External IP:</strong> <code>dpc://203.0.113.5:8888?node_id=dpc-node-abc123...</code>
+            </p>
+          </div>
         </div>
 
         <!-- Chat List -->
@@ -1664,6 +1705,28 @@
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   }
 
+  /* Connection Help Styles */
+  .connection-help {
+    margin-top: 0.75rem;
+    padding: 0.75rem;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border: 1px solid #dee2e6;
+  }
+
+  .connection-help code {
+    background: #e9ecef;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    font-family: 'Courier New', monospace;
+    font-size: 0.85rem;
+  }
+
+  .connection-help .small {
+    margin: 0.25rem 0;
+    line-height: 1.6;
+  }
+
   .chat-list ul {
     list-style: none;
     padding: 0;
@@ -2412,6 +2475,12 @@
     background: #e7f1ff;
     border-radius: 6px;
     border: 1px solid #b3d7ff;
+  }
+
+  .ip-badge.external {
+    color: #0d6e2b;
+    background: #d1f4e0;
+    border: 1px solid #7fd99f;
   }
 
   .copy-btn-icon {

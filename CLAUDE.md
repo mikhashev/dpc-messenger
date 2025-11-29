@@ -166,11 +166,17 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
 
 ### Connection Types
 
-1. **Direct TLS** (Local Network)
-   - Server listens on port 8888
+1. **Direct TLS** (Local Network & IPv6)
+   - Server listens on port 8888 (default)
+   - **Dual-stack support**: IPv4 and IPv6
    - Uses self-signed X.509 certificates for node identity
    - Location: `dpc-client/core/dpc_client_core/p2p_manager.py`
    - Lowest latency, requires network visibility
+   - **IPv6 URIs**: Use bracket notation: `dpc://[2001:db8::1]:8888?node_id=...`
+   - **Configuration**: Set `listen_host` in config.ini:
+     - `dual` (default) - Listens on both IPv4 and IPv6
+     - `0.0.0.0` - IPv4 only
+     - `::` - IPv6 only
 
 2. **WebRTC** (Internet-Wide)
    - NAT traversal via STUN/TURN
@@ -210,10 +216,13 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
 - `crypto.py` - Node identity, RSA keys, X.509 certificates
 - `protocol.py` - Message serialization (10-byte header + JSON)
 - `pcm_core.py` - Personal Context Model data structures
+- See [dpc-protocol/README.md](dpc-protocol/README.md) for comprehensive library documentation
 
 ### Message Protocol (DPTP)
 
 Messages use binary framing: 10-byte ASCII length header + JSON payload
+
+**Formal specification:** [specs/dptp_v1.md](specs/dptp_v1.md)
 
 **Example Message Types:**
 ```python
@@ -796,6 +805,9 @@ poetry run pytest tests/test_turn_connectivity.py
 - `docs/CONFIGURATION.md` - Complete configuration reference
 - `docs/DEVICE_CONTEXT_SPEC.md` - Device context schema and special instructions specification
 - `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
+- `specs/dptp_v1.md` - DPTP (D-PC Transfer Protocol) formal specification
+- `specs/hub_api_v1.md` - Hub API specification
+- `dpc-protocol/README.md` - Protocol library documentation and usage examples
 - `VISION.md` - Business vision, market opportunity, and mission (investor/co-founder focused)
 - `PRODUCT_VISION.md` - Product vision and technical philosophy
 
