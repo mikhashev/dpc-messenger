@@ -2028,17 +2028,36 @@ class CoreService:
         # Use connect_directly from P2PManager
         await self.p2p_manager.connect_directly(host, port, target_node_id)
 
+    async def connect_directly_by_ip(self, host: str, port: int, node_id: str):
+        """
+        Connect to a peer directly using IP address and port (Direct TLS).
+        This method allows manual IP entry without needing Hub for signaling.
+
+        Args:
+            host: IP address or hostname (e.g., "192.168.1.100" or external IP)
+            port: Port number (default: 8888)
+            node_id: Target node's ID (e.g., "dpc-node-abc123...")
+        """
+        print(f"Orchestrating direct TLS connection to {node_id} at {host}:{port}...")
+
+        # Validate node_id format
+        if not node_id.startswith("dpc-node-"):
+            raise ValueError(f"Invalid node_id format: {node_id} (must start with 'dpc-node-')")
+
+        # Use connect_directly from P2PManager
+        await self.p2p_manager.connect_directly(host, port, node_id)
+
     async def connect_to_peer_by_id(self, node_id: str):
         """
         Orchestrates a P2P connection to a peer using its node_id via Hub.
         Uses WebRTC with NAT traversal.
         """
         print(f"Orchestrating WebRTC connection to {node_id} via Hub...")
-        
+
         # Check if Hub is connected
         if not self.hub_client.websocket or self.hub_client.websocket.state != websockets.State.OPEN:
             raise ConnectionError("Not connected to Hub. Cannot establish WebRTC connection.")
-        
+
         # Use WebRTC connection via Hub
         await self.p2p_manager.connect_via_hub(
             target_node_id=node_id,
@@ -2932,8 +2951,10 @@ class CoreService:
         # Always buffer messages (even when auto-detection is OFF) to enable manual extraction
         if status == "OK":
             try:
-                monitor = self._get_or_create_conversation_monitor("local_ai")
-                print(f"[Monitor] Buffering messages for local_ai (buffer size before: {len(monitor.message_buffer)})")
+                # BUG FIX: Use actual conversation_id instead of hardcoded "local_ai"
+                # This ensures each AI chat (local_ai, ai_chat_xxx) maintains its own buffer and provider settings
+                monitor = self._get_or_create_conversation_monitor(conversation_id)
+                print(f"[Monitor] Buffering messages for {conversation_id} (buffer size before: {len(monitor.message_buffer)})")
 
                 # Update monitor's inference settings to match the query (for knowledge detection)
                 monitor.update_inference_settings(
@@ -2943,11 +2964,13 @@ class CoreService:
                 )
 
                 # Feed user message
+                # Group chat support: Include short node_id prefix for global uniqueness
+                node_id_short = self.p2p_manager.node_id[-8:]
                 user_message = ConvMessage(
-                    message_id=f"{command_id}-user",
-                    conversation_id="local_ai",
-                    sender_node_id="user",
-                    sender_name="User",
+                    message_id=f"{node_id_short}-{command_id}-user",
+                    conversation_id=conversation_id,  # BUG FIX: Use actual conversation_id
+                    sender_node_id=self.p2p_manager.node_id,  # BUG FIX: Use actual node ID
+                    sender_name=self.p2p_manager.get_display_name() or "User",  # BUG FIX: Use actual display name
                     text=prompt,
                     timestamp=datetime.utcnow().isoformat()
                 )
@@ -2959,8 +2982,8 @@ class CoreService:
                 ai_name = f"AI ({model_name})" if model_name != "unknown" else "AI Assistant"
 
                 ai_message = ConvMessage(
-                    message_id=f"{command_id}-ai",
-                    conversation_id="local_ai",
+                    message_id=f"{node_id_short}-{command_id}-ai",
+                    conversation_id=conversation_id,  # BUG FIX: Use actual conversation_id
                     sender_node_id="ai",
                     sender_name=ai_name,
                     text=response_payload.get("content", ""),
@@ -2974,13 +2997,13 @@ class CoreService:
                 if self.auto_knowledge_detection_enabled:
                     # If proposal generated, broadcast to UI
                     if proposal:
-                        print(f"[Auto-detect] Knowledge proposal generated for local_ai chat")
+                        print(f"[Auto-detect] Knowledge proposal generated for {conversation_id} chat")
                         await self.local_api.broadcast_event(
                             "knowledge_commit_proposed",
                             proposal.to_dict()
                         )
                         # Local AI - private conversation, don't broadcast to peers
-                        print(f"[Local AI] Private conversation - knowledge will not be shared with peers")
+                        print(f"[{conversation_id}] Private conversation - knowledge will not be shared with peers")
                         async def _no_op_broadcast(message: Dict[str, Any]) -> None:
                             pass  # Don't send to peers for private conversations
 
@@ -3094,7 +3117,8 @@ class CoreService:
         system_instruction = self._build_bias_aware_system_instruction(
             instruction_blocks,
             bias_mitigation_settings,
-            cultural_contexts
+            cultural_contexts,
+            include_full_context
         )
 
         # Build context blocks
@@ -3224,20 +3248,29 @@ class CoreService:
         self,
         instruction_blocks: List[Dict[str, Any]],
         bias_mitigation_settings: List[Dict[str, Any]],
-        cultural_contexts: List[Dict[str, str]]
+        cultural_contexts: List[Dict[str, str]],
+        include_full_context: bool = True
     ) -> str:
         """Build system instruction with bias mitigation and multi-perspective requirements.
 
         Phase 2: Implements cognitive bias mitigation strategies from KNOWLEDGE_ARCHITECTURE.md
+        Phase 7: Context-aware instruction (adapts based on whether context is provided)
         """
-        # Base instruction
-        base = (
-            "You are a helpful AI assistant with strong bias-awareness training. "
-            "Your task is to answer the user's query based on the provided JSON data blobs inside <CONTEXT> tags. "
-            "The 'source' attribute of each tag indicates who the context belongs to. The source 'local' refers to the user asking the query. "
-            "Other sources are peer nodes who have shared their context to help answer the query. "
-            "Analyze all provided contexts to formulate your answer. When relevant, cite which source provided specific information."
-        )
+        # Base instruction (context-aware)
+        if include_full_context:
+            base = (
+                "You are a helpful AI assistant with strong bias-awareness training. "
+                "Your task is to answer the user's query based on the provided JSON data blobs inside <CONTEXT> tags. "
+                "The 'source' attribute of each tag indicates who the context belongs to. The source 'local' refers to the user asking the query. "
+                "Other sources are peer nodes who have shared their context to help answer the query. "
+                "Analyze all provided contexts to formulate your answer. When relevant, cite which source provided specific information."
+            )
+        else:
+            base = (
+                "You are a helpful AI assistant with strong bias-awareness training. "
+                "Answer the user's query based on the conversation history and your general knowledge. "
+                "The user has chosen not to share their personal context or device specifications for this conversation."
+            )
 
         # Add user-specific instructions
         if instruction_blocks:

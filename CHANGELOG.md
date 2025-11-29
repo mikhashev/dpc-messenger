@@ -8,6 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Manual IP connection (Direct TLS without Hub)** - Connect to peers using external IP addresses without Hub signaling
+  - New `connect_directly_by_ip()` backend method for manual IP/port/node_id connections
+  - Expandable "Connect via Manual IP" form in sidebar UI with IP, port, and node ID fields
+  - Enables secure TLS connections when peers share external IPs via trusted channels (email, Signal, etc.)
+  - Requires port forwarding on peer's router (default port 8888)
+  - No Hub dependency - completely peer-to-peer with X.509 certificate validation
+  - **Note:** Feature implemented but not yet tested with external IPs
+
 - **External IP discovery via STUN servers** - Your public IP address now displays automatically in the UI
   - New standalone STUN discovery module (`stun_discovery.py`) for detecting external IP without WebRTC connections
   - Background task runs on startup and refreshes every 5 minutes
@@ -31,6 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - No more truncated AI responses with Anthropic Claude
 
 ### Changed
+- **Context-aware AI system instructions** - AI now adapts instructions based on whether personal context is enabled
+  - When context disabled: AI receives "Answer based on conversation history and general knowledge" instead of expecting `<CONTEXT>` tags
+  - Eliminates confusing "I don't see any JSON data blobs in `<CONTEXT>` tags" responses
+  - Cleaner user experience for context-free queries while preserving conversation history
+  - Backend: `_build_bias_aware_system_instruction()` now accepts `include_full_context` parameter
+
+- **Message ID format updated for group chat support** - Message IDs now include node ID prefix for global uniqueness
+  - New format: `{node_id_short}-{command_id}-{user|ai}` (e.g., `46f34940-abc123-user`)
+  - Enables tracking individual participants in future multi-user group chats
+  - Prevents message ID collisions across different users and AI instances
+  - Maintains backward compatibility with existing code
+
 - **STUN discovery architecture** - Dual-source external IP detection
   - Priority: Standalone STUN discovery (always available) → WebRTC ICE candidates (when active)
   - Avoids duplicate IPs from multiple sources
@@ -38,6 +58,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `P2PManager.get_external_ips()` aggregates from both WebRTC peers and standalone discovery
 
 ### Fixed
+- **Knowledge extraction routing to wrong AI provider in multi-chat scenarios** - Critical bug where "End Session" button used wrong AI model
+  - Root cause: Hardcoded `"local_ai"` conversation_id caused all AI chats to share same message buffer and provider settings
+  - When Chat 1 (claude_haiku) and Chat 2 (ollama_local) were both active, Chat 2's provider settings overwrote Chat 1's
+  - Clicking "End Session" in Chat 1 would incorrectly use ollama_local for knowledge extraction instead of claude_haiku
+  - Fixed: Use actual `conversation_id` parameter instead of hardcoded string in 3 locations (monitor creation, user message, AI message)
+  - Impact: Each AI chat now maintains independent message buffers and provider settings
+
+- **Hardcoded user identity in knowledge commits** - User attribution was generic instead of using actual node ID and display name
+  - Root cause: `sender_node_id="user"` and `sender_name="User"` hardcoded in ConvMessage creation
+  - Knowledge commits showed generic "User (user)" instead of real identity like "Mike Windows 10 (dpc-node-e07fb59e46f34940)"
+  - Fixed: Use `self.p2p_manager.node_id` and `self.p2p_manager.get_display_name()`
+  - Impact: Proper attribution in knowledge commits, enables future multi-device support and knowledge sharing
+
 - **Settings validation** - STUN servers return empty list (not hardcoded defaults) if config missing
   - Clear warning message: "No STUN servers configured in config.ini"
   - Forces users to configure servers explicitly for their region

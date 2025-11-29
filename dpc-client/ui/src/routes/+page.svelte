@@ -38,6 +38,12 @@
   let selectedRemoteModel: string = "";  // Selected model when using remote compute host
   let selectedPeerContexts: Set<string> = new Set();  // Set of peer node_ids to fetch context from
 
+  // Manual IP connection state
+  let showManualIPForm: boolean = false;
+  let manualIpHost: string = "";
+  let manualIpPort: number = 8888;
+  let manualIpNodeId: string = "";
+
   // Resizable chat panel state
   let chatPanelHeight: number = (() => {
     // Load saved height from localStorage, default to calc(100vh - 120px)
@@ -393,6 +399,26 @@
     if (activeChatId === nodeId) {
       activeChatId = 'local_ai';
     }
+  }
+
+  function handleManualIPConnect() {
+    if (!manualIpHost.trim() || !manualIpNodeId.trim()) {
+      alert("Please fill in IP/hostname and node ID");
+      return;
+    }
+
+    console.log(`Connecting via manual IP: ${manualIpHost}:${manualIpPort} to ${manualIpNodeId}`);
+    sendCommand("connect_directly_by_ip", {
+      host: manualIpHost.trim(),
+      port: manualIpPort,
+      node_id: manualIpNodeId.trim()
+    });
+
+    // Reset form
+    manualIpHost = "";
+    manualIpPort = 8888;
+    manualIpNodeId = "";
+    showManualIPForm = false;
   }
   
   function handleReconnect() {
@@ -915,8 +941,8 @@
         <!-- Connect to Peer - UPDATED PLACEHOLDER -->
         <div class="connect-section">
           <h3>Connect to Peer</h3>
-          <input 
-            type="text" 
+          <input
+            type="text"
             bind:value={peerInput}
             placeholder="dpc://... or node_id"
             on:keydown={(e) => e.key === 'Enter' && handleConnectPeer()}
@@ -925,6 +951,49 @@
           <p class="small">
             💡 Tip: Enter just node_id for WebRTC, or full dpc:// URI for Direct TLS
           </p>
+
+          <!-- Manual IP Connection (Expandable) -->
+          <button
+            class="btn-toggle-manual-ip"
+            on:click={() => showManualIPForm = !showManualIPForm}
+          >
+            {showManualIPForm ? '▼' : '▶'} Connect via Manual IP
+          </button>
+
+          {#if showManualIPForm}
+            <div class="manual-ip-form">
+              <p class="small">
+                🔒 Secure TLS connection without Hub (requires port forwarding on peer's side)
+              </p>
+              <label>
+                IP/Hostname:
+                <input
+                  type="text"
+                  bind:value={manualIpHost}
+                  placeholder="e.g., 203.0.113.5 or example.com"
+                />
+              </label>
+              <label>
+                Port:
+                <input
+                  type="number"
+                  bind:value={manualIpPort}
+                  placeholder="8888"
+                  min="1"
+                  max="65535"
+                />
+              </label>
+              <label>
+                Node ID:
+                <input
+                  type="text"
+                  bind:value={manualIpNodeId}
+                  placeholder="dpc-node-abc123..."
+                />
+              </label>
+              <button on:click={handleManualIPConnect}>Connect via IP</button>
+            </div>
+          {/if}
         </div>
 
         <!-- Chat List -->
@@ -1698,6 +1767,46 @@
   .btn-add-chat:active {
     transform: translateY(0);
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  }
+
+  /* Manual IP Connection Styles */
+  .btn-toggle-manual-ip {
+    width: 100%;
+    padding: 0.5rem;
+    margin-top: 0.5rem;
+    background: #f8f9fa;
+    color: #333;
+    border: 1px solid #dee2e6;
+    text-align: left;
+    font-size: 0.9rem;
+  }
+
+  .btn-toggle-manual-ip:hover {
+    background: #e9ecef;
+  }
+
+  .manual-ip-form {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: #f8f9fa;
+    border-radius: 6px;
+    border: 1px solid #dee2e6;
+  }
+
+  .manual-ip-form label {
+    display: block;
+    margin-bottom: 0.75rem;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #495057;
+  }
+
+  .manual-ip-form input {
+    margin-top: 0.25rem;
+  }
+
+  .manual-ip-form button {
+    margin-top: 0.5rem;
   }
 
   .chat-list ul {
