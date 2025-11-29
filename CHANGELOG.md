@@ -8,13 +8,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- **Manual IP connection (Direct TLS without Hub)** - Connect to peers using external IP addresses without Hub signaling
-  - New `connect_directly_by_ip()` backend method for manual IP/port/node_id connections
-  - Expandable "Connect via Manual IP" form in sidebar UI with IP, port, and node ID fields
+- **External IP connection support in Connect to Peer field** - Single input field now supports all connection methods
+  - Existing `dpc://` URI format works with external IPs: `dpc://203.0.113.5:8888?node_id=dpc-node-abc...`
+  - Added connection help with examples for all three methods (WebRTC, Local Network, External IP)
   - Enables secure TLS connections when peers share external IPs via trusted channels (email, Signal, etc.)
   - Requires port forwarding on peer's router (default port 8888)
-  - No Hub dependency - completely peer-to-peer with X.509 certificate validation
-  - **Note:** Feature implemented but not yet tested with external IPs
+  - No Hub dependency for external IP connections - completely peer-to-peer with X.509 certificate validation
+  - **Note:** Feature not yet tested with external IPs across internet
 
 - **External IP discovery via STUN servers** - Your public IP address now displays automatically in the UI
   - New standalone STUN discovery module (`stun_discovery.py`) for detecting external IP without WebRTC connections

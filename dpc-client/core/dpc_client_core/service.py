@@ -2019,7 +2019,16 @@ class CoreService:
     # --- P2P Connection Methods ---
 
     async def connect_to_peer(self, uri: str):
-        """Connect to a peer using a dpc:// URI (Direct TLS)."""
+        """
+        Connect to a peer using a dpc:// URI (Direct TLS).
+
+        Supports local network and external IP connections:
+        - Local: dpc://192.168.1.100:8888?node_id=dpc-node-abc123...
+        - External: dpc://203.0.113.5:8888?node_id=dpc-node-abc123...
+
+        Args:
+            uri: dpc:// URI with host, port, and node_id query parameter
+        """
         print(f"Orchestrating direct connection to {uri}...")
         
         # Parse the URI to extract host, port, and node_id
@@ -2027,25 +2036,6 @@ class CoreService:
         
         # Use connect_directly from P2PManager
         await self.p2p_manager.connect_directly(host, port, target_node_id)
-
-    async def connect_directly_by_ip(self, host: str, port: int, node_id: str):
-        """
-        Connect to a peer directly using IP address and port (Direct TLS).
-        This method allows manual IP entry without needing Hub for signaling.
-
-        Args:
-            host: IP address or hostname (e.g., "192.168.1.100" or external IP)
-            port: Port number (default: 8888)
-            node_id: Target node's ID (e.g., "dpc-node-abc123...")
-        """
-        print(f"Orchestrating direct TLS connection to {node_id} at {host}:{port}...")
-
-        # Validate node_id format
-        if not node_id.startswith("dpc-node-"):
-            raise ValueError(f"Invalid node_id format: {node_id} (must start with 'dpc-node-')")
-
-        # Use connect_directly from P2PManager
-        await self.p2p_manager.connect_directly(host, port, node_id)
 
     async def connect_to_peer_by_id(self, node_id: str):
         """
