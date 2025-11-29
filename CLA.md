@@ -121,18 +121,14 @@ If you become aware that any representations are inaccurate:
 
 ## How to Sign
 
-### For Pull Requests (Recommended):
-1. Open a Pull Request
-2. **CLA Assistant bot** will comment with a link
-3. Click the link and sign electronically
-4. Your GitHub username will be recorded
-5. Future PRs won't require re-signing
+### For Pull Requests:
+**Note:** CLA Assistant bot integration is coming soon. For now, please use manual signing below.
 
-### Manual Signing:
+### Manual Signing (Current Method):
 1. Download this CLA
 2. Fill in your information below
 3. Sign and date
-4. Email to: cla@dpc-project.org
+4. Email to: legoogmiha@gmail.com
 
 ---
 
@@ -260,7 +256,7 @@ The D-PC Project may update this CLA to:
 
 ## Governing Law
 
-This CLA is governed by the laws of **[Your Jurisdiction - to be specified]**.
+This CLA is governed by the laws of the **State of Delaware, United States** (upon company incorporation; jurisdiction pending until formal entity establishment).
 
 Disputes shall be resolved through:
 1. Good-faith negotiation
@@ -329,11 +325,11 @@ Every contribution, whether code, documentation, or ideas, makes D-PC Messenger 
 ---
 
 **Document Version:** 2.0  
-**Last Updated:** November 2, 2025  
+**Last Updated:** November 29, 2025  
 **Effective Date:** November 2, 2025
 
 © 2025 D-PC Project
 
 ---
 
-**To sign this CLA, open a Pull Request and follow the CLA Assistant bot instructions.**
+**To sign this CLA, use the manual signing process above (email to legoogmiha@gmail.com). Automated CLA Assistant integration coming soon.**
