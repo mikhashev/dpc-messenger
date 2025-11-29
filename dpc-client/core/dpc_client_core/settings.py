@@ -74,7 +74,7 @@ class Settings:
 
         self._config['p2p'] = {
             'listen_port': '8888',
-            'listen_host': '0.0.0.0'
+            'listen_host': 'dual'  # dual-stack (IPv4 + IPv6), can be "0.0.0.0" (IPv4 only) or "::" (IPv6 only)
         }
 
         self._config['api'] = {

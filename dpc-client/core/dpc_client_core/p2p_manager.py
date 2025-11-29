@@ -123,15 +123,56 @@ class P2PManager:
     # --- Direct TLS Connection Methods (existing code) ---
 
     async def start_server(self, host: str = "0.0.0.0", port: int = 8888):
-        """Starts the raw TLS server to listen for direct connections."""
+        """
+        Starts the raw TLS server to listen for direct connections.
+
+        Supports IPv4, IPv6, and dual-stack modes:
+        - host="0.0.0.0": IPv4 only
+        - host="::": IPv6 only (may also accept IPv4 on some systems)
+        - host="dual": Dual-stack (both IPv4 and IPv6)
+
+        Args:
+            host: Bind address ("0.0.0.0", "::", or "dual")
+            port: Port to listen on
+        """
         ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
         ssl_context.load_cert_chain(certfile=self.cert_file, keyfile=self.key_file)
-        
-        server = await asyncio.start_server(
-            self._handle_direct_connection, host, port, ssl=ssl_context
-        )
-        self._server_task = asyncio.create_task(server.serve_forever())
-        print(f"P2PManager Direct TLS server listening on {host}:{port} for node {self.node_id}")
+
+        if host == "dual":
+            # Try dual-stack binding (IPv6 with IPv4 fallback)
+            try:
+                # On most systems, binding to :: with IPV6_V6ONLY=0 accepts both IPv4 and IPv6
+                server = await asyncio.start_server(
+                    self._handle_direct_connection, "::", port, ssl=ssl_context
+                )
+                self._server_task = asyncio.create_task(server.serve_forever())
+                print(f"P2PManager Direct TLS server listening on [::]:{port} (dual-stack) for node {self.node_id}")
+            except Exception as e:
+                # Fallback: Create separate IPv4 and IPv6 listeners
+                print(f"Dual-stack binding failed ({e}), binding IPv4 and IPv6 separately...")
+
+                server_v4 = await asyncio.start_server(
+                    self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
+                )
+                server_v6 = await asyncio.start_server(
+                    self._handle_direct_connection, "::", port, ssl=ssl_context
+                )
+
+                self._server_task = asyncio.create_task(asyncio.gather(
+                    server_v4.serve_forever(),
+                    server_v6.serve_forever()
+                ))
+                print(f"P2PManager Direct TLS server listening on 0.0.0.0:{port} and [::]:{port} for node {self.node_id}")
+        else:
+            # Single-stack mode (IPv4 or IPv6 only)
+            server = await asyncio.start_server(
+                self._handle_direct_connection, host, port, ssl=ssl_context
+            )
+            self._server_task = asyncio.create_task(server.serve_forever())
+
+            # Format IPv6 addresses with brackets for clarity
+            formatted_host = f"[{host}]" if ":" in host else host
+            print(f"P2PManager Direct TLS server listening on {formatted_host}:{port} for node {self.node_id}")
 
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
@@ -179,8 +220,64 @@ class P2PManager:
                 writer.close()
                 await writer.wait_closed()
 
-    async def connect_directly(self, host: str, port: int, target_node_id: str):
-        """Initiates a direct TLS connection to a peer (Client-side)."""
+    async def test_port_connectivity(self, host: str, port: int, timeout: float = 10.0) -> tuple[bool, str]:
+        """
+        Test if a port is accessible before attempting full connection.
+
+        Args:
+            host: Target IP address
+            port: Target port
+            timeout: Test timeout in seconds (default 5.0)
+
+        Returns:
+            Tuple of (success: bool, message: str)
+            - (True, "Port is accessible") if connection succeeds
+            - (False, "error details") if connection fails
+        """
+        try:
+            # Attempt basic TCP connection without SSL/TLS
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                timeout=timeout
+            )
+            writer.close()
+            await writer.wait_closed()
+            return (True, f"Port {port} is accessible on {host}")
+
+        except asyncio.TimeoutError:
+            msg = (
+                f"Port {port} on {host} is not accessible (timeout).\n"
+                f"  - If this is an external IP, ensure port forwarding is configured on the peer's router.\n"
+                f"  - If this is a local IP, check the peer's firewall settings."
+            )
+            return (False, msg)
+
+        except ConnectionRefusedError:
+            msg = (
+                f"Port {port} on {host} actively refused connection.\n"
+                f"  - Peer's D-PC client may not be running.\n"
+                f"  - Port may be blocked by firewall."
+            )
+            return (False, msg)
+
+        except Exception as e:
+            return (False, f"Port test failed: {e}")
+
+    async def connect_directly(self, host: str, port: int, target_node_id: str, timeout: float = 30.0):
+        """
+        Initiates a direct TLS connection to a peer (Client-side).
+
+        Args:
+            host: Peer's IP address (local or external)
+            port: Peer's port (default 8888)
+            target_node_id: Expected node ID for identity verification
+            timeout: Connection timeout in seconds (default 10.0)
+
+        Raises:
+            asyncio.TimeoutError: If connection times out (likely port forwarding issue)
+            ConnectionRefusedError: If peer actively refuses connection (firewall/not running)
+            ConnectionError: If peer handshake fails
+        """
         print(f"Initiating direct connection to {target_node_id} at {host}:{port}...")
 
         ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
@@ -188,7 +285,11 @@ class P2PManager:
         ssl_context.verify_mode = ssl.CERT_NONE
 
         try:
-            reader, writer = await asyncio.open_connection(host, port, ssl=ssl_context)
+            # Add timeout to prevent long hangs
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port, ssl=ssl_context),
+                timeout=timeout
+            )
 
             hello = {
                 "command": "HELLO",
@@ -198,11 +299,11 @@ class P2PManager:
                 }
             }
             await write_message(writer, hello)
-            
+
             response = await read_message(reader)
             if not response or response.get("status") != "OK":
                 raise ConnectionError(f"Peer did not acknowledge HELLO.")
-            
+
             peer_name = response.get("name")
             if peer_name:
                 print(f"  - Peer name: {peer_name}")
@@ -224,6 +325,29 @@ class P2PManager:
             except Exception as e:
                 print(f"  - Failed to request providers from {target_node_id}: {e}")
 
+        except asyncio.TimeoutError:
+            error_msg = (
+                f"Connection to {host}:{port} timed out after {timeout} seconds.\n"
+                f"  Possible causes:\n"
+                f"  - Peer is behind NAT/firewall without port forwarding configured\n"
+                f"  - For external IP connections: Router must forward port {port} to peer device\n"
+                f"  - Peer's D-PC client may not be running\n"
+                f"  - Network connectivity issues\n"
+                f"  Recommended: Use WebRTC connections for internet-wide P2P (no port forwarding needed)"
+            )
+            print(error_msg)
+            raise ConnectionError(error_msg)
+        except ConnectionRefusedError as e:
+            error_msg = (
+                f"Connection to {host}:{port} was refused.\n"
+                f"  Possible causes:\n"
+                f"  - Peer's D-PC client is not running\n"
+                f"  - Firewall is blocking port {port}\n"
+                f"  - Port {port} is used by another application\n"
+                f"  Verify peer is running: Check for 'Direct TLS server started on port {port}' in their logs"
+            )
+            print(error_msg)
+            raise ConnectionError(error_msg)
         except Exception as e:
             print(f"Failed to establish direct connection with {target_node_id}: {e}")
             raise

@@ -436,7 +436,9 @@ class CoreService:
         await self._startup_integrity_check()
 
         # Start all background tasks
-        p2p_task = asyncio.create_task(self.p2p_manager.start_server())
+        listen_host = self.settings.get_p2p_listen_host()
+        listen_port = self.settings.get_p2p_listen_port()
+        p2p_task = asyncio.create_task(self.p2p_manager.start_server(host=listen_host, port=listen_port))
         p2p_task.set_name("p2p_server")
         self._background_tasks.add(p2p_task)
 
@@ -954,16 +956,65 @@ class CoreService:
 
     # --- High-level methods (API for the UI) ---
 
+    def _is_global_ipv6(self, ip: str) -> bool:
+        """
+        Check if an IPv6 address is globally routable (not private/ULA).
+
+        Global IPv6 ranges:
+        - 2000::/3 - Global Unicast
+        - 2001:0::/32 - Teredo (globally routable IPv6-over-IPv4 tunnel)
+
+        Excludes:
+        - fe80::/10 - Link-local (already filtered out)
+        - fc00::/7  - Unique Local Addresses (ULA) - private
+        - fd00::/8  - ULA (subset of fc00::/7)
+        - ::1       - Loopback (already filtered out)
+        - ff00::/8  - Multicast
+
+        Args:
+            ip: IPv6 address string (e.g., "2001:db8::1234" or "2001:0:1234:5678:90ab:cdef:1234:5678")
+
+        Returns:
+            True if globally routable, False otherwise
+        """
+        import ipaddress
+        try:
+            addr = ipaddress.IPv6Address(ip)
+
+            # Special case: Teredo addresses (2001:0::/32) are globally routable
+            # Python's ipaddress incorrectly marks them as private
+            teredo_network = ipaddress.IPv6Network("2001:0::/32")
+            if addr in teredo_network:
+                return True
+
+            # Check if it's global unicast (2000::/3)
+            if addr.is_global:
+                return True
+
+            # Exclude ULA (fc00::/7 and fd00::/8) and other private ranges
+            if addr.is_private:
+                return False
+
+            # Exclude multicast
+            if addr.is_multicast:
+                return False
+
+            return False
+
+        except Exception:
+            return False
+
     def _get_local_ips(self) -> List[str]:
         """
         Get local network IP addresses (excluding loopback).
-        Returns a list of IP addresses for constructing dpc:// URIs.
+        Returns a list of IP addresses (IPv4 and IPv6) for constructing dpc:// URIs.
         Uses multiple methods for cross-platform compatibility and combines results.
         """
         local_ips = []
         errors = []
 
         # Method 1: Use socket to external address (most reliable, finds primary interface)
+        # Try IPv4
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -971,11 +1022,26 @@ class CoreService:
             s.close()
             if local_ip and not local_ip.startswith('127.'):
                 local_ips.append(local_ip)
-                print(f"✓ Found local IP via socket method: {local_ip}")
+                print(f"✓ Found local IPv4 via socket method: {local_ip}")
         except Exception as e:
-            errors.append(f"Socket method: {e}")
+            errors.append(f"Socket method (IPv4): {e}")
+
+        # Try IPv6
+        try:
+            s6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+            # Use Google's IPv6 DNS server
+            s6.connect(("2001:4860:4860::8888", 80))
+            local_ip6 = s6.getsockname()[0]
+            s6.close()
+            # Filter out link-local (fe80::) and loopback (::1) addresses
+            if local_ip6 and not local_ip6.startswith('fe80:') and local_ip6 != '::1':
+                local_ips.append(local_ip6)
+                print(f"✓ Found local IPv6 via socket method: {local_ip6}")
+        except Exception as e:
+            errors.append(f"Socket method (IPv6): {e}")
 
         # Method 2: Try hostname resolution (finds all interfaces)
+        # IPv4
         try:
             hostname = socket.gethostname()
             addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET)
@@ -985,10 +1051,25 @@ class CoreService:
                 # Filter out loopback addresses and duplicates
                 if ip and not ip.startswith('127.') and ip not in local_ips:
                     local_ips.append(ip)
-                    print(f"✓ Found local IP via hostname method: {ip}")
+                    print(f"✓ Found local IPv4 via hostname method: {ip}")
 
         except Exception as e:
-            errors.append(f"Hostname method: {e}")
+            errors.append(f"Hostname method (IPv4): {e}")
+
+        # IPv6
+        try:
+            hostname = socket.gethostname()
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_INET6)
+
+            for info in addr_info:
+                ip = info[4][0]
+                # Filter out link-local (fe80::), loopback (::1), and duplicates
+                if ip and not ip.startswith('fe80:') and ip != '::1' and ip not in local_ips:
+                    local_ips.append(ip)
+                    print(f"✓ Found local IPv6 via hostname method: {ip}")
+
+        except Exception as e:
+            errors.append(f"Hostname method (IPv6): {e}")
 
         # Method 3: Platform-specific (Linux/Unix only - finds all interfaces)
         if sys.platform.startswith('linux'):
@@ -998,12 +1079,20 @@ class CoreService:
                 result = subprocess.run(['ip', 'addr', 'show'], capture_output=True, text=True, timeout=2)
                 if result.returncode == 0:
                     import re
-                    # Look for inet addresses (not inet6)
+                    # Look for inet addresses (IPv4)
                     for match in re.finditer(r'inet\s+(\d+\.\d+\.\d+\.\d+)', result.stdout):
                         ip = match.group(1)
                         if not ip.startswith('127.') and ip not in local_ips:
                             local_ips.append(ip)
-                            print(f"✓ Found local IP via 'ip addr' command: {ip}")
+                            print(f"✓ Found local IPv4 via 'ip addr' command: {ip}")
+
+                    # Look for inet6 addresses (IPv6)
+                    for match in re.finditer(r'inet6\s+([0-9a-f:]+)', result.stdout):
+                        ip = match.group(1)
+                        # Filter out link-local (fe80::) and loopback (::1)
+                        if not ip.startswith('fe80:') and ip != '::1' and ip not in local_ips:
+                            local_ips.append(ip)
+                            print(f"✓ Found local IPv6 via 'ip addr' command: {ip}")
             except Exception as e:
                 errors.append(f"Linux 'ip addr' method: {e}")
 
@@ -1045,16 +1134,20 @@ class CoreService:
         dpc_uris = []
 
         for ip in local_ips:
-            uri = f"dpc://{ip}:{dpc_port}?node_id={self.p2p_manager.node_id}"
+            # IPv6 addresses need brackets in URIs: dpc://[2001:db8::1]:8888
+            formatted_host = f"[{ip}]" if ":" in ip else ip
+            uri = f"dpc://{formatted_host}:{dpc_port}?node_id={self.p2p_manager.node_id}"
             dpc_uris.append({
                 "ip": ip,
                 "port": dpc_port,
-                "uri": uri
+                "uri": uri,
+                "ip_version": "IPv6" if ":" in ip else "IPv4"
             })
 
         # Get external IPs discovered via STUN servers
         # Priority: 1) Standalone STUN discovery (always available)
         #           2) WebRTC connection STUN discovery (only when WebRTC active)
+        #           3) Global IPv6 addresses from local detection (Teredo, native IPv6)
         external_ips = []
 
         # Add standalone STUN-discovered IP first (if available)
@@ -1067,14 +1160,23 @@ class CoreService:
             if ip not in external_ips:
                 external_ips.append(ip)
 
+        # Add global IPv6 addresses from local detection
+        # These are assigned to local interfaces but are globally routable
+        for ip in local_ips:
+            if ":" in ip and self._is_global_ipv6(ip) and ip not in external_ips:
+                external_ips.append(ip)
+
         # Build external URIs
         external_uris = []
         for ip in external_ips:
-            uri = f"dpc://{ip}:{dpc_port}?node_id={self.p2p_manager.node_id}"
+            # IPv6 addresses need brackets in URIs: dpc://[2001:db8::1]:8888
+            formatted_host = f"[{ip}]" if ":" in ip else ip
+            uri = f"dpc://{formatted_host}:{dpc_port}?node_id={self.p2p_manager.node_id}"
             external_uris.append({
                 "ip": ip,
                 "port": dpc_port,
-                "uri": uri
+                "uri": uri,
+                "ip_version": "IPv6" if ":" in ip else "IPv4"
             })
 
         return {
@@ -2036,6 +2138,36 @@ class CoreService:
         
         # Use connect_directly from P2PManager
         await self.p2p_manager.connect_directly(host, port, target_node_id)
+
+    async def test_port(self, uri: str) -> dict:
+        """
+        Test port connectivity before attempting full connection.
+
+        Args:
+            uri: dpc:// URI with host, port, and node_id query parameter
+
+        Returns:
+            Dict with keys:
+            - success (bool): Whether port is accessible
+            - message (str): Diagnostic message
+            - host (str): Target host
+            - port (int): Target port
+        """
+        from dpc_protocol.utils import parse_dpc_uri
+
+        # Parse the URI to extract host and port
+        host, port, target_node_id = parse_dpc_uri(uri)
+
+        # Test port connectivity
+        success, message = await self.p2p_manager.test_port_connectivity(host, port)
+
+        return {
+            "success": success,
+            "message": message,
+            "host": host,
+            "port": port,
+            "node_id": target_node_id
+        }
 
     async def connect_to_peer_by_id(self, node_id: str):
         """

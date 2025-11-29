@@ -166,11 +166,17 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
 
 ### Connection Types
 
-1. **Direct TLS** (Local Network)
-   - Server listens on port 8888
+1. **Direct TLS** (Local Network & IPv6)
+   - Server listens on port 8888 (default)
+   - **Dual-stack support**: IPv4 and IPv6
    - Uses self-signed X.509 certificates for node identity
    - Location: `dpc-client/core/dpc_client_core/p2p_manager.py`
    - Lowest latency, requires network visibility
+   - **IPv6 URIs**: Use bracket notation: `dpc://[2001:db8::1]:8888?node_id=...`
+   - **Configuration**: Set `listen_host` in config.ini:
+     - `dual` (default) - Listens on both IPv4 and IPv6
+     - `0.0.0.0` - IPv4 only
+     - `::` - IPv6 only
 
 2. **WebRTC** (Internet-Wide)
    - NAT traversal via STUN/TURN

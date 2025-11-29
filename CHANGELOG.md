@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **IPv6 support for direct P2P connections** - Full dual-stack (IPv4 + IPv6) connectivity
+  - Dual-stack server binding: Listens on both IPv4 and IPv6 simultaneously
+  - Configuration: Set `listen_host = dual` (default), `0.0.0.0` (IPv4 only), or `::` (IPv6 only) in `~/.dpc/config.ini`
+  - Automatic IPv6 address detection (local and global addresses)
+  - IPv6 URI support with bracket notation: `dpc://[2001:db8::1]:8888?node_id=...`
+  - Teredo IPv6 support: Global Teredo addresses (`2001:0::/32`) automatically promoted to External section
+  - Enables NAT-free connections for peers with native IPv6 or Teredo tunneling
+  - Cross-platform IPv6 detection: Socket method, hostname resolution, and platform-specific commands
+  - Smart filtering: Excludes link-local (`fe80::/10`) and ULA (`fc00::/7`) from external addresses
+
+- **Connection timeout and diagnostics** - Better error handling for failed connections
+  - Configurable connection timeout (default: 30 seconds for full connection, 10 seconds for port test)
+  - New `test_port_connectivity()` method for pre-flight port accessibility checks
+  - Exposed via WebSocket API as `test_port` command for UI integration
+  - Fast failure detection instead of relying on OS default timeouts
+
 - **External IP connection support in Connect to Peer field** - Single input field now supports all connection methods
   - Existing `dpc://` URI format works with external IPs: `dpc://203.0.113.5:8888?node_id=dpc-node-abc...`
   - Added connection help with examples for all three methods (WebRTC, Local Network, External IP)
@@ -57,6 +73,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Faster initial discovery (5 seconds vs waiting for WebRTC connection)
   - `P2PManager.get_external_ips()` aggregates from both WebRTC peers and standalone discovery
 
+- **Connection timeout increased** - Direct TLS connection timeout extended from 10 to 30 seconds
+  - Accommodates slower networks and long-distance connections
+  - Port test timeout: 10 seconds (unchanged)
+  - Prevents premature connection failures on high-latency networks
+
+- **Improved error messages for connection failures** - More actionable diagnostics for users
+  - Timeout errors now explain port forwarding requirements for external IP connections
+  - ConnectionRefusedError provides firewall and service status guidance
+  - Recommends WebRTC for NAT/firewall scenarios (no port forwarding needed)
+  - Error messages distinguish between network issues, firewall blocks, and service unavailability
+
 ### Fixed
 - **Knowledge extraction routing to wrong AI provider in multi-chat scenarios** - Critical bug where "End Session" button used wrong AI model
   - Root cause: Hardcoded `"local_ai"` conversation_id caused all AI chats to share same message buffer and provider settings
@@ -70,6 +97,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Knowledge commits showed generic "User (user)" instead of real identity like "Mike Windows 10 (dpc-node-e07fb59e46f34940)"
   - Fixed: Use `self.p2p_manager.node_id` and `self.p2p_manager.get_display_name()`
   - Impact: Proper attribution in knowledge commits, enables future multi-device support and knowledge sharing
+
+- **Teredo IPv6 addresses not appearing in External section** - Global Teredo addresses were incorrectly classified as private
+  - Root cause: Python's `ipaddress` module incorrectly marks Teredo (`2001:0::/32`) as `is_private=True`
+  - Impact: Teredo addresses only showed in Local Network section instead of External (Internet)
+  - Fixed: Added explicit Teredo network check in `_is_global_ipv6()` before relying on `is_global` flag
+  - Global Teredo addresses now correctly promoted to External section for internet-wide connectivity
+  - Enables NAT-free P2P connections via Teredo tunneling (IPv6-over-IPv4)
 
 - **Settings validation** - STUN servers return empty list (not hardcoded defaults) if config missing
   - Clear warning message: "No STUN servers configured in config.ini"
