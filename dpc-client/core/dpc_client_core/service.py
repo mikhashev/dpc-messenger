@@ -3,12 +3,15 @@
 import asyncio
 from dataclasses import asdict
 import json
+import logging
 import uuid
 import websockets
 import socket
 import sys
 from pathlib import Path
 from typing import Dict, Any, List
+
+logger = logging.getLogger(__name__)
 
 from .firewall import ContextFirewall
 from .hub_client import HubClient
@@ -46,7 +49,7 @@ class CoreService:
     Manages all sub-components and the application's lifecycle.
     """
     def __init__(self):
-        print("Initializing D-PC Core Service...")
+        logger.info("Initializing D-PC Core Service")
 
         DPC_HOME_DIR.mkdir(exist_ok=True)
 
@@ -86,7 +89,7 @@ class CoreService:
 
         # Load AI instructions from instructions.json
         self.instructions = load_instructions()
-        print(f"[OK] AI instructions loaded from instructions.json")
+        logger.info("AI instructions loaded from instructions.json")
 
         # Auto-collect device context on startup (if enabled)
         self.device_context = None
@@ -97,7 +100,7 @@ class CoreService:
 
                 # Generate/update device_context.json
                 device_file = device_collector.collect_and_save()
-                print(f"[OK] Device context saved to {device_file.name}")
+                logger.info("Device context saved to %s", device_file.name)
 
                 # Update personal.json with reference to device_context.json
                 context = self.pcm_core.load_context()
@@ -107,9 +110,9 @@ class CoreService:
                 # Load device context for AI use
                 with open(device_file, 'r', encoding='utf-8') as f:
                     self.device_context = json.load(f)
-                print("[OK] Device context loaded and referenced in personal.json")
+                logger.info("Device context loaded and referenced in personal.json")
             except Exception as e:
-                print(f"[Warning] Failed to collect device context: {e}")
+                logger.warning("Failed to collect device context: %s", e)
                 # Continue service startup even if collection fails
 
         # Set display name from personal context (for P2P handshakes)
@@ -117,9 +120,9 @@ class CoreService:
             context = self.pcm_core.load_context()
             if context.profile and context.profile.name:
                 self.p2p_manager.set_display_name(context.profile.name)
-                print(f"[OK] Display name set from personal context: {context.profile.name}")
+                logger.info("Display name set from personal context: %s", context.profile.name)
         except Exception as e:
-            print(f"[Warning] Failed to load display name from personal context: {e}")
+            logger.warning("Failed to load display name from personal context: %s", e)
 
         self.consensus_manager = ConsensusManager(
             node_id=self.p2p_manager.node_id,
@@ -168,8 +171,8 @@ class CoreService:
 
     def _on_connection_status_changed(self, old_mode: OperationMode, new_mode: OperationMode):
         """Callback when connection status changes."""
-        print(f"\n[Connection Status Change] {old_mode.value} -> {new_mode.value}")
-        print(f"Status: {self.connection_status.get_status_message()}")
+        logger.info("Connection Status Change: %s -> %s", old_mode.value, new_mode.value)
+        logger.info("Status: %s", self.connection_status.get_status_message())
 
         # Notify UI via local API
         asyncio.create_task(self._notify_ui_status_change(new_mode))
@@ -188,7 +191,7 @@ class CoreService:
             # Send to UI via local API
             await self.local_api.broadcast_event("connection_status_changed", {"status": status_info})
         except Exception as e:
-            print(f"Error notifying UI of status change: {e}")
+            logger.error("Error notifying UI of status change: %s", e, exc_info=True)
 
     async def _cleanup_schema_v2(self):
         """
@@ -212,10 +215,10 @@ class CoreService:
         personal_json_path = DPC_HOME_DIR / "personal.json"
 
         if not personal_json_path.exists():
-            print("No personal.json found, skipping cleanup")
+            logger.info("No personal.json found, skipping cleanup")
             return
 
-        print("=== Schema v2.0 Cleanup ===")
+        logger.info("Schema v2.0 Cleanup")
 
         # Load current data
         with open(personal_json_path, 'r', encoding='utf-8') as f:
@@ -230,25 +233,25 @@ class CoreService:
             )
 
             if not has_instruction and not has_entries:
-                print("✓ Already v2.0 and clean")
+                logger.info("Already v2.0 and clean")
                 return
 
         changes_made = False
 
         # STEP 1: Fix instruction field
-        print("Step 1: Checking instruction field...")
+        logger.info("Step 1: Checking instruction field")
         if migrate_instructions_from_personal_context():
-            print("  ✓ Instructions migrated")
+            logger.info("Instructions migrated")
             changes_made = True
 
             # Reload data
             with open(personal_json_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         else:
-            print("  ✓ Instructions already clean")
+            logger.info("Instructions already clean")
 
         # STEP 2: Export knowledge to markdown
-        print("Step 2: Exporting knowledge to markdown...")
+        logger.info("Step 2: Exporting knowledge to markdown")
 
         markdown_manager = MarkdownKnowledgeManager()
         context = PersonalContext.from_dict(data)
@@ -258,7 +261,7 @@ class CoreService:
             if hasattr(topic, 'markdown_file') and topic.markdown_file:
                 markdown_path = DPC_HOME_DIR / topic.markdown_file
                 if markdown_path.exists():
-                    print(f"  ✓ {topic_name}: Already has markdown")
+                    logger.info("%s: Already has markdown", topic_name)
                     continue
 
             # Get commit_id (should be hash-based from COMMIT_INTEGRITY)
@@ -266,7 +269,7 @@ class CoreService:
 
             if not commit_id:
                 # Fallback: generate hash-based commit_id
-                print(f"  ⚠️ {topic_name}: No commit_id, generating new one")
+                logger.warning("%s: No commit_id, generating new one", topic_name)
 
                 from dpc_protocol.knowledge_commit import KnowledgeCommit
                 from dpc_protocol.commit_integrity import compute_commit_hash
@@ -327,7 +330,7 @@ class CoreService:
             entry_count = len(data['knowledge'][topic_name].get('entries', []))
             data['knowledge'][topic_name]['entries'] = []
 
-            print(f"  ✓ {topic_name}: Exported {entry_count} entries to {markdown_filename}")
+            logger.info("%s: Exported %d entries to %s", topic_name, entry_count, markdown_filename)
             changes_made = True
 
         # STEP 3: Update format_version
@@ -343,7 +346,7 @@ class CoreService:
             import shutil
             backup_path = personal_json_path.with_suffix('.json.v1_backup')
             shutil.copy(personal_json_path, backup_path)
-            print(f"✓ Backed up to {backup_path}")
+            logger.info("Backed up to %s", backup_path)
 
             # Save cleaned version
             with open(personal_json_path, 'w', encoding='utf-8') as f:
@@ -354,10 +357,10 @@ class CoreService:
             new_size = personal_json_path.stat().st_size
             reduction = ((original_size - new_size) / original_size) * 100
 
-            print(f"✓ Schema v2.0 cleanup complete")
-            print(f"  File size: {original_size} → {new_size} bytes ({reduction:.1f}% reduction)")
+            logger.info("Schema v2.0 cleanup complete")
+            logger.info("File size reduced from %d to %d bytes (%.1f%% reduction)", original_size, new_size, reduction)
         else:
-            print("No changes needed")
+            logger.info("No changes needed")
 
     async def _startup_integrity_check(self):
         """Verify all knowledge commits on startup."""
@@ -406,21 +409,21 @@ class CoreService:
                     'warnings': warnings
                 })
 
-            print(f"  ⚠️ Knowledge integrity: {len(warnings)} issues found")
+            logger.warning("Knowledge integrity: %d issues found", len(warnings))
             if orphaned_count > 0:
-                print(f"      - {orphaned_count} topics with missing markdown files")
+                logger.warning("%d topics with missing markdown files", orphaned_count)
             for w in warnings:
-                print(f"    [{w['severity'].upper()}] {w.get('file', w.get('topic'))}: {w['message']}")
+                logger.warning("[%s] %s: %s", w['severity'].upper(), w.get('file', w.get('topic')), w['message'])
         else:
-            print(f"  ✓ Knowledge integrity verified ({verified_count} commits)")
+            logger.info("Knowledge integrity verified (%d commits)", verified_count)
 
     async def start(self):
         """Starts all background services and runs indefinitely."""
         if self._is_running:
-            print("Core Service is already running.")
+            logger.warning("Core Service is already running")
             return
 
-        print("Starting D-PC Core Service...")
+        logger.info("Starting D-PC Core Service")
 
         self._shutdown_event = asyncio.Event()
 
@@ -428,11 +431,11 @@ class CoreService:
         try:
             await self._cleanup_schema_v2()
         except Exception as e:
-            print(f"Schema cleanup error: {e}")
+            logger.error("Schema cleanup error: %s", e, exc_info=True)
             # Don't fail startup
 
         # Run knowledge integrity check
-        print("Running knowledge integrity check...")
+        logger.info("Running knowledge integrity check")
         await self._startup_integrity_check()
 
         # Start all background tasks
@@ -456,7 +459,7 @@ class CoreService:
 
         # Update Direct TLS status (always available if P2P server running)
         self.connection_status.update_direct_tls_status(available=True, port=8888)
-        print("[OK] Direct TLS server started on port 8888")
+        logger.info("Direct TLS server started on port 8888")
 
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
@@ -466,7 +469,7 @@ class CoreService:
             try:
                 # Use configured default provider
                 default_provider = self.settings.get_oauth_default_provider()
-                print(f"[Auto-Connect] Using OAuth provider: {default_provider}")
+                logger.info("Auto-Connect using OAuth provider: %s", default_provider)
 
                 await self.hub_client.login(provider=default_provider)
                 await self.hub_client.connect_signaling_socket()
