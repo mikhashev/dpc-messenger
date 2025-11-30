@@ -41,7 +41,7 @@ class GeoBlockingMiddleware(BaseHTTPMiddleware):
     Middleware to block requests from specific countries based on IP geolocation.
 
     This provides legal compliance by blocking access from jurisdictions where
-    the software is explicitly prohibited (e.g., Russian Federation).
+    the software may be subject to legal restrictions.
     """
 
     def __init__(self, app):

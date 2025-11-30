@@ -82,20 +82,20 @@ Leave `username` and `credential` empty. The client will automatically use the c
 2. Update `config.ini` with accessible servers
 3. Remove blocked servers from the list
 
-**Example for China:**
+**Example with regional STUN servers:**
 ```ini
 [webrtc]
-stun_servers = stun:stun.qq.com:3478,stun:stun.miwifi.com:3478
+stun_servers = stun:stun.regional-provider.com:3478,stun:stun.l.google.com:19302
 
 [turn]
-# Use Chinese TURN providers if available
-servers = turn:your-chinese-turn-provider.com:3478
+# Use regional TURN providers if available
+servers = turn:your-regional-turn-provider.com:3478
 ```
 
-**Example for Russia:**
+**Example with alternative providers:**
 ```ini
 [webrtc]
-stun_servers = stun:stun.rtc.yandex.net:3478,stun:stun.l.google.com:19302
+stun_servers = stun:stun.provider-a.com:3478,stun:stun.provider-b.com:19302
 ```
 
 ## How It Works

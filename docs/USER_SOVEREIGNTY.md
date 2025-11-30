@@ -466,8 +466,8 @@ D-PC is built on the foundational ideas of the cypherpunk movement:
 4. **"Information wants to be free"** (Stewart Brand, 1984)
    - Implementation: Open protocols (DPTP, PCS), LGPL-licensed libraries
 
-5. **"The Net interprets censorship as damage and routes around it"** (John Gilmore, 1993)
-   - Implementation: P2P architecture, federation, no central authority
+5. **"The Net interprets failure as damage and routes around it"** (adapted from John Gilmore, 1993)
+   - Implementation: P2P architecture, federation, resilient routing, no central authority
 
 ---
 

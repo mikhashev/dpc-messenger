@@ -2,7 +2,40 @@
 
 **Version:** 2.0
 **Date:** November 2025
-**Status:** Design Specification
+**Status:** Partial Implementation (v0.8.0)
+
+---
+
+## Implementation Status (v0.8.0)
+
+### Completed Features (Phase 1 - Federated MVP)
+
+| Phase | Feature | Status | Evidence |
+|-------|---------|--------|----------|
+| 1 | Enhanced PCM Structure | Complete | `dpc-protocol/dpc_protocol/pcm_core.py` |
+| 2 | Instruction Processing | Partial | Instructions exist, bias mitigation pending |
+| 3 | Markdown Files | Not Started | Planned for Phase 2 |
+| 4 | Knowledge Commit Protocol | Partial | Consensus voting complete, git-like commits pending |
+| 5 | Context Retrieval | Not Started | @-mentions planned for Phase 2 |
+| 6 | Self-Improvement Tracking | Partial | Effectiveness tracking complete |
+| 7 | Cognitive Bias Mitigation | Not Started | Planned for Phase 2 |
+| 8 | Collaborative Knowledge Building | Complete | Multi-peer consensus voting with devil's advocate |
+
+**What Works in v0.8.0:**
+- Basic PCM structure with profile, knowledge, preferences
+- Consensus voting system (`consensus_manager.py`)
+- Multi-peer knowledge approval workflow
+- Devil's advocate mechanism (force_dissent)
+- Effectiveness tracking (`effectiveness_tracker.py`)
+- Personal context sharing with firewall rules
+
+**What's Next (Phase 2 - Team Collaboration):**
+- Markdown knowledge files (Claude Code-style)
+- @-mention context retrieval
+- Semantic search across team contexts
+- Git-like knowledge commit history
+- Full cognitive bias mitigation
+- Group chat knowledge extraction
 
 ---
 
@@ -1322,98 +1355,217 @@ class MarkdownKnowledgeManager:
 
 ---
 
-## 9. Migration Path
+## 9. Implementation Roadmap
 
-### 9.1 Phase 1: Enhanced PCM Structure (Weeks 1-2)
+### Phase 1: Enhanced PCM Structure (v0.8.0 - COMPLETE)
 
 **Goal:** Update data structures without breaking existing functionality
 
-**Tasks:**
-1. Add `InstructionBlock`, `BiasAwareness`, enhanced `KnowledgeEntry` to `pcm_core.py`
-2. Add backward compatibility - read old `personal.json` files
-3. Add migration script: `python migrate_pcm.py --from v1 --to v2`
-4. Update `PCMCore.save_context()` to write new format
-5. Add tests for old/new format compatibility
+**Completed Tasks:**
+1. Added `InstructionBlock`, `BiasAwareness`, enhanced `KnowledgeEntry` to `pcm_core.py`
+2. Implemented backward compatibility for old `personal.json` files
+3. Created v2 PCM schema with structured metadata
+4. Updated `PCMCore.save_context()` to write new format
+5. Added device context collection (`device_context.json`)
 
-**Deliverable:** v2 PCM schema with v1 compatibility
+**Deliverable:** v2 PCM schema operational in production
 
 ---
 
-### 9.2 Phase 2: Instruction Processing (Weeks 3-4)
+### Phase 2: Instruction Processing (v0.8.0 - PARTIAL)
 
 **Goal:** Make AI respect instruction blocks
 
-**Tasks:**
-1. Update `_assemble_final_prompt()` in `service.py`
-2. Add bias mitigation prompts based on `instruction.bias_mitigation`
-3. Add multi-perspective requirements
-4. Add evidence requirements
-5. Test with various instruction configurations
+**Completed Tasks:**
+1. Basic instruction processing in `service.py`
+2. Personal context instructions sent to AI
+3. Multi-perspective analysis (devil's advocate mechanism)
 
-**Deliverable:** AI follows user-defined instructions
+**Pending Tasks:**
+1. Full bias mitigation prompts based on `instruction.bias_mitigation`
+2. Cultural sensitivity requirements
+3. Evidence requirement enforcement
+4. Framing neutrality detection
+
+**Deliverable:** Partial - basic instructions work, advanced bias mitigation pending
 
 ---
 
-### 9.3 Phase 3: Markdown Files + Hybrid Storage (Weeks 5-6)
+### Phase 3: Markdown Files + Hybrid Storage (Phase 2.1 - Month 2-3, 2026)
 
-**Goal:** Implement Claude Code-style markdown files
+**Goal:** Implement Claude Code-style markdown knowledge files
+
+**Timeline:** Q1 2026 (Month 2-3)
 
 **Tasks:**
 1. Create `MarkdownKnowledgeManager` class
-2. Add `knowledge/` directory creation
-3. Implement markdown file generation
-4. Update PCM to link JSON ↔ markdown
+2. Add `~/.dpc/knowledge/` directory structure
+3. Implement markdown file generation from knowledge commits
+4. Update PCM to link JSON ↔ markdown (bidirectional sync)
 5. Add markdown file syncing on context updates
-6. Build UI markdown viewer
+6. Build UI markdown viewer/editor
+7. Support @-file mentions for markdown knowledge
 
-**Deliverable:** Human-readable knowledge files
+**Integration with Team Collaboration:**
+- Shared markdown files for team knowledge
+- Version control integration (git-compatible)
+- Conflict resolution for concurrent edits
+- Markdown export for external tools
 
----
-
-### 9.4 Phase 4: Knowledge Commit Protocol (Weeks 7-10)
-
-**Goal:** Implement git-like knowledge commits
-
-**Tasks:**
-1. Create `KnowledgeCommit` dataclass and protocol messages
-2. Implement `ConversationMonitor` for group chats
-3. Add AI summarization with bias mitigation
-4. Build consensus voting system
-5. Implement required dissent mechanism
-6. Create commit history storage
-7. Build UI for commit approval workflow
-
-**Deliverable:** Working knowledge commit system
+**Deliverable:** Human-readable, git-versionable knowledge files
 
 ---
 
-### 9.5 Phase 5: Context Retrieval & Semantic Search (Weeks 11-12)
+### Phase 4: Knowledge Commit Protocol (v0.8.0 - PARTIAL, Enhanced in Phase 2.2 - Month 4-5, 2026)
 
-**Goal:** Add @-mention syntax and semantic search
+**Goal:** Complete git-like knowledge commit system
+
+**Completed (v0.8.0):**
+1. Consensus voting system (`consensus_manager.py`)
+2. Multi-peer knowledge approval workflow
+3. Devil's advocate mechanism (required dissent)
+4. Basic knowledge entry structure
+
+**Pending (Phase 2.2 - Month 4-5, 2026):**
+1. Git-like commit history (`.knowledge_history/commits.json`)
+2. Commit messages and provenance tracking
+3. AI-generated commit summaries with bias mitigation
+4. ConversationMonitor for automatic knowledge extraction
+5. Commit diff visualization
+6. Rollback/revert functionality
+7. Branch/merge for experimental knowledge
+
+**Integration with Team Collaboration:**
+- Team-wide knowledge commits (2-20 members)
+- Async consensus voting (email/webhook notifications)
+- Knowledge contribution metrics (gamification)
+- Commit changelog for team visibility
+
+**Deliverable:** Full git-style knowledge versioning with team workflows
+
+---
+
+### Phase 5: Context Retrieval & Semantic Search (Phase 2.2 - Month 4-6, 2026)
+
+**Goal:** Add @-mention syntax and semantic search across team contexts
+
+**Timeline:** Q2 2026 (Month 4-6)
 
 **Tasks:**
 1. Implement `ContextRetriever` with @-mention parsing
+   - `@user:alice` - retrieve peer's full context
+   - `@topic:game_design` - search all team members' knowledge
+   - `@file:knowledge/python.md` - include specific markdown file
+   - `@group:frontend_team` - aggregate contexts from node group
 2. Add semantic search with sentence-transformers
-3. Index all contexts on load
-4. Update UI to support @-mentions (autocomplete)
-5. Build relevance ranking algorithm
+3. Index all local + peer contexts on connection
+4. Update UI to support @-mentions (autocomplete dropdown)
+5. Build relevance ranking algorithm (TF-IDF + embeddings)
+6. Cache peer contexts for offline search
 
-**Deliverable:** Smart context retrieval
+**Integration with Team Collaboration:**
+- Real-time context indexing on knowledge commits
+- Team-wide semantic search (query across 20 peers)
+- Privacy-aware search (respects firewall rules)
+- Search result provenance (who contributed what)
+
+**Deliverable:** Smart, privacy-aware context retrieval for teams
 
 ---
 
-### 9.6 Phase 6: Self-Improvement Tracking (Weeks 13-14)
+### Phase 6: Self-Improvement Tracking (Phase 2.3 - Month 6-7, 2026)
 
 **Goal:** Track effectiveness and suggest improvements
 
-**Tasks:**
-1. Create `CommitEffectivenessMetrics` storage
-2. Add usage tracking hooks
-3. Implement spaced repetition scheduling
-4. Build effectiveness dashboard UI
-5. Add AI suggestions for low-scoring knowledge
+**Timeline:** Q2-Q3 2026 (Month 6-7)
 
-**Deliverable:** Self-improving context system
+**Completed (v0.8.0):**
+1. Basic effectiveness tracking (`effectiveness_tracker.py`)
+2. Token usage and cost tracking
+
+**Pending:**
+1. `CommitEffectivenessMetrics` storage (per-commit usage analytics)
+2. Spaced repetition scheduling for knowledge review
+3. Effectiveness dashboard UI (which knowledge gets used most?)
+4. AI suggestions for low-scoring knowledge
+5. Knowledge deprecation warnings (outdated context detection)
+6. Team analytics (most valuable contributors)
+
+**Integration with Team Collaboration:**
+- Team knowledge quality metrics
+- Identify experts (who contributes most-used knowledge?)
+- Suggest knowledge gaps (what questions can't we answer?)
+- Usage heatmaps (which topics are queried most?)
+
+**Deliverable:** Data-driven knowledge quality system
+
+---
+
+### Phase 7: Cognitive Bias Mitigation (Phase 2.4 - Month 7-9, 2026)
+
+**Goal:** Full bias-resistant AI curation
+
+**Timeline:** Q3 2026 (Month 7-9)
+
+**Tasks:**
+1. Implement multi-cultural perspective prompting
+2. Add cultural context tracking per user
+3. Build bias detection in AI responses
+4. Implement forced alternative viewpoints
+5. Add confidence scoring with cultural applicability
+6. Create bias audit logs
+7. Build bias mitigation dashboard
+
+**Integration with Team Collaboration:**
+- Cultural diversity metrics for team knowledge
+- Cross-cultural validation requirements
+- Bias warnings when team lacks diversity
+- Alternative perspective suggestions
+
+**Deliverable:** Bias-aware collaborative knowledge system
+
+---
+
+### Phase 8: Group Chat Knowledge Extraction (Phase 2.1 - Month 1-3, 2026)
+
+**Goal:** Automatic knowledge capture from team conversations
+
+**Timeline:** Q1-Q2 2026 (Month 1-3, parallel with Phase 3)
+
+**Tasks:**
+1. Implement `ConversationMonitor` for group chats
+2. Add knowledge-worthiness scoring algorithm
+3. Build AI-powered summarization pipeline
+4. Create real-time knowledge commit proposals
+5. Implement consensus detection (agreement signals)
+6. Add UI for in-chat commit approval
+7. Support threaded knowledge discussions
+
+**Integration with Team Collaboration:**
+- Multi-party group chat support (3-20 participants)
+- Async knowledge approval (notifications)
+- Knowledge attribution (who said what?)
+- Conversation context linking (why was this committed?)
+
+**Deliverable:** Seamless conversation → knowledge transformation
+
+---
+
+## Updated Timeline (2026)
+
+**Q1 2026 (Months 1-3):**
+- Phase 3: Markdown Files + Hybrid Storage
+- Phase 8: Group Chat Knowledge Extraction (parallel)
+
+**Q2 2026 (Months 4-6):**
+- Phase 4: Git-like Knowledge Commits (complete)
+- Phase 5: Context Retrieval & Semantic Search
+
+**Q3 2026 (Months 6-9):**
+- Phase 6: Self-Improvement Tracking
+- Phase 7: Cognitive Bias Mitigation
+
+**Total Duration:** 9 months (aligned with Phase 2 main roadmap)
 
 ---
 
@@ -1429,14 +1581,85 @@ This architecture combines the best practices from:
 
 The result is a **collaborative knowledge building system** where conversations transform into permanent, versioned, bias-resistant knowledge through AI curation and multi-party consensus.
 
-**Next Steps:**
-1. Review this architecture with the team
-2. Prioritize phases based on MVP goals
-3. Begin Phase 1 implementation
-4. Build prototype UI mockups for knowledge commit workflow
+---
 
-**Questions for Discussion:**
-- Should we support multiple markdown formats (CommonMark, GitHub Flavored, etc.)?
-- What's the optimal threshold for AI to propose knowledge commits?
-- How do we handle knowledge conflicts between users?
-- Should we build a web UI for browsing shared knowledge graphs?
+## Current Status (v0.8.0)
+
+**Production Ready:**
+- Basic PCM structure with profile, knowledge, preferences
+- Multi-peer consensus voting system
+- Devil's advocate mechanism (anti-groupthink)
+- Effectiveness tracking for AI responses
+- Personal context sharing with firewall controls
+
+**Partial Implementation:**
+- Instruction processing (basic, no full bias mitigation)
+- Knowledge commit protocol (voting works, git-like history pending)
+
+**Planned for Phase 2 (2026):**
+- Markdown knowledge files (Claude Code-style)
+- @-mention context retrieval
+- Semantic search across team contexts
+- Git-like commit history and diffs
+- Full cognitive bias mitigation
+- Automatic knowledge extraction from group chats
+
+---
+
+## Phase 2 Focus: Small Team Collaboration (2-20 Members + AIs)
+
+The knowledge architecture roadmap is now aligned with **Phase 2: Team Collaboration + Disaster Resilience** (Q1-Q3 2026):
+
+**Primary Goal:** Enable small teams (2-20 members + AIs) to build shared knowledge through:
+- Real-time collaborative knowledge commits
+- Privacy-aware context sharing (firewall rules)
+- Git-compatible versioning (markdown files)
+- Semantic search across team knowledge
+- Bias-resistant AI curation
+
+**Why Small Teams First?**
+- Test and refine knowledge commit workflows
+- Validate consensus mechanisms at scale (2-20 peers)
+- Build tooling for effective team collaboration
+- Gather feedback before mass-market scaling (Phase 3)
+
+**Integration with Disaster Resilience:**
+- Knowledge commits work offline (DHT-based peer discovery)
+- Markdown files sync over pluggable transports (WebRTC, WebSocket-TLS, HTTP tunneling)
+- No Hub dependency for knowledge sharing
+- Mesh-compatible (WiFi Mesh, Meshtastic, Starlink)
+
+---
+
+## Next Steps (Q1 2026)
+
+**Immediate (Month 1):**
+1. Update documentation (README.md, ROADMAP.md, KNOWLEDGE_ARCHITECTURE.md, CHANGELOG.md)
+2. Complete Stage 1 planning for Phase 2 implementation
+3. Design UI mockups for markdown knowledge viewer/editor
+4. Prototype @-mention autocomplete system
+
+**Month 2-3:**
+1. Implement markdown knowledge files (Phase 3)
+2. Build group chat knowledge extraction (Phase 8)
+3. Add @-mention context retrieval prototype
+4. Test with 3-5 person team (dogfooding)
+
+**Month 4-6:**
+1. Complete git-like commit history (Phase 4)
+2. Launch semantic search across team contexts (Phase 5)
+3. Beta test with 10-20 person teams
+4. Gather effectiveness metrics
+
+---
+
+## Open Questions
+
+1. **Markdown Format:** CommonMark vs GitHub Flavored Markdown vs custom extensions?
+2. **Knowledge Commit Threshold:** What score triggers AI to propose a commit (currently 0.7)?
+3. **Conflict Resolution:** How do we handle knowledge conflicts between team members?
+4. **Search Privacy:** Should semantic search respect per-field firewall rules or per-topic rules?
+5. **Offline Sync:** Git-style merge or CRDT-based conflict-free sync for markdown files?
+6. **UI/UX:** Web UI for knowledge graph visualization or CLI-first?
+
+See [ROADMAP.md](../ROADMAP.md) for complete Phase 2 implementation plan.

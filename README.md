@@ -371,46 +371,84 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ## Roadmap
 
-### Phase 1: Federated MVP (Completed - v0.8.0)
-- Direct TLS P2P connections
-- WebRTC with NAT traversal
-- Federation Hub for discovery
-- OAuth authentication (Google + GitHub)
+### Phase 1: Federated MVP - COMPLETE (v0.8.0)
+**Status:** Production Ready | **Timeline:** Completed
+
+**Core Infrastructure:**
+- Direct TLS P2P connections (local network + IPv6 dual-stack)
+- WebRTC with NAT traversal (STUN/TURN)
+- Federation Hub for discovery and OAuth
 - Cryptographic node identity system
 - Token blacklist and logout
-- **Encrypted local backups** (AES-256-GCM with user-controlled passphrases)
-- Local AI integration
 - Offline mode with graceful degradation
-- **Remote inference** - Share compute power with trusted peers ([guide](./docs/REMOTE_INFERENCE.md))
-- **Knowledge Commit System** - Git-like versioned knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
-  - Personal Context Model (PCM) v2.0
-  - Knowledge topics with entries, tags, and confidence scoring
-  - Automatic conversation monitoring and knowledge extraction
-  - Multi-perspective bias mitigation (Western, Eastern, Indigenous viewpoints)
-  - Knowledge commit proposals with approval workflow
-  - Git-style versioning with commit history
-  - User-controlled auto-detection toggle
 
-### Phase 2: Enhanced Federation (Next - Q1-Q2 2026)
-**Current Starting Point for Development**
+**Privacy & Security:**
+- **Encrypted local backups** (AES-256-GCM, PBKDF2 600k iterations)
+- Context firewall with granular access control
+- No message persistence (transactional communication)
+- End-to-end encryption (DTLS/TLS)
 
-- Multi-hub federation
-- Advanced context firewall with tag-based sharing
-- **Peer-to-peer knowledge sharing** - Share knowledge commits between peers
-- **Collaborative knowledge building** - Multi-peer consensus on shared knowledge
-- **Remote inference enhancements** - Model discovery, streaming responses, usage tracking
-- **Hub-assisted backup** (encrypted backup storage on Hub)
-- **QR code backup transfer** (for mobile devices)
-- Mobile clients (Android, iOS)
-- Dedicated TURN server deployment
+**AI Collaboration:**
+- Local AI integration (Ollama, OpenAI, Anthropic)
+- **Remote inference** - Borrow compute from trusted peers ([guide](./docs/REMOTE_INFERENCE.md))
+  - Model discovery (auto-discovery on connection)
+  - Usage tracking (token counts, effectiveness metrics)
+  - Streaming responses (planned for Phase 2)
+- **Collaborative knowledge building** - Multi-peer consensus voting with devil's advocate
+- **Knowledge Commit System** - Git-like versioned knowledge ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
+  - Personal Context Model (PCM) v2.0 with modular file system
+  - Conversation history optimization (60-80% token savings)
+  - Multi-perspective bias mitigation
+  - Cryptographic commit integrity (hash-based IDs, multi-signature support)
+  - Markdown rendering with intelligent caching
 
-### Phase 3: True P2P (Future - 2026-2027)
-- DHT-based peer discovery
-- Hub-free operation mode
-- **Social recovery** (Shamir Secret Sharing for backup passphrases)
-- **Hardware wallet integration** (Ledger, YubiKey, TPM)
+### Phase 2: Team Collaboration + Disaster Resilience - IN PROGRESS (Q1-Q3 2026)
+**Status:** Planning Complete | **Target:** Small teams (2-20 members + AIs)
+
+**Team Collaboration Features (12 features):**
+- Persistent team management with roles
+- Group chat UI with presence indicators
+- Team knowledge repositories (shared, synchronized knowledge)
+- Team AI assistants (access to collective team knowledge)
+- Collaborative context editing (PR-like approval workflow)
+- Team compute pools (auto-discovery and load balancing)
+- Knowledge commit templates (Meeting Notes, Decisions, Postmortems)
+- Team activity feed and analytics dashboard
+- AI-facilitated team sessions (standups, brainstorming)
+
+**Resilient Infrastructure (7 features - CRITICAL):**
+- **DHT-based peer discovery** (Kademlia + Gossip for decentralized signaling)
+- **Pluggable transport framework** (auto-fallback: WebRTC → WebSocket-TLS → HTTP tunneling)
+- **WebSocket-over-TLS transport** (HTTPS transport for reliability)
+- **WiFi Mesh (802.11s) support** (OpenWRT documentation - works out of box)
+- **Meshtastic (LoRa) integration** (offline text messaging - stretch goal)
+- **Starlink backup** (already works - WebRTC over satellite)
+- Hub-assisted backup (encrypted storage on Hub)
+
+**Why This Matters:**
+- Works in disaster scenarios and challenging network conditions via DHT + pluggable transports
+- Works offline via mesh networks (WiFi, LoRa)
+- Eliminates Hub as single point of failure
+
+**See [ROADMAP.md](./ROADMAP.md) for detailed Phase 2 specifications.**
+
+### Phase 3: Scaling & Mass Decentralization - PLANNED (2026-2027)
+**Status:** Design Phase | **Target:** Global scale, 100% decentralization
+
+**Scaling Features:**
+- Mobile clients (iOS, Android)
+- Multi-hub federation (large organizations with 100+ teams)
+- Advanced DHT features (libp2p integration, cross-DHT discovery)
+- Hub-free operation mode (100% decentralized)
+- Dedicated TURN server infrastructure
+
+**Advanced Security:**
+- Social recovery (Shamir Secret Sharing for backup passphrases)
+- Hardware wallet integration (Ledger, YubiKey, TPM)
 - Blockchain-based identity (optional)
-- Full decentralization
+- QR code backup transfer (for mobile)
+
+**Rationale:** Phase 2 proves small team collaboration model. Phase 3 scales to millions.
 
 ---
 
