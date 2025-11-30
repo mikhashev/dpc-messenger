@@ -63,9 +63,9 @@ This is **digital feudalism**: You work the land (create content), they own ever
 │  ┌───────────────────────────────────┐  │
 │  │ YOUR Data (.dpc directory)        │  │
 │  │ - personal.json (knowledge)       │  │
-│  │ - .dpc_access (social graph)      │  │
+│  │ - privacy_rules.json (firewall)   │  │
 │  │ - node.key (identity)             │  │
-│  │ - providers.toml (preferences)    │  │
+│  │ - providers.json (preferences)    │  │
 │  └───────────────────────────────────┘  │
 │                                          │
 │  YOU decide:                             │
@@ -97,15 +97,21 @@ This is **digital feudalism**: You work the land (create content), they own ever
 ```
 ~/.dpc/
 ├── personal.json        # Your knowledge graph (AI's understanding of you)
-├── .dpc_access          # Your social graph (who can access what)
-├── node.key             # Your cryptographic identity
+├── privacy_rules.json   # Your firewall rules (who can access what)
+├── device_context.json  # Auto-generated device/system info
+├── instructions.json    # AI instruction customizations
+├── known_peers.json     # List of known peer connections
+├── knowledge/           # Knowledge commits directory
+│   └── [commit files]   # Versioned knowledge snapshots
+├── node.key             # Your cryptographic identity (private key)
 ├── node.crt             # Your certificate
-├── providers.toml       # Your AI provider preferences
+├── node.id              # Your node identifier (e.g., dpc-node-abc123)
+├── providers.json       # Your AI provider preferences
 └── config.ini           # Your settings
 ```
 
 **What this means:**
-- The Hub server **never** sees personal.json or .dpc_access
+- The Hub server **never** sees personal.json or privacy_rules.json
 - Messages are **never** stored on servers (peer-to-peer only)
 - Your knowledge belongs to **you**, not a company
 
@@ -151,7 +157,7 @@ Alice's Device                    Bob's Device
 **What the Hub NEVER sees:**
 - Message contents
 - Personal knowledge (personal.json)
-- Contact relationships (.dpc_access)
+- Contact relationships (privacy_rules.json)
 - Private keys
 
 ---
@@ -210,8 +216,8 @@ How do you transfer your digital self to a new device without exposing it to clo
 │                                                      │
 │  Files restored:                                     │
 │    ✅ personal.json (your knowledge)                 │
-│    ✅ .dpc_access (your contacts)                    │
-│    ✅ providers.toml (your preferences)              │
+│    ✅ privacy_rules.json (your firewall rules)       │
+│    ✅ providers.json (your preferences)              │
 │    ✅ node.key (your identity)                       │
 └─────────────────────────────────────────────────────┘
 ```
@@ -322,7 +328,7 @@ D-PC Messenger:
 
 **What D-PC Hub NEVER Sees:**
 - personal.json (knowledge graph)
-- .dpc_access (social graph)
+- privacy_rules.json (firewall rules)
 - Message contents
 - Private keys
 - AI provider credentials
@@ -520,7 +526,7 @@ D-PC is built on the foundational ideas of the cypherpunk movement:
 **Good UX (D-PC):**
 ```
 1. Add friend: "Bob" (dpc-node-bob123)
-2. Edit .dpc_access.json firewall:
+2. Edit privacy_rules.json firewall:
    {
      "nodes": {
        "dpc-node-bob123": {
@@ -625,8 +631,8 @@ D-PC's answer: You shouldn't have to choose. You can have both.
 - [Product Vision](../PRODUCT_VISION.md)
 - [Technical Architecture](../CLAUDE.md)
 - [Backup Implementation](./BACKUP_RESTORE.md)
-- [Firewall Rules](./.dpc_access.example)
-- [Protocol Specification](../specs/DPTP.md)
+- [Firewall Rules](../dpc-client/privacy_rules.example.json)
+- [Protocol Specification](../specs/dptp_v1.md)
 
 **Questions? Concerns? Contributions?**
 Join our community: [GitHub Discussions](https://github.com/mikhashev/dpc-messenger/discussions)

@@ -262,7 +262,7 @@ Guidelines for sharing device context with peers.
 
 #### `default_sharing`
 
-**Rule:** `"By default, only software.os and software.dev_tools should be shared with peers unless explicit firewall allow rules exist. Hardware specifications (GPU, RAM, storage) require explicit authorization via device_context.json:hardware.* = allow rules in .dpc_access.json file."`
+**Rule:** `"By default, only software.os and software.dev_tools should be shared with peers unless explicit firewall allow rules exist. Hardware specifications (GPU, RAM, storage) require explicit authorization via device_context.json:hardware.* = allow rules in privacy_rules.json file."`
 
 **Purpose:** Privacy-first sharing model.
 
@@ -477,7 +477,7 @@ collect_ai_models = false            # Ollama models (default: false, opt-in)
 
 ## Firewall Control
 
-Device context sharing is controlled via `~/.dpc/.dpc_access.json`:
+Device context sharing is controlled via `~/.dpc/privacy_rules.json`:
 
 ```json
 {

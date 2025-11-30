@@ -32,6 +32,27 @@ The main configuration file is located at:
 
 ---
 
+## Configuration File Naming (Updated v0.6+)
+
+**Current filenames:**
+- `privacy_rules.json` - Firewall access control (previously `.dpc_access.json`)
+- `providers.json` - AI provider settings (previously `providers.toml`)
+
+**Migration:** The client automatically migrates old filenames to new ones on startup. Both formats work for backwards compatibility, but documentation uses current standard names.
+
+**Example Migration:**
+```bash
+# Old (pre-v0.6) - still works
+~/.dpc/.dpc_access.json  → migrated to → ~/.dpc/privacy_rules.json
+~/.dpc/providers.toml    → migrated to → ~/.dpc/providers.json
+
+# New (v0.6+) - recommended
+~/.dpc/privacy_rules.json  # Use this
+~/.dpc/providers.json      # Use this
+```
+
+---
+
 ## Default Configuration
 
 On first run, DPC-Client creates a default configuration file:
@@ -612,7 +633,7 @@ Same device, different OAuth accounts = different Hub user profiles
 - [Quick Start Guide](./QUICK_START.md)
 - [WebRTC Setup Guide](./WEBRTC_SETUP_GUIDE.md)
 - [GitHub OAuth Setup](./GITHUB_AUTH_SETUP.md)
-- [Firewall Configuration](../dpc-client/.dpc_access.example)
+- [Firewall Configuration](../dpc-client/privacy_rules.example.json)
 - [Fixes Summary](../FIXES_SUMMARY.md)
 
 ---
