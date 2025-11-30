@@ -65,9 +65,13 @@ npm run tauri dev
   - `node.key` - Your private key
   - `node.crt` - Your certificate
   - `node.id` - Your node ID
-  - `providers.toml` - AI provider config
-  - `.dpc_access.json` - Firewall rules
+  - `providers.json` - AI provider config
+  - `privacy_rules.json` - Firewall rules
   - `personal.json` - Your context
+  - `device_context.json` - Auto-generated device info
+  - `instructions.json` - AI instruction customizations
+  - `known_peers.json` - Known peer connections
+  - `knowledge/` - Knowledge commits directory
 
 **Note your connection URI** displayed in the terminal:
 ```
@@ -210,7 +214,7 @@ Hub no longer involved in communication
 
 ## Configure AI Providers
 
-Edit `~/.dpc/providers.toml` to add your AI providers:
+Edit `~/.dpc/providers.json` to add your AI providers:
 
 ### Ollama (Local AI - Recommended for Privacy)
 
@@ -221,35 +225,49 @@ curl -fsSL https://ollama.com/install.sh | sh
 # 2. Download a model
 ollama pull llama3.2
 
-# 3. Configure in providers.toml
-nano ~/.dpc/providers.toml
+# 3. Configure in providers.json
+nano ~/.dpc/providers.json
 ```
 
-```toml
-default_provider = "ollama_local"
-
-[providers.ollama_local]
-type = "ollama"
-base_url = "http://localhost:11434"
-model = "llama3.2:latest"
+```json
+{
+  "default_provider": "ollama_local",
+  "providers": {
+    "ollama_local": {
+      "type": "ollama",
+      "base_url": "http://localhost:11434",
+      "model": "llama3.2:latest"
+    }
+  }
+}
 ```
 
 ### OpenAI
 
-```toml
-[providers.openai]
-type = "openai"
-api_key = "sk-your-api-key"
-model = "gpt-4"
+```json
+{
+  "providers": {
+    "openai": {
+      "type": "openai",
+      "api_key": "sk-your-api-key",
+      "model": "gpt-4"
+    }
+  }
+}
 ```
 
 ### Anthropic Claude
 
-```toml
-[providers.anthropic]
-type = "anthropic"
-api_key = "sk-ant-your-api-key"
-model = "claude-3-5-sonnet-20241022"
+```json
+{
+  "providers": {
+    "anthropic": {
+      "type": "anthropic",
+      "api_key": "sk-ant-your-api-key",
+      "model": "claude-3-5-sonnet-20241022"
+    }
+  }
+}
 ```
 
 ---
@@ -354,8 +372,8 @@ poetry run python run_service.py
 
 ### For Users
 
-1. **Configure Context Firewall** - Edit `~/.dpc/.dpc_access.json`
-2. **Add AI Providers** - Edit `~/.dpc/providers.toml`
+1. **Configure Context Firewall** - Edit `~/.dpc/privacy_rules.json`
+2. **Add AI Providers** - Edit `~/.dpc/providers.json`
 3. **Customize Profile** - Edit `~/.dpc/personal.json`
 4. **Read the Whitepaper** - Understand the vision
 

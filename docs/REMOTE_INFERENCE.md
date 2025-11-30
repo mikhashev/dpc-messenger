@@ -63,7 +63,7 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 
 ### Firewall Integration
 
-**Compute Sharing Permissions** (`~/.dpc/.dpc_access.json`):
+**Compute Sharing Permissions** (`~/.dpc/privacy_rules.json`):
 ```json
 {
   "compute": {
@@ -106,7 +106,7 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
 
 ### Enabling Compute Sharing
 
-Edit `~/.dpc/.dpc_access.json` to enable compute sharing:
+Edit `~/.dpc/privacy_rules.json` to enable compute sharing:
 
 ```json
 {
@@ -150,7 +150,7 @@ Edit `~/.dpc/.dpc_access.json` to enable compute sharing:
 ### From the UI
 
 1. **Enable Compute Sharing** (Host Side):
-   - Edit `~/.dpc/.dpc_access.json`
+   - Edit `~/.dpc/privacy_rules.json`
    - Add `"compute"` section with permissions
    - Restart the client
 
@@ -257,7 +257,7 @@ result = await core_service.send_ai_query(
 ```bash
 # Terminal 1: Start Host (powerful PC)
 cd dpc-client/core
-# Edit ~/.dpc/.dpc_access.json to enable compute sharing
+# Edit ~/.dpc/privacy_rules.json to enable compute sharing
 poetry run python run_service.py
 
 # Terminal 2: Start Requestor (weak laptop)
@@ -272,7 +272,7 @@ poetry run python run_service.py
 
 **Test 2: Access Denied**
 ```json
-// Host: Disable compute sharing in ~/.dpc/.dpc_access.json
+// Host: Disable compute sharing in ~/.dpc/privacy_rules.json
 {
   "compute": {
     "enabled": false
@@ -306,7 +306,7 @@ poetry run pytest tests/test_remote_inference.py -v
 
 **Check firewall config on host:**
 ```bash
-cat ~/.dpc/.dpc_access.json
+cat ~/.dpc/privacy_rules.json
 # Ensure "compute" section exists and enabled = true
 # Ensure requestor is in allow_nodes or allow_groups
 ```
@@ -344,7 +344,7 @@ ollama serve  # Ensure service is running
    - Use `allowed_models` to limit which models peers can access
 
 4. **Regular firewall audits**
-   - Review `.dpc_access.json` periodically
+   - Review `privacy_rules.json` periodically
    - Remove nodes that are no longer trusted
 
 ---

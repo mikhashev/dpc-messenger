@@ -16,7 +16,7 @@ We're building **D-PC Messenger** — a peer-to-peer protocol that enables priva
 - 18-24 month window before Big Tech locks down AI infrastructure
 - Technology ready (WebRTC, cryptographic identity mature)
 
-**Current Status:** v0.7.0 Federated MVP complete—production-ready with breakthrough features
+**Current Status:** v0.8.0 Beta - Feature-complete MVP with production-ready P2P, context sharing, and compute collaboration
 
 **Business Model:** We're validating multiple sustainable revenue paths aligned with our mission (Red Hat model, managed infrastructure, grants, compute marketplace, hybrid). This is intentional methodology—build the right foundation, then commit to optimal monetization approach.
 
@@ -578,7 +578,7 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 - Background: Hardware (3D printers, CNC) → Software (PHP, Python) → AI/ML
 - Product Owner at US startup (led 5-person engineering team)
 - Yandex ML/Data Analytics certification (330 hours, Nov 2024)
-- **Shipped:** v0.7.0 Federated MVP—production-ready WebRTC, OAuth authentication, encrypted messaging, local AI integration, and P2P compute sharing
+- **Shipped:** v0.8.0 Beta MVP—production-ready WebRTC, OAuth authentication (Google + GitHub), encrypted messaging, local AI integration, P2P compute sharing, IPv6 support, markdown rendering, and context-aware AI instructions
 
 **What I Bring:**
 - Product vision refined through iterative development—from initial concept to differentiated 'transactional communication' paradigm
@@ -622,15 +622,20 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 
 ## Roadmap
 
-### Phase 1: Federated MVP ✅ (Completed - v0.7.0)
+### Phase 1: Federated MVP ✅ (Completed - v0.8.0)
 - Direct TLS P2P connections
 - WebRTC with NAT traversal
 - Federation Hub for discovery
 - OAuth authentication (Google + GitHub)
 - Cryptographic node identity
-- Local AI integration
+- Local AI integration (Ollama, OpenAI, Anthropic)
 - Encrypted backups
-- Remote inference (basic compute sharing)
+- Remote inference (P2P compute sharing)
+- IPv6 support (dual-stack connections)
+- External IP connection support
+- Markdown rendering for AI responses
+- Context-aware AI instructions
+- Improved connection diagnostics
 
 ### Phase 2: Enhanced Federation (Q1-Q2 2026)
 - Multi-hub federation

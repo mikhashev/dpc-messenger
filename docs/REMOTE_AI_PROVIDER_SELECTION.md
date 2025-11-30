@@ -36,7 +36,7 @@ When a peer connection is established, the client automatically sends `GET_PROVI
 - Lines 1048-1099: `_handle_get_providers_request()`
 
 Security checks:
-1. ✅ Is `compute.enabled = true` in requester's `.dpc_access.json`?
+1. ✅ Is `compute.enabled = true` in requester's `privacy_rules.json`?
 2. ✅ Is requester in `allow_nodes` or `allow_groups`?
 3. ✅ Filter by `allowed_models` (if specified)
 
@@ -72,7 +72,7 @@ Stores peer providers in `peer_metadata` and broadcasts to UI.
 
 ### Alice's Perspective (Sharing Her Compute)
 
-**File:** `~/.dpc/.dpc_access.json`
+**File:** `~/.dpc/privacy_rules.json`
 
 ```json
 {
@@ -165,7 +165,7 @@ Alice → Bob (WebRTC via Hub)
   ↓
 Bob receives GET_PROVIDERS request
   ↓
-Bob checks firewall (.dpc_access.json):
+Bob checks firewall (privacy_rules.json):
   - compute.enabled = true ✅
   - Alice in allow_nodes ✅
   - allowed_models = llama3.1:8b, gpt-4 ✅
@@ -246,7 +246,7 @@ Charlie's UI shows: "Alice (no models available)"
 
 **Setup:**
 - Two clients running (Alice, Bob)
-- Bob's `~/.dpc/.dpc_access.json`:
+- Bob's `~/.dpc/privacy_rules.json`:
   ```json
   {
     "compute": {
@@ -419,7 +419,7 @@ Bob's backend:
 ## Security Considerations
 
 ### 1. Firewall is Mandatory
-- Users MUST configure `.dpc_access.json` to share compute
+- Users MUST configure `privacy_rules.json` to share compute
 - Default is deny-all (secure by default)
 - Fine-grained control: per-node, per-group, per-model
 
@@ -474,7 +474,7 @@ Bob's backend:
 ### Issue: Peer shows "no models available" but should have access
 
 **Check:**
-1. Bob's `.dpc_access.json` has `compute.enabled = true`
+1. Bob's `privacy_rules.json` has `compute.enabled = true`
 2. Alice's node_id is in `allow_nodes` or she's in an `allow_groups` group
 3. Bob's backend logs show "Sending N providers" where N > 0
 4. Alice's backend logs show "Received N providers" where N > 0
@@ -510,7 +510,7 @@ poetry run python run_service.py
 
 ---
 
-### Issue: Provider list not updating after changing `.dpc_access.json`
+### Issue: Provider list not updating after changing `privacy_rules.json`
 
 **Cause:** Providers are cached from initial connection.
 

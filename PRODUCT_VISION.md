@@ -85,11 +85,13 @@ The "D-PC Messenger" is the **first reference implementation** of the D-PC proto
 
 ## 7. Current Status & Next Steps
 
-**Phase 1 Complete: v0.7.0 Federated MVP ✅**
+**Phase 1 Complete: v0.8.0 Beta MVP ✅**
 - ✅ **Remote inference** - 2-user compute sharing working (proven foundation)
 - ✅ **Context collaboration** - Secure P2P knowledge sharing
 - ✅ **Core architecture** - APIs, data structures, UX/UI for compute and context sharing
 - ✅ **Breakthrough features** - Knowledge Commits + P2P Compute Sharing (both working)
+- ✅ **IPv6 support** - Dual-stack connections (IPv4 + IPv6)
+- ✅ **Enhanced UX** - Markdown rendering, context window management, improved diagnostics
 
 **Phase 2 Expansion: Enhanced Federation (Q1-Q2 2026)**
 
