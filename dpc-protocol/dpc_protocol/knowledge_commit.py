@@ -5,12 +5,15 @@ Implements git-like knowledge commits with consensus and bias mitigation.
 Inspired by Personal Context Manager and cognitive bias research.
 """
 
+import logging
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric import rsa
+
+logger = logging.getLogger(__name__)
 
 from .pcm_core import KnowledgeEntry, KnowledgeSource
 
@@ -361,7 +364,7 @@ class CommitEffectivenessMetrics:
 
 # Example usage
 if __name__ == '__main__':
-    print("=== Knowledge Commit Protocol Demo ===\n")
+    logger.info("Knowledge Commit Protocol Demo")
 
     # 1. Create a knowledge entry
     entry = KnowledgeEntry(
@@ -395,14 +398,13 @@ if __name__ == '__main__':
         devil_advocate="This principle may not apply to story-driven games requiring complex narrative exposition."
     )
 
-    print("1. Proposal Created:")
-    print(f"   ID: {proposal.proposal_id}")
-    print(f"   Topic: {proposal.topic}")
-    print(f"   Summary: {proposal.summary}")
-    print(f"   Participants: {', '.join(proposal.participants)}")
-    print(f"   Confidence: {proposal.avg_confidence:.0%}")
-    print(f"   Devil's Advocate: {proposal.devil_advocate[:80]}...")
-    print()
+    logger.info("1. Proposal Created:")
+    logger.info("   ID: %s", proposal.proposal_id)
+    logger.info("   Topic: %s", proposal.topic)
+    logger.info("   Summary: %s", proposal.summary)
+    logger.info("   Participants: %s", ', '.join(proposal.participants))
+    logger.info("   Confidence: %.0f%%", proposal.avg_confidence * 100)
+    logger.info("   Devil's Advocate: %s...", proposal.devil_advocate[:80])
 
     # 3. Simulate voting
     vote1 = CommitVote(
@@ -422,11 +424,10 @@ if __name__ == '__main__':
     proposal.votes = {"alice": "approve", "bob": "approve"}
     proposal.status = "approved"
 
-    print("2. Votes Cast:")
-    print(f"   Alice: {vote1.vote} - {vote1.comment}")
-    print(f"   Bob: {vote2.vote} - {vote2.comment}")
-    print(f"   Status: {proposal.status}")
-    print()
+    logger.info("2. Votes Cast:")
+    logger.info("   Alice: %s - %s", vote1.vote, vote1.comment)
+    logger.info("   Bob: %s - %s", vote2.vote, vote2.comment)
+    logger.info("   Status: %s", proposal.status)
 
     # 4. Create finalized commit
     commit = KnowledgeCommit(
@@ -445,15 +446,13 @@ if __name__ == '__main__':
         dissenting_opinion=proposal.devil_advocate
     )
 
-    print("3. Finalized Commit:")
-    print(commit.format_commit_message())
-    print()
+    logger.info("3. Finalized Commit:")
+    logger.info(commit.format_commit_message())
 
     # 5. Protocol messages
     propose_msg = ProposeKnowledgeCommitMessage.create(proposal)
-    print(f"4. Protocol Message: {propose_msg.command}")
-    print(f"   Payload keys: {list(propose_msg.payload.keys())}")
-    print()
+    logger.info("4. Protocol Message: %s", propose_msg.command)
+    logger.info("   Payload keys: %s", list(propose_msg.payload.keys()))
 
     # 6. Effectiveness tracking
     metrics = CommitEffectivenessMetrics(commit_id=commit.commit_id)
@@ -461,10 +460,9 @@ if __name__ == '__main__':
     metrics.unhelpful_count = 1
     metrics.update_effectiveness()
 
-    print(f"5. Effectiveness Metrics:")
-    print(f"   Helpful: {metrics.helpful_count}")
-    print(f"   Unhelpful: {metrics.unhelpful_count}")
-    print(f"   Effectiveness: {metrics.effectiveness_score:.0%}")
-    print()
+    logger.info("5. Effectiveness Metrics:")
+    logger.info("   Helpful: %d", metrics.helpful_count)
+    logger.info("   Unhelpful: %d", metrics.unhelpful_count)
+    logger.info("   Effectiveness: %.0f%%", metrics.effectiveness_score * 100)
 
-    print("=== Demo Complete ===")
+    logger.info("Demo Complete")

@@ -2,7 +2,10 @@
 
 import asyncio
 import json
+import logging
 from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
 
 def create_hello_message(node_id: str, name: str = None) -> Dict[str, Any]:
     """Creates a HELLO message with optional display name."""
@@ -91,15 +94,15 @@ async def read_message(reader: asyncio.StreamReader) -> dict | None:
     except asyncio.IncompleteReadError as e:
         # Graceful disconnect: 0 bytes read means connection closed cleanly
         if len(e.partial) == 0:
-            print("Connection closed by peer")
+            logger.info("Connection closed by peer")
         else:
-            print(f"Protocol error: incomplete message ({len(e.partial)} bytes received)")
+            logger.warning("Protocol error: incomplete message (%d bytes received)", len(e.partial))
         return None
     except (ConnectionResetError, BrokenPipeError) as e:
-        print(f"Connection lost: {e}")
+        logger.warning("Connection lost: %s", e)
         return None
     except ValueError as e:
-        print(f"Protocol error: invalid message format ({e})")
+        logger.warning("Protocol error: invalid message format (%s)", e)
         return None
 
 async def write_message(writer: asyncio.StreamWriter, data: dict):
@@ -113,4 +116,4 @@ async def write_message(writer: asyncio.StreamWriter, data: dict):
         writer.write(payload)
         await writer.drain()
     except (ConnectionResetError, BrokenPipeError) as e:
-        print(f"Could not write message, connection closed: {e}")
+        logger.warning("Could not write message, connection closed: %s", e)

@@ -1,12 +1,56 @@
 # dpc-client/core/run_service.py
 
 import asyncio
-import platform # Import the platform module to check the OS
+import logging
+from logging.handlers import RotatingFileHandler
+import platform  # Import the platform module to check the OS
+import sys
 from dpc_client_core.service import CoreService
+
+
+def setup_logging(settings):
+    """Configure logging based on settings."""
+    # Create log directory
+    log_file = settings.get_log_file()
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, settings.get_log_level()))
+
+    # File handler with rotation
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=settings.get_log_max_bytes(),
+        backupCount=settings.get_log_backup_count(),
+        encoding='utf-8'
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    ))
+    root_logger.addHandler(file_handler)
+
+    # Console handler (optional)
+    if settings.get_log_console():
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(getattr(logging, settings.get_log_console_level()))
+        console_handler.setFormatter(logging.Formatter(
+            '%(levelname)-8s %(message)s'
+        ))
+        root_logger.addHandler(console_handler)
+
+    # Per-module overrides
+    for module_name, level in settings.get_module_log_levels().items():
+        logging.getLogger(module_name).setLevel(getattr(logging, level))
+
 
 async def main():
     """Main entrypoint to start and run the Core Service."""
     service = CoreService()
+
+    # Setup logging infrastructure before service starts
+    setup_logging(service.settings)
 
     # --- THE CORE FIX: Cross-platform shutdown logic ---
 

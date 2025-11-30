@@ -5,9 +5,12 @@ Manages Claude Code-style markdown files for human-readable knowledge storage.
 Provides bidirectional sync between JSON PCM data and markdown files.
 """
 
+import logging
 import re
 import yaml
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime
 
@@ -715,7 +718,7 @@ if __name__ == '__main__':
     # Create manager
     manager = MarkdownKnowledgeManager()
 
-    print(f"Knowledge directory: {manager.knowledge_dir}")
+    logger.info("Knowledge directory: %s", manager.knowledge_dir)
 
     # Create example topic
     topic = Topic(
@@ -745,13 +748,13 @@ if __name__ == '__main__':
 
     # Create markdown file
     filepath = manager.create_topic_file(topic, "game_design_philosophy")
-    print(f"\nCreated: {filepath}")
+    logger.info("Created: %s", filepath)
 
     # Read it back
     content = manager.read_markdown_file(filepath)
-    print(f"\n--- Content Preview ---")
-    print(f"File length: {len(content)} characters")
-    print(f"First line: {content.split(chr(10))[0]}")
+    logger.info("Content Preview")
+    logger.info("File length: %d characters", len(content))
+    logger.info("First line: %s", content.split(chr(10))[0])
 
     # Add another entry
     new_entry = KnowledgeEntry(
@@ -765,14 +768,14 @@ if __name__ == '__main__':
         'last_modified': datetime.utcnow().isoformat()
     })
 
-    print(f"\nUpdated: {filepath}")
+    logger.info("Updated: %s", filepath)
 
     # List all files
     files = manager.list_markdown_files()
-    print(f"\nMarkdown files: {len(files)}")
+    logger.info("Markdown files: %d", len(files))
     for f in files:
-        print(f"  - {f.name}")
+        logger.info("  %s", f.name)
 
     # Cleanup example file
     manager.delete_markdown_file(filepath)
-    print(f"\nCleaned up example file")
+    logger.info("Cleaned up example file")
