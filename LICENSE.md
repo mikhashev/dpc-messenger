@@ -451,9 +451,9 @@ Contact: legoogmiha@gmail.com
    - This includes but is not limited to:
      - Cryptography and encryption regulations (export controls, registration requirements)
      - Telecommunications and messaging laws
-     - Data protection regulations (GDPR, CCPA, Russian Federal Law No. 152-FZ, etc.)
+     - Data protection regulations (GDPR, CCPA, and other regional data protection laws)
      - Privacy and surveillance laws
-     - Content restrictions and censorship requirements
+     - Content restrictions and communication regulations
 
 3. **Cryptographic Technology Notice**
    - This software contains strong cryptographic features (RSA-2048, TLS 1.2+, AES-256)
@@ -461,13 +461,14 @@ Contact: legoogmiha@gmail.com
    - Users must verify compliance with applicable export control laws (U.S. EAR, Wassenaar Arrangement, etc.)
    - Some jurisdictions require registration or licensing for cryptographic software
 
-4. **Russian Federation Specific Notice**
-   - Users in Russia must comply with Federal Law No. 152-FZ on Personal Data
-   - Users in Russia must comply with Yarovaya Law (data retention requirements)
-   - Users may need to register cryptographic tools with FSB/FSTEC
-   - Users may need to comply with SORM requirements
-   - **The creators make NO GUARANTEES of compliance with Russian Federation law**
-   - **Consult legal counsel before use in Russian jurisdiction**
+4. **Jurisdiction-Specific Considerations**
+   - Users in all jurisdictions must verify compliance with local laws regarding:
+     - Personal data protection and localization requirements
+     - Data retention regulations
+     - Cryptographic tool registration or licensing
+     - Lawful surveillance and interception requirements
+   - **The creators make NO GUARANTEES of compliance with any specific jurisdiction's law**
+   - **Consult legal counsel before use in your jurisdiction**
 
 5. **Prohibited Uses**
    - The creators EXPLICITLY PROHIBIT use of this software for:
@@ -495,7 +496,7 @@ Before deploying this software, users should:
 - Consult legal counsel familiar with telecommunications, data protection, and encryption laws
 - Conduct a legal risk assessment for their jurisdiction
 - Implement additional controls as required by local law
-- For Russian users: verify compliance with all applicable regulations and registration requirements
+- Verify compliance with all applicable regulations and registration requirements in your jurisdiction
 
 ### Contact for Legal Matters
 

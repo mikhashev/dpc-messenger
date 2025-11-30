@@ -68,7 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **All STUN/TURN servers now configurable in config.ini** - No hardcoded servers in production code
   - STUN servers configurable in `[webrtc] stun_servers` in `~/.dpc/config.ini`
   - TURN servers configurable in `[turn] servers` (with credentials) and `fallback_servers` (public)
-  - Users can customize servers for regional availability (e.g., China, Russia)
+  - Users can customize servers for regional availability and network conditions
   - Environment variable overrides: `DPC_WEBRTC_STUN_SERVERS`, `DPC_TURN_SERVERS`
   - Maximum flexibility for international users facing regional server blocks
 
@@ -689,6 +689,56 @@ signatures:
 
 ### Fixed (Additional)
 - **Filename sanitization** - Cross-platform compatibility (removes colons and invalid characters)
+
+---
+
+## What's Next: Phase 2 - Team Collaboration + Disaster Resilience
+
+**Phase 1 (Federated MVP) is now complete!** Version 0.8.0 marks the completion of the foundational infrastructure:
+
+**Phase 1 Achievements:**
+- Federated architecture with Hub-based discovery and WebRTC NAT traversal
+- Direct TLS P2P connections with IPv6 dual-stack support
+- AI collaboration (local/remote inference, collaborative knowledge building)
+- Consensus voting system with devil's advocate mechanism
+- Personal Context Model v2.0 with modular file system
+- Cryptographic commit integrity (hash-based IDs, multi-signatures)
+- Conversation history optimization (60-80% token savings)
+- In-app configuration editors (no more manual file editing)
+
+**Phase 2 Focus: Small Team Collaboration (2-20 Members + AIs)**
+
+The next phase (Q1-Q3 2026) shifts focus from scaling to **deepening team collaboration features** for small teams:
+
+**Team Collaboration Features (12 features, 6 months):**
+- Group chats (3-20 participants with multi-AI support)
+- Shared team knowledge base (markdown files, git-compatible)
+- @-mention context retrieval (semantic search across team members)
+- Async workflows (notifications, task management)
+- Enhanced consensus (weighted voting, time-based approval)
+- Team analytics (usage metrics, knowledge quality tracking)
+
+**Resilient Infrastructure (7 features, CRITICAL):**
+- DHT-based peer discovery (Kademlia + Gossip for decentralized signaling)
+- Pluggable transport framework (auto-fallback: WebRTC → WebSocket-TLS → HTTP tunneling)
+- Hub-optional bootstrap (start without Hub, discover peers via DHT)
+- Offline mesh networking (WiFi Mesh, Meshtastic, Starlink)
+- End-to-end encryption for all transports
+- Protocol reliability enhancements for HTTP tunneling (HTTPS transport)
+
+**Why Small Teams First?**
+- Test and refine collaborative knowledge workflows at manageable scale
+- Validate consensus mechanisms with 2-20 peers (not thousands)
+- Build tooling for effective team communication
+- Gather real-world feedback before mass-market scaling (Phase 3)
+
+**Documentation Updates:**
+- See [ROADMAP.md](ROADMAP.md) for complete Phase 2 implementation plan (15 features, 9-month timeline)
+- See [docs/KNOWLEDGE_ARCHITECTURE.md](docs/KNOWLEDGE_ARCHITECTURE.md) for knowledge system roadmap integration
+- Updated [README.md](README.md) roadmap section with revised Phase 1/2/3 structure
+
+**Phase 3 (Mass-Market Scaling):**
+Mobile clients, public discovery, enterprise features, and scaling to thousands of nodes will be addressed in Phase 3 (2027+).
 
 ---
 
