@@ -7,12 +7,15 @@ detect consensus signals.
 """
 
 import asyncio
+import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
 from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSource
 from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -181,9 +184,9 @@ class ConversationMonitor:
         self.provider_alias = provider
 
         if compute_host:
-            print(f"[Monitor {self.conversation_id}] Knowledge detection: REMOTE inference on {compute_host}, model={model or 'default'}")
+            logger.info("Monitor %s: Knowledge detection using REMOTE inference on %s, model=%s", self.conversation_id, compute_host, model or 'default')
         else:
-            print(f"[Monitor {self.conversation_id}] Knowledge detection: LOCAL inference, provider={provider or 'default'}")
+            logger.info("Monitor %s: Knowledge detection using LOCAL inference, provider=%s", self.conversation_id, provider or 'default')
 
     async def _calculate_knowledge_score(self) -> float:
         """Calculate knowledge-worthiness score for conversation segment
@@ -252,8 +255,8 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                 result = json.loads(response.strip())
                 return float(result.get('score', 0.0))
         except Exception as e:
-            print(f"Error calculating knowledge score: {e}")
-            print(f"  LLM Response preview: {response[:200] if 'response' in locals() else 'N/A'}...")
+            logger.error("Error calculating knowledge score: %s", e, exc_info=True)
+            logger.error("  LLM Response preview: %s...", response[:200] if 'response' in locals() else 'N/A')
             return 0.0
 
     def _detect_consensus(self) -> bool:
@@ -481,9 +484,9 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                     try:
                         repaired = self._repair_json(json_str)
                         result = json.loads(repaired)
-                        print("[JSON Repair] Successfully repaired malformed JSON")
+                        logger.debug("Successfully repaired malformed JSON")
                     except json.JSONDecodeError as e:
-                        print(f"[JSON Repair] Failed to repair extracted JSON: {e}")
+                        logger.warning("Failed to repair extracted JSON: %s", e)
                         result = None
 
             # Attempt 3: Try parsing whole response
@@ -495,7 +498,7 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                     try:
                         repaired = self._repair_json(response.strip())
                         result = json.loads(repaired)
-                        print("[JSON Repair] Successfully repaired malformed response")
+                        logger.debug("Successfully repaired malformed response")
                     except json.JSONDecodeError as e:
                         # All attempts failed
                         raise ValueError(f"Failed to extract valid JSON after repair attempts: {e}")
@@ -547,8 +550,8 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
             return proposal
 
         except Exception as e:
-            print(f"Error generating commit proposal: {e}")
-            print(f"  LLM Response preview: {response[:300] if 'response' in locals() else 'N/A'}...")
+            logger.error("Error generating commit proposal: %s", e, exc_info=True)
+            logger.error("  LLM Response preview: %s...", response[:300] if 'response' in locals() else 'N/A')
             # Return empty proposal on error
             return KnowledgeCommitProposal(
                 conversation_id=self.conversation_id,
