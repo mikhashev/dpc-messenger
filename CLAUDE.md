@@ -733,15 +733,28 @@ Access control file format (`~/.dpc/privacy_rules.json`):
 
 **Check logs:**
 ```bash
-# Backend prints to stdout
+# View real-time logs (console output in development)
 cd dpc-client/core
 poetry run python run_service.py
+
+# View log file (production logs)
+tail -f ~/.dpc/logs/dpc-client.log
+
+# Enable DEBUG logging for specific modules
+export DPC_LOG_MODULE_LEVELS="dpc_client_core.p2p_manager:DEBUG,dpc_client_core.webrtc_peer:DEBUG"
+poetry run python run_service.py
 ```
+
+**Logging System:**
+- All components use Python standard library `logging`
+- Logs stored in `~/.dpc/logs/dpc-client.log` (auto-rotates at 10MB)
+- Per-module log levels configurable via `config.ini` or env vars
+- See [docs/LOGGING.md](docs/LOGGING.md) for complete guide
 
 **Common issues:**
 - Port 8888 or 9999 already in use
 - Certificate files missing in `~/.dpc/`
-- AI provider not configured in `~/.dpc/providers.toml`
+- AI provider not configured in `~/.dpc/providers.json`
 
 ### Frontend Issues
 
@@ -803,6 +816,7 @@ poetry run pytest tests/test_turn_connectivity.py
 - `docs/QUICK_START.md` - 5-minute setup guide
 - `docs/WEBRTC_SETUP_GUIDE.md` - Production deployment
 - `docs/CONFIGURATION.md` - Complete configuration reference
+- `docs/LOGGING.md` - Logging system configuration and troubleshooting
 - `docs/DEVICE_CONTEXT_SPEC.md` - Device context schema and special instructions specification
 - `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
 - `specs/dptp_v1.md` - DPTP (D-PC Transfer Protocol) formal specification
