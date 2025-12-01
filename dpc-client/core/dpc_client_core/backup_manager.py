@@ -7,6 +7,7 @@ Philosophy: User-controlled encryption. No backdoors. No key escrow.
 If user loses passphrase, data is permanently lost (by design).
 """
 
+import logging
 import tarfile
 import io
 import json
@@ -20,6 +21,8 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.backends import default_backend
+
+logger = logging.getLogger(__name__)
 
 
 class DPCBackupManager:
@@ -50,15 +53,12 @@ class DPCBackupManager:
         self.verbose = verbose
 
     def _print(self, message: str):
-        """Print message if verbose mode enabled."""
+        """Log message if verbose mode enabled."""
         if self.verbose:
-            try:
-                print(message)
-            except UnicodeEncodeError:
-                # Windows console encoding issue - remove emojis
-                import re
-                clean_message = re.sub(r'[\U00010000-\U0010ffff\u2705\u26A0\uFE0F]', '', message)
-                print(clean_message)
+            # Remove emojis for logging (consistent with migration guidelines)
+            import re
+            clean_message = re.sub(r'[\U00010000-\U0010ffff\u2705\u26A0\uFE0F\U0001F4E6\U0001F512\U0001F513\U0001F4BE\U0001F4C2\U0001F4C4]', '', message)
+            logger.info(clean_message.strip())
 
     def create_backup(
         self,
