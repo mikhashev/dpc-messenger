@@ -1,7 +1,8 @@
-# dpc-client/core/dpc_client_core/token_cache.py
+# dpc-client/core/dpc-client_core/token_cache.py
 
 import json
 import base64
+import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 from datetime import datetime, timedelta
@@ -9,6 +10,8 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 import hashlib
+
+logger = logging.getLogger(__name__)
 
 
 class TokenCache:
@@ -58,7 +61,7 @@ class TokenCache:
 
             self._cipher = Fernet(key)
         except Exception as e:
-            print(f"Warning: Could not initialize token cache encryption: {e}")
+            logger.warning("Could not initialize token cache encryption: %s", e)
             self._cipher = None
 
     def save_tokens(
@@ -83,7 +86,7 @@ class TokenCache:
             True if saved successfully
         """
         if not self._cipher:
-            print("Warning: Token cache encryption not available")
+            logger.warning("Token cache encryption not available")
             return False
 
         try:
@@ -108,11 +111,11 @@ class TokenCache:
             with open(self.cache_file, 'wb') as f:
                 f.write(encrypted_data)
 
-            print(f"[OK] Tokens cached to {self.cache_file}")
+            logger.debug("Tokens cached to %s", self.cache_file)
             return True
 
         except Exception as e:
-            print(f"Error saving tokens to cache: {e}")
+            logger.error("Error saving tokens to cache: %s", e, exc_info=True)
             return False
 
     def load_tokens(self) -> Optional[Dict[str, Any]]:
@@ -140,15 +143,15 @@ class TokenCache:
             # Check if token is expired
             expires_at = datetime.fromisoformat(cache_data.get("expires_at", ""))
             if datetime.utcnow() >= expires_at:
-                print("Cached tokens expired")
+                logger.info("Cached tokens expired")
                 self.clear()
                 return None
 
-            print("[OK] Loaded cached tokens")
+            logger.debug("Loaded cached tokens")
             return cache_data
 
         except Exception as e:
-            print(f"Error loading cached tokens: {e}")
+            logger.error("Error loading cached tokens: %s", e, exc_info=True)
             # Clear corrupted cache
             self.clear()
             return None
@@ -163,10 +166,10 @@ class TokenCache:
         try:
             if self.cache_file.exists():
                 self.cache_file.unlink()
-                print("[OK] Token cache cleared")
+                logger.debug("Token cache cleared")
             return True
         except Exception as e:
-            print(f"Error clearing token cache: {e}")
+            logger.error("Error clearing token cache: %s", e, exc_info=True)
             return False
 
     def is_valid(self) -> bool:
