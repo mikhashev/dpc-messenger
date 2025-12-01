@@ -5,8 +5,11 @@ Does not require establishing a WebRTC connection.
 """
 
 import asyncio
+import logging
 import socket
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 async def discover_external_ip(stun_servers: list[str], timeout: float = 5.0) -> Optional[str]:
@@ -37,14 +40,14 @@ async def discover_external_ip(stun_servers: list[str], timeout: float = 5.0) ->
             external_ip = await _stun_binding_request(host, port, timeout)
 
             if external_ip:
-                print(f"[STUN Discovery] External IP discovered: {external_ip} (via {host}:{port})")
+                logger.info("STUN Discovery: External IP discovered: %s (via %s:%d)", external_ip, host, port)
                 return external_ip
 
         except Exception as e:
-            print(f"[STUN Discovery] Failed to query {stun_url}: {e}")
+            logger.warning("STUN Discovery: Failed to query %s: %s", stun_url, e)
             continue
 
-    print("[STUN Discovery] Could not discover external IP from any STUN server")
+    logger.warning("STUN Discovery: Could not discover external IP from any STUN server")
     return None
 
 
@@ -137,7 +140,7 @@ async def _stun_binding_request(host: str, port: int, timeout: float) -> Optiona
     except asyncio.TimeoutError:
         return None
     except Exception as e:
-        print(f"[STUN] Error during binding request to {host}:{port}: {e}")
+        logger.error("STUN: Error during binding request to %s:%d: %s", host, port, e)
         return None
 
 
