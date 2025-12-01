@@ -76,7 +76,7 @@ class CoreService:
             oauth_callback_port=self.settings.get_oauth_callback_port(),
             token_cache=self.token_cache  # Pass token cache for offline mode
         )
-        self.p2p_manager = P2PManager(firewall=self.firewall)
+        self.p2p_manager = P2PManager(firewall=self.firewall, settings=self.settings)
         self.cache = ContextCache()
 
         self.local_api = LocalApiServer(core_service=self)
@@ -458,8 +458,9 @@ class CoreService:
         await asyncio.sleep(0.5)
 
         # Update Direct TLS status (always available if P2P server running)
-        self.connection_status.update_direct_tls_status(available=True, port=8888)
-        logger.info("Direct TLS server started on port 8888")
+        p2p_port = self.settings.get_p2p_listen_port()
+        self.connection_status.update_direct_tls_status(available=True, port=p2p_port)
+        logger.info(f"Direct TLS server started on port {p2p_port}")
 
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
@@ -1133,7 +1134,7 @@ class CoreService:
 
         # Get local IPs and construct dpc:// URIs
         local_ips = self._get_local_ips()
-        dpc_port = 8888  # Default TLS server port
+        dpc_port = self.settings.get_p2p_listen_port()
         dpc_uris = []
 
         for ip in local_ips:

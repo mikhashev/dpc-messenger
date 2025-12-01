@@ -47,9 +47,10 @@ class PeerConnection:
 
 class P2PManager:
     """Manages all P2P connections (both direct TLS and WebRTC)."""
-    
-    def __init__(self, firewall: ContextFirewall):
+
+    def __init__(self, firewall: ContextFirewall, settings=None):
         self.firewall = firewall
+        self.settings = settings  # Optional settings for configurable timeouts/ports
         self.peers: Dict[str, Union[PeerConnection, WebRTCPeerConnection]] = {}
         self.display_name: str | None = None
 
@@ -269,7 +270,7 @@ class P2PManager:
         except Exception as e:
             return (False, f"Port test failed: {e}")
 
-    async def connect_directly(self, host: str, port: int, target_node_id: str, timeout: float = 30.0):
+    async def connect_directly(self, host: str, port: int, target_node_id: str, timeout: float = None):
         """
         Initiates a direct TLS connection to a peer (Client-side).
 
@@ -284,6 +285,10 @@ class P2PManager:
             ConnectionRefusedError: If peer actively refuses connection (firewall/not running)
             ConnectionError: If peer handshake fails
         """
+        # Use configured timeout if not explicitly provided
+        if timeout is None:
+            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 30.0
+
         logger.info("Initiating direct connection to %s at %s:%d", target_node_id, host, port)
 
         ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
@@ -654,8 +659,9 @@ class P2PManager:
             return
 
         try:
-            # Wait for connection to be ready
-            await webrtc_peer.wait_ready(timeout=30.0)
+            # Wait for connection to be ready (use configured timeout)
+            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 30.0
+            await webrtc_peer.wait_ready(timeout=timeout)
 
             # Move from pending to active peers
             self._pending_webrtc.pop(node_id, None)
@@ -689,12 +695,13 @@ class P2PManager:
     async def _handle_connection_timeout(self, node_id: str):
         """Handle timeout for WebRTC connection establishment."""
         try:
-            # Wait for connection to be established
-            await asyncio.sleep(30)  # 30 second timeout
+            # Use configured timeout
+            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 30.0
+            await asyncio.sleep(timeout)
 
             # Check if connection is still pending
             if node_id in self._pending_webrtc and node_id not in self.peers:
-                logger.warning("WebRTC connection to %s timed out after 30 seconds", node_id)
+                logger.warning("WebRTC connection to %s timed out after %.1f seconds", node_id, timeout)
                 webrtc_peer = self._pending_webrtc.pop(node_id, None)
                 if webrtc_peer:
                     await webrtc_peer.close()

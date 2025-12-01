@@ -74,7 +74,8 @@ class Settings:
 
         self._config['p2p'] = {
             'listen_port': '8888',
-            'listen_host': 'dual'  # dual-stack (IPv4 + IPv6), can be "0.0.0.0" (IPv4 only) or "::" (IPv6 only)
+            'listen_host': 'dual',  # dual-stack (IPv4 + IPv6), can be "0.0.0.0" (IPv4 only) or "::" (IPv6 only)
+            'connection_timeout': '30'  # Connection establishment timeout in seconds
         }
 
         self._config['api'] = {
@@ -176,6 +177,10 @@ class Settings:
     def get_p2p_listen_host(self) -> str:
         """Get the P2P server listen host."""
         return self.get('p2p', 'listen_host', '0.0.0.0')
+
+    def get_p2p_connection_timeout(self) -> float:
+        """Get the P2P connection establishment timeout in seconds."""
+        return float(self.get('p2p', 'connection_timeout', '30'))
 
     def get_api_port(self) -> int:
         """Get the local API server port."""
