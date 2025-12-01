@@ -2124,8 +2124,8 @@ class CoreService:
         Args:
             uri: dpc:// URI with host, port, and node_id query parameter
         """
-        print(f"Orchestrating direct connection to {uri}...")
-        
+        logger.info("Orchestrating direct connection to %s", uri)
+
         # Parse the URI to extract host, port, and node_id
         host, port, target_node_id = parse_dpc_uri(uri)
         
@@ -2482,7 +2482,7 @@ class CoreService:
 
         connected_peers = list(self.p2p_manager.peers.keys())
         if not connected_peers:
-            print("  - No connected peers to notify")
+            logger.debug("No connected peers to notify")
             return
 
         for peer_id in connected_peers:
@@ -2490,9 +2490,9 @@ class CoreService:
                 # Send HELLO message with updated name
                 hello_msg = create_hello_message(self.p2p_manager.node_id, new_name)
                 await self.p2p_manager.send_message_to_peer(peer_id, hello_msg)
-                print(f"  - Notified {peer_id} of name change: {new_name}")
+                logger.debug("Notified %s of name change: %s", peer_id, new_name)
             except Exception as e:
-                print(f"  - Error notifying {peer_id} of name change: {e}")
+                logger.error("Error notifying %s of name change: %s", peer_id, e, exc_info=True)
 
     async def _on_commit_applied(self, commit):
         """Callback called after a knowledge commit is applied
@@ -2503,7 +2503,7 @@ class CoreService:
             commit: The KnowledgeCommit that was applied
         """
         try:
-            print(f"[Commit Applied] Reloading local context after commit {commit.commit_id}")
+            logger.info("Commit Applied - reloading local context after commit %s", commit.commit_id)
 
             # Reload context from disk
             context = self.pcm_core.load_context()
@@ -2511,7 +2511,7 @@ class CoreService:
             # Update in P2PManager so context requests return latest data
             if hasattr(self, 'p2p_manager') and self.p2p_manager:
                 self.p2p_manager.local_context = context
-                print(f"  - Updated p2p_manager.local_context with new knowledge")
+                logger.info("Updated p2p_manager.local_context with new knowledge")
 
             # Compute new context hash
             new_context_hash = self._compute_context_hash()
@@ -2526,7 +2526,7 @@ class CoreService:
             })
 
         except Exception as e:
-            print(f"Error in _on_commit_applied: {e}")
+            logger.error("Error in _on_commit_applied: %s", e, exc_info=True)
             import traceback
             traceback.print_exc()
 
@@ -2540,10 +2540,10 @@ class CoreService:
         """
         connected_peers = list(self.p2p_manager.peers.keys())
         if not connected_peers:
-            print("  - No connected peers to notify of context update")
+            logger.debug("No connected peers to notify of context update")
             return
 
-        print(f"  - Broadcasting CONTEXT_UPDATED to {len(connected_peers)} peer(s)...")
+        logger.info("Broadcasting CONTEXT_UPDATED to %d peer(s)", len(connected_peers))
         for peer_id in connected_peers:
             try:
                 # Send CONTEXT_UPDATED message
@@ -2555,9 +2555,9 @@ class CoreService:
                     }
                 }
                 await self.p2p_manager.send_message_to_peer(peer_id, message)
-                print(f"    ✓ Notified {peer_id[:20]}... of context update")
+                logger.debug("Notified %s of context update", peer_id[:20])
             except Exception as e:
-                print(f"    ✗ Error notifying {peer_id[:20]}... of context update: {e}")
+                logger.error("Error notifying %s of context update: %s", peer_id[:20], e, exc_info=True)
 
     async def _notify_peers_of_provider_changes(self):
         """
@@ -2567,23 +2567,23 @@ class CoreService:
         from dpc_protocol.protocol import create_providers_response
 
         connected_peers = list(self.p2p_manager.peers.keys())
-        print(f"  - Found {len(connected_peers)} connected peer(s) to notify")
+        logger.debug("Found %d connected peer(s) to notify", len(connected_peers))
 
         if not connected_peers:
-            print("  - No connected peers to notify")
+            logger.debug("No connected peers to notify")
             return
 
         for peer_id in connected_peers:
-            print(f"  - Processing notification for {peer_id}...")
+            logger.debug("Processing notification for %s", peer_id)
             try:
                 # Check if compute sharing is enabled and peer is authorized
                 can_access = self.firewall.can_request_inference(peer_id)
-                print(f"  - Firewall check for {peer_id}: can_access={can_access}")
+                logger.debug("Firewall check for %s: can_access=%s", peer_id, can_access)
 
                 if not can_access:
                     # Send empty provider list (access was revoked or never granted)
                     response = create_providers_response([])
-                    print(f"  - Notifying {peer_id}: access denied, sending empty providers list")
+                    logger.debug("Notifying %s: access denied, sending empty providers list", peer_id)
                 else:
                     # Build provider list (same as _handle_get_providers_request)
                     all_providers = []
@@ -2600,7 +2600,7 @@ class CoreService:
                         })
                         all_models.append(model)
 
-                    print(f"  - Found {len(all_providers)} total providers")
+                    logger.debug("Found %d total providers", len(all_providers))
 
                     # Filter providers based on firewall allowed_models setting
                     allowed_models = self.firewall.get_available_models_for_peer(peer_id, all_models)
@@ -2611,39 +2611,37 @@ class CoreService:
                         if p["model"] in allowed_models
                     ]
 
-                    print(f"  - Filtered to {len(filtered_providers)} providers (from {len(all_providers)} total)")
+                    logger.debug("Filtered to %d providers (from %d total)", len(filtered_providers), len(all_providers))
                     response = create_providers_response(filtered_providers)
-                    print(f"  - Notifying {peer_id}: sending {len(filtered_providers)} providers")
+                    logger.debug("Notifying %s: sending %d providers", peer_id, len(filtered_providers))
 
                 # Send the updated providers response
-                print(f"  - Sending PROVIDERS_RESPONSE to {peer_id}...")
+                logger.debug("Sending PROVIDERS_RESPONSE to %s", peer_id)
                 await self.p2p_manager.send_message_to_peer(peer_id, response)
-                print(f"  - Successfully sent providers to {peer_id}")
+                logger.debug("Successfully sent providers to %s", peer_id)
 
             except Exception as e:
-                print(f"  - Error notifying {peer_id} of provider changes: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error("Error notifying %s of provider changes: %s", peer_id, e, exc_info=True)
 
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """
         Request context from a specific peer for the given query.
         Uses async request-response pattern with Future.
         """
-        print(f"  - Requesting context from peer: {peer_id}")
-        
+        logger.debug("Requesting context from peer: %s", peer_id)
+
         if peer_id not in self.p2p_manager.peers:
-            print(f"  - Peer {peer_id} not connected, skipping context request.")
+            logger.debug("Peer %s not connected, skipping context request", peer_id)
             return None
-        
+
         try:
             # Generate unique request ID
             request_id = str(uuid.uuid4())
-            
+
             # Create Future to wait for response
             response_future = asyncio.Future()
             self._pending_context_requests[request_id] = response_future
-            
+
             # Create context request message
             request_message = {
                 "command": "REQUEST_CONTEXT",
@@ -2653,10 +2651,10 @@ class CoreService:
                     "requestor_id": self.p2p_manager.node_id
                 }
             }
-            
+
             # Send request using P2PManager's method
             await self.p2p_manager.send_message_to_peer(peer_id, request_message)
-            
+
             # Wait for response with timeout
             try:
                 context = await asyncio.wait_for(response_future, timeout=5.0)
@@ -2664,18 +2662,18 @@ class CoreService:
                 if context:
                     # Already a PersonalContext object (deserialized in CONTEXT_RESPONSE handler)
                     return context
-                
+
             except asyncio.TimeoutError:
-                print(f"  - Timeout waiting for context from {peer_id}")
+                logger.warning("Timeout waiting for context from %s", peer_id)
                 return None
             finally:
                 # Clean up pending request
                 self._pending_context_requests.pop(request_id, None)
-            
+
             return None
 
         except Exception as e:
-            print(f"  - Error requesting context from {peer_id}: {e}")
+            logger.error("Error requesting context from %s: %s", peer_id, e, exc_info=True)
             return None
 
     async def _request_device_context_from_peer(self, peer_id: str) -> Dict:
@@ -2689,10 +2687,10 @@ class CoreService:
         Returns:
             Dict containing filtered device context, or None if request fails
         """
-        print(f"  - Requesting device context from peer: {peer_id}")
+        logger.debug("Requesting device context from peer: %s", peer_id)
 
         if peer_id not in self.p2p_manager.peers:
-            print(f"  - Peer {peer_id} not connected, skipping device context request.")
+            logger.debug("Peer %s not connected, skipping device context request", peer_id)
             return None
 
         try:
@@ -2721,14 +2719,14 @@ class CoreService:
                 return device_context_dict if device_context_dict else None
 
             except asyncio.TimeoutError:
-                print(f"  - Timeout waiting for device context from {peer_id}")
+                logger.warning("Timeout waiting for device context from %s", peer_id)
                 return None
             finally:
                 # Clean up pending request
                 self._pending_device_context_requests.pop(request_id, None)
 
         except Exception as e:
-            print(f"  - Error requesting device context from {peer_id}: {e}")
+            logger.error("Error requesting device context from %s: %s", peer_id, e, exc_info=True)
             return None
 
     async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, timeout: float = 60.0) -> str:
@@ -2753,7 +2751,7 @@ class CoreService:
         """
         from dpc_protocol.protocol import create_remote_inference_request
 
-        print(f"  - Requesting inference from peer: {peer_id}")
+        logger.debug("Requesting inference from peer: %s", peer_id)
 
         if peer_id not in self.p2p_manager.peers:
             raise ConnectionError(f"Peer {peer_id} is not connected")
@@ -2780,18 +2778,18 @@ class CoreService:
             # Wait for response with timeout
             try:
                 result = await asyncio.wait_for(response_future, timeout=timeout)
-                print(f"  - Received inference result from {peer_id}")
+                logger.info("Received inference result from %s", peer_id)
                 return result
 
             except asyncio.TimeoutError:
-                print(f"  - Timeout waiting for inference from {peer_id}")
+                logger.warning("Timeout waiting for inference from %s", peer_id)
                 raise TimeoutError(f"Inference request to {peer_id} timed out after {timeout}s")
             finally:
                 # Clean up pending request
                 self._pending_inference_requests.pop(request_id, None)
 
         except Exception as e:
-            print(f"  - Error requesting inference from {peer_id}: {e}")
+            logger.error("Error requesting inference from %s: %s", peer_id, e, exc_info=True)
             raise
 
     async def _aggregate_contexts(self, query: str, peer_ids: List[str] = None) -> Dict[str, PersonalContext]:
@@ -2819,13 +2817,13 @@ class CoreService:
         if peer_ids:
             tasks = [self._request_context_from_peer(peer_id, query) for peer_id in peer_ids]
             results = await asyncio.gather(*tasks, return_exceptions=True)
-            
+
             for peer_id, result in zip(peer_ids, results):
                 if isinstance(result, PersonalContext):
                     contexts[peer_id] = result
                 elif result is not None:
-                    print(f"  - Error getting context from {peer_id}: {result}")
-        
+                    logger.error("Error getting context from %s: %s", peer_id, result)
+
         return contexts
 
     # --- AI Query Methods ---
@@ -2844,10 +2842,10 @@ class CoreService:
             include_context: If True, includes personal context, device context, and AI instructions (default: True)
             **kwargs: Additional arguments (including conversation_id)
         """
-        print(f"Orchestrating AI query for command_id {command_id}: '{prompt[:50]}...'")
-        print(f"  - Compute host: {compute_host or 'local'}")
-        print(f"  - Model: {model or 'default'}")
-        print(f"  - Include context: {include_context}")
+        logger.info("Orchestrating AI query for command_id %s: '%s...'", command_id, prompt[:50])
+        logger.debug("Compute host: %s", compute_host or 'local')
+        logger.debug("Model: %s", model or 'default')
+        logger.debug("Include context: %s", include_context)
 
         # Phase 7: Get or create conversation monitor early for history tracking
         conversation_id = kwargs.get("conversation_id", "local_ai")
@@ -2861,7 +2859,7 @@ class CoreService:
                     f"Context window is full ({monitor.current_token_count}/{monitor.token_limit} tokens). "
                     "Please end the session to save knowledge and start a new conversation."
                 )
-                print(f"  - BLOCKED: {error_msg}")
+                logger.warning("BLOCKED: %s", error_msg)
                 raise RuntimeError(error_msg)
 
         # Phase 7: Compute context hash and determine if context should be included
@@ -2877,11 +2875,11 @@ class CoreService:
             # 3. User just toggled the checkbox (checkbox state change handled by frontend)
             if not monitor.context_included or monitor.has_context_changed(current_context_hash):
                 should_include_full_context = True
-                print(f"  - Full context will be included (first message or context changed)")
+                logger.info("Full context will be included (first message or context changed)")
             else:
-                print(f"  - Context already included, using conversation history only")
+                logger.debug("Context already included, using conversation history only")
         else:
-            print(f"  - User disabled context inclusion")
+            logger.debug("User disabled context inclusion")
 
         # Conditionally include local context based on flag
         aggregated_contexts = {}
@@ -2896,7 +2894,7 @@ class CoreService:
         # Phase 7: Fetch remote contexts if context_ids provided (with caching)
         peer_device_contexts = {}
         if context_ids:
-            print(f"  - Processing contexts from {len(context_ids)} peer(s)")
+            logger.info("Processing contexts from %d peer(s)", len(context_ids))
             for node_id in context_ids:
                 if node_id in self.p2p_manager.peers:
                     try:
@@ -2905,10 +2903,10 @@ class CoreService:
                         device_ctx = monitor.get_cached_peer_device_context(node_id)
 
                         if context:
-                            print(f"    • Using cached context for {node_id[:20]}...")
+                            logger.debug("Using cached context for %s...", node_id[:20])
                         else:
                             # Cache miss: Fetch from network
-                            print(f"    • Fetching context from {node_id[:20]}...")
+                            logger.debug("Fetching context from %s...", node_id[:20])
                             context = await self._request_context_from_peer(node_id, prompt)
 
                         if context:
@@ -2927,9 +2925,9 @@ class CoreService:
                                 monitor.update_peer_context_hash(node_id, peer_hash)
 
                                 if is_first_fetch:
-                                    print(f"    ✓ Context from {node_id[:20]}... (included - first fetch)")
+                                    logger.info("Context from %s... (included - first fetch)", node_id[:20])
                                 else:
-                                    print(f"    ✓ Context from {node_id[:20]}... (included - context changed)")
+                                    logger.info("Context from %s... (included - context changed)", node_id[:20])
                                     # Phase 7: Only broadcast update event if context actually changed (not first fetch)
                                     await self.local_api.broadcast_event("peer_context_updated", {
                                         "node_id": node_id,
@@ -2942,7 +2940,7 @@ class CoreService:
                                 if not device_ctx:
                                     device_ctx = await self._request_device_context_from_peer(node_id)
                                     if device_ctx:
-                                        print(f"    ✓ Received device context from {node_id[:20]}...")
+                                        logger.info("Received device context from %s...", node_id[:20])
 
                                 # Cache both personal and device contexts
                                 monitor.cache_peer_context(node_id, context, device_ctx)
@@ -2952,16 +2950,16 @@ class CoreService:
                                     peer_device_contexts[node_id] = device_ctx
 
                             else:
-                                print(f"    ✓ Context from {node_id[:20]}... unchanged (using history)")
+                                logger.debug("Context from %s... unchanged (using history)", node_id[:20])
                                 # Still add cached device context if available
                                 if device_ctx:
                                     peer_device_contexts[node_id] = device_ctx
                         else:
-                            print(f"    ✗ No context received from {node_id[:20]}...")
+                            logger.warning("No context received from %s...", node_id[:20])
                     except Exception as e:
-                        print(f"    ✗ Error fetching context from {node_id[:20]}...: {e}")
+                        logger.error("Error fetching context from %s...: %s", node_id[:20], e)
                 else:
-                    print(f"    ✗ Peer {node_id[:20]}... not connected")
+                    logger.warning("Peer %s... not connected", node_id[:20])
 
         # Phase 7: Update should_include_full_context if peer contexts were added
         # BugFix: Even if local context wasn't included, if we have peer contexts, we need full context mode
@@ -2970,7 +2968,7 @@ class CoreService:
             has_peer_contexts = any(key != 'local' for key in aggregated_contexts.keys())
             if has_peer_contexts:
                 should_include_full_context = True
-                print(f"  - Including peer contexts in this query (peer context changed)")
+                logger.info("Including peer contexts in this query (peer context changed)")
 
         # Phase 7: Add user prompt to conversation history BEFORE assembling prompt
         monitor.add_message('user', prompt)
@@ -2991,7 +2989,7 @@ class CoreService:
         # Phase 7: Mark context as included if we just sent it
         if should_include_full_context:
             monitor.mark_context_included(current_context_hash)
-            print(f"  - Context marked as included (hash: {current_context_hash[:8]}...)")
+            logger.debug("Context marked as included (hash: %s...)", current_context_hash[:8])
 
         response_payload = {}
         status = "OK"
@@ -3015,7 +3013,7 @@ class CoreService:
 
             # Phase 7: Add AI response to conversation history
             monitor.add_message('assistant', result["response"])
-            print(f"  - AI response added to conversation history (total messages: {len(message_history) + 1})")
+            logger.debug("AI response added to conversation history (total messages: %d)", len(message_history) + 1)
 
             # Token tracking (Phase 2) - works for both local and remote inference
             if "tokens_used" in result:
@@ -3042,7 +3040,9 @@ class CoreService:
                         "token_limit": current_limit,
                         "usage_percent": current_usage_percent
                     })
-                    print(f"[Token Warning] {conversation_id}: {current_usage_percent:.1%} of context window used ({monitor.current_token_count}/{current_limit} tokens)")
+                    logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
+                                 conversation_id, current_usage_percent * 100,
+                                 monitor.current_token_count, current_limit)
 
                 # Include token info in response (send cumulative conversation tokens, not per-query)
                 response_payload["tokens_used"] = monitor.current_token_count  # Cumulative conversation tokens
@@ -3050,7 +3050,7 @@ class CoreService:
                 response_payload["this_query_tokens"] = result["tokens_used"]  # Per-query tokens (for debugging)
 
         except Exception as e:
-            print(f"  - Error during inference: {e}")
+            logger.error("Error during inference: %s", e, exc_info=True)
             status = "ERROR"
             response_payload = {"message": str(e)}
 
@@ -3069,7 +3069,8 @@ class CoreService:
                 # BUG FIX: Use actual conversation_id instead of hardcoded "local_ai"
                 # This ensures each AI chat (local_ai, ai_chat_xxx) maintains its own buffer and provider settings
                 monitor = self._get_or_create_conversation_monitor(conversation_id)
-                print(f"[Monitor] Buffering messages for {conversation_id} (buffer size before: {len(monitor.message_buffer)})")
+                logger.debug("Monitor - buffering messages for %s (buffer size before: %d)",
+                           conversation_id, len(monitor.message_buffer))
 
                 # Update monitor's inference settings to match the query (for knowledge detection)
                 monitor.update_inference_settings(
@@ -3106,19 +3107,20 @@ class CoreService:
                 )
                 proposal = await monitor.on_message(ai_message)
 
-                print(f"[Monitor] Buffer size after: {len(monitor.message_buffer)}, Score: {monitor.knowledge_score:.2f}")
+                logger.debug("Monitor - buffer size after: %d, Score: %.2f",
+                           len(monitor.message_buffer), monitor.knowledge_score)
 
                 # Only handle automatic proposals if auto-detection is enabled
                 if self.auto_knowledge_detection_enabled:
                     # If proposal generated, broadcast to UI
                     if proposal:
-                        print(f"[Auto-detect] Knowledge proposal generated for {conversation_id} chat")
+                        logger.info("Auto-detect - knowledge proposal generated for %s chat", conversation_id)
                         await self.local_api.broadcast_event(
                             "knowledge_commit_proposed",
                             proposal.to_dict()
                         )
                         # Local AI - private conversation, don't broadcast to peers
-                        print(f"[{conversation_id}] Private conversation - knowledge will not be shared with peers")
+                        logger.info("%s - private conversation, knowledge will not be shared with peers", conversation_id)
                         async def _no_op_broadcast(message: Dict[str, Any]) -> None:
                             pass  # Don't send to peers for private conversations
 
@@ -3127,13 +3129,11 @@ class CoreService:
                             broadcast_func=_no_op_broadcast
                         )
                     else:
-                        print(f"[Monitor] No proposal yet (need 5 messages for auto-detect)")
+                        logger.debug("Monitor - no proposal yet (need 5 messages for auto-detect)")
                 else:
-                    print(f"[Monitor] Auto-detection is OFF - messages buffered for manual extraction")
+                    logger.debug("Monitor - auto-detection is OFF, messages buffered for manual extraction")
             except Exception as e:
-                print(f"Error in local AI conversation monitoring: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.error("Error in local AI conversation monitoring: %s", e, exc_info=True)
                 # Only broadcast extraction failure if auto-detection was enabled
                 if self.auto_knowledge_detection_enabled:
                     await self.local_api.broadcast_event(
@@ -3145,7 +3145,7 @@ class CoreService:
                         }
                     )
         else:
-            print(f"[Monitor] Query failed (status={status}) - not buffering messages")
+            logger.debug("Monitor - query failed (status=%s), not buffering messages", status)
 
     def _compute_context_hash(self) -> str:
         """Compute SHA256 hash of personal.json + device_context.json for change detection
@@ -3524,7 +3524,7 @@ class CoreService:
             monitor_task.set_name("hub_monitor")
             self._background_tasks.add(monitor_task)
 
-        print("[OK] Successfully logged in to Hub.")
+        logger.info("Successfully logged in to Hub")
 
     async def disconnect_from_hub(self):
         """Disconnect from Hub."""
@@ -3556,5 +3556,5 @@ class CoreService:
         self.connection_status.update_hub_status(connected=False, error="User disconnected")
         self.connection_status.update_webrtc_status(available=False)
 
-        print("[OK] Disconnected from Hub.")
+        logger.info("Disconnected from Hub")
         await self.local_api.broadcast_event("status_update", await self.get_status())
