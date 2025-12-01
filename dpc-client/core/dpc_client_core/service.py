@@ -484,34 +484,34 @@ class CoreService:
                 signals_task.set_name("hub_signals")
                 self._background_tasks.add(signals_task)
 
-                print("[OK] Hub connected - WebRTC available")
+                logger.info("Hub connected - WebRTC available")
 
             except Exception as e:
-                print(f"\n[Offline Mode] Hub connection failed: {e}")
-                print(f"   Operating in {self.connection_status.get_operation_mode().value} mode")
-                print(f"   Status: {self.connection_status.get_status_message()}")
-                print(f"   Direct TLS connections still available via dpc:// URIs\n")
+                logger.warning("Offline Mode - Hub connection failed: %s", e)
+                logger.info("Operating in %s mode", self.connection_status.get_operation_mode().value)
+                logger.info("Status: %s", self.connection_status.get_status_message())
+                logger.info("Direct TLS connections still available via dpc:// URIs")
 
                 # Update connection status
                 self.connection_status.update_hub_status(connected=False, error=str(e))
                 self.connection_status.update_webrtc_status(available=False)
         else:
-            print("[Auto-Connect] Disabled in config - use UI to connect to Hub manually")
-            print(f"   Operating in {self.connection_status.get_operation_mode().value} mode")
-            print(f"   Direct TLS connections available via dpc:// URIs\n")
+            logger.info("Auto-Connect disabled in config - use UI to connect to Hub manually")
+            logger.info("Operating in %s mode", self.connection_status.get_operation_mode().value)
+            logger.info("Direct TLS connections available via dpc:// URIs")
 
             # Update connection status
             self.connection_status.update_hub_status(connected=False)
             self.connection_status.update_webrtc_status(available=False)
 
         self._is_running = True
-        print(f"\nD-PC Core Service started")
-        print(f"  Node ID: {self.p2p_manager.node_id}")
-        print(f"  Operation Mode: {self.connection_status.get_operation_mode().value}")
-        print(f"  Available Features:")
+        logger.info("D-PC Core Service started")
+        logger.info("Node ID: %s", self.p2p_manager.node_id)
+        logger.info("Operation Mode: %s", self.connection_status.get_operation_mode().value)
+        logger.info("Available Features:")
         for feature, available in self.connection_status.get_available_features().items():
-            status = "[OK]" if available else "[--]"
-            print(f"    {status} {feature}")
+            status = "available" if available else "unavailable"
+            logger.info("  %s: %s", feature, status)
 
         # Start hub connection monitor (only if initially connected)
         if hub_connected:
@@ -530,17 +530,17 @@ class CoreService:
         """Signals the service to stop and waits for a clean shutdown."""
         if not self._is_running:
             return
-        print("Stopping D-PC Core Service...")
+        logger.info("Stopping D-PC Core Service")
         self._shutdown_event.set()
 
     async def shutdown(self):
         """Performs a clean shutdown of all components."""
         self._is_running = False
-        print("Shutting down components...")
+        logger.info("Shutting down components")
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()
         await self.hub_client.close()
-        print("D-PC Core Service shut down.")
+        logger.info("D-PC Core Service shut down")
 
     async def _discover_external_ip(self):
         """
@@ -552,17 +552,17 @@ class CoreService:
             stun_servers = self.settings.get_stun_servers()
 
             # Perform initial discovery
-            print("[STUN Discovery] Discovering external IP address...")
+            logger.info("Discovering external IP address via STUN")
             external_ip = await discover_external_ip(stun_servers, timeout=5.0)
 
             if external_ip:
                 self._external_ip = external_ip
-                print(f"[OK] External IP discovered: {external_ip}")
+                logger.info("External IP discovered: %s", external_ip)
 
                 # Notify UI of status update (to refresh external URIs)
                 await self.local_api.broadcast_event("status_update", await self.get_status())
             else:
-                print("[Warning] Could not discover external IP via STUN servers")
+                logger.warning("Could not discover external IP via STUN servers")
 
             # Periodically refresh external IP (every 5 minutes)
             while self._is_running:
@@ -571,16 +571,16 @@ class CoreService:
                 external_ip = await discover_external_ip(stun_servers, timeout=5.0)
 
                 if external_ip and external_ip != self._external_ip:
-                    print(f"[STUN Discovery] External IP changed: {self._external_ip} → {external_ip}")
+                    logger.info("External IP changed: %s -> %s", self._external_ip, external_ip)
                     self._external_ip = external_ip
 
                     # Notify UI
                     await self.local_api.broadcast_event("status_update", await self.get_status())
 
         except asyncio.CancelledError:
-            print("[STUN Discovery] Task cancelled")
+            logger.debug("STUN discovery task cancelled")
         except Exception as e:
-            print(f"[STUN Discovery] Error: {e}")
+            logger.error("STUN discovery error: %s", e, exc_info=True)
 
     async def _monitor_hub_connection(self):
         """Background task to monitor hub connection and auto-reconnect if needed."""
@@ -593,8 +593,8 @@ class CoreService:
 
                     # Check if we've exceeded max reconnection attempts
                     if self._hub_reconnect_attempts >= self._max_hub_reconnect_attempts:
-                        print(f"\n[Hub Offline] Max reconnection attempts ({self._max_hub_reconnect_attempts}) reached")
-                        print("   Staying in offline mode. Use 'Login to Hub' button to reconnect manually.")
+                        logger.warning("Hub offline - max reconnection attempts (%d) reached", self._max_hub_reconnect_attempts)
+                        logger.info("Staying in offline mode - use Login to Hub button to reconnect manually")
                         self.connection_status.update_hub_status(
                             connected=False,
                             error=f"Max reconnection attempts ({self._max_hub_reconnect_attempts}) reached"
@@ -609,7 +609,7 @@ class CoreService:
                     # Exponential backoff: 2, 4, 8, 16, 32 seconds
                     backoff_delay = min(2 ** self._hub_reconnect_attempts, 32)
 
-                    print(f"Hub connection lost, attempting to reconnect (attempt {self._hub_reconnect_attempts}/{self._max_hub_reconnect_attempts})...")
+                    logger.info("Hub connection lost, attempting to reconnect (attempt %d/%d)", self._hub_reconnect_attempts, self._max_hub_reconnect_attempts)
 
                     # Update connection status
                     self.connection_status.update_hub_status(connected=False, error="Connection lost")
@@ -623,7 +623,7 @@ class CoreService:
                             break
 
                     if old_listener:
-                        print("Cancelling old Hub signal listener...")
+                        logger.debug("Cancelling old Hub signal listener")
                         old_listener.cancel()
                         try:
                             await old_listener
@@ -633,7 +633,7 @@ class CoreService:
 
                     # Close old websocket BEFORE reconnecting
                     if self.hub_client.websocket:
-                        print("Closing old Hub websocket...")
+                        logger.debug("Closing old Hub websocket")
                         try:
                             await self.hub_client.websocket.close()
                         except:
@@ -641,7 +641,7 @@ class CoreService:
                         self.hub_client.websocket = None
 
                     # Wait before reconnection attempt (exponential backoff)
-                    print(f"   Waiting {backoff_delay}s before reconnection...")
+                    logger.info("Waiting %ds before reconnection", backoff_delay)
                     await asyncio.sleep(backoff_delay)
 
                     try:
@@ -658,17 +658,17 @@ class CoreService:
                         # Reset reconnection attempts on success
                         self._hub_reconnect_attempts = 0
 
-                        print("[OK] Hub reconnection successful")
+                        logger.info("Hub reconnection successful")
                         await self.local_api.broadcast_event("status_update", await self.get_status())
 
                     except PermissionError as e:
-                        print(f"Hub reconnection failed - authentication expired: {e}")
-                        print("Please login again to reconnect to Hub.")
+                        logger.warning("Hub reconnection failed - authentication expired: %s", e)
+                        logger.info("Please login again to reconnect to Hub")
                         self.connection_status.update_hub_status(connected=False, error="Authentication expired")
                         # Don't count auth failures toward reconnect limit
                         self._hub_reconnect_attempts = self._max_hub_reconnect_attempts
                     except Exception as e:
-                        print(f"Hub reconnection failed: {e}")
+                        logger.error("Hub reconnection failed: %s", e, exc_info=True)
                         self.connection_status.update_hub_status(connected=False, error=str(e))
                 else:
                     # Connection is healthy, reset reconnection attempts
@@ -678,33 +678,33 @@ class CoreService:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                print(f"Error in hub connection monitor: {e}")
+                logger.error("Error in hub connection monitor: %s", e, exc_info=True)
 
     async def _listen_for_hub_signals(self):
         """Background task that listens for incoming WebRTC signaling messages from Hub."""
-        print("Started listening for Hub WebRTC signals...")
-        
+        logger.info("Started listening for Hub WebRTC signals")
+
         try:
             while self._is_running:
                 try:
                     if not self.hub_client.websocket or \
                     self.hub_client.websocket.state != websockets.State.OPEN:
-                        print("Hub signaling socket disconnected, stopping listener...")
+                        logger.info("Hub signaling socket disconnected, stopping listener")
                         break
-                    
+
                     signal = await self.hub_client.receive_signal()
                     await self.p2p_manager.handle_incoming_signal(signal, self.hub_client)
-                    
+
                 except asyncio.CancelledError:
                     break
                 except ConnectionError as e:
-                    print(f"Hub connection lost: {e}")
+                    logger.warning("Hub connection lost: %s", e)
                     break
                 except Exception as e:
-                    print(f"Error receiving Hub signal: {e}")
+                    logger.error("Error receiving Hub signal: %s", e, exc_info=True)
                     await asyncio.sleep(1)
         finally:
-            print("Stopped listening for Hub signals.")
+            logger.info("Stopped listening for Hub signals")
             await self.local_api.broadcast_event("status_update", await self.get_status())
 
 
@@ -712,7 +712,7 @@ class CoreService:
 
     async def on_peer_list_change(self):
         """Callback function that is triggered by P2PManager when peer list changes."""
-        print("Peer list changed, broadcasting status update to UI.")
+        logger.debug("Peer list changed, broadcasting status update to UI")
 
         # Cache peer information for offline mode
         for peer_id, peer_conn in self.p2p_manager.peers.items():
@@ -755,9 +755,9 @@ class CoreService:
         """
         command = message.get("command")
         payload = message.get("payload", {})
-        
-        print(f"CoreService received message from {sender_node_id}: {command}")
-        
+
+        logger.debug("Received message from %s: %s", sender_node_id, command)
+
         if command == "SEND_TEXT":
             # Text message from peer - forward to UI with deduplication
             text = payload.get("text")
@@ -771,7 +771,7 @@ class CoreService:
             
             # Check if already processed
             if message_id in self._processed_message_ids:
-                print(f"Duplicate message detected from {sender_node_id}, skipping")
+                logger.debug("Duplicate message detected from %s, skipping", sender_node_id)
                 return
             
             # Add to processed set
@@ -814,19 +814,19 @@ class CoreService:
                 if self.auto_knowledge_detection_enabled:
                     # If proposal generated, broadcast to UI and start voting
                     if proposal:
-                        print(f"[Auto-detect] Knowledge proposal generated for {sender_node_id}")
+                        logger.info("Knowledge proposal generated for %s", sender_node_id)
                         await self.local_api.broadcast_event(
                             "knowledge_commit_proposed",
                             proposal.to_dict()
                         )
                         # Peer chat - broadcast for collaborative knowledge building
-                        print(f"[Peer Chat] Broadcasting knowledge proposal to peers for consensus")
+                        logger.info("Broadcasting knowledge proposal to peers for consensus")
                         await self.consensus_manager.propose_commit(
                             proposal=proposal,
                             broadcast_func=self._broadcast_to_peers
                         )
             except Exception as e:
-                print(f"Error in conversation monitoring: {e}")
+                logger.error("Error in conversation monitoring: %s", e, exc_info=True)
                 # Only broadcast extraction failure if auto-detection was enabled
                 if self.auto_knowledge_detection_enabled:
                     await self.local_api.broadcast_event(
@@ -857,7 +857,7 @@ class CoreService:
                         context_obj = PersonalContext.from_dict(context_dict)
                         future.set_result(context_obj)
                     except Exception as e:
-                        print(f"  ✗ Error deserializing context from peer: {e}")
+                        logger.error("Error deserializing context from peer: %s", e, exc_info=True)
                         future.set_result(None)
 
         elif command == "REQUEST_DEVICE_CONTEXT":
@@ -925,7 +925,7 @@ class CoreService:
             # Name exchange (mainly for WebRTC connections that don't have initial handshake)
             peer_name = payload.get("name")
             if peer_name:
-                print(f"Received name from {sender_node_id}: {peer_name}")
+                logger.debug("Received name from %s: %s", sender_node_id, peer_name)
                 self.set_peer_metadata(sender_node_id, name=peer_name)
                 # Notify UI of peer list change so names update
                 await self.on_peer_list_change()
@@ -933,12 +933,12 @@ class CoreService:
         elif command == "CONTEXT_UPDATED":
             # Phase 7: Peer notifies that their personal context has changed
             context_hash = payload.get("context_hash")
-            print(f"Received CONTEXT_UPDATED from {sender_node_id[:20]}... (hash: {context_hash[:8] if context_hash else 'none'}...)")
+            logger.info("Received CONTEXT_UPDATED from %s (hash: %s)", sender_node_id[:20], context_hash[:8] if context_hash else 'none')
 
             # Invalidate cached peer context in all conversation monitors
             for monitor in self.conversation_monitors.values():
                 monitor.invalidate_peer_context_cache(sender_node_id)
-                print(f"  - Invalidated cache for {sender_node_id[:20]}... in conversation {monitor.conversation_id}")
+                logger.debug("Invalidated cache for %s in conversation %s", sender_node_id[:20], monitor.conversation_id)
 
             # Broadcast event to UI so "Updated" badge appears
             await self.local_api.broadcast_event("peer_context_updated", {
@@ -955,7 +955,7 @@ class CoreService:
             await self.consensus_manager.handle_vote_message(sender_node_id, payload)
 
         else:
-            print(f"Unknown P2P message command: {command}")
+            logger.warning("Unknown P2P message command: %s", command)
 
     # --- High-level methods (API for the UI) ---
 
@@ -1025,7 +1025,7 @@ class CoreService:
             s.close()
             if local_ip and not local_ip.startswith('127.'):
                 local_ips.append(local_ip)
-                print(f"✓ Found local IPv4 via socket method: {local_ip}")
+                logger.debug("Found local IPv4 via socket method: %s", local_ip)
         except Exception as e:
             errors.append(f"Socket method (IPv4): {e}")
 
@@ -1039,7 +1039,7 @@ class CoreService:
             # Filter out link-local (fe80::) and loopback (::1) addresses
             if local_ip6 and not local_ip6.startswith('fe80:') and local_ip6 != '::1':
                 local_ips.append(local_ip6)
-                print(f"✓ Found local IPv6 via socket method: {local_ip6}")
+                logger.debug("Found local IPv6 via socket method: %s", local_ip6)
         except Exception as e:
             errors.append(f"Socket method (IPv6): {e}")
 
@@ -1054,7 +1054,7 @@ class CoreService:
                 # Filter out loopback addresses and duplicates
                 if ip and not ip.startswith('127.') and ip not in local_ips:
                     local_ips.append(ip)
-                    print(f"✓ Found local IPv4 via hostname method: {ip}")
+                    logger.debug("Found local IPv4 via hostname method: %s", ip)
 
         except Exception as e:
             errors.append(f"Hostname method (IPv4): {e}")
@@ -1069,7 +1069,7 @@ class CoreService:
                 # Filter out link-local (fe80::), loopback (::1), and duplicates
                 if ip and not ip.startswith('fe80:') and ip != '::1' and ip not in local_ips:
                     local_ips.append(ip)
-                    print(f"✓ Found local IPv6 via hostname method: {ip}")
+                    logger.debug("Found local IPv6 via hostname method: %s", ip)
 
         except Exception as e:
             errors.append(f"Hostname method (IPv6): {e}")
@@ -1087,7 +1087,7 @@ class CoreService:
                         ip = match.group(1)
                         if not ip.startswith('127.') and ip not in local_ips:
                             local_ips.append(ip)
-                            print(f"✓ Found local IPv4 via 'ip addr' command: {ip}")
+                            logger.debug("Found local IPv4 via 'ip addr' command: %s", ip)
 
                     # Look for inet6 addresses (IPv6)
                     for match in re.finditer(r'inet6\s+([0-9a-f:]+)', result.stdout):
@@ -1095,16 +1095,16 @@ class CoreService:
                         # Filter out link-local (fe80::) and loopback (::1)
                         if not ip.startswith('fe80:') and ip != '::1' and ip not in local_ips:
                             local_ips.append(ip)
-                            print(f"✓ Found local IPv6 via 'ip addr' command: {ip}")
+                            logger.debug("Found local IPv6 via 'ip addr' command: %s", ip)
             except Exception as e:
                 errors.append(f"Linux 'ip addr' method: {e}")
 
         # Report results
         if not local_ips:
-            print("⚠ Warning: Could not determine any local IP addresses")
-            print(f"Errors encountered: {'; '.join(errors)}")
+            logger.warning("Could not determine any local IP addresses")
+            logger.warning("Errors encountered: %s", '; '.join(errors))
         else:
-            print(f"✓ Successfully detected {len(local_ips)} local IP(s): {local_ips}")
+            logger.info("Successfully detected %d local IP(s): %s", len(local_ips), local_ips)
 
         return local_ips
 
