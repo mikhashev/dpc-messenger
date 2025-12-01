@@ -194,28 +194,28 @@ def load_settings() -> Settings:
         
         # Security warnings
         if settings.DEBUG:
-            logger.warning("⚠️  DEBUG mode is enabled - DO NOT use in production!")
-        
+            logger.warning("DEBUG mode is enabled - DO NOT use in production!")
+
         if 'localhost' in settings.DATABASE_URL and not settings.DEBUG:
-            logger.warning("⚠️  Using localhost database in production mode")
+            logger.warning("Using localhost database in production mode")
         
         return settings
         
     except ValidationError as e:
-        logger.error("❌ Configuration error:")
+        logger.error("Configuration error:")
         for error in e.errors():
             field = ' -> '.join(str(loc) for loc in error['loc'])
             logger.error(f"   {field}: {error['msg']}")
-        
-        logger.error("\n💡 Tips:")
+
+        logger.error("\nTips:")
         logger.error("   1. Copy .env.example to .env")
         logger.error("   2. Fill in all required values")
         logger.error("   3. Generate SECRET_KEY: openssl rand -hex 32")
-        
+
         sys.exit(1)
-    
+
     except Exception as e:
-        logger.error(f"❌ Failed to load settings: {e}")
+        logger.error(f"Failed to load settings: {e}")
         sys.exit(1)
 
 
