@@ -1,9 +1,12 @@
 # dpc-client/core/dpc_client_core/context_cache.py
 
+import logging
 from typing import Dict
 
 # We need to import this to use it as a type hint
 from dpc_protocol.pcm_core import PersonalContext
+
+logger = logging.getLogger(__name__)
 
 class ContextCache:
     """
@@ -11,7 +14,7 @@ class ContextCache:
     """
     def __init__(self):
         self._cache: Dict[str, PersonalContext] = {}
-        print("ContextCache initialized.")
+        logger.debug("ContextCache initialized")
 
     def get(self, node_id: str) -> PersonalContext | None:
         """Returns a context from the cache or None if not found."""
@@ -19,7 +22,7 @@ class ContextCache:
 
     def set(self, node_id: str, context: PersonalContext):
         """Saves a context to the cache."""
-        print(f"Caching context for node {node_id}.")
+        logger.debug("Caching context for node %s", node_id)
         self._cache[node_id] = context
 
     def clear(self):
