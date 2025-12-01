@@ -6,6 +6,7 @@ Coordinates multi-party approval with devil's advocate mechanism.
 """
 
 import asyncio
+import logging
 import random
 from typing import List, Dict, Optional, Callable, Any
 from dataclasses import dataclass, asdict
@@ -17,6 +18,8 @@ from dpc_protocol.knowledge_commit import (
     KnowledgeCommit
 )
 from dpc_protocol.pcm_core import PCMCore, PersonalContext
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -185,7 +188,7 @@ class ConsensusManager:
         proposal_id = vote.proposal_id
 
         if proposal_id not in self.sessions:
-            print(f"Warning: Received vote for unknown proposal {proposal_id}")
+            logger.warning("Received vote for unknown proposal %s", proposal_id)
             return
 
         session = self.sessions[proposal_id]
@@ -283,7 +286,7 @@ class ConsensusManager:
             # 2. Compute hash-based commit ID
             commit.compute_hash()  # Sets commit_hash and commit_id
 
-            print(f"Created commit {commit.commit_id} (hash: {commit.commit_hash[:16]}...)")
+            logger.info("Created commit %s (hash: %s...)", commit.commit_id, commit.commit_hash[:16])
 
             # 3. Sign commit with our private key
             node_id, key_path, cert_path = load_identity()
@@ -296,7 +299,7 @@ class ConsensusManager:
 
             commit.sign(node_id, private_key)
 
-            print(f"Signed commit with {node_id}")
+            logger.info("Signed commit with %s", node_id)
 
             # 4. Add or update topic
             topic_name = commit.topic
@@ -382,19 +385,17 @@ class ConsensusManager:
             # 8. Save context
             self.pcm_core.save_context(context)
 
-            print(f"✅ Applied commit: {commit.commit_id}")
-            print(f"   Topic: {topic_name}")
-            print(f"   Markdown: {markdown_filename}")
-            print(f"   Signatures: {len(commit.signatures)}")
+            logger.info("Applied commit: %s", commit.commit_id)
+            logger.info("   Topic: %s", topic_name)
+            logger.info("   Markdown: %s", markdown_filename)
+            logger.info("   Signatures: %d", len(commit.signatures))
 
             # 9. Notify callback (for reloading p2p_manager.local_context and broadcasting CONTEXT_UPDATED)
             if self.on_commit_applied:
                 await self.on_commit_applied(commit)
 
         except Exception as e:
-            print(f"Error applying commit: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("Error applying commit: %s", e, exc_info=True)
 
     async def _handle_vote_deadline(self, proposal_id: str) -> None:
         """Handle vote deadline timeout
@@ -482,19 +483,17 @@ class ConsensusManager:
 
             self.sessions[proposal.proposal_id] = session
 
-            print(f"Received knowledge commit proposal from {sender_node_id}")
-            print(f"  - Topic: {proposal.topic}")
-            print(f"  - Entries: {len(proposal.entries)}")
-            print(f"  - Proposal ID: {proposal.proposal_id}")
+            logger.info("Received knowledge commit proposal from %s", sender_node_id)
+            logger.info("  - Topic: %s", proposal.topic)
+            logger.info("  - Entries: %d", len(proposal.entries))
+            logger.info("  - Proposal ID: %s", proposal.proposal_id)
 
             # Notify callback if registered
             if self.on_proposal_received:
                 await self.on_proposal_received(proposal)
 
         except Exception as e:
-            print(f"Error handling proposal message from {sender_node_id}: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("Error handling proposal message from %s: %s", sender_node_id, e, exc_info=True)
 
     async def handle_vote_message(self, sender_node_id: str, payload: Dict[str, Any]) -> None:
         """Handle VOTE_KNOWLEDGE_COMMIT message from peer
@@ -517,16 +516,14 @@ class ConsensusManager:
             # Process vote
             await self.receive_vote(vote)
 
-            print(f"Received vote from {sender_node_id}: {vote.vote}")
+            logger.info("Received vote from %s: %s", sender_node_id, vote.vote)
 
             # Notify callback if registered
             if self.on_vote_received:
                 await self.on_vote_received(vote)
 
         except Exception as e:
-            print(f"Error handling vote message from {sender_node_id}: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("Error handling vote message from %s: %s", sender_node_id, e, exc_info=True)
 
 
 # Example usage
