@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -18,6 +19,8 @@ import certifi
 
 from .token_cache import TokenCache
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class HubClient:
@@ -63,9 +66,9 @@ class HubClient:
             self.jwt_token = tokens.get("jwt_token")
             self.refresh_token = tokens.get("refresh_token")
             self.current_provider = tokens.get("provider", "google")  # Default to google for backward compat
-            print(f"[OK] Loaded cached authentication tokens (provider: {self.current_provider})")
+            logger.info("Loaded cached authentication tokens (provider: %s)", self.current_provider)
         else:
-            print("No valid cached tokens found")
+            logger.info("No valid cached tokens found")
 
     def _save_tokens_to_cache(self):
         """Save current tokens to cache."""
@@ -80,7 +83,7 @@ class HubClient:
                 provider=self.current_provider or "google"  # Save current provider
             )
         except Exception as e:
-            print(f"Warning: Could not cache tokens: {e}")
+            logger.warning("Could not cache tokens: %s", e)
 
     def _get_auth_headers(self) -> Dict[str, str]:
         """Helper to create authorization headers."""
@@ -112,7 +115,7 @@ class HubClient:
             return current_time >= (exp_timestamp - 60)
 
         except Exception as e:
-            print(f"Error checking token expiration: {e}")
+            logger.error("Error checking token expiration: %s", e, exc_info=True)
             return True
 
     async def _refresh_access_token(self) -> bool:
@@ -121,11 +124,11 @@ class HubClient:
         Returns True if successful, False otherwise.
         """
         if not self.refresh_token:
-            print("No refresh token available")
+            logger.warning("No refresh token available")
             return False
 
         try:
-            print("Refreshing access token...")
+            logger.info("Refreshing access token")
             response = await self.http_client.post(
                 "/refresh",
                 json={"refresh_token": self.refresh_token}
@@ -134,14 +137,14 @@ class HubClient:
             if response.status_code == 200:
                 data = response.json()
                 self.jwt_token = data.get("access_token")
-                print("✅ Access token refreshed successfully")
+                logger.info("Access token refreshed successfully")
                 return True
             else:
-                print(f"Failed to refresh token: {response.status_code}")
+                logger.warning("Failed to refresh token: %d", response.status_code)
                 return False
 
         except Exception as e:
-            print(f"Error refreshing token: {e}")
+            logger.error("Error refreshing token: %s", e, exc_info=True)
             return False
 
     # --- Authentication Flow ---
@@ -171,11 +174,11 @@ class HubClient:
         # Check if already authenticated with the same provider
         if self.jwt_token:
             if self.current_provider == provider:
-                print(f"Already authenticated with {provider}.")
+                logger.info("Already authenticated with %s", provider)
                 return
             else:
                 # Provider mismatch - clear cache and re-authenticate
-                print(f"Provider changed from {self.current_provider} to {provider}. Re-authenticating...")
+                logger.info("Provider changed from %s to %s - re-authenticating", self.current_provider, provider)
                 if self.token_cache:
                     self.token_cache.clear()
                 self.jwt_token = None
@@ -247,9 +250,10 @@ class HubClient:
         thread.daemon = True
         thread.start()
 
-        print(f"Starting local server for OAuth callback on {self.oauth_callback_host}:{self.oauth_callback_port}...")
+        logger.info("Starting local server for OAuth callback on %s:%d",
+                   self.oauth_callback_host, self.oauth_callback_port)
         login_url = f"{self.api_base_url}/login/{provider}"
-        print(f"Opening browser for {provider.upper()} authentication: {login_url}")
+        logger.info("Opening browser for %s authentication: %s", provider.upper(), login_url)
         webbrowser.open(login_url)
 
         try:
@@ -257,49 +261,49 @@ class HubClient:
             self.jwt_token = tokens.get("access_token")
             self.refresh_token = tokens.get("refresh_token")
             self.current_provider = provider  # Track which provider was used
-            print(f"Authentication successful with {provider}, JWT received.")
+            logger.info("Authentication successful with %s, JWT received", provider)
             if self.refresh_token:
-                print("Refresh token also received.")
+                logger.info("Refresh token also received")
 
             # Save tokens to cache for offline mode
             self._save_tokens_to_cache()
 
         except asyncio.TimeoutError:
-            print("Authentication timed out.")
+            logger.warning("Authentication timed out")
             raise
         finally:
             server.shutdown()
             thread.join()
-            print("Local callback server stopped.")
+            logger.info("Local callback server stopped")
 
         # NEW: Automatically register cryptographic node_id
         try:
             await self.register_node_id()
-            print("✅ Cryptographic identity registration complete!")
+            logger.info("Cryptographic identity registration complete")
         except Exception as e:
-            print(f"⚠️  Warning: Failed to register node identity: {e}")
-            print("   You may need to register manually or re-authenticate")
+            logger.warning("Failed to register node identity: %s", e)
+            logger.warning("You may need to register manually or re-authenticate")
             # Don't fail login if registration fails
 
-        print("✅ Hub authentication complete!")
+        logger.info("Hub authentication complete")
 
     # --- REST API Methods ---
 
     async def update_profile(self, profile_data: Dict[str, Any]):
         """Pushes the public profile to the Hub."""
-        print("Updating profile on the Hub...")
+        logger.info("Updating profile on the Hub")
         response = await self.http_client.put(
             "/profile",
             json=profile_data,
             headers=self._get_auth_headers()
         )
         response.raise_for_status()
-        print("Profile updated successfully.")
+        logger.info("Profile updated successfully")
         return response.json()
 
     async def search_users(self, topic: str, min_level: int = 1) -> Dict[str, Any]:
         """Searches for users by expertise."""
-        print(f"Searching for users with expertise in '{topic}'...")
+        logger.info("Searching for users with expertise in '%s'", topic)
         response = await self.http_client.get(
             "/discovery/search",
             params={"q": topic, "min_level": min_level},
@@ -321,11 +325,11 @@ class HubClient:
             "/profile",
             headers=self._get_auth_headers()
         )
-        
+
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 404:
-            print("No profile found. Create one with update_profile()")
+            logger.info("No profile found - create one with update_profile()")
             return None
         else:
             response.raise_for_status()
@@ -334,22 +338,22 @@ class HubClient:
     async def logout(self):
         """
         Logout from Hub by blacklisting the current token.
-        
+
         NEW endpoint support.
         """
         if not self.jwt_token:
-            print("Not logged in.")
+            logger.info("Not logged in")
             return
-        
+
         try:
             response = await self.http_client.post(
                 "/logout",
                 headers=self._get_auth_headers()
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
-                print(f"✅ Logged out successfully: {data['message']}")
+                logger.info("Logged out successfully: %s", data['message'])
                 self.jwt_token = None
                 self.refresh_token = None
 
@@ -365,7 +369,7 @@ class HubClient:
                 response.raise_for_status()
 
         except Exception as e:
-            print(f"Logout failed: {e}")
+            logger.error("Logout failed: %s", e, exc_info=True)
             # Clear tokens anyway
             self.jwt_token = None
             self.refresh_token = None
@@ -376,29 +380,29 @@ class HubClient:
     async def delete_account(self):
         """
         Delete the user's account and all associated data.
-        
+
         NEW endpoint support.
         WARNING: This action cannot be undone!
         """
         if not self.jwt_token:
             raise PermissionError("Not authenticated")
-        
+
         # Confirm deletion
-        print("⚠️  WARNING: This will permanently delete your account and all data!")
-        print("   This action cannot be undone.")
+        logger.warning("WARNING: This will permanently delete your account and all data")
+        logger.warning("This action cannot be undone")
         confirm = input("   Type 'DELETE' to confirm: ")
-        
+
         if confirm != "DELETE":
-            print("Account deletion cancelled.")
+            logger.info("Account deletion cancelled")
             return
-        
+
         response = await self.http_client.delete(
             "/profile",
             headers=self._get_auth_headers()
         )
-        
+
         if response.status_code == 204:
-            print("✅ Account deleted successfully")
+            logger.info("Account deleted successfully")
             self.jwt_token = None
             self.refresh_token = None
 
@@ -415,7 +419,7 @@ class HubClient:
         """Connects to the Hub's WebSocket and authenticates via query parameter."""
         # Close existing websocket first (THIS IS THE KEY FIX)
         if self.websocket:
-            print("Closing existing websocket before reconnecting...")
+            logger.info("Closing existing websocket before reconnecting")
             try:
                 if self.websocket.state == websockets.State.OPEN:
                     await self.websocket.close()
@@ -428,13 +432,13 @@ class HubClient:
 
         # Check if token is expired and try to refresh it
         if self._is_token_expired():
-            print("Access token expired, attempting to refresh...")
+            logger.info("Access token expired, attempting to refresh")
             if not await self._refresh_access_token():
                 raise PermissionError("Access token expired and refresh failed. Please login again.")
 
         # Cancel old keepalive task
         if hasattr(self, '_keepalive_task') and self._keepalive_task and not self._keepalive_task.done():
-            print("Cancelling old keepalive task...")
+            logger.debug("Cancelling old keepalive task")
             self._keepalive_task.cancel()
             try:
                 await self._keepalive_task
@@ -442,14 +446,14 @@ class HubClient:
                 pass
 
         ws_url = self.api_base_url.replace("http", "ws") + f"/ws/signal?token={self.jwt_token}"
-        print(f"Connecting to signaling server...")
+        logger.info("Connecting to signaling server")
 
         try:
             # Create SSL context with proper certificate verification (fixes macOS SSL error)
             ssl_context = None
             if ws_url.startswith("wss://"):
                 ssl_context = ssl.create_default_context(cafile=certifi.where())
-                print(f"Using SSL context with certifi CA bundle: {certifi.where()}")
+                logger.debug("Using SSL context with certifi CA bundle: %s", certifi.where())
 
             # Added ping_interval and ping_timeout for built-in keepalive
             self.websocket = await websockets.connect(
@@ -458,7 +462,7 @@ class HubClient:
                 ping_interval=20,
                 ping_timeout=60
             )
-            
+
             response_str = await self.websocket.recv()
             response = json.loads(response_str)
 
@@ -467,12 +471,12 @@ class HubClient:
                 self.websocket = None
                 raise ConnectionError(f"WebSocket authentication failed. Server response: {response}")
 
-            print(f"Signaling server response: {response.get('message')}")
-            print("Signaling socket connected and authenticated.")
-            
+            logger.info("Signaling server response: %s", response.get('message'))
+            logger.info("Signaling socket connected and authenticated")
+
             # Start keepalive ping task
             self._keepalive_task = asyncio.create_task(self._send_hub_keepalive_pings())
-            print("Hub keepalive task started")
+            logger.debug("Hub keepalive task started")
             
         except websockets.exceptions.InvalidStatus as e:
             status = getattr(e.response, 'status_code', 'unknown') if hasattr(e, 'response') else 'unknown'
@@ -510,11 +514,11 @@ class HubClient:
 
         if self.websocket and self.websocket.state == websockets.State.OPEN:
             await self.websocket.close()
-        
+
         if not self.http_client.is_closed:
             await self.http_client.aclose()
-            
-        print("HubClient connections closed.")
+
+        logger.info("HubClient connections closed")
 
     async def register_node_id(self):
         """
@@ -530,20 +534,20 @@ class HubClient:
         from cryptography import x509
         from cryptography.hazmat.primitives import serialization
         from cryptography.hazmat.backends import default_backend
-        
-        print("📝 Registering cryptographic identity with Hub...")
-        
+
+        logger.info("Registering cryptographic identity with Hub")
+
         try:
             # Load local identity
             node_id, key_file, cert_file = load_identity()
-            
+
             # Read certificate
             with open(cert_file, 'r') as f:
                 certificate = f.read()
-            
+
             # Extract public key from certificate
             cert = x509.load_pem_x509_certificate(
-                certificate.encode('utf-8'), 
+                certificate.encode('utf-8'),
                 default_backend()
             )
             public_key = cert.public_key()
@@ -551,7 +555,7 @@ class HubClient:
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PublicFormat.SubjectPublicKeyInfo
             ).decode('utf-8')
-            
+
             # Send registration request
             response = await self.http_client.post(
                 "/register-node-id",
@@ -562,12 +566,12 @@ class HubClient:
                     "certificate": certificate
                 }
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
-                print(f"✅ Node identity registered and verified!")
-                print(f"   Node ID: {data['node_id']}")
-                print(f"   Verified: {data['verified']}")
+                logger.info("Node identity registered and verified")
+                logger.info("Node ID: %s", data['node_id'])
+                logger.info("Verified: %s", data['verified'])
                 return data
             else:
                 error_detail = response.json().get("detail", "Unknown error")
@@ -587,11 +591,11 @@ class HubClient:
         try:
             while True:
                 await asyncio.sleep(25)
-                
+
                 if not self.websocket or self.websocket.state != websockets.State.OPEN:
-                    print(f"Keepalive stopping - websocket not open (sent {ping_count} pings)")
+                    logger.debug("Keepalive stopping - websocket not open (sent %d pings)", ping_count)
                     break
-                
+
                 try:
                     ping_count += 1
                     ping_message = {
@@ -599,41 +603,41 @@ class HubClient:
                         "timestamp": asyncio.get_event_loop().time()
                     }
                     await self.websocket.send(json.dumps(ping_message))
-                    print(f"✓ Hub keepalive ping #{ping_count} sent")
-                    
+                    logger.debug("Hub keepalive ping #%d sent", ping_count)
+
                 except websockets.exceptions.ConnectionClosed:
-                    print(f"Hub connection closed during ping #{ping_count}")
+                    logger.warning("Hub connection closed during ping #%d", ping_count)
                     break
                 except Exception as e:
-                    print(f"Error sending keepalive ping #{ping_count}: {e}")
+                    logger.error("Error sending keepalive ping #%d: %s", ping_count, e, exc_info=True)
                     break
-                    
+
         except asyncio.CancelledError:
-            print(f"Hub keepalive cancelled (sent {ping_count} pings)")
+            logger.debug("Hub keepalive cancelled (sent %d pings)", ping_count)
 
 # --- Self-testing block ---
 async def main_test():
     """Updated test code with new features"""
-    print("--- Testing Enhanced HubClient ---")
-    
+    logger.info("--- Testing Enhanced HubClient ---")
+
     hub = HubClient(api_base_url="http://127.0.0.1:8000")
 
     try:
         # 1. Test Login with Auto-Registration
-        print("\n--- Step 1: Authentication ---")
-        print("Please complete the login process in your browser.")
+        logger.info("--- Step 1: Authentication ---")
+        logger.info("Please complete the login process in your browser")
         await hub.login()
         assert hub.jwt_token is not None
-        print("✅ Authentication and registration successful")
+        logger.info("Authentication and registration successful")
 
         # 2. Test Get Own Profile
-        print("\n--- Step 2: Get Own Profile ---")
+        logger.info("--- Step 2: Get Own Profile ---")
         my_profile = await hub.get_my_profile()
         if my_profile:
-            print(f"✅ Profile found: {my_profile.get('name')}")
+            logger.info("Profile found: %s", my_profile.get('name'))
         else:
-            print("ℹ️  No profile yet, creating one...")
-            
+            logger.info("No profile yet, creating one")
+
             # Create profile
             test_profile = {
                 "name": "Test User",
@@ -641,41 +645,39 @@ async def main_test():
                 "expertise": {"testing": 5, "python": 4}
             }
             await hub.update_profile(test_profile)
-            
+
             # Verify it was created
             my_profile = await hub.get_my_profile()
             assert my_profile is not None
-            print("✅ Profile created and retrieved")
+            logger.info("Profile created and retrieved")
 
         # 3. Test Search
-        print("\n--- Step 3: Discovery ---")
+        logger.info("--- Step 3: Discovery ---")
         results = await hub.search_expertise("python", min_level=1)
-        print(f"✅ Found {len(results)} Python experts")
+        logger.info("Found %d Python experts", len(results))
 
         # 4. Test Signaling Connection
-        print("\n--- Step 4: WebSocket Signaling ---")
+        logger.info("--- Step 4: WebSocket Signaling ---")
         await hub.connect_signaling()
-        print("✅ Signaling connected")
+        logger.info("Signaling connected")
 
         # 5. Test Logout
-        print("\n--- Step 5: Logout ---")
+        logger.info("--- Step 5: Logout ---")
         await hub.logout()
-        print("✅ Logged out successfully")
-        
+        logger.info("Logged out successfully")
+
         # Verify token is blacklisted
         try:
             await hub.get_my_profile()
-            print("❌ Token should be blacklisted!")
+            logger.error("Token should be blacklisted")
         except Exception:
-            print("✅ Token correctly blacklisted")
+            logger.info("Token correctly blacklisted")
 
-        print("\n✅ All tests passed!")
+        logger.info("All tests passed")
 
     except Exception as e:
-        print(f"\n❌ Test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        
+        logger.error("Test failed: %s", e, exc_info=True)
+
     finally:
         await hub.close()
 
