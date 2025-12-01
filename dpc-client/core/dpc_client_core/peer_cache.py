@@ -1,10 +1,13 @@
 # dpc-client/core/dpc_client_core/peer_cache.py
 
 import json
+import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timedelta
 from dataclasses import dataclass, asdict
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -59,7 +62,7 @@ class PeerCache:
     def _load_cache(self):
         """Load peer cache from disk."""
         if not self.cache_file.exists():
-            print(f"Peer cache not found at {self.cache_file}, starting fresh")
+            logger.debug("Peer cache not found at %s, starting fresh", self.cache_file)
             return
 
         try:
@@ -73,10 +76,10 @@ class PeerCache:
                 peer = CachedPeer(**peer_dict)
                 self._peers[peer.node_id] = peer
 
-            print(f"[OK] Loaded {len(self._peers)} peers from cache")
+            logger.info("Loaded %d peers from cache", len(self._peers))
 
         except Exception as e:
-            print(f"Error loading peer cache: {e}")
+            logger.error("Error loading peer cache: %s", e, exc_info=True)
             self._peers = {}
 
     def _save_cache(self):
@@ -97,10 +100,10 @@ class PeerCache:
             with open(self.cache_file, 'w') as f:
                 json.dump(data, f, indent=2)
 
-            print(f"[OK] Saved {len(self._peers)} peers to cache")
+            logger.debug("Saved %d peers to cache", len(self._peers))
 
         except Exception as e:
-            print(f"Error saving peer cache: {e}")
+            logger.error("Error saving peer cache: %s", e, exc_info=True)
 
     def add_or_update_peer(
         self,
@@ -233,7 +236,7 @@ class PeerCache:
                     pass
 
         if removed_count > 0:
-            print(f"[OK] Cleaned up {removed_count} old peers")
+            logger.info("Cleaned up %d old peers", removed_count)
             self._save_cache()
 
 
