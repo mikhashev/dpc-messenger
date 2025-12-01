@@ -1903,7 +1903,7 @@ class CoreService:
                 }
 
         except Exception as e:
-            print(f"Error voting on knowledge commit: {e}")
+            logger.error("Error voting on knowledge commit: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1918,7 +1918,7 @@ class CoreService:
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, message)
             except Exception as e:
-                print(f"Failed to broadcast to {peer_id}: {e}")
+                logger.warning("Failed to broadcast to %s: %s", peer_id, e)
 
     def _get_or_create_conversation_monitor(self, conversation_id: str) -> ConversationMonitor:
         """Get or create a conversation monitor for a conversation/peer.
@@ -1966,7 +1966,7 @@ class CoreService:
                 ai_query_func=self.send_ai_query,  # Enable both local and remote inference for knowledge detection
                 auto_detect=self.auto_knowledge_detection_enabled  # Pass auto-detection setting
             )
-            print(f"Created conversation monitor for {conversation_id} with {len(participants)} participant(s) (auto_detect={self.auto_knowledge_detection_enabled})")
+            logger.info("Created conversation monitor for %s with %d participant(s) (auto_detect=%s)", conversation_id, len(participants), self.auto_knowledge_detection_enabled)
 
         return self.conversation_monitors[conversation_id]
 
@@ -1983,18 +1983,15 @@ class CoreService:
         """
         try:
             monitor = self._get_or_create_conversation_monitor(conversation_id)
-            print(f"[End Session] Attempting manual extraction for {conversation_id}")
-            print(f"   Buffer: {len(monitor.message_buffer)} messages")
-            print(f"   Current score: {monitor.knowledge_score:.2f}")
+            logger.info("End Session - attempting manual extraction for %s", conversation_id)
+            logger.info("Buffer: %d messages, Score: %.2f", len(monitor.message_buffer), monitor.knowledge_score)
 
             # Force knowledge extraction even if threshold not met
             proposal = await monitor.generate_commit_proposal(force=True)
 
             if proposal:
-                print(f"✓ Knowledge proposal generated for {conversation_id}")
-                print(f"   Topic: {proposal.topic}")
-                print(f"   Entries: {len(proposal.entries)}")
-                print(f"   Confidence: {proposal.avg_confidence:.2f}")
+                logger.info("Knowledge proposal generated for %s", conversation_id)
+                logger.info("Topic: %s, Entries: %d, Confidence: %.2f", proposal.topic, len(proposal.entries), proposal.avg_confidence)
 
                 # Broadcast to UI
                 await self.local_api.broadcast_event(
@@ -2005,7 +2002,7 @@ class CoreService:
                 # For local_ai conversations, don't broadcast knowledge to peers (privacy)
                 # For peer conversations, broadcast for collaborative consensus
                 if conversation_id == "local_ai":
-                    print(f"[Local AI] Private conversation - knowledge will not be shared with peers")
+                    logger.info("Local AI - private conversation, knowledge will not be shared with peers")
                     # Use no-op broadcast function (local-only approval)
                     async def _no_op_broadcast(message: Dict[str, Any]) -> None:
                         pass  # Don't send to peers for private conversations
@@ -2016,7 +2013,7 @@ class CoreService:
                     )
                 else:
                     # Peer conversation - broadcast for collaborative knowledge building
-                    print(f"[Peer Chat] Broadcasting knowledge proposal to peers for consensus")
+                    logger.info("Peer Chat - broadcasting knowledge proposal to peers for consensus")
                     await self.consensus_manager.propose_commit(
                         proposal=proposal,
                         broadcast_func=self._broadcast_to_peers
@@ -2028,16 +2025,14 @@ class CoreService:
                     "proposal_id": proposal.proposal_id
                 }
             else:
-                print(f"✗ No proposal generated - buffer was empty or no knowledge detected")
+                logger.info("No proposal generated - buffer was empty or no knowledge detected")
                 return {
                     "status": "success",
                     "message": "No significant knowledge detected in conversation (buffer may be empty)"
                 }
 
         except Exception as e:
-            print(f"Error ending conversation session: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("Error ending conversation session: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -2063,7 +2058,7 @@ class CoreService:
                 self.auto_knowledge_detection_enabled = enabled
 
             state_text = "enabled" if self.auto_knowledge_detection_enabled else "disabled"
-            print(f"Auto knowledge detection {state_text}")
+            logger.info("Auto knowledge detection %s", state_text)
 
             # Update all existing conversation monitors to reflect the new setting
             for monitor in self.conversation_monitors.values():
@@ -2076,7 +2071,7 @@ class CoreService:
             }
 
         except Exception as e:
-            print(f"Error toggling auto knowledge detection: {e}")
+            logger.error("Error toggling auto knowledge detection: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -2096,7 +2091,7 @@ class CoreService:
         try:
             monitor = self._get_or_create_conversation_monitor(conversation_id)
             monitor.reset_conversation()
-            print(f"[Reset Conversation] Cleared history for {conversation_id}")
+            logger.info("Reset Conversation - cleared history for %s", conversation_id)
 
             # Broadcast to UI
             await self.local_api.broadcast_event(
@@ -2110,7 +2105,7 @@ class CoreService:
             }
 
         except Exception as e:
-            print(f"Error resetting conversation: {e}")
+            logger.error("Error resetting conversation: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
