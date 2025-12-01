@@ -1441,23 +1441,24 @@ class CoreService:
                         if 'content_hash' in frontmatter:
                             actual_hash = hashlib.sha256(content.encode('utf-8')).hexdigest()[:16]
                             if actual_hash != frontmatter['content_hash']:
-                                print(
-                                    f"⚠️ Content hash mismatch for {topic_name}: "
-                                    f"{frontmatter['commit_id']}"
+                                logger.warning(
+                                    "Content hash mismatch for %s: %s",
+                                    topic_name,
+                                    frontmatter['commit_id']
                                 )
 
                         # Convert markdown to entries
                         entries = markdown_manager.markdown_to_entries(content)
                         topic.entries = entries  # In-memory only
                     else:
-                        print(f"Markdown file not found: {topic.markdown_file}")
+                        logger.warning("Markdown file not found: %s", topic.markdown_file)
 
             return {
                 "status": "success",
                 "context": asdict(context)
             }
         except Exception as e:
-            print(f"Error loading personal context: {e}")
+            logger.error("Error loading personal context: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1515,7 +1516,7 @@ class CoreService:
                 if current.profile and current.profile.name:
                     self.p2p_manager.set_display_name(current.profile.name)
                     # Notify all connected peers of the name change
-                    print("[PersonalContext] Notifying connected peers of name change...")
+                    logger.info("Notifying connected peers of name change")
                     await self._notify_peers_of_name_change(current.profile.name)
 
             # Phase 7: Compute new context hash after saving
@@ -1538,9 +1539,7 @@ class CoreService:
             }
 
         except Exception as e:
-            print(f"Error saving personal context: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("Error saving personal context: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1564,7 +1563,7 @@ class CoreService:
                 if context.profile and context.profile.name:
                     self.p2p_manager.set_display_name(context.profile.name)
                     # Notify all connected peers of the name change
-                    print("[PersonalContext] Notifying connected peers of name change...")
+                    logger.info("Notifying connected peers of name change")
                     await self._notify_peers_of_name_change(context.profile.name)
 
             # Emit event to UI
@@ -1579,7 +1578,7 @@ class CoreService:
             }
 
         except Exception as e:
-            print(f"Error reloading personal context: {e}")
+            logger.error("Error reloading personal context: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1598,7 +1597,7 @@ class CoreService:
                 "instructions": asdict(instructions)
             }
         except Exception as e:
-            print(f"Error loading instructions: {e}")
+            logger.error("Error loading instructions: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1646,9 +1645,7 @@ class CoreService:
             }
 
         except Exception as e:
-            print(f"Error saving instructions: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("Error saving instructions: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1680,7 +1677,7 @@ class CoreService:
             }
 
         except Exception as e:
-            print(f"Error reloading instructions: {e}")
+            logger.error("Error reloading instructions: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1707,7 +1704,7 @@ class CoreService:
             }
 
         except Exception as e:
-            print(f"Error getting token usage for {conversation_id}: {e}")
+            logger.error("Error getting token usage for %s: %s", conversation_id, e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e),
@@ -1734,7 +1731,7 @@ class CoreService:
                 "file_path": str(self.firewall.access_file_path)
             }
         except Exception as e:
-            print(f"Error reading firewall rules: {e}")
+            logger.error("Error reading firewall rules: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1774,7 +1771,7 @@ class CoreService:
 
             if success:
                 # Notify all connected peers of updated providers (compute sharing settings may have changed)
-                print("[Firewall] Notifying connected peers of provider changes...")
+                logger.info("Notifying connected peers of provider changes")
                 await self._notify_peers_of_provider_changes()
 
                 # Emit event to UI
@@ -1793,9 +1790,7 @@ class CoreService:
                 }
 
         except Exception as e:
-            print(f"Error saving firewall rules: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error("Error saving firewall rules: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1814,7 +1809,7 @@ class CoreService:
 
             if success:
                 # Notify all connected peers of updated providers
-                print("[Firewall] Notifying connected peers of provider changes...")
+                logger.info("Notifying connected peers of provider changes")
                 await self._notify_peers_of_provider_changes()
 
                 # Emit event to UI
@@ -1833,7 +1828,7 @@ class CoreService:
                 }
 
         except Exception as e:
-            print(f"Error reloading firewall: {e}")
+            logger.error("Error reloading firewall: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -1862,7 +1857,7 @@ class CoreService:
             }
 
         except Exception as e:
-            print(f"Error validating firewall rules: {e}")
+            logger.error("Error validating firewall rules: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
