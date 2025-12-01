@@ -2167,7 +2167,7 @@ class CoreService:
         Orchestrates a P2P connection to a peer using its node_id via Hub.
         Uses WebRTC with NAT traversal.
         """
-        print(f"Orchestrating WebRTC connection to {node_id} via Hub...")
+        logger.info("Orchestrating WebRTC connection to %s via Hub", node_id)
 
         # Check if Hub is connected
         if not self.hub_client.websocket or self.hub_client.websocket.state != websockets.State.OPEN:
@@ -2185,19 +2185,19 @@ class CoreService:
 
     async def send_p2p_message(self, target_node_id: str, text: str):
         """Send a text message to a connected peer."""
-        print(f"Sending text message to {target_node_id}: {text}")
-        
+        logger.debug("Sending text message to %s: %s", target_node_id, text)
+
         message = {
             "command": "SEND_TEXT",
             "payload": {
                 "text": text
             }
         }
-        
+
         try:
             await self.p2p_manager.send_message_to_peer(target_node_id, message)
         except Exception as e:
-            print(f"Error sending message to {target_node_id}: {e}")
+            logger.error("Error sending message to %s: %s", target_node_id, e, exc_info=True)
             raise
 
     async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None):
@@ -2217,7 +2217,7 @@ class CoreService:
             ValueError: If compute_host is specified but peer is not connected
             RuntimeError: If inference fails
         """
-        print(f"AI Query - compute_host: {compute_host or 'local'}, model: {model or 'default'}")
+        logger.info("AI Query - compute_host: %s, model: %s", compute_host or 'local', model or 'default')
 
         # Local inference
         if not compute_host:
@@ -2226,7 +2226,7 @@ class CoreService:
                 result['compute_host'] = 'local'
                 return result
             except Exception as e:
-                print(f"Local inference failed: {e}")
+                logger.error("Local inference failed: %s", e, exc_info=True)
                 raise RuntimeError(f"Local inference failed: {e}") from e
 
         # Remote inference
@@ -2252,7 +2252,7 @@ class CoreService:
         except ConnectionError as e:
             raise ValueError(f"Compute host {compute_host} is not connected") from e
         except Exception as e:
-            print(f"Remote inference failed: {e}")
+            logger.error("Remote inference failed: %s", e, exc_info=True)
             raise RuntimeError(f"Remote inference failed: {e}") from e
 
     # --- Context Request Methods ---
@@ -2262,20 +2262,20 @@ class CoreService:
         Handle incoming context request from a peer.
         Apply firewall rules and return filtered context.
         """
-        print(f"  - Handling context request from {peer_id} (request_id: {request_id})")
-        
+        logger.debug("Handling context request from %s (request_id: %s)", peer_id, request_id)
+
         # Apply firewall to filter context based on peer
         filtered_context = self.firewall.filter_context_for_peer(
             context=self.p2p_manager.local_context,
             peer_id=peer_id,
             query=query
         )
-        
-        print(f"  - Context filtered by firewall for {peer_id}")
-        
+
+        logger.debug("Context filtered by firewall for %s", peer_id)
+
         # Convert to dict for JSON serialization
         context_dict = asdict(filtered_context)
-        
+
         # Send response back to peer with request_id
         response = {
             "command": "CONTEXT_RESPONSE",
@@ -2285,23 +2285,23 @@ class CoreService:
                 "query": query
             }
         }
-        
+
         try:
             await self.p2p_manager.send_message_to_peer(peer_id, response)
-            print(f"  - Sent filtered context response to {peer_id}")
+            logger.debug("Sent filtered context response to %s", peer_id)
         except Exception as e:
-            print(f"  - Error sending context response to {peer_id}: {e}")
+            logger.error("Error sending context response to %s: %s", peer_id, e, exc_info=True)
 
     async def _handle_device_context_request(self, peer_id: str, request_id: str):
         """
         Handle incoming device context request from a peer.
         Apply firewall rules and return filtered device context.
         """
-        print(f"  - Handling device context request from {peer_id} (request_id: {request_id})")
+        logger.debug("Handling device context request from %s (request_id: %s)", peer_id, request_id)
 
         # Check if device context is available
         if not self.device_context:
-            print(f"  - Device context not available, sending empty response")
+            logger.debug("Device context not available, sending empty response")
             response = {
                 "command": "DEVICE_CONTEXT_RESPONSE",
                 "payload": {
@@ -2317,7 +2317,7 @@ class CoreService:
                 peer_id=peer_id
             )
 
-            print(f"  - Device context filtered by firewall for {peer_id}")
+            logger.debug("Device context filtered by firewall for %s", peer_id)
 
             # Send response back to peer with request_id
             response = {
@@ -2330,9 +2330,9 @@ class CoreService:
 
         try:
             await self.p2p_manager.send_message_to_peer(peer_id, response)
-            print(f"  - Sent filtered device context response to {peer_id}")
+            logger.debug("Sent filtered device context response to %s", peer_id)
         except Exception as e:
-            print(f"  - Error sending device context response to {peer_id}: {e}")
+            logger.error("Error sending device context response to %s: %s", peer_id, e, exc_info=True)
 
     async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None):
         """
@@ -2341,11 +2341,11 @@ class CoreService:
         """
         from dpc_protocol.protocol import create_remote_inference_response
 
-        print(f"  - Handling inference request from {peer_id} (request_id: {request_id})")
+        logger.debug("Handling inference request from %s (request_id: %s)", peer_id, request_id)
 
         # Check if peer is allowed to request inference
         if not self.firewall.can_request_inference(peer_id, model):
-            print(f"  - Access denied: {peer_id} cannot request inference" + (f" for model {model}" if model else ""))
+            logger.warning("Access denied: %s cannot request inference%s", peer_id, f" for model {model}" if model else "")
             error_response = create_remote_inference_response(
                 request_id=request_id,
                 error=f"Access denied: You are not authorized to request inference" + (f" for model {model}" if model else "")
@@ -2353,12 +2353,12 @@ class CoreService:
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
             except Exception as e:
-                print(f"  - Error sending inference error response to {peer_id}: {e}")
+                logger.error("Error sending inference error response to %s: %s", peer_id, e, exc_info=True)
             return
 
         # Run inference
         try:
-            print(f"  - Running inference for {peer_id} (model: {model or 'default'}, provider: {provider or 'default'})")
+            logger.info("Running inference for %s (model: %s, provider: %s)", peer_id, model or 'default', provider or 'default')
 
             # Determine which provider to use:
             # 1. If model name specified, find provider by model
@@ -2371,12 +2371,12 @@ class CoreService:
                 found_alias = self.llm_manager.find_provider_by_model(model)
                 if found_alias:
                     provider_alias_to_use = found_alias
-                    print(f"  - Found provider '{found_alias}' for model '{model}'")
+                    logger.debug("Found provider '%s' for model '%s'", found_alias, model)
                 else:
                     raise ValueError(f"No provider found for model '{model}'")
 
             result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use, return_metadata=True)
-            print(f"  - Inference completed successfully for {peer_id}")
+            logger.info("Inference completed successfully for %s", peer_id)
 
             # Send success response with token metadata
             success_response = create_remote_inference_response(
@@ -2388,10 +2388,10 @@ class CoreService:
                 model_max_tokens=result.get("model_max_tokens")
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
-            print(f"  - Sent inference result to {peer_id}")
+            logger.debug("Sent inference result to %s", peer_id)
 
         except Exception as e:
-            print(f"  - Inference failed for {peer_id}: {e}")
+            logger.error("Inference failed for %s: %s", peer_id, e, exc_info=True)
             error_response = create_remote_inference_response(
                 request_id=request_id,
                 error=str(e)
@@ -2399,7 +2399,7 @@ class CoreService:
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, error_response)
             except Exception as send_err:
-                print(f"  - Error sending inference error response to {peer_id}: {send_err}")
+                logger.error("Error sending inference error response to %s: %s", peer_id, send_err, exc_info=True)
 
     async def _handle_get_providers_request(self, peer_id: str):
         """
@@ -2408,17 +2408,17 @@ class CoreService:
         """
         from dpc_protocol.protocol import create_providers_response
 
-        print(f"  - Handling GET_PROVIDERS request from {peer_id}")
+        logger.debug("Handling GET_PROVIDERS request from %s", peer_id)
 
         # Check if compute sharing is enabled and peer is authorized
         if not self.firewall.can_request_inference(peer_id):
-            print(f"  - Access denied: {peer_id} cannot access compute resources")
+            logger.warning("Access denied: %s cannot access compute resources", peer_id)
             # Send empty provider list (no access)
             response = create_providers_response([])
             try:
                 await self.p2p_manager.send_message_to_peer(peer_id, response)
             except Exception as e:
-                print(f"  - Error sending providers response to {peer_id}: {e}")
+                logger.error("Error sending providers response to %s: %s", peer_id, e, exc_info=True)
             return
 
         # Get all available providers
@@ -2445,21 +2445,21 @@ class CoreService:
             if p["model"] in allowed_models
         ]
 
-        print(f"  - Sending {len(filtered_providers)} providers to {peer_id} (filtered from {len(all_providers)} total)")
+        logger.debug("Sending %d providers to %s (filtered from %d total)", len(filtered_providers), peer_id, len(all_providers))
 
         # Send response with filtered providers
         response = create_providers_response(filtered_providers)
         try:
             await self.p2p_manager.send_message_to_peer(peer_id, response)
         except Exception as e:
-            print(f"  - Error sending providers response to {peer_id}: {e}")
+            logger.error("Error sending providers response to %s: %s", peer_id, e, exc_info=True)
 
     async def _handle_providers_response(self, peer_id: str, providers: list):
         """
         Handle PROVIDERS_RESPONSE from a peer.
         Store the providers in peer metadata and broadcast to UI.
         """
-        print(f"  - Received {len(providers)} providers from {peer_id}")
+        logger.debug("Received %d providers from %s", len(providers), peer_id)
 
         # Update peer metadata with providers
         if peer_id not in self.peer_metadata:
