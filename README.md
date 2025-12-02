@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.8.0
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.9.0
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
@@ -553,7 +553,7 @@ Special thanks to all contributors and early testers!
 | **Hub Server** | Production Ready |
 | **Crypto Identity** | v0.5.0 |
 | **Knowledge Architecture** | v2.0 (Phase 4.2 Complete) |
-| **Desktop Client** | Beta (v0.8.0) |
+| **Desktop Client** | Beta (v0.9.0) |
 | **Mobile Clients** | Planned (Phase 2) |
 | **Test Coverage** | In Progress |
 | **Documentation** | Good |

@@ -8,6 +8,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
+**Phase 1: Peer Connection Diagnostics and Reliability (v0.9.0)**
+
+- **Network-Resilient STUN Discovery** - STUN now works reliably even when service starts before network is ready
+  - Internet connectivity checks before STUN attempts (8.8.8.8, 1.1.1.1, OpenDNS)
+  - Retry logic with exponential backoff (0s, +5s, +15s)
+  - Periodic re-discovery every 5 minutes to detect IP changes
+  - Fully async implementation (no blocking sockets)
+  - IPv4 link-local address filtering (169.254.x.x APIPA addresses excluded)
+  - Fixes root cause of "STUN: Error during binding request [Errno 11001] getaddrinfo failed"
+
+- **Enhanced Connection Diagnostics** - Actionable error messages for troubleshooting connection failures
+  - **WebRTC diagnostics**: Analyzes ICE candidate types (host/srflx/relay)
+    - Provides specific failure reasons (STUN failed, TURN not configured, NAT traversal stuck)
+    - Includes prioritized recommendations for troubleshooting
+    - Example: "❌ STUN failed - No server reflexive candidates found. Check internet connectivity."
+  - **Direct TLS pre-flight checks**: Tests port connectivity before SSL handshake (5s timeout)
+    - Catches connection errors early (before cryptic WinError 121)
+    - Clear error messages about port accessibility
+    - Separates pre-flight timeout from full connection timeout
+
+- **Windows Dual-Stack Binding Fix** - Fixed Direct TLS server only listening on IPv6 on Windows
+  - Root cause: Windows binding to [::] only listens on IPv6 (doesn't accept IPv4-mapped addresses)
+  - Platform detection: Separate IPv4/IPv6 listeners on Windows, single [::] listener on Linux/macOS
+  - Result: Both 0.0.0.0:8888 and [::]:8888 now active on Windows
+  - Tested: Windows ↔ Ubuntu Direct TLS connection verified
+
+### Added
 - **Comprehensive DPTP protocol specification** - Formal documentation at `specs/dptp_v1.md`
   - Message format, types, and wire protocol details
   - Node identity system specification (RSA-2048, X.509 certificates)
