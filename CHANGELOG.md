@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.9.1] - 2025-12-02
+
+### Fixed
+- **Windows dual-stack binding** - Fixed `TypeError: a coroutine was expected, got <_GatheringFuture pending>`
+  - Removed incorrect `asyncio.create_task()` wrapper around `asyncio.gather()`
+  - Windows dual-stack listeners now start without errors
+  - Service functions correctly despite previous error messages
+
+---
+
+## [0.9.0] - 2025-12-02
+
 ### Changed
 - **Logging migration complete** - All print statements converted to Python standard library logging
   - run_service.py startup/shutdown messages now use logger
@@ -15,10 +29,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Created VERSION file in client and Hub
   - Version auto-imported from VERSION file (no hardcoded versions)
   - Startup logs show "D-PC Messenger v0.9.0 initializing..."
-
----
-
-## [0.9.0] - 2025-12-02
 
 ### Added
 
