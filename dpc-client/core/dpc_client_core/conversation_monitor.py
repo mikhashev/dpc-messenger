@@ -99,6 +99,30 @@ class ConversationMonitor:
         self.model: str | None = None  # Model name for remote/local inference
         self.provider_alias: str | None = None  # Provider alias for local inference
 
+        # Track last used compute settings for knowledge extraction fallback
+        self.last_compute_host: str | None = None  # Track last compute host used
+        self.last_model: str | None = None  # Track last model used
+        self.last_provider: str | None = None  # Track last provider used
+
+    def set_inference_settings(self, compute_host: str | None, model: str | None, provider: str | None):
+        """Update inference settings (called after each AI query in this conversation).
+
+        Args:
+            compute_host: Node ID for remote inference (None = local)
+            model: Model name
+            provider: Provider alias
+        """
+        self.last_compute_host = compute_host
+        self.last_model = model
+        self.last_provider = provider
+        logger.debug(
+            "Monitor %s: Updated inference settings (compute_host=%s, model=%s, provider=%s)",
+            self.conversation_id,
+            compute_host or "local",
+            model or "default",
+            provider or "default"
+        )
+
     async def on_message(self, message: Message) -> Optional[KnowledgeCommitProposal]:
         """Process new message in conversation
 
@@ -228,9 +252,9 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
             if self.ai_query_func:
                 result = await self.ai_query_func(
                     prompt=prompt,
-                    compute_host=self.compute_host,
-                    model=self.model,
-                    provider=self.provider_alias
+                    compute_host=self.last_compute_host,
+                    model=self.last_model,
+                    provider=self.last_provider
                 )
                 response = result["response"]
             else:
@@ -454,9 +478,9 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
             if self.ai_query_func:
                 result = await self.ai_query_func(
                     prompt=prompt,
-                    compute_host=self.compute_host,
-                    model=self.model,
-                    provider=self.provider_alias
+                    compute_host=self.last_compute_host,
+                    model=self.last_model,
+                    provider=self.last_provider
                 )
                 response = result["response"]
             else:
