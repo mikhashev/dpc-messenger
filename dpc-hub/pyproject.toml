@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "dpc-hub"
-version = "1.0.0"
+version = "0.9.2"
 description = "D-PC Federation Hub - Discovery and signaling server"
 authors = ["DPC Team"]
 license = "AGPL-3.0"
