@@ -5,6 +5,7 @@ import asyncio
 import ssl
 import json
 import logging
+import platform
 from typing import Dict, Any, Callable, Tuple, Union
 
 from cryptography import x509
@@ -143,32 +144,59 @@ class P2PManager:
         ssl_context.load_cert_chain(certfile=self.cert_file, keyfile=self.key_file)
 
         if host == "dual":
-            # Try dual-stack binding (IPv6 with IPv4 fallback)
-            try:
-                # On most systems, binding to :: with IPV6_V6ONLY=0 accepts both IPv4 and IPv6
-                server = await asyncio.start_server(
-                    self._handle_direct_connection, "::", port, ssl=ssl_context
-                )
-                self._server_task = asyncio.create_task(server.serve_forever())
-                logger.info("P2PManager Direct TLS server listening on [::]:%d (dual-stack) for node %s",
-                          port, self.node_id)
-            except Exception as e:
-                # Fallback: Create separate IPv4 and IPv6 listeners
-                logger.warning("Dual-stack binding failed (%s), binding IPv4 and IPv6 separately", e)
+            # Windows requires separate IPv4 and IPv6 listeners
+            # On Windows, binding to [::] only listens on IPv6 (doesn't accept IPv4-mapped addresses)
+            # On Linux/macOS, binding to [::] with IPV6_V6ONLY=0 works for both
+            is_windows = platform.system() == "Windows"
 
-                server_v4 = await asyncio.start_server(
-                    self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
-                )
-                server_v6 = await asyncio.start_server(
-                    self._handle_direct_connection, "::", port, ssl=ssl_context
-                )
+            if is_windows:
+                # Windows: Create separate IPv4 and IPv6 listeners
+                logger.info("Windows detected - creating separate IPv4 and IPv6 listeners")
 
-                self._server_task = asyncio.create_task(asyncio.gather(
-                    server_v4.serve_forever(),
-                    server_v6.serve_forever()
-                ))
-                logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d for node %s",
-                          port, port, self.node_id)
+                try:
+                    server_v4 = await asyncio.start_server(
+                        self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
+                    )
+                    server_v6 = await asyncio.start_server(
+                        self._handle_direct_connection, "::", port, ssl=ssl_context
+                    )
+
+                    self._server_task = asyncio.create_task(asyncio.gather(
+                        server_v4.serve_forever(),
+                        server_v6.serve_forever()
+                    ))
+                    logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d (dual-stack) for node %s",
+                              port, port, self.node_id)
+                except Exception as e:
+                    logger.error("Failed to bind dual-stack on Windows: %s", e)
+                    raise
+            else:
+                # Linux/macOS: Try dual-stack binding first (more efficient)
+                try:
+                    # On Unix systems, binding to :: with IPV6_V6ONLY=0 accepts both IPv4 and IPv6
+                    server = await asyncio.start_server(
+                        self._handle_direct_connection, "::", port, ssl=ssl_context
+                    )
+                    self._server_task = asyncio.create_task(server.serve_forever())
+                    logger.info("P2PManager Direct TLS server listening on [::]:%d (dual-stack) for node %s",
+                              port, self.node_id)
+                except Exception as e:
+                    # Fallback: Create separate IPv4 and IPv6 listeners
+                    logger.warning("Dual-stack binding failed (%s), binding IPv4 and IPv6 separately", e)
+
+                    server_v4 = await asyncio.start_server(
+                        self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
+                    )
+                    server_v6 = await asyncio.start_server(
+                        self._handle_direct_connection, "::", port, ssl=ssl_context
+                    )
+
+                    self._server_task = asyncio.create_task(asyncio.gather(
+                        server_v4.serve_forever(),
+                        server_v6.serve_forever()
+                    ))
+                    logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d for node %s",
+                              port, port, self.node_id)
         else:
             # Single-stack mode (IPv4 or IPv6 only)
             server = await asyncio.start_server(
