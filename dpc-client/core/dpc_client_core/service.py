@@ -27,6 +27,20 @@ from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .stun_discovery import discover_external_ip
+from .message_router import MessageRouter
+from .message_handlers.hello_handler import HelloHandler
+from .message_handlers.text_handler import SendTextHandler
+from .message_handlers.context_handler import (
+    RequestContextHandler, ContextResponseHandler,
+    RequestDeviceContextHandler, DeviceContextResponseHandler
+)
+from .message_handlers.inference_handler import (
+    RemoteInferenceRequestHandler, RemoteInferenceResponseHandler
+)
+from .message_handlers.provider_handler import GetProvidersHandler, ProvidersResponseHandler
+from .message_handlers.knowledge_handler import (
+    ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler
+)
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
     load_instructions, save_instructions, migrate_instructions_from_personal_context
@@ -169,6 +183,39 @@ class CoreService:
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
         self._processed_message_ids = set()  # Track processed messages
         self._max_processed_ids = 1000  # Limit set size
+
+        # Initialize message router and register handlers
+        self.message_router = MessageRouter()
+        self._register_message_handlers()
+
+    def _register_message_handlers(self):
+        """Register all P2P message handlers with the router."""
+        # Text messaging
+        self.message_router.register_handler(SendTextHandler(self))
+
+        # Context sharing
+        self.message_router.register_handler(RequestContextHandler(self))
+        self.message_router.register_handler(ContextResponseHandler(self))
+        self.message_router.register_handler(RequestDeviceContextHandler(self))
+        self.message_router.register_handler(DeviceContextResponseHandler(self))
+
+        # Remote inference (compute sharing)
+        self.message_router.register_handler(RemoteInferenceRequestHandler(self))
+        self.message_router.register_handler(RemoteInferenceResponseHandler(self))
+
+        # Provider discovery
+        self.message_router.register_handler(GetProvidersHandler(self))
+        self.message_router.register_handler(ProvidersResponseHandler(self))
+
+        # Knowledge commits and context updates
+        self.message_router.register_handler(ContextUpdatedHandler(self))
+        self.message_router.register_handler(ProposeKnowledgeCommitHandler(self))
+        self.message_router.register_handler(VoteKnowledgeCommitHandler(self))
+
+        # Peer handshake
+        self.message_router.register_handler(HelloHandler(self))
+
+        logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 
     def _on_connection_status_changed(self, old_mode: OperationMode, new_mode: OperationMode):
         """Callback when connection status changes."""
@@ -766,211 +813,13 @@ class CoreService:
     async def on_p2p_message_received(self, sender_node_id: str, message: Dict[str, Any]):
         """
         Callback function that is triggered when a P2P message is received.
-        Handles different message types and routes them appropriately.
+        Routes messages to appropriate handlers via message router.
         """
         command = message.get("command")
-        payload = message.get("payload", {})
-
         logger.debug("Received message from %s: %s", sender_node_id, command)
 
-        if command == "SEND_TEXT":
-            # Text message from peer - forward to UI with deduplication
-            text = payload.get("text")
-            
-            # Create unique message ID for deduplication
-            import hashlib
-            import time
-            message_id = hashlib.sha256(
-                f"{sender_node_id}:{text}:{int(time.time() * 1000)}".encode()
-            ).hexdigest()[:16]
-            
-            # Check if already processed
-            if message_id in self._processed_message_ids:
-                logger.debug("Duplicate message detected from %s, skipping", sender_node_id)
-                return
-            
-            # Add to processed set
-            self._processed_message_ids.add(message_id)
-            
-            # Clean up old IDs
-            if len(self._processed_message_ids) > self._max_processed_ids:
-                to_remove = list(self._processed_message_ids)[:self._max_processed_ids // 2]
-                for mid in to_remove:
-                    self._processed_message_ids.discard(mid)
-            
-            # Broadcast to UI with sender name
-            sender_name = self.peer_metadata.get(sender_node_id, {}).get("name") or sender_node_id
-            await self.local_api.broadcast_event("new_p2p_message", {
-                "sender_node_id": sender_node_id,
-                "sender_name": sender_name,
-                "text": text,
-                "message_id": message_id
-            })
-
-            # Feed to conversation monitor for knowledge extraction (Phase 4.2)
-            # Always buffer messages (even when auto-detection is OFF) to enable manual extraction
-            try:
-                monitor = self._get_or_create_conversation_monitor(sender_node_id)
-
-                # Create ConvMessage object for monitor
-                conv_message = ConvMessage(
-                    message_id=message_id,
-                    conversation_id=sender_node_id,
-                    sender_node_id=sender_node_id,
-                    sender_name=self.peer_metadata.get(sender_node_id, {}).get("name", sender_node_id),
-                    text=text,
-                    timestamp=datetime.utcnow().isoformat()
-                )
-
-                # Buffer message (always) and optionally auto-detect
-                proposal = await monitor.on_message(conv_message)
-
-                # Only handle automatic proposals if auto-detection is enabled
-                if self.auto_knowledge_detection_enabled:
-                    # If proposal generated, broadcast to UI and start voting
-                    if proposal:
-                        logger.info("Knowledge proposal generated for %s", sender_node_id)
-                        await self.local_api.broadcast_event(
-                            "knowledge_commit_proposed",
-                            proposal.to_dict()
-                        )
-                        # Peer chat - broadcast for collaborative knowledge building
-                        logger.info("Broadcasting knowledge proposal to peers for consensus")
-                        await self.consensus_manager.propose_commit(
-                            proposal=proposal,
-                            broadcast_func=self._broadcast_to_peers
-                        )
-            except Exception as e:
-                logger.error("Error in conversation monitoring: %s", e, exc_info=True)
-                # Only broadcast extraction failure if auto-detection was enabled
-                if self.auto_knowledge_detection_enabled:
-                    await self.local_api.broadcast_event(
-                        "knowledge_extraction_failed",
-                        {
-                            "conversation_id": sender_node_id,
-                            "error": str(e),
-                            "reason": "JSON parsing failed or LLM extraction error"
-                        }
-                    )
-
-        elif command == "REQUEST_CONTEXT":
-            # Context request from peer - handle and respond
-            request_id = payload.get("request_id")
-            query = payload.get("query")
-            await self._handle_context_request(sender_node_id, query, request_id)
-        
-        elif command == "CONTEXT_RESPONSE":
-            # Context response from peer - resolve the pending future
-            request_id = payload.get("request_id")
-            context_dict = payload.get("context")
-
-            if request_id in self._pending_context_requests:
-                future = self._pending_context_requests[request_id]
-                if not future.done():
-                    # Deserialize dict into PersonalContext object
-                    try:
-                        context_obj = PersonalContext.from_dict(context_dict)
-                        future.set_result(context_obj)
-                    except Exception as e:
-                        logger.error("Error deserializing context from peer: %s", e, exc_info=True)
-                        future.set_result(None)
-
-        elif command == "REQUEST_DEVICE_CONTEXT":
-            # Device context request from peer - handle and respond
-            request_id = payload.get("request_id")
-            await self._handle_device_context_request(sender_node_id, request_id)
-
-        elif command == "DEVICE_CONTEXT_RESPONSE":
-            # Device context response from peer - resolve the pending future
-            request_id = payload.get("request_id")
-            device_context = payload.get("device_context")
-
-            if request_id in self._pending_device_context_requests:
-                future = self._pending_device_context_requests[request_id]
-                if not future.done():
-                    future.set_result(device_context)
-
-        elif command == "REMOTE_INFERENCE_REQUEST":
-            # Remote inference request from peer - handle and respond
-            request_id = payload.get("request_id")
-            prompt = payload.get("prompt")
-            model = payload.get("model")
-            provider = payload.get("provider")
-            await self._handle_inference_request(sender_node_id, request_id, prompt, model, provider)
-
-        elif command == "REMOTE_INFERENCE_RESPONSE":
-            # Remote inference response from peer - resolve the pending future
-            request_id = payload.get("request_id")
-            status = payload.get("status")
-            response = payload.get("response")
-            error = payload.get("error")
-
-            # Extract token metadata
-            tokens_used = payload.get("tokens_used")
-            model_max_tokens = payload.get("model_max_tokens")
-            prompt_tokens = payload.get("prompt_tokens")
-            response_tokens = payload.get("response_tokens")
-
-            if request_id in self._pending_inference_requests:
-                future = self._pending_inference_requests[request_id]
-                if not future.done():
-                    if status == "success":
-                        # Return dict with response and token metadata
-                        result_data = {
-                            "response": response,
-                            "tokens_used": tokens_used,
-                            "model_max_tokens": model_max_tokens,
-                            "prompt_tokens": prompt_tokens,
-                            "response_tokens": response_tokens
-                        }
-                        future.set_result(result_data)
-                    else:
-                        future.set_exception(RuntimeError(error or "Remote inference failed"))
-
-        elif command == "GET_PROVIDERS":
-            # Peer is requesting our available AI providers
-            await self._handle_get_providers_request(sender_node_id)
-
-        elif command == "PROVIDERS_RESPONSE":
-            # Peer is sending their available AI providers
-            providers = payload.get("providers", [])
-            await self._handle_providers_response(sender_node_id, providers)
-
-        elif command == "HELLO":
-            # Name exchange (mainly for WebRTC connections that don't have initial handshake)
-            peer_name = payload.get("name")
-            if peer_name:
-                logger.debug("Received name from %s: %s", sender_node_id, peer_name)
-                self.set_peer_metadata(sender_node_id, name=peer_name)
-                # Notify UI of peer list change so names update
-                await self.on_peer_list_change()
-
-        elif command == "CONTEXT_UPDATED":
-            # Phase 7: Peer notifies that their personal context has changed
-            context_hash = payload.get("context_hash")
-            logger.info("Received CONTEXT_UPDATED from %s (hash: %s)", sender_node_id[:20], context_hash[:8] if context_hash else 'none')
-
-            # Invalidate cached peer context in all conversation monitors
-            for monitor in self.conversation_monitors.values():
-                monitor.invalidate_peer_context_cache(sender_node_id)
-                logger.debug("Invalidated cache for %s in conversation %s", sender_node_id[:20], monitor.conversation_id)
-
-            # Broadcast event to UI so "Updated" badge appears
-            await self.local_api.broadcast_event("peer_context_updated", {
-                "node_id": sender_node_id,
-                "context_hash": context_hash
-            })
-
-        elif command == "PROPOSE_KNOWLEDGE_COMMIT":
-            # Knowledge commit proposal from peer (forward to consensus manager)
-            await self.consensus_manager.handle_proposal_message(sender_node_id, payload)
-
-        elif command == "VOTE_KNOWLEDGE_COMMIT":
-            # Knowledge commit vote from peer (forward to consensus manager)
-            await self.consensus_manager.handle_vote_message(sender_node_id, payload)
-
-        else:
-            logger.warning("Unknown P2P message command: %s", command)
+        # Route message to registered handler
+        await self.message_router.route_message(sender_node_id, message)
 
     # --- High-level methods (API for the UI) ---
 
