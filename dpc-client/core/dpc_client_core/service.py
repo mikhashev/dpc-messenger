@@ -27,6 +27,7 @@ from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .stun_discovery import discover_external_ip
+from .inference_orchestrator import InferenceOrchestrator
 from .message_router import MessageRouter
 from .message_handlers.hello_handler import HelloHandler
 from .message_handlers.text_handler import SendTextHandler
@@ -150,6 +151,9 @@ class CoreService:
 
         # Register callback to broadcast peer proposals to UI
         self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
+
+        # Inference orchestrator (coordinates local and remote AI inference)
+        self.inference_orchestrator = InferenceOrchestrator(self)
 
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
@@ -2112,6 +2116,8 @@ class CoreService:
         """
         Send an AI query, either to local LLM or to a remote peer for inference.
 
+        Delegates to InferenceOrchestrator for execution.
+
         Args:
             prompt: The prompt to send to the AI
             compute_host: Optional node_id of peer to use for inference (None = local)
@@ -2125,43 +2131,12 @@ class CoreService:
             ValueError: If compute_host is specified but peer is not connected
             RuntimeError: If inference fails
         """
-        logger.info("AI Query - compute_host: %s, model: %s", compute_host or 'local', model or 'default')
-
-        # Local inference
-        if not compute_host:
-            try:
-                result = await self.llm_manager.query(prompt, provider_alias=provider, return_metadata=True)
-                result['compute_host'] = 'local'
-                return result
-            except Exception as e:
-                logger.error("Local inference failed: %s", e, exc_info=True)
-                raise RuntimeError(f"Local inference failed: {e}") from e
-
-        # Remote inference
-        try:
-            result_data = await self._request_inference_from_peer(
-                peer_id=compute_host,
-                prompt=prompt,
-                model=model,
-                provider=provider
-            )
-            # result_data is now a dict with response and token metadata
-            return {
-                "response": result_data.get("response") if isinstance(result_data, dict) else result_data,
-                "model": model or "unknown",
-                "provider": provider or "unknown",
-                "compute_host": compute_host,
-                # Include token metadata if available
-                "tokens_used": result_data.get("tokens_used") if isinstance(result_data, dict) else None,
-                "model_max_tokens": result_data.get("model_max_tokens") if isinstance(result_data, dict) else None,
-                "prompt_tokens": result_data.get("prompt_tokens") if isinstance(result_data, dict) else None,
-                "response_tokens": result_data.get("response_tokens") if isinstance(result_data, dict) else None
-            }
-        except ConnectionError as e:
-            raise ValueError(f"Compute host {compute_host} is not connected") from e
-        except Exception as e:
-            logger.error("Remote inference failed: %s", e, exc_info=True)
-            raise RuntimeError(f"Remote inference failed: {e}") from e
+        return await self.inference_orchestrator.execute_inference(
+            prompt=prompt,
+            compute_host=compute_host,
+            model=model,
+            provider=provider
+        )
 
     # --- Context Request Methods ---
 
