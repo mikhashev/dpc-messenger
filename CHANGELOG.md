@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.2] - 2025-12-02
+
+### Fixed
+- **Knowledge extraction now respects inference settings** - Fixed bug where knowledge extraction always used local inference
+  - Conversation monitors now track last used compute host/model/provider
+  - Knowledge extraction automatically uses same inference as conversation (remote if peer was used)
+  - Fixes: Ubuntu peer without Ollama can now extract knowledge using remote Windows inference
+  - Files modified: [conversation_monitor.py](dpc-client/core/dpc_client_core/conversation_monitor.py), [service.py](dpc-client/core/dpc_client_core/service.py)
+
+- **Peer proposals now display in UI** - Fixed bug where knowledge proposals from peers were received but not shown
+  - Registered `on_proposal_received` callback in CoreService initialization
+  - Peer proposals now broadcast `knowledge_commit_proposed` event to UI
+  - Fixes: Windows peer proposals now appear immediately on Ubuntu peer's UI for review and voting
+  - Files modified: [service.py](dpc-client/core/dpc_client_core/service.py:152)
+
+### Technical Details
+- Added `last_compute_host`, `last_model`, `last_provider` tracking fields to ConversationMonitor
+- Added `set_inference_settings()` method to update inference tracking after each query
+- Knowledge extraction methods now use tracked settings instead of hardcoded None values
+- Callback integration follows same pattern as existing `on_commit_applied` callback
+
+---
+
 ## [0.9.1] - 2025-12-02
 
 ### Fixed

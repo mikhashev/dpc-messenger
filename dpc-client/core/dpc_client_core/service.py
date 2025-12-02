@@ -148,6 +148,9 @@ class CoreService:
         # Register callback to reload context and notify peers after commit
         self.consensus_manager.on_commit_applied = self._on_commit_applied
 
+        # Register callback to broadcast peer proposals to UI
+        self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
+
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
@@ -2399,6 +2402,21 @@ class CoreService:
             except Exception as e:
                 logger.error("Error notifying %s of name change: %s", peer_id, e, exc_info=True)
 
+    async def _on_proposal_received_from_peer(self, proposal):
+        """Callback when knowledge proposal received from peer.
+
+        Broadcasts proposal to UI so user can review and vote.
+
+        Args:
+            proposal: The knowledge commit proposal from peer
+        """
+        logger.info("Broadcasting peer proposal to UI: %s (topic: %s)",
+                    proposal.proposal_id, proposal.topic)
+        await self.local_api.broadcast_event(
+            "knowledge_commit_proposed",
+            proposal.to_dict()
+        )
+
     async def _on_commit_applied(self, commit):
         """Callback called after a knowledge commit is applied
 
@@ -2919,6 +2937,9 @@ class CoreService:
             # Phase 7: Add AI response to conversation history
             monitor.add_message('assistant', result["response"])
             logger.debug("AI response added to conversation history (total messages: %d)", len(message_history) + 1)
+
+            # Update conversation monitor with inference settings used (for knowledge extraction)
+            monitor.set_inference_settings(compute_host, model, provider)
 
             # Token tracking (Phase 2) - works for both local and remote inference
             if "tokens_used" in result:
