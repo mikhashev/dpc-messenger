@@ -7,12 +7,15 @@ for low-performing knowledge.
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timedelta
 
 from dpc_protocol.crypto import DPC_HOME_DIR
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -115,7 +118,7 @@ class EffectivenessTracker:
 
             return metrics
         except Exception as e:
-            print(f"Error loading metrics: {e}")
+            logger.error("Error loading metrics: %s", e, exc_info=True)
             return {}
 
     def _save_metrics(self):
@@ -130,7 +133,7 @@ class EffectivenessTracker:
                 json.dump(data, f, indent=2, ensure_ascii=False)
 
         except Exception as e:
-            print(f"Error saving metrics: {e}")
+            logger.error("Error saving metrics: %s", e, exc_info=True)
 
     def track_reference(self, commit_id: str):
         """Track that a commit was referenced

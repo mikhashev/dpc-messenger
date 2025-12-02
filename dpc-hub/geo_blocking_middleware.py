@@ -238,7 +238,7 @@ async def test_geo_blocking():
                 response = reader.country(ip)
                 country = f"{response.country.name} ({response.country.iso_code})"
                 blocked = response.country.iso_code in ["RU", "BY"]
-                status_str = "❌ BLOCKED" if blocked else "✅ ALLOWED"
+                status_str = "BLOCKED" if blocked else "ALLOWED"
 
                 print(f"{ip:20} {country:30} {status_str}")
                 print(f"  → {description}")

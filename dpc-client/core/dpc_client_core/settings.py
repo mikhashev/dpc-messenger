@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 import configparser
 
 
@@ -74,7 +74,8 @@ class Settings:
 
         self._config['p2p'] = {
             'listen_port': '8888',
-            'listen_host': 'dual'  # dual-stack (IPv4 + IPv6), can be "0.0.0.0" (IPv4 only) or "::" (IPv6 only)
+            'listen_host': 'dual',  # dual-stack (IPv4 + IPv6), can be "0.0.0.0" (IPv4 only) or "::" (IPv6 only)
+            'connection_timeout': '30'  # Connection establishment timeout in seconds
         }
 
         self._config['api'] = {
@@ -109,6 +110,15 @@ class Settings:
             'token_warning_threshold': '0.8',  # Warn when context window reaches 80%
             'auto_extraction_enabled': 'true',  # Automatically suggest knowledge extraction
             'cultural_perspectives_enabled': 'false'  # Include cultural perspective analysis in knowledge extraction
+        }
+
+        self._config['logging'] = {
+            'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+            'console': 'true',  # Enable console output
+            'console_level': 'INFO',  # Console log level (can differ from file)
+            'file': '~/.dpc/logs/dpc-client.log',  # Log file path
+            'max_bytes': '10485760',  # Max bytes per log file before rotation (10MB)
+            'backup_count': '5'  # Number of backup log files to keep
         }
 
         # Ensure directory exists
@@ -168,6 +178,10 @@ class Settings:
         """Get the P2P server listen host."""
         return self.get('p2p', 'listen_host', '0.0.0.0')
 
+    def get_p2p_connection_timeout(self) -> float:
+        """Get the P2P connection establishment timeout in seconds."""
+        return float(self.get('p2p', 'connection_timeout', '30'))
+
     def get_api_port(self) -> int:
         """Get the local API server port."""
         return int(self.get('api', 'port', '9999'))
@@ -221,6 +235,40 @@ class Settings:
         """Check if cultural perspective analysis is enabled in knowledge extraction."""
         value = self.get('knowledge', 'cultural_perspectives_enabled', 'false')
         return value.lower() in ('true', '1', 'yes')
+
+    def get_log_level(self) -> str:
+        """Get global log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)."""
+        return self.get('logging', 'level', 'INFO').upper()
+
+    def get_log_file(self) -> Path:
+        """Get log file path."""
+        file_path = self.get('logging', 'file', '~/.dpc/logs/dpc-client.log')
+        return Path(file_path).expanduser()
+
+    def get_log_console(self) -> bool:
+        """Check if console output is enabled."""
+        value = self.get('logging', 'console', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_log_console_level(self) -> str:
+        """Get console log level."""
+        return self.get('logging', 'console_level', 'INFO').upper()
+
+    def get_log_max_bytes(self) -> int:
+        """Get max bytes per log file before rotation."""
+        return int(self.get('logging', 'max_bytes', '10485760'))
+
+    def get_log_backup_count(self) -> int:
+        """Get number of backup log files to keep."""
+        return int(self.get('logging', 'backup_count', '5'))
+
+    def get_module_log_levels(self) -> Dict[str, str]:
+        """Get per-module log level overrides."""
+        overrides = {}
+        if self._config.has_section('logging.modules'):
+            for module_name, level in self._config.items('logging.modules'):
+                overrides[module_name] = level.upper()
+        return overrides
 
     def get_stun_servers(self) -> list[str]:
         """

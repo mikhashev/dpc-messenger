@@ -4,6 +4,8 @@
 import asyncio
 import ssl
 import json
+import logging
+import platform
 from typing import Dict, Any, Callable, Tuple, Union
 
 from cryptography import x509
@@ -17,6 +19,8 @@ from dpc_protocol.utils import parse_dpc_uri
 from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
+
+logger = logging.getLogger(__name__)
 
 
 class PeerConnection:
@@ -44,9 +48,10 @@ class PeerConnection:
 
 class P2PManager:
     """Manages all P2P connections (both direct TLS and WebRTC)."""
-    
-    def __init__(self, firewall: ContextFirewall):
+
+    def __init__(self, firewall: ContextFirewall, settings=None):
         self.firewall = firewall
+        self.settings = settings  # Optional settings for configurable timeouts/ports
         self.peers: Dict[str, Union[PeerConnection, WebRTCPeerConnection]] = {}
         self.display_name: str | None = None
 
@@ -60,18 +65,18 @@ class P2PManager:
         
         try:
             self.node_id, self.key_file, self.cert_file = load_identity()
-            print("Existing node identity loaded.")
+            logger.info("Existing node identity loaded")
         except FileNotFoundError:
-            print("Node identity not found. Generating a new one...")
+            logger.info("Node identity not found - generating a new one")
             generate_identity()
             self.node_id, self.key_file, self.cert_file = load_identity()
-            print("New node identity generated and loaded.")
+            logger.info("New node identity generated and loaded")
 
         self.local_context = PCMCore().load_context()
         self.on_peer_list_change: Callable | None = None
         self.on_message_received: Callable | None = None
         self._server_task = None
-        print("P2PManager initialized with WebRTC support.")
+        logger.info("P2PManager initialized with WebRTC support")
 
     def set_on_peer_list_change(self, callback: Callable):
         self.on_peer_list_change = callback
@@ -86,7 +91,7 @@ class P2PManager:
     def set_display_name(self, name: str):
         """Set the display name that will be shared with peers during handshake."""
         self.display_name = name
-        print(f"Display name set to: {name}")
+        logger.info("Display name set to: %s", name)
     
     def get_display_name(self) -> str | None:
         """Get the current display name."""
@@ -139,30 +144,59 @@ class P2PManager:
         ssl_context.load_cert_chain(certfile=self.cert_file, keyfile=self.key_file)
 
         if host == "dual":
-            # Try dual-stack binding (IPv6 with IPv4 fallback)
-            try:
-                # On most systems, binding to :: with IPV6_V6ONLY=0 accepts both IPv4 and IPv6
-                server = await asyncio.start_server(
-                    self._handle_direct_connection, "::", port, ssl=ssl_context
-                )
-                self._server_task = asyncio.create_task(server.serve_forever())
-                print(f"P2PManager Direct TLS server listening on [::]:{port} (dual-stack) for node {self.node_id}")
-            except Exception as e:
-                # Fallback: Create separate IPv4 and IPv6 listeners
-                print(f"Dual-stack binding failed ({e}), binding IPv4 and IPv6 separately...")
+            # Windows requires separate IPv4 and IPv6 listeners
+            # On Windows, binding to [::] only listens on IPv6 (doesn't accept IPv4-mapped addresses)
+            # On Linux/macOS, binding to [::] with IPV6_V6ONLY=0 works for both
+            is_windows = platform.system() == "Windows"
 
-                server_v4 = await asyncio.start_server(
-                    self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
-                )
-                server_v6 = await asyncio.start_server(
-                    self._handle_direct_connection, "::", port, ssl=ssl_context
-                )
+            if is_windows:
+                # Windows: Create separate IPv4 and IPv6 listeners
+                logger.info("Windows detected - creating separate IPv4 and IPv6 listeners")
 
-                self._server_task = asyncio.create_task(asyncio.gather(
-                    server_v4.serve_forever(),
-                    server_v6.serve_forever()
-                ))
-                print(f"P2PManager Direct TLS server listening on 0.0.0.0:{port} and [::]:{port} for node {self.node_id}")
+                try:
+                    server_v4 = await asyncio.start_server(
+                        self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
+                    )
+                    server_v6 = await asyncio.start_server(
+                        self._handle_direct_connection, "::", port, ssl=ssl_context
+                    )
+
+                    self._server_task = asyncio.create_task(asyncio.gather(
+                        server_v4.serve_forever(),
+                        server_v6.serve_forever()
+                    ))
+                    logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d (dual-stack) for node %s",
+                              port, port, self.node_id)
+                except Exception as e:
+                    logger.error("Failed to bind dual-stack on Windows: %s", e)
+                    raise
+            else:
+                # Linux/macOS: Try dual-stack binding first (more efficient)
+                try:
+                    # On Unix systems, binding to :: with IPV6_V6ONLY=0 accepts both IPv4 and IPv6
+                    server = await asyncio.start_server(
+                        self._handle_direct_connection, "::", port, ssl=ssl_context
+                    )
+                    self._server_task = asyncio.create_task(server.serve_forever())
+                    logger.info("P2PManager Direct TLS server listening on [::]:%d (dual-stack) for node %s",
+                              port, self.node_id)
+                except Exception as e:
+                    # Fallback: Create separate IPv4 and IPv6 listeners
+                    logger.warning("Dual-stack binding failed (%s), binding IPv4 and IPv6 separately", e)
+
+                    server_v4 = await asyncio.start_server(
+                        self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
+                    )
+                    server_v6 = await asyncio.start_server(
+                        self._handle_direct_connection, "::", port, ssl=ssl_context
+                    )
+
+                    self._server_task = asyncio.create_task(asyncio.gather(
+                        server_v4.serve_forever(),
+                        server_v6.serve_forever()
+                    ))
+                    logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d for node %s",
+                              port, port, self.node_id)
         else:
             # Single-stack mode (IPv4 or IPv6 only)
             server = await asyncio.start_server(
@@ -172,13 +206,14 @@ class P2PManager:
 
             # Format IPv6 addresses with brackets for clarity
             formatted_host = f"[{host}]" if ":" in host else host
-            print(f"P2PManager Direct TLS server listening on {formatted_host}:{port} for node {self.node_id}")
+            logger.info("P2PManager Direct TLS server listening on %s:%d for node %s",
+                      formatted_host, port, self.node_id)
 
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
         peer_node_id = None
         try:
-            print("Received a direct TLS connection attempt...")
+            logger.info("Received a direct TLS connection attempt")
             await asyncio.sleep(0.01)
 
             hello_msg = await read_message(reader)
@@ -192,9 +227,9 @@ class P2PManager:
             if not peer_node_id:
                 raise ValueError("Peer did not provide a node_id.")
 
-            print(f"Connection from node: {peer_node_id}")
+            logger.info("Connection from node: %s", peer_node_id)
             if peer_name:
-                print(f"  - Peer name: {peer_name}")
+                logger.info("Peer name: %s", peer_name)
                 if hasattr(self, '_core_service_ref') and self._core_service_ref:
                     self._core_service_ref.set_peer_metadata(peer_node_id, name=peer_name)
 
@@ -208,12 +243,12 @@ class P2PManager:
             peer = PeerConnection(node_id=peer_node_id, reader=reader, writer=writer)
             self.peers[peer_node_id] = peer
             await self._notify_peer_change()
-            print(f"✅ Direct TLS connection established with {peer_node_id}")
+            logger.info("Direct TLS connection established with %s", peer_node_id)
 
             asyncio.create_task(self._listen_to_peer(peer))
 
         except Exception as e:
-            print(f"Error handling direct connection: {e}")
+            logger.error("Error handling direct connection: %s", e, exc_info=True)
             if peer_node_id and peer_node_id in self.peers:
                 await self.shutdown_peer_connection(peer_node_id)
             else:
@@ -263,7 +298,7 @@ class P2PManager:
         except Exception as e:
             return (False, f"Port test failed: {e}")
 
-    async def connect_directly(self, host: str, port: int, target_node_id: str, timeout: float = 30.0):
+    async def connect_directly(self, host: str, port: int, target_node_id: str, timeout: float = None):
         """
         Initiates a direct TLS connection to a peer (Client-side).
 
@@ -278,7 +313,32 @@ class P2PManager:
             ConnectionRefusedError: If peer actively refuses connection (firewall/not running)
             ConnectionError: If peer handshake fails
         """
-        print(f"Initiating direct connection to {target_node_id} at {host}:{port}...")
+        # Use configured timeout if not explicitly provided
+        if timeout is None:
+            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 30.0
+
+        logger.info("Initiating direct connection to %s at %s:%d", target_node_id, host, port)
+
+        # Pre-flight check: Test basic port connectivity before SSL handshake
+        # This provides clearer error messages than cryptic SSL errors (e.g., WinError 121)
+        logger.debug("Running pre-flight port connectivity check for %s:%d", host, port)
+        preflight_timeout = 5.0  # Quick check - separate from full connection timeout
+        port_accessible, port_message = await self.test_port_connectivity(host, port, preflight_timeout)
+
+        if not port_accessible:
+            error_msg = (
+                f"Pre-flight check failed for {host}:{port} - Port is not accessible.\n"
+                f"{port_message}\n"
+                f"  Direct TLS connection requires:\n"
+                f"    - Peer's D-PC client running and listening on port {port}\n"
+                f"    - No firewall blocking port {port}\n"
+                f"    - For external IPs: Router port forwarding configured\n"
+                f"  Alternative: Use WebRTC connections (no port forwarding needed)"
+            )
+            logger.error(error_msg)
+            raise ConnectionError(error_msg)
+
+        logger.debug("Pre-flight check passed - port %d is accessible", port)
 
         ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         ssl_context.check_hostname = False
@@ -306,14 +366,14 @@ class P2PManager:
 
             peer_name = response.get("name")
             if peer_name:
-                print(f"  - Peer name: {peer_name}")
+                logger.info("Peer name: %s", peer_name)
                 if hasattr(self, '_core_service_ref') and self._core_service_ref:
                     self._core_service_ref.set_peer_metadata(target_node_id, name=peer_name)
 
             peer = PeerConnection(node_id=target_node_id, reader=reader, writer=writer)
             self.peers[target_node_id] = peer
             await self._notify_peer_change()
-            print(f"✅ Direct connection established with {target_node_id}")
+            logger.info("Direct connection established with %s", target_node_id)
 
             asyncio.create_task(self._listen_to_peer(peer))
 
@@ -321,9 +381,9 @@ class P2PManager:
             from dpc_protocol.protocol import create_get_providers_message
             try:
                 await self.send_message_to_peer(target_node_id, create_get_providers_message())
-                print(f"  - Requested AI providers from {target_node_id}")
+                logger.debug("Requested AI providers from %s", target_node_id)
             except Exception as e:
-                print(f"  - Failed to request providers from {target_node_id}: {e}")
+                logger.warning("Failed to request providers from %s: %s", target_node_id, e)
 
         except asyncio.TimeoutError:
             error_msg = (
@@ -335,7 +395,7 @@ class P2PManager:
                 f"  - Network connectivity issues\n"
                 f"  Recommended: Use WebRTC connections for internet-wide P2P (no port forwarding needed)"
             )
-            print(error_msg)
+            logger.error(error_msg)
             raise ConnectionError(error_msg)
         except ConnectionRefusedError as e:
             error_msg = (
@@ -346,10 +406,10 @@ class P2PManager:
                 f"  - Port {port} is used by another application\n"
                 f"  Verify peer is running: Check for 'Direct TLS server started on port {port}' in their logs"
             )
-            print(error_msg)
+            logger.error(error_msg)
             raise ConnectionError(error_msg)
         except Exception as e:
-            print(f"Failed to establish direct connection with {target_node_id}: {e}")
+            logger.error("Failed to establish direct connection with %s: %s", target_node_id, e, exc_info=True)
             raise
 
     async def _listen_to_peer(self, peer: PeerConnection):
@@ -366,7 +426,7 @@ class P2PManager:
         except (asyncio.IncompleteReadError, ConnectionResetError):
             pass
         finally:
-            print(f"Connection with peer {peer.node_id} was lost.")
+            logger.info("Connection with peer %s was lost", peer.node_id)
             await self.shutdown_peer_connection(peer.node_id)
 
     # --- WebRTC Connection Methods (NEW) ---
@@ -376,14 +436,14 @@ class P2PManager:
         Initiates a WebRTC connection to a peer via Hub signaling.
         This is the INITIATOR side (Alice).
         """
-        print(f"Initiating WebRTC connection to {target_node_id} via Hub...")
+        logger.info("Initiating WebRTC connection to %s via Hub", target_node_id)
 
         if target_node_id in self.peers:
-            print(f"Already connected to {target_node_id}")
+            logger.info("Already connected to %s", target_node_id)
             return
 
         if target_node_id in self._pending_webrtc:
-            print(f"Connection to {target_node_id} already in progress")
+            logger.info("Connection to %s already in progress", target_node_id)
             return
 
         try:
@@ -412,7 +472,7 @@ class P2PManager:
 
             # Set up close handler with auto-reconnect
             async def handle_close(node_id):
-                print(f"WebRTC connection closed for {node_id}, cleaning up...")
+                logger.info("WebRTC connection closed for %s, cleaning up", node_id)
                 if node_id in self.peers:
                     self.peers.pop(node_id)
                     await self._notify_peer_change()
@@ -421,23 +481,23 @@ class P2PManager:
 
                 # Auto-reconnect if disconnection was not intentional
                 if node_id not in self._intentional_disconnects:
-                    print(f"[Auto-Reconnect] Connection to {node_id} lost unexpectedly")
-                    print(f"[Auto-Reconnect] Will attempt to reconnect in 3 seconds...")
+                    logger.info("Auto-Reconnect: Connection to %s lost unexpectedly", node_id)
+                    logger.info("Auto-Reconnect: Will attempt to reconnect in 3 seconds")
                     await asyncio.sleep(3)
 
                     # Check if hub_client is still connected
                     stored_hub_client = self._hub_client_refs.get(node_id)
                     if stored_hub_client and stored_hub_client.websocket and stored_hub_client.websocket.state == websockets.State.OPEN:
                         try:
-                            print(f"[Auto-Reconnect] Reconnecting to {node_id}...")
+                            logger.info("Auto-Reconnect: Reconnecting to %s", node_id)
                             await self.connect_via_hub(node_id, stored_hub_client)
                         except Exception as e:
-                            print(f"[Auto-Reconnect] Failed to reconnect to {node_id}: {e}")
+                            logger.error("Auto-Reconnect: Failed to reconnect to %s: %s", node_id, e)
                     else:
-                        print(f"[Auto-Reconnect] Cannot reconnect to {node_id} - Hub client not connected")
+                        logger.warning("Auto-Reconnect: Cannot reconnect to %s - Hub client not connected", node_id)
                         self._hub_client_refs.pop(node_id, None)
                 else:
-                    print(f"[Auto-Reconnect] Disconnection was intentional, not reconnecting")
+                    logger.info("Auto-Reconnect: Disconnection was intentional, not reconnecting")
                     self._intentional_disconnects.discard(node_id)
                     self._hub_client_refs.pop(node_id, None)
 
@@ -449,14 +509,14 @@ class P2PManager:
                 "type": "offer",
                 "offer": offer
             })
-            
-            print(f"WebRTC offer sent to {target_node_id}, waiting for answer...")
-            
+
+            logger.info("WebRTC offer sent to %s, waiting for answer", target_node_id)
+
             # Start timeout task
             asyncio.create_task(self._handle_connection_timeout(target_node_id))
-            
+
         except Exception as e:
-            print(f"Failed to initiate WebRTC connection to {target_node_id}: {e}")
+            logger.error("Failed to initiate WebRTC connection to %s: %s", target_node_id, e, exc_info=True)
             self._pending_webrtc.pop(target_node_id, None)
             raise
 
@@ -493,39 +553,37 @@ class P2PManager:
             
             # Validate we have required fields
             if not from_node or not webrtc_signal_type:
-                print(f"Received invalid Hub signal (missing sender_node_id or payload.type): {signal}")
+                logger.warning("Received invalid Hub signal (missing sender_node_id or payload.type): %s", signal)
                 return
-            
-            print(f"Received WebRTC signal '{webrtc_signal_type}' from {from_node}")
-            
+
+            logger.debug("Received WebRTC signal '%s' from %s", webrtc_signal_type, from_node)
+
             try:
                 if webrtc_signal_type == "offer":
                     await self._handle_webrtc_offer(from_node, wrapped_payload, hub_client)
-                
+
                 elif webrtc_signal_type == "answer":
                     await self._handle_webrtc_answer(from_node, wrapped_payload)
-                
+
                 elif webrtc_signal_type == "ice-candidate":
                     await self._handle_ice_candidate(from_node, wrapped_payload)
-                
+
                 else:
-                    print(f"Unknown WebRTC signal type: {webrtc_signal_type}")
-            
+                    logger.warning("Unknown WebRTC signal type: %s", webrtc_signal_type)
+
             except Exception as e:
-                print(f"Error handling signal from {from_node}: {e}")
-                import traceback
-                traceback.print_exc()
-        
+                logger.error("Error handling signal from %s: %s", from_node, e, exc_info=True)
+
         else:
             # Unknown signal format
-            print(f"Received unknown signal format (type={signal_type}): {signal}")
+            logger.warning("Received unknown signal format (type=%s): %s", signal_type, signal)
 
     async def _handle_webrtc_offer(self, from_node: str, payload: Dict[str, Any], hub_client: HubClient):
         """Handle incoming WebRTC offer (ANSWERER side - Bob)."""
-        print(f"Handling WebRTC offer from {from_node}")
+        logger.info("Handling WebRTC offer from %s", from_node)
 
         if from_node in self.peers:
-            print(f"Already connected to {from_node}, ignoring offer")
+            logger.info("Already connected to %s, ignoring offer", from_node)
             return
 
         # Store hub_client reference for reconnection
@@ -553,7 +611,7 @@ class P2PManager:
 
         # Set up close handler with auto-reconnect
         async def handle_close(node_id):
-            print(f"WebRTC connection closed for {node_id}, cleaning up...")
+            logger.info("WebRTC connection closed for %s, cleaning up", node_id)
             if node_id in self.peers:
                 self.peers.pop(node_id)
                 await self._notify_peer_change()
@@ -562,23 +620,23 @@ class P2PManager:
 
             # Auto-reconnect if disconnection was not intentional
             if node_id not in self._intentional_disconnects:
-                print(f"[Auto-Reconnect] Connection to {node_id} lost unexpectedly")
-                print(f"[Auto-Reconnect] Will attempt to reconnect in 3 seconds...")
+                logger.info("Auto-Reconnect: Connection to %s lost unexpectedly", node_id)
+                logger.info("Auto-Reconnect: Will attempt to reconnect in 3 seconds")
                 await asyncio.sleep(3)
 
                 # Check if hub_client is still connected
                 stored_hub_client = self._hub_client_refs.get(node_id)
                 if stored_hub_client and stored_hub_client.websocket and stored_hub_client.websocket.state == websockets.State.OPEN:
                     try:
-                        print(f"[Auto-Reconnect] Reconnecting to {node_id}...")
+                        logger.info("Auto-Reconnect: Reconnecting to %s", node_id)
                         await self.connect_via_hub(node_id, stored_hub_client)
                     except Exception as e:
-                        print(f"[Auto-Reconnect] Failed to reconnect to {node_id}: {e}")
+                        logger.error("Auto-Reconnect: Failed to reconnect to %s: %s", node_id, e)
                 else:
-                    print(f"[Auto-Reconnect] Cannot reconnect to {node_id} - Hub client not connected")
+                    logger.warning("Auto-Reconnect: Cannot reconnect to %s - Hub client not connected", node_id)
                     self._hub_client_refs.pop(node_id, None)
             else:
-                print(f"[Auto-Reconnect] Disconnection was intentional, not reconnecting")
+                logger.info("Auto-Reconnect: Disconnection was intentional, not reconnecting")
                 self._intentional_disconnects.discard(node_id)
                 self._hub_client_refs.pop(node_id, None)
 
@@ -593,26 +651,26 @@ class P2PManager:
             "type": "answer",
             "answer": answer
         })
-        
-        print(f"WebRTC answer sent to {from_node}")
-        
+
+        logger.info("WebRTC answer sent to %s", from_node)
+
         # Process any buffered ICE candidates
         if from_node in self._ice_candidates_buffer:
             for candidate in self._ice_candidates_buffer[from_node]:
                 await webrtc_peer.add_ice_candidate(candidate)
             del self._ice_candidates_buffer[from_node]
-        
+
         # Wait for connection to be ready, then move to active peers
         # This ensures the UI is notified on the answerer side too
         asyncio.create_task(self._finalize_webrtc_connection(from_node))
 
     async def _handle_webrtc_answer(self, from_node: str, payload: Dict[str, Any]):
         """Handle incoming WebRTC answer (INITIATOR side - Alice)."""
-        print(f"Handling WebRTC answer from {from_node}")
-        
+        logger.info("Handling WebRTC answer from %s", from_node)
+
         webrtc_peer = self._pending_webrtc.get(from_node)
         if not webrtc_peer:
-            print(f"No pending WebRTC connection for {from_node}")
+            logger.warning("No pending WebRTC connection for %s", from_node)
             return
         
         # Set remote description with answer
@@ -641,7 +699,7 @@ class P2PManager:
             if from_node not in self._ice_candidates_buffer:
                 self._ice_candidates_buffer[from_node] = []
             self._ice_candidates_buffer[from_node].append(candidate)
-            print(f"Buffered ICE candidate from {from_node} (total: {len(self._ice_candidates_buffer[from_node])})")
+            logger.debug("Buffered ICE candidate from %s (total: %d)", from_node, len(self._ice_candidates_buffer[from_node]))
 
     async def _finalize_webrtc_connection(self, node_id: str):
         """Wait for WebRTC connection to be ready and move to active peers."""
@@ -650,56 +708,58 @@ class P2PManager:
             return
 
         try:
-            # Wait for connection to be ready
-            await webrtc_peer.wait_ready(timeout=30.0)
+            # Wait for connection to be ready (use configured timeout)
+            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 30.0
+            await webrtc_peer.wait_ready(timeout=timeout)
 
             # Move from pending to active peers
             self._pending_webrtc.pop(node_id, None)
             self.peers[node_id] = webrtc_peer
 
             await self._notify_peer_change()
-            print(f"✅ WebRTC connection established with {node_id}")
+            logger.info("WebRTC connection established with %s", node_id)
 
             # Exchange names (WebRTC doesn't have initial HELLO handshake like TLS)
             from dpc_protocol.protocol import create_hello_message
             try:
                 hello_msg = create_hello_message(self.node_id, self.display_name)
                 await self.send_message_to_peer(node_id, hello_msg)
-                print(f"  - Sent name to {node_id}: {self.display_name}")
+                logger.debug("Sent name to %s: %s", node_id, self.display_name)
             except Exception as e:
-                print(f"  - Failed to send name to {node_id}: {e}")
+                logger.warning("Failed to send name to %s: %s", node_id, e)
 
             # Auto-discover peer's available AI providers
             from dpc_protocol.protocol import create_get_providers_message
             try:
                 await self.send_message_to_peer(node_id, create_get_providers_message())
-                print(f"  - Requested AI providers from {node_id}")
+                logger.debug("Requested AI providers from %s", node_id)
             except Exception as e:
-                print(f"  - Failed to request providers from {node_id}: {e}")
+                logger.warning("Failed to request providers from %s: %s", node_id, e)
 
         except Exception as e:
-            print(f"Failed to finalize WebRTC connection with {node_id}: {e}")
+            logger.error("Failed to finalize WebRTC connection with %s: %s", node_id, e, exc_info=True)
             self._pending_webrtc.pop(node_id, None)
             await webrtc_peer.close()
 
     async def _handle_connection_timeout(self, node_id: str):
         """Handle timeout for WebRTC connection establishment."""
         try:
-            # Wait for connection to be established
-            await asyncio.sleep(30)  # 30 second timeout
-            
+            # Use configured timeout
+            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 30.0
+            await asyncio.sleep(timeout)
+
             # Check if connection is still pending
             if node_id in self._pending_webrtc and node_id not in self.peers:
-                print(f"WebRTC connection to {node_id} timed out after 30 seconds")
+                logger.warning("WebRTC connection to %s timed out after %.1f seconds", node_id, timeout)
                 webrtc_peer = self._pending_webrtc.pop(node_id, None)
                 if webrtc_peer:
                     await webrtc_peer.close()
-                
+
                 # Clean up ICE candidates buffer
                 self._ice_candidates_buffer.pop(node_id, None)
-                
+
         except Exception as e:
-            print(f"Error in connection timeout handler: {e}")
+            logger.error("Error in connection timeout handler: %s", e, exc_info=True)
 
     # --- Unified Connection Management ---
 
@@ -719,7 +779,7 @@ class P2PManager:
         if peer_id in self.peers:
             peer = self.peers.pop(peer_id)
             await peer.close()
-            print(f"Connection with {peer_id} closed (intentional).")
+            logger.info("Connection with %s closed (intentional)", peer_id)
             # Ensure status update is broadcast
             await self._notify_peer_change()
 
@@ -727,7 +787,7 @@ class P2PManager:
         if peer_id in self._pending_webrtc:
             webrtc_peer = self._pending_webrtc.pop(peer_id)
             await webrtc_peer.close()
-            print(f"Pending WebRTC connection with {peer_id} cleaned up.")
+            logger.info("Pending WebRTC connection with %s cleaned up", peer_id)
             # Notify peer list change even for pending connections
             await self._notify_peer_change()
 
@@ -738,7 +798,7 @@ class P2PManager:
 
     async def shutdown_all(self):
         """Shutdown all connections (intentional shutdown)."""
-        print("Shutting down P2P Manager...")
+        logger.info("Shutting down P2P Manager")
 
         # Mark all disconnections as intentional to prevent auto-reconnect
         for peer_id in list(self.peers.keys()):
@@ -762,4 +822,4 @@ class P2PManager:
         self._intentional_disconnects.clear()
         self._ice_candidates_buffer.clear()
 
-        print("P2P Manager shut down.")
+        logger.info("P2P Manager shut down")

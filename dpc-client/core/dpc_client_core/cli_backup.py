@@ -32,12 +32,12 @@ def get_passphrase(confirm: bool = False) -> str:
     Returns:
         Passphrase string
     """
-    passphrase = getpass.getpass("🔐 Enter passphrase (min 12 chars recommended): ")
+    passphrase = getpass.getpass("Enter passphrase (min 12 chars recommended): ")
 
     if confirm:
-        confirm_pass = getpass.getpass("🔐 Confirm passphrase: ")
+        confirm_pass = getpass.getpass("Confirm passphrase: ")
         if passphrase != confirm_pass:
-            print("❌ Passphrases don't match!")
+            print("ERROR: Passphrases don't match!")
             sys.exit(1)
 
     return passphrase
@@ -48,7 +48,7 @@ def cmd_create(args):
     dpc_dir = Path(args.dpc_dir) if args.dpc_dir else get_dpc_dir()
 
     if not dpc_dir.exists():
-        print(f"❌ .dpc directory not found: {dpc_dir}")
+        print(f"ERROR: .dpc directory not found: {dpc_dir}")
         print("   Make sure D-PC Client is initialized")
         sys.exit(1)
 
@@ -64,17 +64,17 @@ def cmd_create(args):
     # Get passphrase
     if args.passphrase:
         passphrase = args.passphrase
-        print("⚠️  Warning: Passphrase provided via command line (insecure)")
+        print("WARNING: Passphrase provided via command line (insecure)")
     else:
         passphrase = get_passphrase(confirm=True)
 
     # Check passphrase strength
     if len(passphrase) < 8:
-        print("❌ Passphrase too short (minimum 8 characters)")
+        print("ERROR: Passphrase too short (minimum 8 characters)")
         sys.exit(1)
 
     if len(passphrase) < 12:
-        print("⚠️  Warning: Passphrase should be at least 12 characters")
+        print("WARNING: Passphrase should be at least 12 characters")
         response = input("   Continue anyway? [y/N]: ")
         if response.lower() != 'y':
             print("Aborted.")
@@ -100,17 +100,17 @@ def cmd_create(args):
 
         print()
         print("=" * 60)
-        print("✅ Backup Created Successfully!")
+        print("Backup Created Successfully!")
         print("=" * 60)
-        print(f"📂 Backup saved to: {output_path}")
-        print(f"📏 Size: {len(backup_bundle):,} bytes ({len(backup_bundle) / 1024 / 1024:.2f} MB)")
+        print(f"Backup saved to: {output_path}")
+        print(f"Size: {len(backup_bundle):,} bytes ({len(backup_bundle) / 1024 / 1024:.2f} MB)")
         print()
-        print("⚠️  IMPORTANT:")
+        print("IMPORTANT:")
         print("   1. Save your passphrase in a secure location")
         print("   2. Without it, the backup is PERMANENTLY UNRECOVERABLE")
         print("   3. Consider using a password manager (e.g., 1Password, Bitwarden)")
         print()
-        print("💡 Next steps:")
+        print("Next steps:")
         print(f"   - Copy to USB drive: cp {output_path} /media/usb/")
         print(f"   - Upload to cloud: your-cloud-sync-tool {output_path}")
         print(f"   - Restore on new device: dpc backup restore --input {output_path}")
@@ -118,7 +118,7 @@ def cmd_create(args):
 
     except Exception as e:
         print()
-        print(f"❌ Backup failed: {e}")
+        print(f"ERROR: Backup failed: {e}")
         sys.exit(1)
 
 
@@ -126,13 +126,13 @@ def cmd_restore(args):
     """Restore from encrypted backup."""
     # Get input path
     if not args.input:
-        print("❌ No input file specified. Use --input <backup_file>")
+        print("ERROR: No input file specified. Use --input <backup_file>")
         sys.exit(1)
 
     input_path = Path(args.input)
 
     if not input_path.exists():
-        print(f"❌ Backup file not found: {input_path}")
+        print(f"ERROR: Backup file not found: {input_path}")
         sys.exit(1)
 
     # Get target directory
@@ -143,7 +143,7 @@ def cmd_restore(args):
 
     # Check if target exists
     if target_dir.exists() and not args.force:
-        print(f"⚠️  Target directory already exists: {target_dir}")
+        print(f"WARNING: Target directory already exists: {target_dir}")
         print()
         response = input("   Overwrite existing files? [y/N]: ")
         if response.lower() != 'y':
@@ -153,9 +153,9 @@ def cmd_restore(args):
     # Get passphrase
     if args.passphrase:
         passphrase = args.passphrase
-        print("⚠️  Warning: Passphrase provided via command line (insecure)")
+        print("WARNING: Passphrase provided via command line (insecure)")
     else:
-        passphrase = getpass.getpass("🔐 Enter backup passphrase: ")
+        passphrase = getpass.getpass("Enter backup passphrase: ")
 
     # Restore backup
     print()
@@ -175,7 +175,7 @@ def cmd_restore(args):
         if verification["valid"]:
             meta = verification.get("metadata", {})
             print()
-            print("📄 Backup Information:")
+            print("Backup Information:")
             print(f"   Device: {meta.get('device_name', 'unknown')}")
             print(f"   Created: {meta.get('timestamp', 'unknown')}")
             print(f"   Files: {meta.get('num_files', 'unknown')}")
@@ -191,34 +191,34 @@ def cmd_restore(args):
 
         print()
         print("=" * 60)
-        print("✅ Restoration Complete!")
+        print("Restoration Complete!")
         print("=" * 60)
-        print(f"📂 Restored to: {target_dir}")
-        print(f"📁 Files restored: {len(result['files_restored'])}")
+        print(f"Restored to: {target_dir}")
+        print(f"Files restored: {len(result['files_restored'])}")
         print()
 
         # List restored files
         print("Restored files:")
         for filename in result['files_restored']:
-            print(f"   ✅ {filename}")
+            print(f"   - {filename}")
 
         print()
-        print("⚠️  Important Notes:")
+        print("Important Notes:")
         print("   - Your knowledge, contacts, and identity have been restored")
         print("   - This device now has the SAME node_id as your old device")
         print("   - If both devices connect to Hub, conflicts will occur")
         print()
-        print("💡 Recommendation:")
+        print("Recommendation:")
         print("   Generate new node_id for this device to avoid conflicts:")
         print("   $ dpc init --force")
         print()
 
     except ValueError as e:
         print()
-        print(f"❌ Restoration failed: {e}")
+        print(f"ERROR: Restoration failed: {e}")
         if "Wrong passphrase" in str(e):
             print()
-            print("💡 Troubleshooting:")
+            print("Troubleshooting:")
             print("   1. Double-check your passphrase (case-sensitive)")
             print("   2. Try copying from password manager")
             print("   3. Verify backup file isn't corrupted")
@@ -226,20 +226,20 @@ def cmd_restore(args):
 
     except Exception as e:
         print()
-        print(f"❌ Restoration failed: {e}")
+        print(f"ERROR: Restoration failed: {e}")
         sys.exit(1)
 
 
 def cmd_verify(args):
     """Verify backup integrity without restoring."""
     if not args.input:
-        print("❌ No input file specified. Use --input <backup_file>")
+        print("ERROR: No input file specified. Use --input <backup_file>")
         sys.exit(1)
 
     input_path = Path(args.input)
 
     if not input_path.exists():
-        print(f"❌ Backup file not found: {input_path}")
+        print(f"ERROR: Backup file not found: {input_path}")
         sys.exit(1)
 
     print()
@@ -256,7 +256,7 @@ def cmd_verify(args):
 
         print()
         if verification["valid"]:
-            print("✅ Backup is VALID")
+            print("Backup is VALID")
             print()
             print("Backup Information:")
             print(f"   Version: {verification['version']}")
@@ -267,15 +267,15 @@ def cmd_verify(args):
             print(f"   Created: {meta.get('timestamp', 'unknown')}")
             print(f"   Files: {meta.get('num_files', 'unknown')}")
             print()
-            print("💡 This backup can be restored with the correct passphrase")
+            print("This backup can be restored with the correct passphrase")
         else:
-            print("❌ Backup is INVALID")
+            print("ERROR: Backup is INVALID")
             print(f"   Error: {verification.get('error', 'unknown')}")
             sys.exit(1)
 
     except Exception as e:
         print()
-        print(f"❌ Verification failed: {e}")
+        print(f"ERROR: Verification failed: {e}")
         sys.exit(1)
 
 

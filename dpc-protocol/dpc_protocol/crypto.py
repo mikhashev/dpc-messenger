@@ -1,11 +1,14 @@
 # dpc/dpc/crypto.py
 
 import hashlib
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
 
 from cryptography import x509
+
+logger = logging.getLogger(__name__)
 from cryptography.x509.oid import NameOID
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -25,8 +28,8 @@ def generate_node_id(public_key: rsa.RSAPublicKey) -> str:
     return f"dpc-node-{sha256_hash[:16]}"
 
 def generate_identity():
-    print("Generating new node identity...")
-    
+    logger.info("Generating new node identity")
+
     private_key = rsa.generate_private_key(
         public_exponent=65537,
         key_size=2048,
@@ -34,7 +37,7 @@ def generate_identity():
     public_key = private_key.public_key()
 
     node_id = generate_node_id(public_key)
-    print(f"  - Node ID: {node_id}")
+    logger.info("Node ID: %s", node_id)
 
     builder = x509.CertificateBuilder()
     builder = builder.subject_name(x509.Name([
@@ -63,15 +66,15 @@ def generate_identity():
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         ))
-    print(f"  - Private key saved to {KEY_FILE}")
+    logger.info("Private key saved to %s", KEY_FILE)
 
     with open(CERT_FILE, "wb") as f:
         f.write(certificate.public_bytes(serialization.Encoding.PEM))
-    print(f"  - Certificate saved to {CERT_FILE}")
-    
+    logger.info("Certificate saved to %s", CERT_FILE)
+
     with open(NODE_ID_FILE, "w") as f:
         f.write(node_id)
-    print(f"  - Node ID saved to {NODE_ID_FILE}")
+    logger.info("Node ID saved to %s", NODE_ID_FILE)
 
 def load_identity() -> Tuple[str, Path, Path]:
     if not all([DPC_HOME_DIR.exists(), KEY_FILE.exists(), CERT_FILE.exists(), NODE_ID_FILE.exists()]):

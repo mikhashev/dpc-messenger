@@ -1,8 +1,9 @@
-# dpc-client/core/dpc_client_core/llm_manager.py
+# dpc-client/core/dpc-client_core/llm_manager.py
 
 import os
 import json
 import asyncio
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
 
@@ -11,13 +12,15 @@ from openai import AsyncOpenAI
 from anthropic import AsyncAnthropic
 import ollama
 
+logger = logging.getLogger(__name__)
+
 # Token counting
 try:
     import tiktoken
     TIKTOKEN_AVAILABLE = True
 except ImportError:
     TIKTOKEN_AVAILABLE = False
-    print("Warning: tiktoken not available. Token counting will use estimation for all models.")
+    logger.warning("tiktoken not available - token counting will use estimation for all models")
 
 # --- Abstract Base Class for all Providers ---
 
@@ -239,7 +242,7 @@ class LLMManager:
 
         # Only migrate if TOML exists and JSON doesn't
         if toml_path.exists() and not self.config_path.exists():
-            print(f"Migrating {toml_path} to {self.config_path}...")
+            logger.info("Migrating %s to %s", toml_path, self.config_path)
             try:
                 # Import toml only if needed for migration
                 import toml
@@ -252,15 +255,15 @@ class LLMManager:
                 # Backup TOML file
                 backup_path = toml_path.with_suffix('.toml.backup')
                 toml_path.rename(backup_path)
-                print(f"Migration successful! Original file backed up as {backup_path}")
+                logger.info("Migration successful - original file backed up as %s", backup_path)
             except Exception as e:
-                print(f"Error migrating TOML to JSON: {e}")
+                logger.error("Error migrating TOML to JSON: %s", e, exc_info=True)
 
     def _ensure_config_exists(self):
         """Creates a default providers.json file if one doesn't exist."""
         if not self.config_path.exists():
-            print(f"Warning: Provider config file not found at {self.config_path}.")
-            print("Creating a default template with a local Ollama provider...")
+            logger.warning("Provider config file not found at %s", self.config_path)
+            logger.info("Creating a default template with a local Ollama provider")
 
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -279,14 +282,14 @@ class LLMManager:
 
             with open(self.config_path, 'w') as f:
                 json.dump(default_config, f, indent=2)
-            print(f"Default provider config created at {self.config_path}")
+            logger.info("Default provider config created at %s", self.config_path)
 
     def _load_providers_from_config(self):
         """Reads the config file and initializes all defined providers."""
         self._ensure_config_exists()
-        print(f"Loading AI providers from {self.config_path}...")
+        logger.info("Loading AI providers from %s", self.config_path)
         if not self.config_path.exists():
-            print(f"Warning: Provider config file not found at {self.config_path}. No providers loaded.")
+            logger.warning("Provider config file not found at %s - no providers loaded", self.config_path)
             return
 
         try:
@@ -300,25 +303,25 @@ class LLMManager:
                 provider_type = provider_config.get("type")
 
                 if not alias or not provider_type:
-                    print(f"Warning: Skipping invalid provider config: {provider_config}")
+                    logger.warning("Skipping invalid provider config: %s", provider_config)
                     continue
 
                 if provider_type in PROVIDER_MAP:
                     provider_class = PROVIDER_MAP[provider_type]
                     try:
                         self.providers[alias] = provider_class(alias, provider_config)
-                        print(f"  - Successfully loaded provider '{alias}' of type '{provider_type}'.")
+                        logger.info("Successfully loaded provider '%s' of type '%s'", alias, provider_type)
                     except (ValueError, KeyError) as e:
-                        print(f"  - Error loading provider '{alias}': {e}")
+                        logger.error("Error loading provider '%s': %s", alias, e)
                 else:
-                    print(f"Warning: Unknown provider type '{provider_type}' for alias '{alias}'.")
+                    logger.warning("Unknown provider type '%s' for alias '%s'", provider_type, alias)
 
             if self.default_provider and self.default_provider not in self.providers:
-                print(f"Warning: Default provider '{self.default_provider}' not found in loaded providers.")
+                logger.warning("Default provider '%s' not found in loaded providers", self.default_provider)
                 self.default_provider = None
 
         except Exception as e:
-            print(f"Error parsing provider config file: {e}")
+            logger.error("Error parsing provider config file: %s", e, exc_info=True)
 
     def save_config(self, config_dict: Dict[str, Any]):
         """
@@ -330,13 +333,13 @@ class LLMManager:
         try:
             with open(self.config_path, 'w') as f:
                 json.dump(config_dict, f, indent=2)
-            print(f"Provider configuration saved to {self.config_path}")
+            logger.info("Provider configuration saved to %s", self.config_path)
 
             # Reload providers
             self.providers.clear()
             self._load_providers_from_config()
         except Exception as e:
-            print(f"Error saving provider config: {e}")
+            logger.error("Error saving provider config: %s", e, exc_info=True)
             raise
 
     def get_active_model_name(self) -> str:
@@ -417,7 +420,7 @@ class LLMManager:
                     encoding = tiktoken.get_encoding("cl100k_base")
                     return len(encoding.encode(text))
             except Exception as e:
-                print(f"Warning: tiktoken failed for model '{model}': {e}. Using estimation.")
+                logger.warning("tiktoken failed for model '%s': %s - using estimation", model, e)
 
         # Fallback: Character-based estimation (4 chars ≈ 1 token)
         # This works reasonably well for most models
@@ -447,7 +450,8 @@ class LLMManager:
                     try:
                         return int(context_window_config)
                     except (ValueError, TypeError):
-                        print(f"Warning: Invalid context_window value in provider '{alias}' config: {context_window_config}")
+                        logger.warning("Invalid context_window value in provider '%s' config: %s",
+                                     alias, context_window_config)
 
         # Check direct match in hardcoded defaults
         if model in MODEL_CONTEXT_WINDOWS:
@@ -459,7 +463,8 @@ class LLMManager:
                 return window_size
 
         # Return default
-        print(f"Warning: Context window size unknown for model '{model}'. Using default: {MODEL_CONTEXT_WINDOWS['default']}")
+        logger.warning("Context window size unknown for model '%s' - using default: %d",
+                      model, MODEL_CONTEXT_WINDOWS['default'])
         return MODEL_CONTEXT_WINDOWS["default"]
 
     async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False):
@@ -482,7 +487,7 @@ class LLMManager:
             raise ValueError(f"Provider '{alias_to_use}' is not configured or failed to load.")
 
         provider = self.providers[alias_to_use]
-        print(f"Routing query to provider '{alias_to_use}' with model '{provider.model}'...")
+        logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
         response = await provider.generate_response(prompt)
 
         if return_metadata:
@@ -507,7 +512,7 @@ class LLMManager:
 
 # --- Self-testing block ---
 async def main_test():
-    print("--- Testing LLMManager ---")
+    logger.info("--- Testing LLMManager ---")
 
     # Create a dummy providers.json for testing
     dummy_config = {
@@ -530,26 +535,26 @@ async def main_test():
 
     try:
         manager = LLMManager(config_path=test_config_path)
-        
+
         if not manager.providers:
-            print("\nNo providers were loaded. Cannot run test query.")
+            logger.warning("No providers were loaded - cannot run test query")
             return
 
-        print("\nTesting query with default provider...")
+        logger.info("Testing query with default provider")
         response = await manager.query("What is the capital of France?")
-        print(f"  -> Response: {response}")
+        logger.info("Response: %s", response)
 
-        print("\nTesting query with specified provider...")
+        logger.info("Testing query with specified provider")
         response = await manager.query("What is the capital of Germany?", provider_alias="local_ollama")
-        print(f"  -> Response: {response}")
+        logger.info("Response: %s", response)
 
     except Exception as e:
-        print(f"\nAn error occurred during testing: {e}")
+        logger.error("An error occurred during testing: %s", e, exc_info=True)
     finally:
         # Clean up the dummy config
         if test_config_path.exists():
             test_config_path.unlink()
-        print("\n--- Test finished ---")
+        logger.info("--- Test finished ---")
 
 if __name__ == '__main__':
     # To run this test:

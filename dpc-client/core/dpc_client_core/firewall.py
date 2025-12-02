@@ -1,12 +1,15 @@
 # dpc-client/core/dpc_client_core/firewall.py
 
 import json
+import logging
 from pathlib import Path
 from typing import List, Dict, Tuple, Any
 import fnmatch
 from copy import deepcopy
 
 from dpc_protocol.pcm_core import PersonalContext  # For wildcard matching
+
+logger = logging.getLogger(__name__)
 
 
 class ContextFirewall:
@@ -25,12 +28,12 @@ class ContextFirewall:
 
         # Only migrate if old file exists and new file doesn't
         if old_path.exists() and not self.access_file_path.exists():
-            print(f"Migrating {old_path.name} to {self.access_file_path.name}...")
+            logger.info("Migrating %s to %s", old_path.name, self.access_file_path.name)
             try:
                 old_path.rename(self.access_file_path)
-                print(f"Migration successful!")
+                logger.info("Migration successful")
             except Exception as e:
-                print(f"Error migrating privacy rules file: {e}")
+                logger.error("Error migrating privacy rules file: %s", e, exc_info=True)
 
     def _load_rules(self):
         """Load and parse rules from JSON file."""
@@ -58,16 +61,14 @@ class ContextFirewall:
         self.compute_allowed_nodes: List[str] = compute.get('allow_nodes', [])
         self.compute_allowed_groups: List[str] = compute.get('allow_groups', [])
         self.compute_allowed_models: List[str] = compute.get('allowed_models', [])
-        print(f"[Firewall] Compute sharing settings updated: enabled={self.compute_enabled}, "
-              f"allowed_nodes={len(self.compute_allowed_nodes)}, "
-              f"allowed_groups={len(self.compute_allowed_groups)}, "
-              f"allowed_models={len(self.compute_allowed_models)}")
+        logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
+                     self.compute_enabled, len(self.compute_allowed_nodes),
+                     len(self.compute_allowed_groups), len(self.compute_allowed_models))
 
     def _ensure_file_exists(self):
         """Creates a default, secure privacy_rules.json file if one doesn't exist."""
         if not self.access_file_path.exists():
-            print(f"Warning: Access control file not found at {self.access_file_path}.")
-            print("Creating a default, secure template...")
+            logger.warning("Access control file not found at %s - creating a default, secure template", self.access_file_path)
 
             self.access_file_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -124,7 +125,7 @@ class ContextFirewall:
             }
 
             self.access_file_path.write_text(json.dumps(default_rules, indent=2))
-            print(f"Default access control file created at {self.access_file_path}")
+            logger.info("Default access control file created at %s", self.access_file_path)
 
     def _get_rule_for_resource(self, section_type: str, section_key: str, resource_path: str) -> str | None:
         """
@@ -602,9 +603,9 @@ class ContextFirewall:
                 return (False, error_msg)
 
             # Re-load the rules
-            print("[Firewall] Reloading firewall rules from disk...")
+            logger.info("Reloading firewall rules from disk")
             self._load_rules()
-            print("[Firewall] Firewall rules reloaded successfully")
+            logger.info("Firewall rules reloaded successfully")
 
             return (True, "Firewall rules reloaded successfully")
 

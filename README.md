@@ -352,6 +352,7 @@ docker-compose -f docker-compose.prod.yml up -d
 ### Configuration & Features
 - **[CONFIGURATION.md](./docs/CONFIGURATION.md)** - Complete configuration guide
 - **[OFFLINE_MODE.md](./docs/OFFLINE_MODE.md)** - Offline mode features & usage
+- **[LOGGING.md](./docs/LOGGING.md)** - Logging system configuration & troubleshooting
 - **Environment Variables** - All settings support env var overrides
 - **Config File** - `~/.dpc/config.ini` for persistent settings
 

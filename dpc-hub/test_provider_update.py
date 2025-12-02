@@ -38,13 +38,13 @@ async def test_provider_update():
         if existing_user:
             await db.delete(existing_user)
             await db.commit()
-            print(f"✓ Cleaned up existing test user")
+            print(f"OK: Cleaned up existing test user")
 
         # Step 1: Create user with Google
         print(f"\nStep 1: User registers with Google")
         print("-" * 40)
         user = await crud.create_user(db, email=test_email, provider="google")
-        print(f"✓ Created user: {user.email}")
+        print(f"OK: Created user: {user.email}")
         print(f"  Provider: {user.provider}")
         assert user.provider == "google", "Provider should be 'google'"
 
@@ -54,7 +54,7 @@ async def test_provider_update():
 
         # Fetch user again
         user = await crud.get_user_by_email(db, email=test_email)
-        print(f"✓ Fetched existing user: {user.email}")
+        print(f"OK: Fetched existing user: {user.email}")
         print(f"  Current provider: {user.provider}")
 
         # Update provider (simulating callback logic)
@@ -63,14 +63,14 @@ async def test_provider_update():
         await db.commit()
         await db.refresh(user)
 
-        print(f"✓ Updated provider: {old_provider} → {user.provider}")
+        print(f"OK: Updated provider: {old_provider} → {user.provider}")
         assert user.provider == "github", "Provider should be 'github'"
 
         # Step 3: Verify persistence
         print(f"\nStep 3: Verify provider persisted")
         print("-" * 40)
         user = await crud.get_user_by_email(db, email=test_email)
-        print(f"✓ Fetched user again: {user.email}")
+        print(f"OK: Fetched user again: {user.email}")
         print(f"  Provider: {user.provider}")
         assert user.provider == "github", "Provider should still be 'github'"
 
@@ -81,7 +81,7 @@ async def test_provider_update():
         user.provider = "google"
         await db.commit()
         await db.refresh(user)
-        print(f"✓ Updated provider: {old_provider} → {user.provider}")
+        print(f"OK: Updated provider: {old_provider} → {user.provider}")
         assert user.provider == "google", "Provider should be 'google'"
 
         # Cleanup
@@ -89,10 +89,10 @@ async def test_provider_update():
         print("-" * 40)
         await db.delete(user)
         await db.commit()
-        print(f"✓ Deleted test user")
+        print(f"OK: Deleted test user")
 
         print(f"\n{'='*60}")
-        print("✅ All tests passed!")
+        print("All tests passed!")
         print(f"{'='*60}\n")
 
     await engine.dispose()

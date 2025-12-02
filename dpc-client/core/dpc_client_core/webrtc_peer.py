@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Dict, Any, Callable, Optional
@@ -15,6 +16,8 @@ from aiortc import (
 )
 
 from .settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class WebRTCPeerConnection:
@@ -50,14 +53,11 @@ class WebRTCPeerConnection:
                         credential=turn_credential
                     )
                 )
-                print(f"[WebRTC] Using configured TURN servers ({len(turn_urls)} URLs) with username: {turn_username[:8]}...")
+                logger.info("Using configured TURN servers (%d URLs) with username: %s...", len(turn_urls), turn_username[:8])
             else:
-                print("[WebRTC] Warning: TURN credentials provided but no TURN server URLs in config.ini [turn] servers")
+                logger.warning("TURN credentials provided but no TURN server URLs in config.ini [turn] servers")
         else:
-            print("[WebRTC] Warning: No TURN credentials configured")
-            print("         Set DPC_TURN_USERNAME and DPC_TURN_CREDENTIAL environment variables")
-            print("         or add [turn] username/credential to ~/.dpc/config.ini")
-            print("         WebRTC connections may fail without TURN relay!")
+            logger.warning("No TURN credentials configured - set DPC_TURN_USERNAME and DPC_TURN_CREDENTIAL environment variables or add [turn] username/credential to ~/.dpc/config.ini - WebRTC connections may fail without TURN relay")
 
             # Fallback: Try free public TURN servers from config (if configured)
             fallback_urls = settings.get_turn_fallback_servers()
@@ -72,9 +72,9 @@ class WebRTCPeerConnection:
                         credential=fallback_credential
                     )
                 )
-                print(f"[WebRTC] Using fallback public TURN servers ({len(fallback_urls)} URLs) - may be unreliable")
+                logger.info("Using fallback public TURN servers (%d URLs) - may be unreliable", len(fallback_urls))
             else:
-                print("[WebRTC] No fallback TURN servers configured in config.ini")
+                logger.warning("No fallback TURN servers configured in config.ini")
 
         configuration = RTCConfiguration(
             iceServers=ice_servers,
@@ -104,7 +104,7 @@ class WebRTCPeerConnection:
         @self.pc.on("datachannel")
         def on_datachannel(channel: RTCDataChannel):
             """Handle incoming data channel (for answerer)."""
-            print(f"Data channel '{channel.label}' received from peer {self.node_id}")
+            logger.info("Data channel '%s' received from peer %s", channel.label, self.node_id)
             self.data_channel = channel
             self._setup_channel_handlers()
 
@@ -112,7 +112,7 @@ class WebRTCPeerConnection:
         async def on_icegatheringstatechange():
             """Track ICE gathering state."""
             state = self.pc.iceGatheringState
-            print(f"[{self.node_id}] ICE gathering state: {state}")
+            logger.debug("[%s] ICE gathering state: %s", self.node_id, state)
             if state == "complete":
                 self._ice_gathering_complete.set()
                 # Log candidate types found in SDP
@@ -121,19 +121,19 @@ class WebRTCPeerConnection:
                     host_count = sdp.count("typ host")
                     srflx_count = sdp.count("typ srflx")
                     relay_count = sdp.count("typ relay")
-                    print(f"[{self.node_id}] ICE gathering complete - "
-                          f"host:{host_count} srflx:{srflx_count} relay:{relay_count}")
+                    logger.info("[%s] ICE gathering complete - host:%d srflx:%d relay:%d",
+                               self.node_id, host_count, srflx_count, relay_count)
                 else:
-                    print(f"[{self.node_id}] ICE gathering complete - SDP includes all candidates")
+                    logger.info("[%s] ICE gathering complete - SDP includes all candidates", self.node_id)
         
         @self.pc.on("iceconnectionstatechange")
         async def on_iceconnectionstatechange():
             """Track ICE connection state."""
             state = self.pc.iceConnectionState
-            print(f"[{self.node_id}] ICE connection state: {state}")
+            logger.debug("[%s] ICE connection state: %s", self.node_id, state)
 
             if state == "completed":
-                print(f"[{self.node_id}] ICE connection established!")
+                logger.info("[%s] ICE connection established", self.node_id)
                 # Try to log selected candidate pair for debugging
                 try:
                     # Access transport to get selected candidate info
@@ -146,31 +146,27 @@ class WebRTCPeerConnection:
                                 remote_type = selected[1].type if selected[1] else "unknown"
                                 local_addr = f"{selected[0].host}:{selected[0].port}" if selected[0] else "unknown"
                                 remote_addr = f"{selected[1].host}:{selected[1].port}" if selected[1] else "unknown"
-                                print(f"[{self.node_id}] ✓ Selected ICE candidate pair:")
-                                print(f"   Local:  {local_type} @ {local_addr}")
-                                print(f"   Remote: {remote_type} @ {remote_addr}")
+                                logger.info("[%s] Selected ICE candidate pair - Local: %s @ %s, Remote: %s @ %s",
+                                           self.node_id, local_type, local_addr, remote_type, remote_addr)
                 except Exception as e:
                     # Silently ignore if internal structure changed
                     pass
             elif state == "failed":
-                print(f"[{self.node_id}] ICE connection FAILED - NAT traversal unsuccessful")
-                print(f"[{self.node_id}] Possible causes:")
-                print(f"  - Symmetric NAT requiring TURN relay")
-                print(f"  - Firewall blocking UDP traffic")
-                print(f"  - TURN server unavailable or misconfigured")
+                logger.error("[%s] ICE connection FAILED - NAT traversal unsuccessful - Possible causes: Symmetric NAT requiring TURN relay, Firewall blocking UDP traffic, TURN server unavailable or misconfigured",
+                            self.node_id)
             elif state == "disconnected":
-                print(f"[{self.node_id}] ICE connection DISCONNECTED - network change or timeout")
-                print(f"[{self.node_id}] Connection may recover automatically...")
+                logger.warning("[%s] ICE connection DISCONNECTED - network change or timeout - Connection may recover automatically",
+                              self.node_id)
             elif state == "closed":
-                print(f"[{self.node_id}] ICE connection CLOSED")
+                logger.info("[%s] ICE connection CLOSED", self.node_id)
         
         @self.pc.on("connectionstatechange")
         async def on_connectionstatechange():
             state = self.pc.connectionState
-            print(f"[{self.node_id}] WebRTC connection state: {state}")
+            logger.debug("[%s] WebRTC connection state: %s", self.node_id, state)
 
             if state == "connected":
-                print(f"✅ WebRTC connection established with {self.node_id}")
+                logger.info("WebRTC connection established with %s", self.node_id)
                 # Don't set ready here - wait for data channel to be open
             elif state in ["failed", "closed"]:
                 # Stop keepalive on connection failure/close
@@ -178,11 +174,11 @@ class WebRTCPeerConnection:
 
                 # Only notify if this wasn't an intentional close
                 if not self._closing:
-                    print(f"❌ WebRTC connection {state} with {self.node_id}")
+                    logger.error("WebRTC connection %s with %s", state, self.node_id)
                     if self.on_close:
                         asyncio.create_task(self.on_close(self.node_id))
                 else:
-                    print(f"[{self.node_id}] WebRTC connection closed (intentional)")
+                    logger.info("[%s] WebRTC connection closed (intentional)", self.node_id)
             
     def _setup_channel_handlers(self):
         """Set up data channel event handlers."""
@@ -191,7 +187,7 @@ class WebRTCPeerConnection:
 
         @self.data_channel.on("open")
         def on_open():
-            print(f"✅ Data channel opened with {self.node_id}")
+            logger.info("Data channel opened with %s", self.node_id)
             self.ready.set()
             # Start keepalive task when data channel opens
             self._start_keepalive()
@@ -210,16 +206,14 @@ class WebRTCPeerConnection:
                             "timestamp": data.get("timestamp")
                         }
                         self.data_channel.send(json.dumps(pong_message))
-                        # Debug: Log pong response (remove after testing)
-                        print(f"[{self.node_id}] ← Received ping, sent pong")
+                        logger.debug("[%s] Received ping, sent pong", self.node_id)
                     except Exception as e:
-                        print(f"[{self.node_id}] ❌ Failed to send pong: {e}")
+                        logger.error("[%s] Failed to send pong: %s", self.node_id, e)
                     return
 
                 # Handle pong responses - just log receipt
                 if data.get("type") == "pong":
-                    # Debug: Log pong receipt (remove after testing)
-                    print(f"[{self.node_id}] ✓ Received pong response")
+                    logger.debug("[%s] Received pong response", self.node_id)
                     return
 
                 # Pass all other messages to application
@@ -227,12 +221,12 @@ class WebRTCPeerConnection:
                     asyncio.create_task(self.on_message(data))
 
             except json.JSONDecodeError as e:
-                print(f"Failed to decode message from {self.node_id}: {e}")
+                logger.error("Failed to decode message from %s: %s", self.node_id, e)
 
         @self.data_channel.on("error")
         def on_error(error):
             """Handle data channel errors."""
-            print(f"❌ Data channel error with {self.node_id}: {error}")
+            logger.error("Data channel error with %s: %s", self.node_id, error)
 
         @self.data_channel.on("close")
         def on_close():
@@ -240,40 +234,40 @@ class WebRTCPeerConnection:
             conn_state = self.pc.connectionState
             dc_state = self.data_channel.readyState if self.data_channel else None
             if not self._closing:
-                print(f"⚠️  Data channel closed with {self.node_id} (unexpected)")
-                print(f"   ICE state: {ice_state}, Connection state: {conn_state}, DC state: {dc_state}")
+                logger.warning("Data channel closed with %s (unexpected) - ICE state: %s, Connection state: %s, DC state: %s",
+                              self.node_id, ice_state, conn_state, dc_state)
             else:
-                print(f"Data channel closed with {self.node_id} (intentional)")
+                logger.info("Data channel closed with %s (intentional)", self.node_id)
             # Stop keepalive task when data channel closes
             self._stop_keepalive()
 
         # Check if data channel is already open (happens on answerer side)
         if self.data_channel.readyState == "open":
-            print(f"✅ Data channel already open with {self.node_id}")
+            logger.info("Data channel already open with %s", self.node_id)
             self.ready.set()
             # Start keepalive task for already-open channel
             self._start_keepalive()
     
     async def create_offer(self) -> Dict[str, Any]:
         """Create WebRTC offer (initiator side)."""
-        print(f"[{self.node_id}] Creating offer...")
+        logger.info("[%s] Creating offer", self.node_id)
 
         # Create data channel (initiator creates it)
         # Use default reliable, ordered channel (no maxRetransmits/maxPacketLifeTime)
         # This ensures SCTP uses fully reliable mode
         self.data_channel = self.pc.createDataChannel("dpc-data", ordered=True)
         self._setup_channel_handlers()
-        
+
         # Create offer
         offer = await self.pc.createOffer()
         await self.pc.setLocalDescription(offer)
-        
-        print(f"[{self.node_id}] Waiting for ICE gathering to complete...")
+
+        logger.debug("[%s] Waiting for ICE gathering to complete", self.node_id)
         # Wait for ICE gathering to complete (candidates are added to SDP automatically)
         try:
             await asyncio.wait_for(self._ice_gathering_complete.wait(), timeout=10.0)
         except asyncio.TimeoutError:
-            print(f"[{self.node_id}] Warning: ICE gathering timeout after 10s, sending SDP anyway")
+            logger.warning("[%s] ICE gathering timeout after 10s, sending SDP anyway", self.node_id)
 
         # Log ICE candidates after gathering completes
         if self.pc.localDescription:
@@ -281,10 +275,11 @@ class WebRTCPeerConnection:
             host_count = sdp.count("typ host")
             srflx_count = sdp.count("typ srflx")
             relay_count = sdp.count("typ relay")
-            print(f"[{self.node_id}] Offer SDP contains - host:{host_count} srflx:{srflx_count} relay:{relay_count}")
+            logger.info("[%s] Offer SDP contains - host:%d srflx:%d relay:%d",
+                       self.node_id, host_count, srflx_count, relay_count)
 
-        print(f"[{self.node_id}] Offer created with {len(self.pc.localDescription.sdp)} bytes SDP")
-        
+        logger.info("[%s] Offer created with %d bytes SDP", self.node_id, len(self.pc.localDescription.sdp))
+
         return {
             "type": "offer",
             "sdp": self.pc.localDescription.sdp
@@ -292,28 +287,28 @@ class WebRTCPeerConnection:
     
     async def handle_answer(self, answer: Dict[str, Any]):
         """Handle WebRTC answer (initiator side)."""
-        print(f"[{self.node_id}] Processing answer...")
+        logger.info("[%s] Processing answer", self.node_id)
         rdesc = RTCSessionDescription(sdp=answer["sdp"], type=answer["type"])
         await self.pc.setRemoteDescription(rdesc)
-        print(f"[{self.node_id}] Remote description set, ICE checking will begin")
-    
+        logger.info("[%s] Remote description set, ICE checking will begin", self.node_id)
+
     async def handle_offer(self, offer: Dict[str, Any]) -> Dict[str, Any]:
         """Handle WebRTC offer and create answer (answerer side)."""
-        print(f"[{self.node_id}] Processing offer...")
+        logger.info("[%s] Processing offer", self.node_id)
         rdesc = RTCSessionDescription(sdp=offer["sdp"], type=offer["type"])
         await self.pc.setRemoteDescription(rdesc)
-        
+
         # Create answer
-        print(f"[{self.node_id}] Creating answer...")
+        logger.info("[%s] Creating answer", self.node_id)
         answer = await self.pc.createAnswer()
         await self.pc.setLocalDescription(answer)
-        
-        print(f"[{self.node_id}] Waiting for ICE gathering to complete...")
+
+        logger.debug("[%s] Waiting for ICE gathering to complete", self.node_id)
         # Wait for ICE gathering
         try:
             await asyncio.wait_for(self._ice_gathering_complete.wait(), timeout=10.0)
         except asyncio.TimeoutError:
-            print(f"[{self.node_id}] Warning: ICE gathering timeout after 10s, sending SDP anyway")
+            logger.warning("[%s] ICE gathering timeout after 10s, sending SDP anyway", self.node_id)
 
         # Log ICE candidates after gathering completes
         if self.pc.localDescription:
@@ -321,10 +316,11 @@ class WebRTCPeerConnection:
             host_count = sdp.count("typ host")
             srflx_count = sdp.count("typ srflx")
             relay_count = sdp.count("typ relay")
-            print(f"[{self.node_id}] Answer SDP contains - host:{host_count} srflx:{srflx_count} relay:{relay_count}")
+            logger.info("[%s] Answer SDP contains - host:%d srflx:%d relay:%d",
+                       self.node_id, host_count, srflx_count, relay_count)
 
-        print(f"[{self.node_id}] Answer created with {len(self.pc.localDescription.sdp)} bytes SDP")
-        
+        logger.info("[%s] Answer created with %d bytes SDP", self.node_id, len(self.pc.localDescription.sdp))
+
         return {
             "type": "answer",
             "sdp": self.pc.localDescription.sdp
@@ -346,9 +342,9 @@ class WebRTCPeerConnection:
                 sdpMLineIndex=candidate_dict.get("sdpMLineIndex")
             )
             await self.pc.addIceCandidate(candidate)
-            print(f"[{self.node_id}] Added external ICE candidate")
+            logger.debug("[%s] Added external ICE candidate", self.node_id)
         except Exception as e:
-            print(f"[{self.node_id}] Failed to add ICE candidate: {e}")
+            logger.warning("[%s] Failed to add ICE candidate: %s", self.node_id, e)
     
     async def send(self, message: Dict[str, Any]):
         """Send a message over the data channel."""
@@ -361,36 +357,135 @@ class WebRTCPeerConnection:
         json_str = json.dumps(message)
         self.data_channel.send(json_str)
     
+    def _diagnose_connection_failure(self) -> str:
+        """
+        Diagnose WebRTC connection failure by analyzing ICE candidates and connection state.
+
+        Returns:
+            Human-readable diagnostic message with actionable advice
+        """
+        ice_state = self.pc.iceConnectionState
+        conn_state = self.pc.connectionState
+        dc_state = self.data_channel.readyState if self.data_channel else None
+
+        # Parse SDP to count ICE candidate types
+        host_count = 0
+        srflx_count = 0
+        relay_count = 0
+
+        if self.pc.localDescription:
+            sdp = self.pc.localDescription.sdp
+            host_count = sdp.count("typ host")
+            srflx_count = sdp.count("typ srflx")
+            relay_count = sdp.count("typ relay")
+
+        # Build diagnostic message based on missing candidates
+        diagnosis_parts = []
+
+        # Check STUN (server reflexive candidates)
+        if srflx_count == 0:
+            diagnosis_parts.append(
+                "❌ STUN failed - No server reflexive (srflx) candidates found. "
+                "This indicates STUN servers are unreachable or DNS resolution failed. "
+                "Check internet connectivity and STUN server configuration."
+            )
+        else:
+            diagnosis_parts.append(f"✓ STUN working - {srflx_count} server reflexive candidate(s) found")
+
+        # Check TURN (relay candidates)
+        if relay_count == 0:
+            diagnosis_parts.append(
+                "❌ TURN not available - No relay candidates found. "
+                "TURN relay is required for symmetric NAT traversal. "
+                "Check TURN credentials in config.ini or environment variables."
+            )
+        else:
+            diagnosis_parts.append(f"✓ TURN working - {relay_count} relay candidate(s) found")
+
+        # Analyze ICE connection state
+        if ice_state == "checking":
+            diagnosis_parts.append(
+                "⚠️  ICE still checking - NAT traversal in progress but stuck. "
+                "Possible causes: Firewall blocking UDP ports, symmetric NAT without TURN relay, "
+                "or peer behind restrictive NAT."
+            )
+        elif ice_state == "failed":
+            diagnosis_parts.append(
+                "❌ ICE connection FAILED - NAT traversal unsuccessful. "
+                "All candidate pairs failed connectivity checks. "
+                "If TURN is available, this may indicate firewall blocking TURN relay traffic."
+            )
+        elif ice_state == "disconnected":
+            diagnosis_parts.append(
+                "⚠️  ICE disconnected - Connection was established but lost. "
+                "Network change or timeout occurred."
+            )
+
+        # Check data channel state
+        if dc_state != "open":
+            diagnosis_parts.append(
+                f"❌ Data channel not open - State: {dc_state or 'None'}. "
+                f"Even if ICE connects, SCTP data channel must open for messaging."
+            )
+
+        # Provide prioritized recommendations
+        recommendations = []
+        if relay_count == 0:
+            recommendations.append("1. Configure TURN credentials (highest priority for symmetric NAT)")
+        if srflx_count == 0:
+            recommendations.append("2. Check STUN server connectivity (verify internet connection)")
+        if ice_state == "checking" and relay_count > 0:
+            recommendations.append("3. Check firewall/router UDP port settings (TURN ports may be blocked)")
+        if not recommendations:
+            recommendations.append("1. Try testing on same local network first")
+            recommendations.append("2. Check peer's firewall/NAT configuration")
+
+        # Combine all diagnostic info
+        full_diagnosis = "\n".join(diagnosis_parts)
+        if recommendations:
+            full_diagnosis += f"\n\nRecommended actions:\n" + "\n".join(recommendations)
+
+        return full_diagnosis
+
     async def wait_ready(self, timeout: float = 30.0):
         """Wait for connection and data channel to be ready."""
         try:
             await asyncio.wait_for(self.ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            # Provide more helpful error message
+            # Get detailed diagnosis
+            diagnosis = self._diagnose_connection_failure()
+
+            # Get basic state info for summary
             ice_state = self.pc.iceConnectionState
             conn_state = self.pc.connectionState
             dc_state = self.data_channel.readyState if self.data_channel else None
+
+            # Count candidates for summary
+            host_count = srflx_count = relay_count = 0
+            if self.pc.localDescription:
+                sdp = self.pc.localDescription.sdp
+                host_count = sdp.count("typ host")
+                srflx_count = sdp.count("typ srflx")
+                relay_count = sdp.count("typ relay")
+
             raise ConnectionError(
-                f"WebRTC connection timeout with {self.node_id} after {timeout}s. "
-                f"ICE state: {ice_state}, Connection state: {conn_state}, "
-                f"Data channel state: {dc_state}. "
-                f"This usually means NAT traversal failed or data channel didn't open. Try: "
-                f"1) Testing on same local network, "
-                f"2) Checking firewall/UDP settings, "
-                f"3) Verifying TURN server is accessible"
+                f"WebRTC connection timeout with {self.node_id} after {timeout}s.\n"
+                f"ICE state: {ice_state}, Connection state: {conn_state}, Data channel: {dc_state}\n"
+                f"ICE candidates: host={host_count}, srflx={srflx_count}, relay={relay_count}\n\n"
+                f"Diagnosis:\n{diagnosis}"
             )
 
     def _start_keepalive(self):
         """Start the keepalive task to maintain WebRTC connection."""
         if self._keepalive_task is None or self._keepalive_task.done():
             self._keepalive_task = asyncio.create_task(self._keepalive_loop())
-            print(f"[{self.node_id}] Keepalive task started (interval: {self._keepalive_interval}s)")
+            logger.debug("[%s] Keepalive task started (interval: %ss)", self.node_id, self._keepalive_interval)
 
     def _stop_keepalive(self):
         """Stop the keepalive task."""
         if self._keepalive_task and not self._keepalive_task.done():
             self._keepalive_task.cancel()
-            print(f"[{self.node_id}] Keepalive task stopped")
+            logger.debug("[%s] Keepalive task stopped", self.node_id)
 
     async def _keepalive_loop(self):
         """Background task that sends periodic keepalive pings over data channel."""
@@ -401,7 +496,7 @@ class WebRTCPeerConnection:
 
                 # Check if data channel is still open
                 if not self.data_channel or self.data_channel.readyState != "open":
-                    print(f"[{self.node_id}] Data channel not open, stopping keepalive")
+                    logger.debug("[%s] Data channel not open, stopping keepalive", self.node_id)
                     break
 
                 try:
@@ -413,16 +508,16 @@ class WebRTCPeerConnection:
                     self.data_channel.send(json.dumps(ping_message))
                     # Only log every 5th ping to reduce noise
                     if ping_count % 5 == 0:
-                        print(f"[{self.node_id}] Keepalive ping #{ping_count} sent")
+                        logger.debug("[%s] Keepalive ping #%d sent", self.node_id, ping_count)
 
                 except Exception as e:
-                    print(f"[{self.node_id}] Error sending keepalive ping #{ping_count}: {e}")
+                    logger.error("[%s] Error sending keepalive ping #%d: %s", self.node_id, ping_count, e)
                     break
 
         except asyncio.CancelledError:
-            print(f"[{self.node_id}] Keepalive cancelled (sent {ping_count} pings)")
+            logger.debug("[%s] Keepalive cancelled (sent %d pings)", self.node_id, ping_count)
         except Exception as e:
-            print(f"[{self.node_id}] Keepalive loop error: {e}")
+            logger.error("[%s] Keepalive loop error: %s", self.node_id, e, exc_info=True)
 
     def get_external_ip(self) -> str | None:
         """
@@ -447,7 +542,7 @@ class WebRTCPeerConnection:
                 # Return the first external IP found
                 return matches[0]
         except Exception as e:
-            print(f"[{self.node_id}] Error extracting external IP from SDP: {e}")
+            logger.warning("[%s] Error extracting external IP from SDP: %s", self.node_id, e)
 
         return None
 

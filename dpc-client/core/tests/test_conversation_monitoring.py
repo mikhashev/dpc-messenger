@@ -96,8 +96,8 @@ class TestAutoDetectionToggle:
 
     @pytest.mark.asyncio
     async def test_toggle_default_enabled(self, core_service):
-        """Auto-detection should be enabled by default"""
-        assert core_service.auto_knowledge_detection_enabled is True
+        """Auto-detection should be disabled by default (matches UI default)"""
+        assert core_service.auto_knowledge_detection_enabled is False
 
     @pytest.mark.asyncio
     async def test_toggle_disable(self, core_service):
@@ -156,22 +156,26 @@ class TestP2PMessageMonitoring:
 
     @pytest.mark.asyncio
     async def test_monitoring_respects_toggle(self, core_service):
-        """When auto-detection disabled, messages should not be monitored"""
+        """When auto-detection disabled, messages are buffered but auto-proposals not generated"""
         core_service.auto_knowledge_detection_enabled = False
 
-        with patch.object(core_service, '_get_or_create_conversation_monitor') as mock_get_monitor:
+        # Mock the consensus manager to track if proposals are broadcasted
+        with patch.object(core_service.consensus_manager, 'propose_commit') as mock_propose:
             message = {
                 "command": "SEND_TEXT",
                 "payload": {
                     "message_id": "msg123",
-                    "text": "This message should not be monitored"
+                    "text": "This message should be buffered but not auto-analyzed"
                 }
             }
 
             await core_service.on_p2p_message_received("peer123", message)
 
-            # Monitor should not be created when auto-detection is off
-            mock_get_monitor.assert_not_called()
+            # Monitor should be created (for manual extraction later)
+            assert "peer123" in core_service.conversation_monitors
+
+            # But automatic consensus proposals should NOT be created
+            mock_propose.assert_not_called()
 
 
 class TestLocalAIMonitoring:

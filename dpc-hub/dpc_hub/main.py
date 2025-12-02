@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
     Handles startup and shutdown tasks.
     """
     # Startup
-    logger.info("🚀 Starting D-PC Federation Hub")
+    logger.info("Starting D-PC Federation Hub")
     logger.info(f"   Version: {settings.APP_VERSION}")
     logger.info(f"   Debug: {settings.DEBUG}")
     
@@ -69,7 +69,7 @@ async def lifespan(app: FastAPI):
     yield
     
     # Shutdown
-    logger.info("🛑 Shutting down D-PC Federation Hub")
+    logger.info("Shutting down D-PC Federation Hub")
     
     # Stop token blacklist
     await stop_blacklist()
@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
     await manager.close_all()
     logger.info("   WebSocket connections closed")
     
-    logger.info("✅ Shutdown complete")
+    logger.info("Shutdown complete")
 
 
 # Create FastAPI application
@@ -92,12 +92,12 @@ app = FastAPI(
     The central discovery and signaling server for the D-PC network.
     
     ## Features
-    - 🔐 OAuth authentication (Google, GitHub)
-    - 👤 User profiles with expertise search
-    - 🔍 Discovery API for finding peers
-    - 📡 WebRTC signaling via WebSocket
-    - 🛡️ Cryptographic identity verification
-    - 🚀 Rate limiting and security features
+    - OAuth authentication (Google, GitHub)
+    - User profiles with expertise search
+    - Discovery API for finding peers
+    - WebRTC signaling via WebSocket
+    - Cryptographic identity verification
+    - Rate limiting and security features
     
     ## Authentication
     All endpoints (except /auth/*) require Bearer token authentication.

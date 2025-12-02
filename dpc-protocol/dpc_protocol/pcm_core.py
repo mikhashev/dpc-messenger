@@ -1,11 +1,14 @@
 # dpc-protocol\dpc_protocol\pcm_core.py
 
 import json
+import logging
 from pathlib import Path
 from .crypto import DPC_HOME_DIR
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 # --- 1. Data Structure Definitions (Data Structures) ---
 # We use dataclasses for strict typing and convenience.
@@ -322,12 +325,12 @@ class PCMCore:
         Checks if the context file exists. If not, creates a default template.
         """
         if not self.file_path.exists():
-            print(f"Warning: Context file not found at {self.file_path}.")
-            print("Creating a default template...")
-            
+            logger.warning("Context file not found at %s", self.file_path)
+            logger.info("Creating a default template")
+
             # Create parent directory if it doesn't exist
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             template_profile = Profile(
                 name="New User",
                 description="My personal context for D-PC.",
@@ -335,7 +338,7 @@ class PCMCore:
             )
             template_context = PersonalContext(profile=template_profile)
             self.save_context(template_context)
-            print(f"Template context file created at {self.file_path}")
+            logger.info("Template context file created at %s", self.file_path)
 
     def load_context(self) -> PersonalContext:
         """
@@ -360,7 +363,7 @@ class PCMCore:
 
     def create_template(self, overwrite: bool = False):
         if self.file_path.exists() and not overwrite:
-            print(f"File {self.file_path} already exists. Use --overwrite to replace it.")
+            logger.warning("File %s already exists. Use --overwrite to replace it", self.file_path)
             return
 
         template_profile = Profile(
@@ -369,9 +372,9 @@ class PCMCore:
             core_values=["Learning", "Curiosity"]
         )
         template_context = PersonalContext(profile=template_profile)
-        
+
         self.save_context(template_context)
-        print(f"Template context file created at {self.file_path}")
+        logger.info("Template context file created at %s", self.file_path)
 
 
 # --- 3. Instructions Management (separate from personal.json) ---
@@ -393,7 +396,7 @@ def load_instructions(file_path: Path | None = None) -> InstructionBlock:
 
     # If instructions.json doesn't exist, return default
     if not file_path.exists():
-        print(f"Instructions file not found at {file_path}. Using default instructions.")
+        logger.info("Instructions file not found at %s. Using default instructions", file_path)
         return InstructionBlock()
 
     try:
@@ -413,8 +416,8 @@ def load_instructions(file_path: Path | None = None) -> InstructionBlock:
             dissent_encouraged=data.get('dissent_encouraged', True)
         )
     except Exception as e:
-        print(f"Error loading instructions from {file_path}: {e}")
-        print("Using default instructions.")
+        logger.error("Error loading instructions from %s: %s", file_path, e, exc_info=True)
+        logger.info("Using default instructions")
         return InstructionBlock()
 
 
@@ -440,7 +443,7 @@ def save_instructions(instructions: InstructionBlock, file_path: Path | None = N
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
 
-    print(f"Instructions saved to {file_path}")
+    logger.info("Instructions saved to %s", file_path)
 
 
 def migrate_instructions_from_personal_context(
@@ -470,7 +473,7 @@ def migrate_instructions_from_personal_context(
         instructions_json_path = Path(instructions_json_path)
 
     if not personal_json_path.exists():
-        print("No personal.json found, skipping migration")
+        logger.info("No personal.json found, skipping migration")
         return False
 
     try:
@@ -481,11 +484,11 @@ def migrate_instructions_from_personal_context(
 
         # CASE 1: instructions.json exists
         if instructions_json_path.exists():
-            print(f"Instructions file exists at {instructions_json_path}")
+            logger.info("Instructions file exists at %s", instructions_json_path)
 
             # Check if personal.json still has instruction field
             if 'instruction' in personal_data:
-                print("  → Cleaning up legacy instruction field")
+                logger.info("Cleaning up legacy instruction field")
 
                 # Remove instruction field
                 del personal_data['instruction']
@@ -502,19 +505,19 @@ def migrate_instructions_from_personal_context(
                     "last_updated": datetime.utcnow().isoformat()
                 }
 
-                print("  ✓ Removed instruction field")
-                print("  ✓ Added external_files reference")
+                logger.info("Removed instruction field")
+                logger.info("Added external_files reference")
             else:
-                print("  ✓ Already clean")
+                logger.info("Already clean")
                 return False
 
         # CASE 2: instructions.json doesn't exist
         else:
             if 'instruction' not in personal_data:
-                print("No instruction field found")
+                logger.info("No instruction field found")
                 return False
 
-            print("Migrating instructions to separate file...")
+            logger.info("Migrating instructions to separate file")
 
             # Extract instruction
             instruction_data = personal_data['instruction']
@@ -534,7 +537,7 @@ def migrate_instructions_from_personal_context(
 
             # Save to instructions.json
             save_instructions(instructions, instructions_json_path)
-            print(f"  ✓ Created {instructions_json_path}")
+            logger.info("Created %s", instructions_json_path)
 
             # Remove from personal.json
             del personal_data['instruction']
@@ -557,53 +560,53 @@ def migrate_instructions_from_personal_context(
             import shutil
             backup_path = personal_json_path.with_suffix('.json.backup')
             shutil.copy(personal_json_path, backup_path)
-            print(f"  ✓ Backed up to {backup_path}")
+            logger.info("Backed up to %s", backup_path)
 
             # Save cleaned version
             with open(personal_json_path, 'w', encoding='utf-8') as f:
                 json.dump(personal_data, f, indent=2, ensure_ascii=False)
 
-            print(f"  ✓ Updated {personal_json_path}")
+            logger.info("Updated %s", personal_json_path)
 
         return changes_made
 
     except Exception as e:
-        print(f"Error during migration: {e}")
+        logger.error("Error during migration: %s", e, exc_info=True)
         return False
 
 
 # --- 4. Usage example (for self-testing the module) ---
 
 if __name__ == '__main__':
-    print("--- Testing PCMCore ---")
-    
+    logger.info("Testing PCMCore")
+
     test_file = "test_context.json"
     core = PCMCore(test_file)
 
-    print("\n1. Creating template file...")
+    logger.info("1. Creating template file")
     core.create_template(overwrite=True)
 
-    print("\n2. Loading context from file...")
+    logger.info("2. Loading context from file")
     try:
         my_context = core.load_context()
-        print(f"   - Successfully loaded context for user: {my_context.profile.name}")
-        print(f"   - Knowledge topics: {list(my_context.knowledge.keys())}")
+        logger.info("Successfully loaded context for user: %s", my_context.profile.name)
+        logger.info("Knowledge topics: %s", list(my_context.knowledge.keys()))
     except Exception as e:
-        print(f"   - Error loading context: {e}")
+        logger.error("Error loading context: %s", e, exc_info=True)
 
-    print("\n3. Modifying and saving context...")
+    logger.info("3. Modifying and saving context")
     if 'my_context' in locals():
         new_topic = Topic(
             summary="I'm a beginner in Python programming.",
             key_books=[Book(title="Automate the Boring Stuff with Python", rating=5)]
         )
         my_context.knowledge["python_programming"] = new_topic
-        
+
         core.save_context(my_context)
-        print("   - Context updated and saved.")
+        logger.info("Context updated and saved")
 
         reloaded_context = core.load_context()
-        print(f"   - Reloaded context. New topics: {list(reloaded_context.knowledge.keys())}")
-    
+        logger.info("Reloaded context. New topics: %s", list(reloaded_context.knowledge.keys()))
+
     Path(test_file).unlink()
-    print(f"\n--- Test finished, {test_file} cleaned up. ---")
+    logger.info("Test finished, %s cleaned up", test_file)
