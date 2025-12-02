@@ -161,10 +161,10 @@ class P2PManager:
                         self._handle_direct_connection, "::", port, ssl=ssl_context
                     )
 
-                    self._server_task = asyncio.create_task(asyncio.gather(
+                    self._server_task = asyncio.gather(
                         server_v4.serve_forever(),
                         server_v6.serve_forever()
-                    ))
+                    )
                     logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d (dual-stack) for node %s",
                               port, port, self.node_id)
                 except Exception as e:

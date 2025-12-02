@@ -7,9 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.9.1] - 2025-12-02
+
+### Fixed
+- **Windows dual-stack binding** - Fixed `TypeError: a coroutine was expected, got <_GatheringFuture pending>`
+  - Removed incorrect `asyncio.create_task()` wrapper around `asyncio.gather()`
+  - Windows dual-stack listeners now start without errors
+  - Service functions correctly despite previous error messages
+
+---
+
+## [0.9.0] - 2025-12-02
+
+### Changed
+- **Logging migration complete** - All print statements converted to Python standard library logging
+  - run_service.py startup/shutdown messages now use logger
+  - Version information added to logs for debugging
+- **Centralized version management** - Single-source version tracking
+  - Created VERSION file in client and Hub
+  - Version auto-imported from VERSION file (no hardcoded versions)
+  - Startup logs show "D-PC Messenger v0.9.0 initializing..."
+
 ### Added
 
-**Phase 1: Peer Connection Diagnostics and Reliability (v0.9.0)**
+**Phase 1: Peer Connection Diagnostics and Reliability**
 
 - **Network-Resilient STUN Discovery** - STUN now works reliably even when service starts before network is ready
   - Internet connectivity checks before STUN attempts (8.8.8.8, 1.1.1.1, OpenDNS)

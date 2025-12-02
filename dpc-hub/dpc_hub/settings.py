@@ -13,6 +13,15 @@ from pydantic import Field, field_validator, ValidationError
 logger = logging.getLogger(__name__)
 
 
+def __get_version() -> str:
+    """Helper function to get version from __version__ module."""
+    try:
+        from .__version__ import __version__
+        return __version__
+    except Exception:
+        return "unknown"
+
+
 class Settings(BaseSettings):
     """
     Application settings loaded from environment variables.
@@ -60,7 +69,7 @@ class Settings(BaseSettings):
         description="Application name"
     )
     APP_VERSION: str = Field(
-        default="1.0.0",
+        default_factory=lambda: __get_version(),
         description="Application version"
     )
     DEBUG: bool = Field(

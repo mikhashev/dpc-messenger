@@ -13,6 +13,7 @@ from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
+from .__version__ import __version__
 from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .p2p_manager import P2PManager
@@ -423,7 +424,7 @@ class CoreService:
             logger.warning("Core Service is already running")
             return
 
-        logger.info("Starting D-PC Core Service")
+        logger.info("D-PC Messenger v%s initializing...", __version__)
 
         self._shutdown_event = asyncio.Event()
 

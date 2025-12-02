@@ -2,7 +2,7 @@
 
 > **Desktop application for private P2P messaging with collaborative AI**
 >
-> **Status:** Beta | **License:** GPL v3 | **Version:** 0.8.0
+> **Status:** Beta | **License:** GPL v3 | **Version:** 0.9.0
 
 The D-PC Client is a desktop application built with Tauri (Rust) and SvelteKit that enables secure peer-to-peer communication with collaborative AI capabilities. It supports both Direct TLS connections (local network) and WebRTC connections (internet-wide).
 
