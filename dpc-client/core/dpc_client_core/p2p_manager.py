@@ -291,6 +291,27 @@ class P2PManager:
 
         logger.info("Initiating direct connection to %s at %s:%d", target_node_id, host, port)
 
+        # Pre-flight check: Test basic port connectivity before SSL handshake
+        # This provides clearer error messages than cryptic SSL errors (e.g., WinError 121)
+        logger.debug("Running pre-flight port connectivity check for %s:%d", host, port)
+        preflight_timeout = 5.0  # Quick check - separate from full connection timeout
+        port_accessible, port_message = await self.test_port_connectivity(host, port, preflight_timeout)
+
+        if not port_accessible:
+            error_msg = (
+                f"Pre-flight check failed for {host}:{port} - Port is not accessible.\n"
+                f"{port_message}\n"
+                f"  Direct TLS connection requires:\n"
+                f"    - Peer's D-PC client running and listening on port {port}\n"
+                f"    - No firewall blocking port {port}\n"
+                f"    - For external IPs: Router port forwarding configured\n"
+                f"  Alternative: Use WebRTC connections (no port forwarding needed)"
+            )
+            logger.error(error_msg)
+            raise ConnectionError(error_msg)
+
+        logger.debug("Pre-flight check passed - port %d is accessible", port)
+
         ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         ssl_context.check_hostname = False
         ssl_context.verify_mode = ssl.CERT_NONE

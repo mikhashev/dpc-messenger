@@ -357,23 +357,122 @@ class WebRTCPeerConnection:
         json_str = json.dumps(message)
         self.data_channel.send(json_str)
     
+    def _diagnose_connection_failure(self) -> str:
+        """
+        Diagnose WebRTC connection failure by analyzing ICE candidates and connection state.
+
+        Returns:
+            Human-readable diagnostic message with actionable advice
+        """
+        ice_state = self.pc.iceConnectionState
+        conn_state = self.pc.connectionState
+        dc_state = self.data_channel.readyState if self.data_channel else None
+
+        # Parse SDP to count ICE candidate types
+        host_count = 0
+        srflx_count = 0
+        relay_count = 0
+
+        if self.pc.localDescription:
+            sdp = self.pc.localDescription.sdp
+            host_count = sdp.count("typ host")
+            srflx_count = sdp.count("typ srflx")
+            relay_count = sdp.count("typ relay")
+
+        # Build diagnostic message based on missing candidates
+        diagnosis_parts = []
+
+        # Check STUN (server reflexive candidates)
+        if srflx_count == 0:
+            diagnosis_parts.append(
+                "❌ STUN failed - No server reflexive (srflx) candidates found. "
+                "This indicates STUN servers are unreachable or DNS resolution failed. "
+                "Check internet connectivity and STUN server configuration."
+            )
+        else:
+            diagnosis_parts.append(f"✓ STUN working - {srflx_count} server reflexive candidate(s) found")
+
+        # Check TURN (relay candidates)
+        if relay_count == 0:
+            diagnosis_parts.append(
+                "❌ TURN not available - No relay candidates found. "
+                "TURN relay is required for symmetric NAT traversal. "
+                "Check TURN credentials in config.ini or environment variables."
+            )
+        else:
+            diagnosis_parts.append(f"✓ TURN working - {relay_count} relay candidate(s) found")
+
+        # Analyze ICE connection state
+        if ice_state == "checking":
+            diagnosis_parts.append(
+                "⚠️  ICE still checking - NAT traversal in progress but stuck. "
+                "Possible causes: Firewall blocking UDP ports, symmetric NAT without TURN relay, "
+                "or peer behind restrictive NAT."
+            )
+        elif ice_state == "failed":
+            diagnosis_parts.append(
+                "❌ ICE connection FAILED - NAT traversal unsuccessful. "
+                "All candidate pairs failed connectivity checks. "
+                "If TURN is available, this may indicate firewall blocking TURN relay traffic."
+            )
+        elif ice_state == "disconnected":
+            diagnosis_parts.append(
+                "⚠️  ICE disconnected - Connection was established but lost. "
+                "Network change or timeout occurred."
+            )
+
+        # Check data channel state
+        if dc_state != "open":
+            diagnosis_parts.append(
+                f"❌ Data channel not open - State: {dc_state or 'None'}. "
+                f"Even if ICE connects, SCTP data channel must open for messaging."
+            )
+
+        # Provide prioritized recommendations
+        recommendations = []
+        if relay_count == 0:
+            recommendations.append("1. Configure TURN credentials (highest priority for symmetric NAT)")
+        if srflx_count == 0:
+            recommendations.append("2. Check STUN server connectivity (verify internet connection)")
+        if ice_state == "checking" and relay_count > 0:
+            recommendations.append("3. Check firewall/router UDP port settings (TURN ports may be blocked)")
+        if not recommendations:
+            recommendations.append("1. Try testing on same local network first")
+            recommendations.append("2. Check peer's firewall/NAT configuration")
+
+        # Combine all diagnostic info
+        full_diagnosis = "\n".join(diagnosis_parts)
+        if recommendations:
+            full_diagnosis += f"\n\nRecommended actions:\n" + "\n".join(recommendations)
+
+        return full_diagnosis
+
     async def wait_ready(self, timeout: float = 30.0):
         """Wait for connection and data channel to be ready."""
         try:
             await asyncio.wait_for(self.ready.wait(), timeout=timeout)
         except asyncio.TimeoutError:
-            # Provide more helpful error message
+            # Get detailed diagnosis
+            diagnosis = self._diagnose_connection_failure()
+
+            # Get basic state info for summary
             ice_state = self.pc.iceConnectionState
             conn_state = self.pc.connectionState
             dc_state = self.data_channel.readyState if self.data_channel else None
+
+            # Count candidates for summary
+            host_count = srflx_count = relay_count = 0
+            if self.pc.localDescription:
+                sdp = self.pc.localDescription.sdp
+                host_count = sdp.count("typ host")
+                srflx_count = sdp.count("typ srflx")
+                relay_count = sdp.count("typ relay")
+
             raise ConnectionError(
-                f"WebRTC connection timeout with {self.node_id} after {timeout}s. "
-                f"ICE state: {ice_state}, Connection state: {conn_state}, "
-                f"Data channel state: {dc_state}. "
-                f"This usually means NAT traversal failed or data channel didn't open. Try: "
-                f"1) Testing on same local network, "
-                f"2) Checking firewall/UDP settings, "
-                f"3) Verifying TURN server is accessible"
+                f"WebRTC connection timeout with {self.node_id} after {timeout}s.\n"
+                f"ICE state: {ice_state}, Connection state: {conn_state}, Data channel: {dc_state}\n"
+                f"ICE candidates: host={host_count}, srflx={srflx_count}, relay={relay_count}\n\n"
+                f"Diagnosis:\n{diagnosis}"
             )
 
     def _start_keepalive(self):
