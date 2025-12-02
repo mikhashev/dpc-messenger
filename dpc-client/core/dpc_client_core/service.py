@@ -547,14 +547,19 @@ class CoreService:
         """
         Background task to discover external IP address via STUN servers.
         Runs on startup and periodically refreshes.
+
+        Features network resilience:
+        - Checks internet connectivity before STUN attempts
+        - Retries with exponential backoff on failure
+        - Handles service startup before network is ready
         """
         try:
             # Get STUN servers from configuration
             stun_servers = self.settings.get_stun_servers()
 
-            # Perform initial discovery
-            logger.info("Discovering external IP address via STUN")
-            external_ip = await discover_external_ip(stun_servers, timeout=5.0)
+            # Perform initial discovery with retry logic (3 attempts: 0s, 5s, 15s)
+            logger.info("Discovering external IP address via STUN (network-resilient)")
+            external_ip = await discover_external_ip(stun_servers, timeout=3.0, retry_count=3)
 
             if external_ip:
                 self._external_ip = external_ip
@@ -563,20 +568,28 @@ class CoreService:
                 # Notify UI of status update (to refresh external URIs)
                 await self.local_api.broadcast_event("status_update", await self.get_status())
             else:
-                logger.warning("Could not discover external IP via STUN servers")
+                logger.warning("Could not discover external IP via STUN servers (will retry periodically)")
 
             # Periodically refresh external IP (every 5 minutes)
             while self._is_running:
                 await asyncio.sleep(300)  # 5 minutes
 
-                external_ip = await discover_external_ip(stun_servers, timeout=5.0)
+                # Periodic check uses single retry (faster)
+                logger.debug("Running periodic STUN re-discovery")
+                external_ip = await discover_external_ip(stun_servers, timeout=3.0, retry_count=1)
 
-                if external_ip and external_ip != self._external_ip:
-                    logger.info("External IP changed: %s -> %s", self._external_ip, external_ip)
-                    self._external_ip = external_ip
+                if external_ip:
+                    if external_ip != self._external_ip:
+                        logger.info("External IP changed: %s -> %s",
+                                  self._external_ip or "(none)", external_ip)
+                        self._external_ip = external_ip
 
-                    # Notify UI
-                    await self.local_api.broadcast_event("status_update", await self.get_status())
+                        # Notify UI
+                        await self.local_api.broadcast_event("status_update", await self.get_status())
+                    else:
+                        logger.debug("Periodic discovery: External IP unchanged (%s)", external_ip)
+                else:
+                    logger.debug("Periodic STUN re-discovery failed (network may be down)")
 
         except asyncio.CancelledError:
             logger.debug("STUN discovery task cancelled")
@@ -1008,11 +1021,50 @@ class CoreService:
         except Exception:
             return False
 
+    def _is_usable_ipv4(self, ip_str: str) -> bool:
+        """
+        Check if IPv4 address is usable for P2P connections.
+
+        Filters out:
+        - Loopback addresses (127.0.0.0/8)
+        - Link-local addresses (169.254.0.0/16 - APIPA/DHCP failure)
+
+        Args:
+            ip_str: IPv4 address string
+
+        Returns:
+            True if address is usable for P2P, False otherwise
+        """
+        try:
+            import ipaddress
+            addr = ipaddress.IPv4Address(ip_str)
+
+            # Filter loopback (127.x.x.x)
+            if addr.is_loopback:
+                logger.debug("Filtering IPv4 loopback address: %s", ip_str)
+                return False
+
+            # Filter link-local (169.254.x.x - APIPA addresses when DHCP fails)
+            if addr.is_link_local:
+                logger.debug("Filtering IPv4 link-local (APIPA) address: %s", ip_str)
+                return False
+
+            return True
+
+        except ValueError:
+            # Invalid IPv4 address
+            logger.warning("Invalid IPv4 address format: %s", ip_str)
+            return False
+
     def _get_local_ips(self) -> List[str]:
         """
-        Get local network IP addresses (excluding loopback).
+        Get local network IP addresses (excluding loopback and link-local).
         Returns a list of IP addresses (IPv4 and IPv6) for constructing dpc:// URIs.
         Uses multiple methods for cross-platform compatibility and combines results.
+
+        Filters:
+        - IPv4: Loopback (127.x) and link-local (169.254.x - APIPA)
+        - IPv6: Loopback (::1) and link-local (fe80::)
         """
         local_ips = []
         errors = []
@@ -1024,7 +1076,8 @@ class CoreService:
             s.connect(("8.8.8.8", 80))
             local_ip = s.getsockname()[0]
             s.close()
-            if local_ip and not local_ip.startswith('127.'):
+            # Use new filtering method
+            if local_ip and self._is_usable_ipv4(local_ip):
                 local_ips.append(local_ip)
                 logger.debug("Found local IPv4 via socket method: %s", local_ip)
         except Exception as e:
@@ -1052,8 +1105,8 @@ class CoreService:
 
             for info in addr_info:
                 ip = info[4][0]
-                # Filter out loopback addresses and duplicates
-                if ip and not ip.startswith('127.') and ip not in local_ips:
+                # Use new filtering method for loopback and link-local
+                if ip and self._is_usable_ipv4(ip) and ip not in local_ips:
                     local_ips.append(ip)
                     logger.debug("Found local IPv4 via hostname method: %s", ip)
 
@@ -1086,7 +1139,8 @@ class CoreService:
                     # Look for inet addresses (IPv4)
                     for match in re.finditer(r'inet\s+(\d+\.\d+\.\d+\.\d+)', result.stdout):
                         ip = match.group(1)
-                        if not ip.startswith('127.') and ip not in local_ips:
+                        # Use new filtering method
+                        if self._is_usable_ipv4(ip) and ip not in local_ips:
                             local_ips.append(ip)
                             logger.debug("Found local IPv4 via 'ip addr' command: %s", ip)
 
