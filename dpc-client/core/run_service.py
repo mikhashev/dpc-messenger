@@ -6,6 +6,9 @@ from logging.handlers import RotatingFileHandler
 import platform  # Import the platform module to check the OS
 import sys
 from dpc_client_core.service import CoreService
+from dpc_client_core.__version__ import __version__
+
+logger = logging.getLogger(__name__)
 
 
 def setup_logging(settings):
@@ -91,7 +94,7 @@ async def main():
     except asyncio.CancelledError:
         pass # This is expected on shutdown
     finally:
-        print("\nShutdown initiated...")
+        logger.info("Shutdown initiated")
         await service.stop()
         # Ensure the main service task is also cancelled
         service_task.cancel()
@@ -102,8 +105,8 @@ async def main():
 
 if __name__ == "__main__":
     try:
-        print("Starting D-PC Core Service... Press Ctrl+C to stop.")
+        print(f"D-PC Messenger v{__version__} - Starting Core Service (press Ctrl+C to stop)")
         asyncio.run(main())
     except KeyboardInterrupt:
         # This is the primary shutdown mechanism on Windows
-        print("\nShutdown requested by user (KeyboardInterrupt).")
+        print("Shutdown requested by user (KeyboardInterrupt)")

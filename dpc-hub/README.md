@@ -2,7 +2,7 @@
 
 > **Server-side infrastructure for peer discovery and WebRTC signaling**
 > 
-> **Status:** Production Ready | **License:** AGPL v3 | **Version:** 0.5.0
+> **Status:** Production Ready | **License:** AGPL v3 | **Version:** 0.9.0
 
 The D-PC Federation Hub is a minimalistic server application that provides essential services for the D-PC network: user authentication, peer discovery, and WebRTC signaling. It acts as a "phone book and matchmaker" while never storing or accessing users' private conversations.
 
