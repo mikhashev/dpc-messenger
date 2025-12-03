@@ -49,16 +49,15 @@ class ContextResponseHandler(MessageHandler):
         request_id = payload.get("request_id")
         context_dict = payload.get("context")
 
-        if request_id in self.service._pending_context_requests:
-            future = self.service._pending_context_requests[request_id]
-            if not future.done():
-                # Deserialize dict into PersonalContext object
-                try:
-                    context_obj = PersonalContext.from_dict(context_dict)
-                    future.set_result(context_obj)
-                except Exception as e:
-                    self.logger.error("Error deserializing context from peer: %s", e, exc_info=True)
-                    future.set_result(None)
+        # Deserialize dict into PersonalContext object
+        try:
+            context_obj = PersonalContext.from_dict(context_dict)
+            # Resolve via ContextCoordinator
+            self.service.context_coordinator.resolve_context_response(request_id, context_obj)
+        except Exception as e:
+            self.logger.error("Error deserializing context from peer: %s", e, exc_info=True)
+            # Resolve with None to unblock waiting caller
+            self.service.context_coordinator.resolve_context_response(request_id, None)
 
         return None
 
@@ -106,9 +105,7 @@ class DeviceContextResponseHandler(MessageHandler):
         request_id = payload.get("request_id")
         device_context = payload.get("device_context")
 
-        if request_id in self.service._pending_device_context_requests:
-            future = self.service._pending_device_context_requests[request_id]
-            if not future.done():
-                future.set_result(device_context)
+        # Resolve via ContextCoordinator
+        self.service.context_coordinator.resolve_device_context_response(request_id, device_context)
 
         return None
