@@ -187,28 +187,33 @@ class ConversationMonitor:
     def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
         """Infer inference settings when not explicitly tracked.
 
-        For peer conversations (conversation_id = node_id), defaults to using peer compute.
-        For local AI conversations, defaults to local inference.
+        For peer conversations (conversation_id = node_id), ALWAYS uses peer compute for consistency.
+        For local AI conversations, uses tracked settings or defaults to local inference.
 
         Returns:
             (compute_host, model, provider) tuple
         """
-        # If settings were tracked from actual queries, use those
-        if self.last_compute_host is not None or self.last_provider is not None:
-            return (self.last_compute_host, self.last_model, self.last_provider)
-
-        # Infer based on conversation type
         # Peer conversations: conversation_id = node_id (starts with "dpc-node-")
         if self.conversation_id.startswith("dpc-node-"):
-            # Use peer as compute host
-            logger.info("Monitor %s: No inference settings tracked, defaulting to peer compute for knowledge extraction",
-                       self.conversation_id)
-            return (self.conversation_id, None, None)  # Use peer, let them choose model
+            # ALWAYS use peer as compute host for peer conversations (for consistency)
+            # Even if local models are available, peer conversations should use peer compute
+            if self.last_model:
+                logger.info("Monitor %s: Using tracked model for knowledge extraction (compute_host=%s, model=%s)",
+                           self.conversation_id, self.conversation_id, self.last_model)
+            else:
+                logger.info("Monitor %s: Using peer compute for knowledge extraction (compute_host=%s)",
+                           self.conversation_id, self.conversation_id)
+            return (self.conversation_id, self.last_model, None)  # Always use peer, track model if available
         else:
-            # Local AI conversation: use local inference
-            logger.info("Monitor %s: No inference settings tracked, defaulting to local inference for knowledge extraction",
-                       self.conversation_id)
-            return (None, None, None)  # Local inference with default provider
+            # Local AI conversation: use tracked settings or default to local inference
+            if self.last_provider is not None:
+                logger.info("Monitor %s: Using tracked local inference settings (provider=%s)",
+                           self.conversation_id, self.last_provider)
+                return (None, self.last_model, self.last_provider)
+            else:
+                logger.info("Monitor %s: Defaulting to local inference for knowledge extraction",
+                           self.conversation_id)
+                return (None, None, None)  # Local inference with default provider
 
     async def _calculate_knowledge_score(self) -> float:
         """Calculate knowledge-worthiness score for conversation segment
@@ -479,14 +484,15 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
             compute_host, model, provider = self._infer_inference_settings()
 
             # Use AI query function if available (supports remote inference), otherwise use llm_manager (local only)
+            inference_result = None  # Save for metadata extraction
             if self.ai_query_func:
-                result = await self.ai_query_func(
+                inference_result = await self.ai_query_func(
                     prompt=prompt,
                     compute_host=compute_host,
                     model=model,
                     provider=provider
                 )
-                response = result["response"]
+                response = inference_result["response"]
             else:
                 # Fallback to direct llm_manager call (local only)
                 response = await self.llm_manager.query(
@@ -559,6 +565,14 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
             # Calculate average confidence
             avg_confidence = sum(e.confidence for e in entries) / len(entries) if entries else 1.0
 
+            # Determine extraction model and host from inference result
+            extraction_model_name = model  # From _infer_inference_settings()
+            if not extraction_model_name and inference_result:
+                # Try to extract from inference result dict (has model, provider, compute_host)
+                extraction_model_name = inference_result.get('model')
+
+            extraction_host_name = "local" if not compute_host else compute_host
+
             # Create proposal
             proposal = KnowledgeCommitProposal(
                 conversation_id=self.conversation_id,
@@ -572,6 +586,8 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                 flagged_assumptions=result.get('flagged_assumptions', []),
                 devil_advocate=result.get('devil_advocate'),
                 avg_confidence=avg_confidence,
+                extraction_model=extraction_model_name,
+                extraction_host=extraction_host_name,
                 status='proposed'
             )
 

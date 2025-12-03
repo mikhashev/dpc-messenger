@@ -53,6 +53,10 @@ class KnowledgeCommitProposal:
     # AI confidence
     avg_confidence: float = 1.0  # Average confidence across entries
 
+    # Extraction metadata (tracking which model extracted this knowledge)
+    extraction_model: Optional[str] = None  # Model used for extraction (e.g., "claude-haiku-4-5", "llama3.1:8b")
+    extraction_host: Optional[str] = None  # Compute host ("local" or node_id for remote)
+
     # Voting status
     status: Literal["proposed", "voting", "approved", "rejected", "revised"] = "proposed"
     votes: Dict[str, Literal["approve", "reject", "request_changes"]] = field(default_factory=dict)
