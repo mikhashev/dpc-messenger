@@ -24,7 +24,24 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VotingSession:
-    """Active voting session for a commit proposal"""
+    """Active voting session for a commit proposal
+
+    KNOWN ISSUE: Proposal Editing During Voting
+    ============================================
+    Currently, there is no locking mechanism to prevent proposal edits during voting.
+    If a peer edits the proposal while voting is in progress, the following issues can occur:
+
+    1. Votes are cast on the OLD version of the proposal
+    2. The NEW version receives those votes without re-review
+    3. Could result in approving content that voters didn't see
+
+    RECOMMENDED FIX (Future Enhancement):
+    - Option A: Lock proposal during voting (prevent edits)
+    - Option B: Invalidate all votes when proposal is edited (force re-vote)
+    - Option C: Version proposals and track which version each vote is for
+
+    This issue was identified during v0.9.2 testing (2025-12-02).
+    """
     proposal: KnowledgeCommitProposal
     votes: Dict[str, CommitVote] = None  # node_id -> vote
     required_dissenter: Optional[str] = None
@@ -241,7 +258,9 @@ class ConsensusManager:
                 cultural_perspectives_considered=proposal.cultural_perspectives,
                 confidence_score=proposal.avg_confidence,
                 sources_cited=[],  # Could extract from entries
-                dissenting_opinion=proposal.devil_advocate
+                dissenting_opinion=proposal.devil_advocate,
+                extraction_model=proposal.extraction_model,  # Track which model extracted this knowledge
+                extraction_host=proposal.extraction_host  # Track which compute host was used
             )
 
             # Apply commit to local context
@@ -368,7 +387,9 @@ class ConsensusManager:
                 'consensus': commit.consensus_type,
                 'confidence_score': commit.confidence_score,
                 'signatures': commit.signatures,
-                'cultural_perspectives': commit.cultural_perspectives_considered
+                'cultural_perspectives': commit.cultural_perspectives_considered,
+                'extraction_model': commit.extraction_model or "unknown",
+                'extraction_host': commit.extraction_host or "unknown"
             }
 
             markdown_manager.write_markdown_with_frontmatter(

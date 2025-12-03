@@ -72,7 +72,8 @@ class ConversationMonitor:
         self.auto_detect = auto_detect  # Controls automatic detection vs manual-only
 
         # Message buffer
-        self.message_buffer: List[Message] = []
+        self.message_buffer: List[Message] = []  # Cleared after each extraction (for incremental auto-detect)
+        self.full_conversation: List[Message] = []  # Never cleared (for manual "End Session" extraction)
         self.knowledge_score: float = 0.0
 
         # Tracking
@@ -126,7 +127,8 @@ class ConversationMonitor:
             KnowledgeCommitProposal if knowledge detected (when auto_detect=True), None otherwise
         """
         # Always buffer messages (even if auto_detect is disabled, for manual extraction)
-        self.message_buffer.append(message)
+        self.message_buffer.append(message)  # For incremental auto-detection
+        self.full_conversation.append(message)  # For manual "End Session" extraction
 
         # Only run automatic detection if enabled
         if not self.auto_detect:
@@ -405,7 +407,10 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                             cultural_contexts.append(context.cognitive_profile.cultural_background)
 
         # Format conversation
-        messages_text = self._format_messages_for_analysis(self.message_buffer)
+        # Use full_conversation for manual extraction (includes all messages)
+        # Use message_buffer only for automatic incremental extraction
+        messages_to_analyze = self.full_conversation if self.full_conversation else self.message_buffer
+        messages_text = self._format_messages_for_analysis(messages_to_analyze)
 
         # Build cultural context section (conditional)
         cultural_section = ""
@@ -537,6 +542,14 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                         # All attempts failed
                         raise ValueError(f"Failed to extract valid JSON after repair attempts: {e}")
 
+            # Determine extraction model and host from inference result
+            extraction_model_name = model  # From _infer_inference_settings()
+            if not extraction_model_name and inference_result:
+                # Try to extract from inference result dict (has model, provider, compute_host)
+                extraction_model_name = inference_result.get('model')
+
+            extraction_host_name = "local" if not compute_host else compute_host
+
             # Build knowledge entries
             entries = []
             for entry_data in result.get('entries', []):
@@ -546,7 +559,9 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                     participants=[p['node_id'] for p in self.participants],
                     confidence_score=entry_data.get('confidence', 1.0),
                     sources_cited=entry_data.get('sources', []),
-                    cultural_perspectives_considered=result.get('cultural_perspectives', [])
+                    cultural_perspectives_considered=result.get('cultural_perspectives', []),
+                    extraction_model=extraction_model_name,
+                    extraction_host=extraction_host_name
                 )
 
                 # Handle cultural context (only if enabled)
@@ -565,15 +580,7 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
             # Calculate average confidence
             avg_confidence = sum(e.confidence for e in entries) / len(entries) if entries else 1.0
 
-            # Determine extraction model and host from inference result
-            extraction_model_name = model  # From _infer_inference_settings()
-            if not extraction_model_name and inference_result:
-                # Try to extract from inference result dict (has model, provider, compute_host)
-                extraction_model_name = inference_result.get('model')
-
-            extraction_host_name = "local" if not compute_host else compute_host
-
-            # Create proposal
+            # Create proposal (extraction_model_name and extraction_host_name already determined above)
             proposal = KnowledgeCommitProposal(
                 conversation_id=self.conversation_id,
                 topic=result.get('topic', 'conversation_summary'),

@@ -188,8 +188,12 @@ class MarkdownKnowledgeManager:
         lines.append(f"*Confidence: {entry.confidence:.0%}*")
 
         if entry.source:
-            source_type = entry.source.type.replace('_', ' ').title()
-            lines.append(f"*Source: {source_type}*")
+            # Show extraction model if available (for AI-generated entries)
+            if entry.source.extraction_model:
+                lines.append(f"*Source: AI Model {entry.source.extraction_model}*")
+            else:
+                source_type = entry.source.type.replace('_', ' ').title()
+                lines.append(f"*Source: {source_type}*")
 
             if entry.source.participants:
                 lines.append(f"*Participants: {', '.join(entry.source.participants)}*")
@@ -497,6 +501,10 @@ class MarkdownKnowledgeManager:
             lines.append(f"last_modified: {frontmatter['last_modified']}")
         if 'mastery_level' in frontmatter:
             lines.append(f"mastery_level: {frontmatter['mastery_level']}")
+        if 'extraction_model' in frontmatter:
+            lines.append(f"extraction_model: {frontmatter['extraction_model']}")
+        if 'extraction_host' in frontmatter:
+            lines.append(f"extraction_host: {frontmatter['extraction_host']}")
         lines.append("")
 
         # Consensus Tracking
