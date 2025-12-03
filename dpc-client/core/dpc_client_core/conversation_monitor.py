@@ -184,6 +184,32 @@ class ConversationMonitor:
 
         return None
 
+    def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
+        """Infer inference settings when not explicitly tracked.
+
+        For peer conversations (conversation_id = node_id), defaults to using peer compute.
+        For local AI conversations, defaults to local inference.
+
+        Returns:
+            (compute_host, model, provider) tuple
+        """
+        # If settings were tracked from actual queries, use those
+        if self.last_compute_host is not None or self.last_provider is not None:
+            return (self.last_compute_host, self.last_model, self.last_provider)
+
+        # Infer based on conversation type
+        # Peer conversations: conversation_id = node_id (starts with "dpc-node-")
+        if self.conversation_id.startswith("dpc-node-"):
+            # Use peer as compute host
+            logger.info("Monitor %s: No inference settings tracked, defaulting to peer compute for knowledge extraction",
+                       self.conversation_id)
+            return (self.conversation_id, None, None)  # Use peer, let them choose model
+        else:
+            # Local AI conversation: use local inference
+            logger.info("Monitor %s: No inference settings tracked, defaulting to local inference for knowledge extraction",
+                       self.conversation_id)
+            return (None, None, None)  # Local inference with default provider
+
     async def _calculate_knowledge_score(self) -> float:
         """Calculate knowledge-worthiness score for conversation segment
 
@@ -220,20 +246,23 @@ REQUIRED OUTPUT FORMAT (raw JSON only):
 DO NOT include any text before or after the JSON. DO NOT use markdown code blocks. DO NOT explain your analysis outside the JSON."""
 
         try:
+            # Infer inference settings (uses tracked settings if available, otherwise infers from conversation type)
+            compute_host, model, provider = self._infer_inference_settings()
+
             # Use AI query function if available (supports remote inference), otherwise use llm_manager (local only)
             if self.ai_query_func:
                 result = await self.ai_query_func(
                     prompt=prompt,
-                    compute_host=self.last_compute_host,
-                    model=self.last_model,
-                    provider=self.last_provider
+                    compute_host=compute_host,
+                    model=model,
+                    provider=provider
                 )
                 response = result["response"]
             else:
                 # Fallback to direct llm_manager call (local only)
                 response = await self.llm_manager.query(
                     prompt=prompt,
-                    provider_alias=self.last_provider
+                    provider_alias=provider
                 )
 
             # Try to extract JSON if wrapped in markdown or text
@@ -446,20 +475,23 @@ REQUIRED JSON FORMAT (output ONLY this, nothing else):
 DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
 
         try:
+            # Infer inference settings (uses tracked settings if available, otherwise infers from conversation type)
+            compute_host, model, provider = self._infer_inference_settings()
+
             # Use AI query function if available (supports remote inference), otherwise use llm_manager (local only)
             if self.ai_query_func:
                 result = await self.ai_query_func(
                     prompt=prompt,
-                    compute_host=self.last_compute_host,
-                    model=self.last_model,
-                    provider=self.last_provider
+                    compute_host=compute_host,
+                    model=model,
+                    provider=provider
                 )
                 response = result["response"]
             else:
                 # Fallback to direct llm_manager call (local only)
                 response = await self.llm_manager.query(
                     prompt=prompt,
-                    provider_alias=self.last_provider
+                    provider_alias=provider
                 )
 
             # Try to extract and parse JSON from response (with repair attempts)
