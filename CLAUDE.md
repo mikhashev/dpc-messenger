@@ -187,8 +187,30 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
 ### Key Components
 
 **Client Backend (`dpc-client/core`):**
-- `service.py` - Main orchestrator (CoreService)
-- `p2p_manager.py` - Unified P2P connection manager (TLS + WebRTC)
+
+**Service Layer:**
+- `service.py` - Main orchestrator (CoreService, ~3,270 lines)
+  - Lifecycle management (startup/shutdown)
+  - Component initialization
+  - Configuration loading
+  - WebSocket API server coordination
+
+**Coordinators (v0.10.0+):**
+- `inference_orchestrator.py` - AI inference coordination (local/remote)
+  - Executes queries on local LLM or remote peer
+  - Assembles prompts with contexts and history
+  - Tracks token usage and model metadata
+- `context_coordinator.py` - Context request/response coordination
+  - Manages personal and device context sharing
+  - Applies firewall rules before responding
+  - Tracks pending requests with asyncio.Future
+- `p2p_coordinator.py` - P2P connection lifecycle coordination
+  - Direct TLS connections (via dpc:// URIs)
+  - WebRTC connections (via Hub signaling)
+  - Peer messaging and broadcasting
+
+**Managers:**
+- `p2p_manager.py` - Low-level P2P connection manager (TLS + WebRTC)
 - `webrtc_peer.py` - WebRTC peer wrapper (aiortc)
 - `hub_client.py` - Federation Hub communication (OAuth, WebSocket signaling)
 - `llm_manager.py` - AI provider integration (Ollama, OpenAI, Anthropic)
@@ -644,12 +666,21 @@ All I/O operations use asyncio. Key patterns:
 
 ### Service-Oriented Backend
 
-CoreService orchestrates independent components:
-- P2PManager for connections
-- HubClient for federation
-- LLMManager for AI
-- ContextFirewall for access control
-- LocalApiServer for UI communication
+CoreService orchestrates independent components via coordinators and managers:
+
+**Coordinators (High-Level):**
+- InferenceOrchestrator - AI query execution and prompt assembly
+- ContextCoordinator - Context sharing with firewall integration
+- P2PCoordinator - P2P connection lifecycle and messaging
+
+**Managers (Low-Level):**
+- P2PManager - Socket-level connection management
+- HubClient - Federation Hub communication
+- LLMManager - AI provider API integration
+- ContextFirewall - Access control rules engine
+- LocalApiServer - WebSocket API for UI
+
+**Pattern:** Coordinators provide clean APIs for high-level operations, delegating to managers for low-level implementation. This enables easier testing, better separation of concerns, and cleaner extension points for Phase 2 features.
 
 ### Event-Driven UI Communication
 
