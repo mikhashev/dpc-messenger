@@ -431,6 +431,51 @@ class P2PManager:
 
     # --- WebRTC Connection Methods (NEW) ---
 
+    def _create_webrtc_close_handler(self, node_id: str):
+        """
+        Create WebRTC connection close handler with auto-reconnect logic.
+
+        Returns a closure that handles connection cleanup and auto-reconnect
+        for the specified node_id.
+
+        Args:
+            node_id: Node ID of the peer
+
+        Returns:
+            Async function that handles connection close
+        """
+        async def handle_close(_node_id):
+            logger.info("WebRTC connection closed for %s, cleaning up", node_id)
+            if node_id in self.peers:
+                self.peers.pop(node_id)
+                await self._notify_peer_change()
+            if node_id in self._pending_webrtc:
+                self._pending_webrtc.pop(node_id)
+
+            # Auto-reconnect if disconnection was not intentional
+            if node_id not in self._intentional_disconnects:
+                logger.info("Auto-Reconnect: Connection to %s lost unexpectedly", node_id)
+                logger.info("Auto-Reconnect: Will attempt to reconnect in 3 seconds")
+                await asyncio.sleep(3)
+
+                # Check if hub_client is still connected
+                stored_hub_client = self._hub_client_refs.get(node_id)
+                if stored_hub_client and stored_hub_client.websocket and stored_hub_client.websocket.state == websockets.State.OPEN:
+                    try:
+                        logger.info("Auto-Reconnect: Reconnecting to %s", node_id)
+                        await self.connect_via_hub(node_id, stored_hub_client)
+                    except Exception as e:
+                        logger.error("Auto-Reconnect: Failed to reconnect to %s: %s", node_id, e)
+                else:
+                    logger.warning("Auto-Reconnect: Cannot reconnect to %s - Hub client not connected", node_id)
+                    self._hub_client_refs.pop(node_id, None)
+            else:
+                logger.info("Auto-Reconnect: Disconnection was intentional, not reconnecting")
+                self._intentional_disconnects.discard(node_id)
+                self._hub_client_refs.pop(node_id, None)
+
+        return handle_close
+
     async def connect_via_hub(self, target_node_id: str, hub_client: HubClient):
         """
         Initiates a WebRTC connection to a peer via Hub signaling.
@@ -471,37 +516,7 @@ class P2PManager:
             webrtc_peer.on_message = handle_message
 
             # Set up close handler with auto-reconnect
-            async def handle_close(node_id):
-                logger.info("WebRTC connection closed for %s, cleaning up", node_id)
-                if node_id in self.peers:
-                    self.peers.pop(node_id)
-                    await self._notify_peer_change()
-                if node_id in self._pending_webrtc:
-                    self._pending_webrtc.pop(node_id)
-
-                # Auto-reconnect if disconnection was not intentional
-                if node_id not in self._intentional_disconnects:
-                    logger.info("Auto-Reconnect: Connection to %s lost unexpectedly", node_id)
-                    logger.info("Auto-Reconnect: Will attempt to reconnect in 3 seconds")
-                    await asyncio.sleep(3)
-
-                    # Check if hub_client is still connected
-                    stored_hub_client = self._hub_client_refs.get(node_id)
-                    if stored_hub_client and stored_hub_client.websocket and stored_hub_client.websocket.state == websockets.State.OPEN:
-                        try:
-                            logger.info("Auto-Reconnect: Reconnecting to %s", node_id)
-                            await self.connect_via_hub(node_id, stored_hub_client)
-                        except Exception as e:
-                            logger.error("Auto-Reconnect: Failed to reconnect to %s: %s", node_id, e)
-                    else:
-                        logger.warning("Auto-Reconnect: Cannot reconnect to %s - Hub client not connected", node_id)
-                        self._hub_client_refs.pop(node_id, None)
-                else:
-                    logger.info("Auto-Reconnect: Disconnection was intentional, not reconnecting")
-                    self._intentional_disconnects.discard(node_id)
-                    self._hub_client_refs.pop(node_id, None)
-
-            webrtc_peer.on_close = handle_close
+            webrtc_peer.on_close = self._create_webrtc_close_handler(target_node_id)
             
             # Create and send offer
             offer = await webrtc_peer.create_offer()
@@ -610,37 +625,7 @@ class P2PManager:
         webrtc_peer.on_message = handle_message
 
         # Set up close handler with auto-reconnect
-        async def handle_close(node_id):
-            logger.info("WebRTC connection closed for %s, cleaning up", node_id)
-            if node_id in self.peers:
-                self.peers.pop(node_id)
-                await self._notify_peer_change()
-            if node_id in self._pending_webrtc:
-                self._pending_webrtc.pop(node_id)
-
-            # Auto-reconnect if disconnection was not intentional
-            if node_id not in self._intentional_disconnects:
-                logger.info("Auto-Reconnect: Connection to %s lost unexpectedly", node_id)
-                logger.info("Auto-Reconnect: Will attempt to reconnect in 3 seconds")
-                await asyncio.sleep(3)
-
-                # Check if hub_client is still connected
-                stored_hub_client = self._hub_client_refs.get(node_id)
-                if stored_hub_client and stored_hub_client.websocket and stored_hub_client.websocket.state == websockets.State.OPEN:
-                    try:
-                        logger.info("Auto-Reconnect: Reconnecting to %s", node_id)
-                        await self.connect_via_hub(node_id, stored_hub_client)
-                    except Exception as e:
-                        logger.error("Auto-Reconnect: Failed to reconnect to %s: %s", node_id, e)
-                else:
-                    logger.warning("Auto-Reconnect: Cannot reconnect to %s - Hub client not connected", node_id)
-                    self._hub_client_refs.pop(node_id, None)
-            else:
-                logger.info("Auto-Reconnect: Disconnection was intentional, not reconnecting")
-                self._intentional_disconnects.discard(node_id)
-                self._hub_client_refs.pop(node_id, None)
-
-        webrtc_peer.on_close = handle_close
+        webrtc_peer.on_close = self._create_webrtc_close_handler(from_node)
 
         # Handle offer and create answer
         offer_sdp = payload.get("offer")
