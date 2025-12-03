@@ -2657,15 +2657,6 @@ class CoreService:
                 else:
                     logger.warning("Peer %s... not connected", node_id[:20])
 
-        # Phase 7: Update should_include_full_context if peer contexts were added
-        # BugFix: Even if local context wasn't included, if we have peer contexts, we need full context mode
-        if len(aggregated_contexts) > 0 and not should_include_full_context:
-            # Check if we have any peer contexts (non-'local' entries)
-            has_peer_contexts = any(key != 'local' for key in aggregated_contexts.keys())
-            if has_peer_contexts:
-                should_include_full_context = True
-                logger.info("Including peer contexts in this query (peer context changed)")
-
         # Phase 7: Add user prompt to conversation history BEFORE assembling prompt
         monitor.add_message('user', prompt)
 
