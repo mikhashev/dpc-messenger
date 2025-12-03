@@ -29,6 +29,7 @@ from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
+from .p2p_coordinator import P2PCoordinator
 from .message_router import MessageRouter
 from .message_handlers.hello_handler import HelloHandler
 from .message_handlers.text_handler import SendTextHandler
@@ -158,6 +159,9 @@ class CoreService:
 
         # Context coordinator (coordinates context requests and responses)
         self.context_coordinator = ContextCoordinator(self)
+
+        # P2P coordinator (coordinates P2P connection lifecycle)
+        self.p2p_coordinator = P2PCoordinator(self)
 
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
@@ -1824,11 +1828,7 @@ class CoreService:
 
         Used by ConsensusManager to broadcast votes and proposals.
         """
-        for peer_id in list(self.p2p_manager.peers.keys()):
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, message)
-            except Exception as e:
-                logger.warning("Failed to broadcast to %s: %s", peer_id, e)
+        await self.p2p_coordinator.broadcast_to_peers(message)
 
     def _get_or_create_conversation_monitor(self, conversation_id: str) -> ConversationMonitor:
         """Get or create a conversation monitor for a conversation/peer.
@@ -2034,13 +2034,7 @@ class CoreService:
         Args:
             uri: dpc:// URI with host, port, and node_id query parameter
         """
-        logger.info("Orchestrating direct connection to %s", uri)
-
-        # Parse the URI to extract host, port, and node_id
-        host, port, target_node_id = parse_dpc_uri(uri)
-        
-        # Use connect_directly from P2PManager
-        await self.p2p_manager.connect_directly(host, port, target_node_id)
+        await self.p2p_coordinator.connect_via_uri(uri)
 
     async def test_port(self, uri: str) -> dict:
         """
@@ -2056,59 +2050,22 @@ class CoreService:
             - host (str): Target host
             - port (int): Target port
         """
-        from dpc_protocol.utils import parse_dpc_uri
-
-        # Parse the URI to extract host and port
-        host, port, target_node_id = parse_dpc_uri(uri)
-
-        # Test port connectivity
-        success, message = await self.p2p_manager.test_port_connectivity(host, port)
-
-        return {
-            "success": success,
-            "message": message,
-            "host": host,
-            "port": port,
-            "node_id": target_node_id
-        }
+        return await self.p2p_coordinator.test_port_connectivity(uri)
 
     async def connect_to_peer_by_id(self, node_id: str):
         """
         Orchestrates a P2P connection to a peer using its node_id via Hub.
         Uses WebRTC with NAT traversal.
         """
-        logger.info("Orchestrating WebRTC connection to %s via Hub", node_id)
-
-        # Check if Hub is connected
-        if not self.hub_client.websocket or self.hub_client.websocket.state != websockets.State.OPEN:
-            raise ConnectionError("Not connected to Hub. Cannot establish WebRTC connection.")
-
-        # Use WebRTC connection via Hub
-        await self.p2p_manager.connect_via_hub(
-            target_node_id=node_id,
-            hub_client=self.hub_client
-        )
+        await self.p2p_coordinator.connect_via_hub(node_id)
 
     async def disconnect_from_peer(self, node_id: str):
         """Disconnect from a peer."""
-        await self.p2p_manager.shutdown_peer_connection(node_id)
+        await self.p2p_coordinator.disconnect(node_id)
 
     async def send_p2p_message(self, target_node_id: str, text: str):
         """Send a text message to a connected peer."""
-        logger.debug("Sending text message to %s: %s", target_node_id, text)
-
-        message = {
-            "command": "SEND_TEXT",
-            "payload": {
-                "text": text
-            }
-        }
-
-        try:
-            await self.p2p_manager.send_message_to_peer(target_node_id, message)
-        except Exception as e:
-            logger.error("Error sending message to %s: %s", target_node_id, e, exc_info=True)
-            raise
+        await self.p2p_coordinator.send_message(target_node_id, text)
 
     async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None):
         """
