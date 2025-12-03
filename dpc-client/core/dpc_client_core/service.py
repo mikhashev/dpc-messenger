@@ -2570,34 +2570,22 @@ class CoreService:
                 logger.warning("BLOCKED: %s", error_msg)
                 raise RuntimeError(error_msg)
 
-        # Phase 7: Compute context hash and determine if context should be included
-        current_context_hash = self._compute_context_hash()
-
-        # Determine if we should include full context in this query
-        should_include_full_context = False
+        # Simplified context inclusion: Always include when checkbox checked
+        # Rationale: Modern AI models have large context windows (128K+ tokens)
+        # Always including contexts ensures information is never lost and simplifies logic
+        # User controls token usage via checkbox (checked = include, unchecked = exclude)
+        aggregated_contexts = {}
+        device_context_data = None
 
         if include_context:
-            # Include context if:
-            # 1. This is the first message (context not yet included), OR
-            # 2. Context files have changed since last inclusion, OR
-            # 3. User just toggled the checkbox (checkbox state change handled by frontend)
-            if not monitor.context_included or monitor.has_context_changed(current_context_hash):
-                should_include_full_context = True
-                logger.info("Full context will be included (first message or context changed)")
-            else:
-                logger.debug("Context already included, using conversation history only")
-        else:
-            logger.debug("User disabled context inclusion")
-
-        # Conditionally include local context based on flag
-        aggregated_contexts = {}
-        if should_include_full_context:
+            logger.debug("Including contexts (checkbox enabled)")
             aggregated_contexts = {'local': self.p2p_manager.local_context}
 
-        # Add device context if available and should include full context
-        device_context_data = None
-        if should_include_full_context and self.device_context:
-            device_context_data = self.device_context
+            # Always include device context when checkbox is checked
+            if self.device_context:
+                device_context_data = self.device_context
+        else:
+            logger.debug("User disabled context inclusion")
 
         # Phase 7: Fetch remote contexts if context_ids provided (with caching)
         peer_device_contexts = {}
@@ -2691,13 +2679,8 @@ class CoreService:
             device_context=device_context_data,
             peer_device_contexts=peer_device_contexts,
             message_history=message_history,
-            include_full_context=should_include_full_context
+            include_full_context=include_context  # Simplified: just use checkbox state
         )
-
-        # Phase 7: Mark context as included if we just sent it
-        if should_include_full_context:
-            monitor.mark_context_included(current_context_hash)
-            logger.debug("Context marked as included (hash: %s...)", current_context_hash[:8])
 
         response_payload = {}
         status = "OK"

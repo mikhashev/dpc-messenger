@@ -86,9 +86,7 @@ class ConversationMonitor:
 
         # Conversation history tracking (Phase 7: Conversation History)
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
-        self.context_included: bool = False  # Flag: has context been sent in this conversation?
-        self.context_hash: str = ""  # Hash of personal.json + device_context.json when last sent
-        self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer contexts
+        self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
 
         # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
         self.peer_context_cache: Dict[str, Any] = {}  # {node_id: PersonalContext} cached peer contexts
@@ -696,26 +694,6 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
         """
         return self.message_history.copy()
 
-    def mark_context_included(self, context_hash: str):
-        """Mark that context has been included in this conversation
-
-        Args:
-            context_hash: SHA256 hash of personal.json + device_context.json
-        """
-        self.context_included = True
-        self.context_hash = context_hash
-
-    def has_context_changed(self, new_hash: str) -> bool:
-        """Check if context files have changed since last inclusion
-
-        Args:
-            new_hash: Current hash of context files
-
-        Returns:
-            True if context has changed
-        """
-        return new_hash != self.context_hash
-
     def update_peer_context_hash(self, node_id: str, context_hash: str):
         """Update the stored hash for a peer's context
 
@@ -741,13 +719,11 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
     def reset_conversation(self):
         """Reset conversation history and context tracking (for "New Chat" button)"""
         self.message_history = []
-        self.context_included = False
-        self.context_hash = ""
         self.peer_context_hashes = {}
         self.current_token_count = 0
         self.message_buffer = []
         self.knowledge_score = 0.0
-        # Phase 7: Also clear peer context caches
+        # Clear peer context caches
         self.peer_context_cache = {}
         self.peer_device_context_cache = {}
 
