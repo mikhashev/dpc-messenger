@@ -92,12 +92,7 @@ class ConversationMonitor:
         self.peer_context_cache: Dict[str, Any] = {}  # {node_id: PersonalContext} cached peer contexts
         self.peer_device_context_cache: Dict[str, dict] = {}  # {node_id: device_context_dict} cached device contexts
 
-        # Knowledge detection inference settings (supports both local and remote)
-        self.compute_host: str | None = None  # Node ID for remote inference (None = local)
-        self.model: str | None = None  # Model name for remote/local inference
-        self.provider_alias: str | None = None  # Provider alias for local inference
-
-        # Track last used compute settings for knowledge extraction fallback
+        # Track last used compute settings for knowledge extraction
         self.last_compute_host: str | None = None  # Track last compute host used
         self.last_model: str | None = None  # Track last model used
         self.last_provider: str | None = None  # Track last provider used
@@ -189,27 +184,6 @@ class ConversationMonitor:
 
         return None
 
-    def update_inference_settings(self, compute_host: str | None = None, model: str | None = None, provider: str | None = None):
-        """Update inference settings for knowledge detection
-
-        Knowledge detection can use either local or remote inference:
-        - If compute_host is None: Uses local LLM with provider_alias
-        - If compute_host is set: Uses remote peer's LLM with specified model
-
-        Args:
-            compute_host: Node ID for remote inference (None = local)
-            model: Model name for remote inference
-            provider: Provider alias for local inference
-        """
-        self.compute_host = compute_host
-        self.model = model
-        self.provider_alias = provider
-
-        if compute_host:
-            logger.info("Monitor %s: Knowledge detection using REMOTE inference on %s, model=%s", self.conversation_id, compute_host, model or 'default')
-        else:
-            logger.info("Monitor %s: Knowledge detection using LOCAL inference, provider=%s", self.conversation_id, provider or 'default')
-
     async def _calculate_knowledge_score(self) -> float:
         """Calculate knowledge-worthiness score for conversation segment
 
@@ -259,7 +233,7 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                 # Fallback to direct llm_manager call (local only)
                 response = await self.llm_manager.query(
                     prompt=prompt,
-                    provider_alias=self.provider_alias
+                    provider_alias=self.last_provider
                 )
 
             # Try to extract JSON if wrapped in markdown or text
@@ -485,7 +459,7 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                 # Fallback to direct llm_manager call (local only)
                 response = await self.llm_manager.query(
                     prompt=prompt,
-                    provider_alias=self.provider_alias
+                    provider_alias=self.last_provider
                 )
 
             # Try to extract and parse JSON from response (with repair attempts)

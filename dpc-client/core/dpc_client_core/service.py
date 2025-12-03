@@ -2758,11 +2758,9 @@ class CoreService:
                            conversation_id, len(monitor.message_buffer))
 
                 # Update monitor's inference settings to match the query (for knowledge detection)
-                monitor.update_inference_settings(
-                    compute_host=compute_host,
-                    model=model,
-                    provider=provider
-                )
+                # Note: set_inference_settings is also called after query completion (line 2701)
+                # but we call it here too for buffering code path consistency
+                monitor.set_inference_settings(compute_host, model, provider)
 
                 # Feed user message
                 # Group chat support: Include short node_id prefix for global uniqueness
