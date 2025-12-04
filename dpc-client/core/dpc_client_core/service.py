@@ -2078,13 +2078,13 @@ class CoreService:
 
             # Create message object for outgoing message
             message_id = hashlib.sha256(
-                f"{self.node_id}:{text}:{int(time.time() * 1000)}".encode()
+                f"{self.p2p_manager.node_id}:{text}:{int(time.time() * 1000)}".encode()
             ).hexdigest()[:16]
 
             outgoing_message = ConvMessage(
                 message_id=message_id,
                 conversation_id=target_node_id,
-                sender_node_id=self.node_id,
+                sender_node_id=self.p2p_manager.node_id,
                 sender_name="You",  # Outgoing messages from local user
                 text=text,
                 timestamp=datetime.utcnow().isoformat()
