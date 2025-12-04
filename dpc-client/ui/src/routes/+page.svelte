@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, unreadMessageCounts, resetUnreadCount } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
@@ -979,10 +979,16 @@
                     type="button"
                     class="chat-button"
                     class:active={activeChatId === peerId}
-                    on:click={() => activeChatId = peerId}
+                    on:click={() => {
+                      activeChatId = peerId;
+                      resetUnreadCount(peerId);
+                    }}
                     title={peerId}
                   >
                     👤 {getPeerDisplayName(peerId)}
+                    {#if $unreadMessageCounts.get(peerId) > 0}
+                      <span class="unread-badge">{$unreadMessageCounts.get(peerId)}</span>
+                    {/if}
                   </button>
                   <button
                     type="button"
@@ -1754,18 +1760,33 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
+    position: relative;
   }
-  
+
   .chat-button:hover {
     background: #f0f0f0;
   }
-  
+
   .chat-button.active {
     background: #e0e7ff;
     border-color: #c7d2fe;
     font-weight: bold;
   }
-  
+
+  /* Unread message badge (v0.9.3) */
+  .unread-badge {
+    display: inline-block;
+    background: #dc3545;
+    color: white;
+    font-size: 0.7rem;
+    font-weight: bold;
+    padding: 0.15rem 0.4rem;
+    border-radius: 10px;
+    margin-left: 0.5rem;
+    min-width: 1.2rem;
+    text-align: center;
+  }
+
   .disconnect-btn {
     width: auto;
     padding: 0.3rem 0.6rem;

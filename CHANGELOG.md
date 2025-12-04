@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.3] - 2025-12-04
+
+### Added
+- **Topic-Specific Knowledge Extraction Prompts** - Conversation type detection with tailored extraction strategies
+  - Automatic type detection using keyword matching: task, technical, decision, or general
+  - **Task extraction**: Optimized for work coordination (task assignments, deadlines, status tracking)
+    - Extracts project/task NAME (not meta-conversation labels like "deadline inquiry")
+    - Captures who/what/when/status with high confidence
+    - Example: "Core Service Refactoring" instead of "Task Deadline Inquiry"
+  - **Technical extraction**: Focuses on architecture rationale, tradeoffs, and alternatives
+  - **Decision extraction**: Captures options evaluated, consensus reached, and dissent
+  - **General extraction**: Fallback to v0.9.2 behavior for unclassified conversations
+  - Lays foundation for Phase 2.2's "Knowledge Commit Templates" feature
+  - Files modified: [conversation_monitor.py:101-102,220-495,671-713](dpc-client/core/dpc_client_core/conversation_monitor.py)
+
+### Added (continued)
+- **Unread message indicator for peer chats** - Visual notification for new messages
+  - Red badge shows unread count next to peer name in sidebar
+  - Badge clears automatically when opening the chat
+  - Helps users track activity across multiple peer conversations
+  - Files modified: [coreService.ts:32,164-176,350-357](dpc-client/ui/src/lib/coreService.ts), [+page.svelte:6,982-991,1776-1788](dpc-client/ui/src/routes/+page.svelte)
+
+### Fixed
+- **Outgoing messages now tracked in knowledge extraction** - Fixed missing conversation context
+  - Outgoing peer messages now buffered in conversation monitor
+  - Fixes incomplete extraction (only saw incoming messages before)
+  - Both sides of conversation now included in knowledge proposals
+  - Files modified: [service.py:2066-2096](dpc-client/core/dpc_client_core/service.py)
+
+### Technical Details
+- Added `conversation_type` field to ConversationMonitor
+- Implemented `_detect_conversation_type()` with simple keyword matching
+- Created 4 prompt builder methods: task, technical, decision, general
+- Modified `_generate_commit_proposal()` to select type-specific prompts
+- Added outgoing message tracking in `send_p2p_message()` method
+- All 56 existing tests pass with no regressions
+
+---
+
 ## [0.9.2] - 2025-12-02
 
 ### Fixed

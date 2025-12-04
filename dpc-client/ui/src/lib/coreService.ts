@@ -28,6 +28,9 @@ export const peerProviders = writable<Map<string, any[]>>(new Map());
 export const contextUpdated = writable<any>(null);
 export const peerContextUpdated = writable<any>(null);
 
+// Unread message counter (v0.9.3)
+export const unreadMessageCounts = writable<Map<string, number>>(new Map());
+
 let socket: WebSocket | null = null;
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempts = 0;
@@ -159,6 +162,18 @@ export function connectToCoreService() {
                     nodeStatus.set({ ...message.payload });
                 } else if (message.event === "new_p2p_message") {
                     p2pMessages.set(message.payload);
+
+                    // Track unread messages (v0.9.3) - only if this message is not from active chat
+                    // Message payload contains: sender_node_id, sender_name, text, message_id
+                    const senderId = message.payload.sender_node_id;
+                    if (senderId && typeof window !== 'undefined') {
+                        // Get current unread counts
+                        const currentCounts = get(unreadMessageCounts);
+                        const currentCount = currentCounts.get(senderId) || 0;
+                        // Increment count
+                        currentCounts.set(senderId, currentCount + 1);
+                        unreadMessageCounts.set(new Map(currentCounts));
+                    }
                 } else if (message.event === "connection_status_changed") {
                     // Update node status with new connection status
                     const currentStatus = get(nodeStatus);
@@ -329,5 +344,14 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
     } catch (error) {
         console.error(`Error sending command '${command}':`, error);
         return false;
+    }
+}
+
+// Helper function to reset unread count when chat becomes active (v0.9.3)
+export function resetUnreadCount(peerId: string) {
+    const currentCounts = get(unreadMessageCounts);
+    if (currentCounts.has(peerId)) {
+        currentCounts.delete(peerId);
+        unreadMessageCounts.set(new Map(currentCounts));
     }
 }

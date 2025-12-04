@@ -2067,6 +2067,34 @@ class CoreService:
         """Send a text message to a connected peer."""
         await self.p2p_coordinator.send_message(target_node_id, text)
 
+        # Track outgoing message in conversation monitor (v0.9.3 fix)
+        try:
+            from datetime import datetime
+            from .conversation_monitor import Message as ConvMessage
+            import hashlib
+            import time
+
+            monitor = self._get_or_create_conversation_monitor(target_node_id)
+
+            # Create message object for outgoing message
+            message_id = hashlib.sha256(
+                f"{self.node_id}:{text}:{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
+
+            outgoing_message = ConvMessage(
+                message_id=message_id,
+                conversation_id=target_node_id,
+                sender_node_id=self.node_id,
+                sender_name="You",  # Outgoing messages from local user
+                text=text,
+                timestamp=datetime.utcnow().isoformat()
+            )
+
+            # Buffer the outgoing message (conversation monitor handles both directions)
+            await monitor.on_message(outgoing_message)
+        except Exception as e:
+            logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
+
     async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None):
         """
         Send an AI query, either to local LLM or to a remote peer for inference.

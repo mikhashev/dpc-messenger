@@ -98,6 +98,9 @@ class ConversationMonitor:
         self.last_model: str | None = None  # Track last model used
         self.last_provider: str | None = None  # Track last provider used
 
+        # Conversation type classification (v0.9.3)
+        self.conversation_type: str = "general"  # Detected type: task/technical/decision/general
+
     def set_inference_settings(self, compute_host: str | None, model: str | None, provider: str | None):
         """Update inference settings (called after each AI query in this conversation).
 
@@ -216,6 +219,280 @@ class ConversationMonitor:
                 logger.info("Monitor %s: Defaulting to local inference for knowledge extraction",
                            self.conversation_id)
                 return (None, None, None)  # Local inference with default provider
+
+    def _detect_conversation_type(self) -> str:
+        """Detect conversation type from message content and participant context.
+
+        Uses simple keyword matching on message text. Checks both full_conversation
+        (for manual extraction) and message_buffer (for auto-detection).
+
+        Returns:
+            Conversation type: "task", "technical", "decision", or "general"
+        """
+        # Use full_conversation if available (manual extraction), otherwise message_buffer
+        messages = self.full_conversation if self.full_conversation else self.message_buffer
+
+        # Combine all message text for analysis
+        all_text = " ".join([msg.text.lower() for msg in messages])
+
+        # Task/Planning keywords (highest priority - user's primary use case)
+        task_keywords = [
+            "task", "deadline", "assigned", "project", "deliverable",
+            "milestone", "schedule", "priority", "estimate", "sprint",
+            "ticket", "issue", "todo", "action item", "owner"
+        ]
+
+        # Technical keywords
+        technical_keywords = [
+            "code", "implementation", "architecture", "refactor", "bug",
+            "api", "database", "function", "class", "module", "library",
+            "framework", "algorithm", "performance", "optimization", "test"
+        ]
+
+        # Decision keywords
+        decision_keywords = [
+            "decide", "decision", "choose", "option", "alternative",
+            "propose", "vote", "approve", "reject", "consensus",
+            "recommend", "suggest", "evaluate", "tradeoff", "pros and cons"
+        ]
+
+        # Count keyword matches
+        task_count = sum(1 for kw in task_keywords if kw in all_text)
+        technical_count = sum(1 for kw in technical_keywords if kw in all_text)
+        decision_count = sum(1 for kw in decision_keywords if kw in all_text)
+
+        # Determine type based on highest count (task has priority for ties)
+        if task_count >= technical_count and task_count >= decision_count and task_count > 0:
+            return "task"
+        elif technical_count > task_count and technical_count >= decision_count:
+            return "technical"
+        elif decision_count > 0:
+            return "decision"
+        else:
+            return "general"
+
+    def _get_task_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt optimized for task/planning conversations.
+
+        Focuses on: task names, assignments, deadlines, status, decisions.
+        """
+        json_format = """{
+  "topic": "concise_task_or_project_name",
+  "summary": "One sentence: who is doing what, by when",
+  "entries": [
+    {
+      "content": "Task name, assignment, deadline, or status fact",
+      "tags": ["task_assignment", "deadline", "status"],
+      "confidence": 0.9,
+      "sources": ["participant_name"],
+      "reasoning": "Direct statement or agreed commitment"
+    }
+  ],
+  "alternatives": [],
+  "devil_advocate": "Any risks or unclear requirements",
+  "flagged_assumptions": ["Implicit assumptions about scope or timeline"]
+}"""
+
+        rules_section = """EXTRACTION RULES FOR TASK CONVERSATIONS:
+1. PRIMARY FOCUS: Extract the main task/project NAME (often in first few messages)
+2. WHO: Identify who is assigned (mentioned by name or "you"/"I")
+3. WHEN: Extract ALL time references (deadlines, start dates, milestones)
+4. STATUS: Capture acceptance/rejection ("yes I can", "will take it", "cannot do")
+5. SCOPE: Note any deliverables or requirements mentioned
+6. CONFIDENCE: Rate 0.9+ for explicit statements, 0.7 for implicit agreements
+7. IGNORE: Procedural questions about availability unless they lead to commitment
+8. TOPIC: Use task/project NAME, not meta-conversation labels like "deadline inquiry"
+
+EXAMPLE GOOD EXTRACTION:
+Topic: "Core Service Refactoring"
+Entry 1: "Mike Windows assigned to core service refactoring task"
+Entry 2: "Deadline: 3 days from start (tomorrow as start date)"
+Entry 3: "Status: Accepted ('yes I can')"
+
+AVOID: Topics like "Task Deadline Inquiry", "Availability Check"
+"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+
+CONVERSATION TYPE: Task/Planning (formal work coordination)
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract task assignments, deadlines, and commitments. Focus on FACTS, not procedural questions.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+
+    def _get_technical_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt optimized for technical discussions.
+
+        Focuses on: architecture, implementation details, technical decisions.
+        """
+        json_format = """{
+  "topic": "technical_topic_name",
+  "summary": "One sentence technical summary",
+  "entries": [
+    {
+      "content": "Technical fact, decision, or implementation detail",
+      "tags": ["architecture", "implementation", "technical_decision"],
+      "confidence": 0.8,
+      "sources": ["participant_name"],
+      "reasoning": "Technical rationale or evidence"
+    }
+  ],
+  "alternatives": ["Alternative technical approaches discussed"],
+  "devil_advocate": "Technical risks or tradeoffs",
+  "flagged_assumptions": ["Technical assumptions to validate"]
+}"""
+
+        rules_section = """EXTRACTION RULES FOR TECHNICAL CONVERSATIONS:
+1. Focus on: Architecture, implementation details, technical decisions
+2. Capture rationale: WHY decisions were made (not just what was decided)
+3. Alternative approaches: List other options discussed
+4. Tradeoffs: Document pros/cons of chosen approach
+5. Technical risks: Flag potential issues or unknowns
+6. Confidence: Higher for tested/proven solutions, lower for experimental
+"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+
+CONVERSATION TYPE: Technical Discussion
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract technical knowledge with architectural rationale and tradeoffs.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+
+    def _get_decision_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt optimized for decision-making conversations.
+
+        Focuses on: options evaluated, decision made, consensus reached.
+        """
+        json_format = """{
+  "topic": "decision_or_proposal_topic",
+  "summary": "One sentence: what was decided and why",
+  "entries": [
+    {
+      "content": "Decision, option evaluated, or consensus point",
+      "tags": ["decision", "option_evaluation", "consensus"],
+      "confidence": 0.85,
+      "sources": ["participant_name"],
+      "reasoning": "Evidence or criteria used for decision"
+    }
+  ],
+  "alternatives": ["Options that were NOT chosen and why"],
+  "devil_advocate": "Counter-arguments or dissenting views",
+  "flagged_assumptions": ["Assumptions underlying the decision"]
+}"""
+
+        rules_section = """EXTRACTION RULES FOR DECISION CONVERSATIONS:
+1. DECISION: State clearly what was decided
+2. OPTIONS: List all alternatives evaluated (chosen and rejected)
+3. CRITERIA: Capture decision criteria or evaluation factors
+4. CONSENSUS: Note level of agreement (unanimous vs. majority)
+5. DISSENT: Preserve any dissenting opinions or concerns
+6. NEXT STEPS: Extract any follow-up actions decided
+"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+
+CONVERSATION TYPE: Decision Making
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract decision made, options evaluated, and consensus reached.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+
+    def _get_general_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt for general conversations (fallback).
+
+        Uses current v0.9.2 prompt logic (existing implementation).
+        """
+        # Check if cultural perspectives are enabled
+        cultural_perspectives_enabled = False
+        if self.settings:
+            cultural_perspectives_enabled = self.settings.get_cultural_perspectives_enabled()
+
+        if cultural_perspectives_enabled:
+            json_format = """{
+  "topic": "brief_topic_name",
+  "summary": "One sentence overview",
+  "entries": [
+    {
+      "content": "Knowledge statement",
+      "tags": ["tag1", "tag2"],
+      "confidence": 0.8,
+      "cultural_context": "Universal",
+      "sources": ["participant_name"],
+      "reasoning": "Why notable"
+    }
+  ],
+  "cultural_perspectives": ["Western individualistic", "Eastern collective"],
+  "alternatives": ["Alternative perspective 1"],
+  "devil_advocate": "Critical analysis",
+  "flagged_assumptions": ["Assumption if any"]
+}"""
+            rules_section = """RULES:
+- Rate confidence 0.0-1.0 for each claim
+- Mark cultural_context as "Universal" or "Context: [specific culture]"
+- Include devil's advocate critique
+- List alternative viewpoints
+- Flag cultural assumptions"""
+        else:
+            json_format = """{
+  "topic": "brief_topic_name",
+  "summary": "One sentence overview",
+  "entries": [
+    {
+      "content": "Knowledge statement",
+      "tags": ["tag1", "tag2"],
+      "confidence": 0.8,
+      "sources": ["participant_name"],
+      "reasoning": "Why notable"
+    }
+  ],
+  "alternatives": ["Alternative perspective 1"],
+  "devil_advocate": "Critical analysis",
+  "flagged_assumptions": ["Assumption if any"]
+}"""
+            rules_section = """RULES:
+- Rate confidence 0.0-1.0 for each claim
+- Include devil's advocate critique
+- List alternative viewpoints
+- Flag problematic assumptions"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract structured knowledge with bias mitigation.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
 
     async def _calculate_knowledge_score(self) -> float:
         """Calculate knowledge-worthiness score for conversation segment
@@ -391,7 +668,12 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         Returns:
             KnowledgeCommitProposal object
         """
-        # Check if cultural perspectives are enabled
+        # Detect conversation type (v0.9.3)
+        self.conversation_type = self._detect_conversation_type()
+        logger.info("Monitor %s: Detected conversation type: %s",
+                   self.conversation_id, self.conversation_type)
+
+        # Get cultural perspectives setting
         cultural_perspectives_enabled = False
         if self.settings:
             cultural_perspectives_enabled = self.settings.get_cultural_perspectives_enabled()
@@ -420,69 +702,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 {', '.join(cultural_contexts) if cultural_contexts else 'Not specified'}
 """
 
-        # Build JSON format with conditional cultural fields
-        if cultural_perspectives_enabled:
-            json_format = """{
-  "topic": "brief_topic_name",
-  "summary": "One sentence overview",
-  "entries": [
-    {
-      "content": "Knowledge statement",
-      "tags": ["tag1", "tag2"],
-      "confidence": 0.8,
-      "cultural_context": "Universal",
-      "sources": ["participant_name"],
-      "reasoning": "Why notable"
-    }
-  ],
-  "cultural_perspectives": ["Western individualistic", "Eastern collective"],
-  "alternatives": ["Alternative perspective 1"],
-  "devil_advocate": "Critical analysis",
-  "flagged_assumptions": ["Assumption if any"]
-}"""
-            rules_section = """RULES:
-- Rate confidence 0.0-1.0 for each claim
-- Mark cultural_context as "Universal" or "Context: [specific culture]"
-- Include devil's advocate critique
-- List alternative viewpoints
-- Flag cultural assumptions"""
-        else:
-            json_format = """{
-  "topic": "brief_topic_name",
-  "summary": "One sentence overview",
-  "entries": [
-    {
-      "content": "Knowledge statement",
-      "tags": ["tag1", "tag2"],
-      "confidence": 0.8,
-      "sources": ["participant_name"],
-      "reasoning": "Why notable"
-    }
-  ],
-  "alternatives": ["Alternative perspective 1"],
-  "devil_advocate": "Critical analysis",
-  "flagged_assumptions": ["Assumption if any"]
-}"""
-            rules_section = """RULES:
-- Rate confidence 0.0-1.0 for each claim
-- Include devil's advocate critique
-- List alternative viewpoints
-- Flag problematic assumptions"""
-
-        # Build bias-resistant prompt
-        prompt = f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
-{cultural_section}
-CONVERSATION:
-{messages_text}
-
-TASK: Extract structured knowledge with bias mitigation.
-
-REQUIRED JSON FORMAT (output ONLY this, nothing else):
-{json_format}
-
-{rules_section}
-
-DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+        # Select type-specific prompt builder (v0.9.3)
+        if self.conversation_type == "task":
+            prompt = self._get_task_extraction_prompt(messages_text, cultural_section)
+        elif self.conversation_type == "technical":
+            prompt = self._get_technical_extraction_prompt(messages_text, cultural_section)
+        elif self.conversation_type == "decision":
+            prompt = self._get_decision_extraction_prompt(messages_text, cultural_section)
+        else:  # general (fallback)
+            prompt = self._get_general_extraction_prompt(messages_text, cultural_section)
 
         try:
             # Infer inference settings (uses tracked settings if available, otherwise infers from conversation type)

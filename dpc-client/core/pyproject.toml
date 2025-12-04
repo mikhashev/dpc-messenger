@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "dpc-client-core"
-version = "0.9.2"
+version = "0.9.3"
 description = ""
 authors = ["Mike Shevchenko <legoogmiha@gmail.com>"]
 readme = "README.md"
