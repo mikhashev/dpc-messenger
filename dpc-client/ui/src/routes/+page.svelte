@@ -973,7 +973,6 @@
             <!-- P2P Peer Chats -->
             {#if $nodeStatus.p2p_peers && $nodeStatus.p2p_peers.length > 0}
               {#each $nodeStatus.p2p_peers as peerId (`${peerId}-${peerDisplayNames.get(peerId)}`)}
-
                 <li class="peer-item">
                   <button
                     type="button"
@@ -1361,7 +1360,7 @@
 <style>
   .container {
     padding: 1.5rem;
-    max-width: 1400px;
+    width: auto;
     margin: 0 auto;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
@@ -1396,7 +1395,7 @@
   
   .grid {
     display: grid;
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 380px 1fr;
     gap: 1.5rem;
   }
   
@@ -1795,12 +1794,12 @@
   }
 
   .disconnect-btn {
-    width: auto;
     padding: 0.3rem 0.6rem;
     background: transparent;
     color: #999;
     font-size: 1.5rem;
     border: 1px solid transparent;
+    flex: 1;
   }
 
   .disconnect-btn:hover {
