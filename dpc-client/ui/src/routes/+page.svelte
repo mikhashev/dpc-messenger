@@ -985,8 +985,8 @@
                     }}
                     title={peerId}
                   >
-                    👤 {getPeerDisplayName(peerId)}
-                    {#if $unreadMessageCounts.get(peerId) > 0}
+                    <span class="peer-name">👤 {getPeerDisplayName(peerId)}</span>
+                    {#if ($unreadMessageCounts.get(peerId) ?? 0) > 0}
                       <span class="unread-badge">{$unreadMessageCounts.get(peerId)}</span>
                     {/if}
                   </button>
@@ -1750,15 +1750,14 @@
   }
   
   .chat-button {
+    display: flex;
+    align-items: center;
     text-align: left;
     background: transparent;
     color: #333;
     border: 1px solid transparent;
     padding: 0.6rem;
     transition: all 0.2s;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     flex: 1;
     position: relative;
   }
@@ -1771,6 +1770,14 @@
     background: #e0e7ff;
     border-color: #c7d2fe;
     font-weight: bold;
+  }
+
+  /* Peer name wrapper (v0.9.3) - handles overflow so badge stays visible */
+  .peer-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
   }
 
   /* Unread message badge (v0.9.3) */
