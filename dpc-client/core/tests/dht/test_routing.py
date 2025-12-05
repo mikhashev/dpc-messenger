@@ -27,9 +27,9 @@ from dpc_client_core.dht.routing import DHTNode, KBucket, RoutingTable
 # ===== Helper Functions =====
 
 def create_test_node(hex_suffix: str, ip: str = "192.168.1.1", port: int = 8889) -> DHTNode:
-    """Create test DHTNode with given hex suffix (16 chars)."""
-    # Pad hex_suffix to 16 characters
-    padded = hex_suffix.zfill(16)
+    """Create test DHTNode with given hex suffix (32 chars)."""
+    # Pad hex_suffix to 32 characters
+    padded = hex_suffix.zfill(32)
     node_id = f"dpc-node-{padded}"
     return DHTNode(node_id=node_id, ip=ip, port=port)
 
@@ -38,11 +38,11 @@ def create_test_node(hex_suffix: str, ip: str = "192.168.1.1", port: int = 8889)
 
 def test_parse_node_id():
     """Test node ID parsing to integer."""
-    node_id = "dpc-node-0000000000000001"
+    node_id = "dpc-node-00000000000000000000000000000001"
     result = parse_node_id(node_id)
     assert result == 1
 
-    node_id = "dpc-node-00000000000000ff"
+    node_id = "dpc-node-000000000000000000000000000000ff"
     result = parse_node_id(node_id)
     assert result == 255
 
@@ -51,21 +51,21 @@ def test_parse_node_id_invalid():
     """Test node ID parsing with invalid input."""
     # Missing prefix
     with pytest.raises(ValueError, match="must start with"):
-        parse_node_id("invalid-0000000000000001")
+        parse_node_id("invalid-00000000000000000000000000000001")
 
     # Wrong hex length
-    with pytest.raises(ValueError, match="must be 16 characters"):
+    with pytest.raises(ValueError, match="must be 32 characters"):
         parse_node_id("dpc-node-123")
 
     # Invalid hex characters
     with pytest.raises(ValueError, match="Invalid hex characters"):
-        parse_node_id("dpc-node-gggggggggggggggg")
+        parse_node_id("dpc-node-gggggggggggggggggggggggggggggggg")
 
 
 def test_xor_distance_symmetric():
     """Test XOR distance is symmetric: d(A, B) = d(B, A)."""
-    node_a = "dpc-node-0000000000000001"
-    node_b = "dpc-node-0000000000000002"
+    node_a = "dpc-node-00000000000000000000000000000001"
+    node_b = "dpc-node-00000000000000000000000000000002"
 
     dist_ab = xor_distance(node_a, node_b)
     dist_ba = xor_distance(node_b, node_a)
@@ -76,7 +76,7 @@ def test_xor_distance_symmetric():
 
 def test_xor_distance_zero():
     """Test XOR distance to self is zero."""
-    node_a = "dpc-node-0000000000000001"
+    node_a = "dpc-node-00000000000000000000000000000001"
     dist = xor_distance(node_a, node_a)
     assert dist == 0
 
@@ -102,57 +102,57 @@ def test_bucket_index():
 
 def test_node_id_distance_to_bucket():
     """Test bucket index calculation from two node IDs."""
-    node_a = "dpc-node-0000000000000000"
-    node_b = "dpc-node-0000000000000001"
+    node_a = "dpc-node-00000000000000000000000000000000"
+    node_b = "dpc-node-00000000000000000000000000000001"
 
     # Distance = 1 → bucket 0
     assert node_id_distance_to_bucket(node_a, node_b) == 0
 
-    node_c = "dpc-node-0000000000000100"
+    node_c = "dpc-node-00000000000000000000000000000100"
     # Distance = 0x100 = 256 → bucket 8
     assert node_id_distance_to_bucket(node_a, node_c) == 8
 
 
 def test_sort_by_distance():
     """Test sorting nodes by XOR distance."""
-    target = "dpc-node-0000000000000000"
+    target = "dpc-node-00000000000000000000000000000000"
     nodes = [
-        "dpc-node-0000000000000003",
-        "dpc-node-0000000000000001",
-        "dpc-node-0000000000000002",
+        "dpc-node-00000000000000030000000000000003",
+        "dpc-node-00000000000000000000000000000001",
+        "dpc-node-00000000000000000000000000000002",
     ]
 
     sorted_nodes = sort_by_distance(target, nodes)
 
     assert sorted_nodes == [
-        "dpc-node-0000000000000001",  # Distance 1
-        "dpc-node-0000000000000002",  # Distance 2
-        "dpc-node-0000000000000003",  # Distance 3
+        "dpc-node-00000000000000000000000000000001",  # Distance 1
+        "dpc-node-00000000000000000000000000000002",  # Distance 2
+        "dpc-node-00000000000000030000000000000003",  # Distance 3
     ]
 
 
 def test_find_closest_nodes():
     """Test finding k closest nodes from candidates."""
-    target = "dpc-node-0000000000000000"
+    target = "dpc-node-00000000000000000000000000000000"
     candidates = [
-        ("dpc-node-0000000000000003", "data3"),
-        ("dpc-node-0000000000000001", "data1"),
-        ("dpc-node-0000000000000005", "data5"),
+        ("dpc-node-00000000000000030000000000000003", "data3"),
+        ("dpc-node-00000000000000000000000000000001", "data1"),
+        ("dpc-node-00000000000000050000000000000005", "data5"),
     ]
 
     # Find 2 closest
     closest = find_closest_nodes(target, candidates, count=2)
 
     assert len(closest) == 2
-    assert closest[0] == ("dpc-node-0000000000000001", "data1")
-    assert closest[1] == ("dpc-node-0000000000000002", "data2") or closest[1] == ("dpc-node-0000000000000003", "data3")
+    assert closest[0] == ("dpc-node-00000000000000000000000000000001", "data1")
+    assert closest[1] == ("dpc-node-00000000000000000000000000000002", "data2") or closest[1] == ("dpc-node-00000000000000030000000000000003", "data3")
 
 
 def test_is_closer():
     """Test proximity comparison."""
-    target = "dpc-node-0000000000000000"
-    candidate = "dpc-node-0000000000000001"  # Distance 1
-    reference = "dpc-node-0000000000000003"  # Distance 3
+    target = "dpc-node-00000000000000000000000000000000"
+    candidate = "dpc-node-00000000000000000000000000000001"  # Distance 1
+    reference = "dpc-node-00000000000000030000000000000003"  # Distance 3
 
     assert is_closer(target, candidate, reference) is True
     assert is_closer(target, reference, candidate) is False
@@ -160,7 +160,7 @@ def test_is_closer():
 
 def test_generate_random_node_id_in_bucket():
     """Test generating random node ID in specific bucket."""
-    reference = "dpc-node-0000000000000000"
+    reference = "dpc-node-00000000000000000000000000000000"
 
     # Generate 10 random IDs in bucket 5
     for _ in range(10):
@@ -178,7 +178,7 @@ def test_dht_node_creation():
     """Test DHTNode creation and attributes."""
     node = create_test_node("0001", ip="10.0.0.1", port=8889)
 
-    assert node.node_id == "dpc-node-0000000000000001"
+    assert node.node_id == "dpc-node-00000000000000000000000000000001"
     assert node.ip == "10.0.0.1"
     assert node.port == 8889
     assert node.failed_pings == 0
@@ -241,7 +241,7 @@ def test_kbucket_add_node():
 
     assert success is True
     assert len(bucket) == 1
-    assert bucket.has_node("dpc-node-0000000000000001")
+    assert bucket.has_node("dpc-node-00000000000000000000000000000001")
 
 
 def test_kbucket_add_duplicate():
@@ -287,8 +287,8 @@ def test_kbucket_lru_eviction():
 
     assert success is True
     assert len(bucket) == 3
-    assert not bucket.has_node("dpc-node-0000000000000001")  # node1 evicted
-    assert bucket.has_node("dpc-node-0000000000000004")  # node4 added
+    assert not bucket.has_node("dpc-node-00000000000000000000000000000001")  # node1 evicted
+    assert bucket.has_node("dpc-node-00000000000000000000000000000004")  # node4 added
 
 
 def test_kbucket_replacement_cache():
@@ -321,11 +321,11 @@ def test_kbucket_remove_node():
     bucket.add(node)
     assert len(bucket) == 1
 
-    success = bucket.remove("dpc-node-0000000000000001")
+    success = bucket.remove("dpc-node-00000000000000000000000000000001")
 
     assert success is True
     assert len(bucket) == 0
-    assert not bucket.has_node("dpc-node-0000000000000001")
+    assert not bucket.has_node("dpc-node-00000000000000000000000000000001")
 
 
 def test_kbucket_remove_promotes_replacement():
@@ -344,11 +344,11 @@ def test_kbucket_remove_promotes_replacement():
     assert len(bucket.replacement_cache) == 1
 
     # Remove node1
-    bucket.remove("dpc-node-0000000000000001")
+    bucket.remove("dpc-node-00000000000000000000000000000001")
 
     # node3 should be promoted from cache
     assert len(bucket) == 2
-    assert bucket.has_node("dpc-node-0000000000000003")
+    assert bucket.has_node("dpc-node-00000000000000000000000000000003")
     assert len(bucket.replacement_cache) == 0
 
 
@@ -392,9 +392,9 @@ def test_kbucket_needs_refresh():
 
 def test_routing_table_creation():
     """Test routing table initialization."""
-    table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
 
-    assert table.node_id == "dpc-node-0000000000000000"
+    assert table.node_id == "dpc-node-00000000000000000000000000000000"
     assert table.k == 20
     assert len(table.buckets) == 128
     assert table.get_node_count() == 0
@@ -402,10 +402,10 @@ def test_routing_table_creation():
 
 def test_routing_table_add_node():
     """Test adding node to routing table."""
-    table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
 
     success = table.add_node(
-        node_id="dpc-node-0000000000000001",
+        node_id="dpc-node-00000000000000000000000000000001",
         ip="10.0.0.1",
         port=8889
     )
@@ -414,18 +414,18 @@ def test_routing_table_add_node():
     assert table.get_node_count() == 1
 
     # Verify node is in correct bucket (distance 1 → bucket 0)
-    node = table.get_node("dpc-node-0000000000000001")
+    node = table.get_node("dpc-node-00000000000000000000000000000001")
     assert node is not None
     assert node.ip == "10.0.0.1"
 
 
 def test_routing_table_cannot_add_self():
     """Test adding self to routing table raises error."""
-    table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
 
     with pytest.raises(ValueError, match="Cannot add self"):
         table.add_node(
-            node_id="dpc-node-0000000000000000",
+            node_id="dpc-node-00000000000000000000000000000000",
             ip="10.0.0.1",
             port=8889
         )
@@ -433,12 +433,12 @@ def test_routing_table_cannot_add_self():
 
 def test_routing_table_remove_node():
     """Test removing node from routing table."""
-    table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
 
-    table.add_node("dpc-node-0000000000000001", "10.0.0.1", 8889)
+    table.add_node("dpc-node-00000000000000000000000000000001", "10.0.0.1", 8889)
     assert table.get_node_count() == 1
 
-    success = table.remove_node("dpc-node-0000000000000001")
+    success = table.remove_node("dpc-node-00000000000000000000000000000001")
 
     assert success is True
     assert table.get_node_count() == 0
@@ -446,42 +446,42 @@ def test_routing_table_remove_node():
 
 def test_routing_table_find_closest_nodes():
     """Test finding closest nodes to target."""
-    table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
 
     # Add several nodes
-    table.add_node("dpc-node-0000000000000001", "10.0.0.1", 8889)
-    table.add_node("dpc-node-0000000000000002", "10.0.0.2", 8889)
-    table.add_node("dpc-node-0000000000000005", "10.0.0.5", 8889)
-    table.add_node("dpc-node-000000000000000a", "10.0.0.10", 8889)
+    table.add_node("dpc-node-00000000000000000000000000000001", "10.0.0.1", 8889)
+    table.add_node("dpc-node-00000000000000000000000000000002", "10.0.0.2", 8889)
+    table.add_node("dpc-node-00000000000000050000000000000005", "10.0.0.5", 8889)
+    table.add_node("dpc-node-000000000000000a000000000000000a", "10.0.0.10", 8889)
 
     # Find 2 closest to target "0000000000000003"
-    target = "dpc-node-0000000000000003"
+    target = "dpc-node-00000000000000030000000000000003"
     closest = table.find_closest_nodes(target, count=2)
 
     assert len(closest) == 2
     # Closest should be 0x02 (distance 1) and 0x01 (distance 2)
-    assert closest[0].node_id == "dpc-node-0000000000000002"
-    assert closest[1].node_id == "dpc-node-0000000000000001"
+    assert closest[0].node_id == "dpc-node-00000000000000000000000000000002"
+    assert closest[1].node_id == "dpc-node-00000000000000000000000000000001"
 
 
 def test_routing_table_get_bucket_for_node():
     """Test retrieving specific bucket for node."""
-    table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
 
     # Node at distance 1 → bucket 0
-    bucket = table.get_bucket_for_node("dpc-node-0000000000000001")
+    bucket = table.get_bucket_for_node("dpc-node-00000000000000000000000000000001")
     assert bucket is not None
     assert bucket == table.buckets[0]
 
     # Node at distance 256 (0x100) → bucket 8
-    bucket = table.get_bucket_for_node("dpc-node-0000000000000100")
+    bucket = table.get_bucket_for_node("dpc-node-00000000000000000000000000000100")
     assert bucket is not None
     assert bucket == table.buckets[8]
 
 
 def test_routing_table_stats():
     """Test routing table statistics."""
-    table = RoutingTable(node_id="dpc-node-0000000000000000", k=2)
+    table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=2)
 
     # Empty table
     stats = table.get_bucket_stats()
@@ -490,8 +490,8 @@ def test_routing_table_stats():
 
     # Add nodes that fall in SAME bucket (use different subnets)
     # Node 0x02 and 0x03 both fall in bucket 1 (distances 2 and 3, both in range [2^1, 2^2) = [2, 4))
-    table.add_node("dpc-node-0000000000000002", "10.0.1.1", 8889)
-    table.add_node("dpc-node-0000000000000003", "10.0.2.3", 8889)
+    table.add_node("dpc-node-00000000000000000000000000000002", "10.0.1.1", 8889)
+    table.add_node("dpc-node-00000000000000000000000000000003", "10.0.2.3", 8889)
 
     stats = table.get_bucket_stats()
     assert stats["total_nodes"] == 2
@@ -501,10 +501,10 @@ def test_routing_table_stats():
 
 def test_routing_table_get_buckets_needing_refresh():
     """Test finding buckets that need periodic refresh."""
-    table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
 
     # Add node to bucket 0
-    table.add_node("dpc-node-0000000000000001", "10.0.0.1", 8889)
+    table.add_node("dpc-node-00000000000000000000000000000001", "10.0.0.1", 8889)
 
     # Fresh bucket - doesn't need refresh
     buckets = table.get_buckets_needing_refresh(interval=10)
@@ -520,14 +520,14 @@ def test_routing_table_get_buckets_needing_refresh():
 
 def test_routing_table_get_all_nodes():
     """Test retrieving all nodes from routing table."""
-    table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
 
-    table.add_node("dpc-node-0000000000000001", "10.0.0.1", 8889)
-    table.add_node("dpc-node-0000000000000100", "10.0.0.2", 8889)
+    table.add_node("dpc-node-00000000000000000000000000000001", "10.0.0.1", 8889)
+    table.add_node("dpc-node-00000000000001000000000000000100", "10.0.0.2", 8889)
 
     all_nodes = table.get_all_nodes()
 
     assert len(all_nodes) == 2
     node_ids = {node.node_id for node in all_nodes}
-    assert "dpc-node-0000000000000001" in node_ids
-    assert "dpc-node-0000000000000100" in node_ids
+    assert "dpc-node-00000000000000000000000000000001" in node_ids
+    assert "dpc-node-00000000000001000000000000000100" in node_ids

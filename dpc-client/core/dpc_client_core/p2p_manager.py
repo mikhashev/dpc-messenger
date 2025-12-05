@@ -19,6 +19,7 @@ from dpc_protocol.utils import parse_dpc_uri
 from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
+from .dht import DHTManager, DHTConfig
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,10 @@ class P2PManager:
         # Auto-reconnect tracking
         self._intentional_disconnects: set = set()  # Track user-initiated disconnects
         self._hub_client_refs: Dict[str, HubClient] = {}  # Store hub_client for reconnection
-        
+
+        # DHT (Distributed Hash Table) for decentralized peer discovery
+        self.dht_manager: DHTManager | None = None  # Initialized in start_server()
+
         try:
             self.node_id, self.key_file, self.cert_file = load_identity()
             logger.info("Existing node identity loaded")

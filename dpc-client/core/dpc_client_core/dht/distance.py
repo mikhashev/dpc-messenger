@@ -4,12 +4,12 @@ DHT Distance Utilities - XOR Distance Metric for Kademlia DHT
 This module provides XOR distance calculation utilities for Kademlia DHT.
 Node IDs are organized in a 128-bit key space using XOR distance metric.
 
-Node ID Format: dpc-node-[16 hex chars] → 128-bit integer
+Node ID Format: dpc-node-[32 hex chars] → 128-bit integer
 
 Example:
-    dpc-node-abcd1234abcd1234 → 0xabcd1234abcd1234
-    dpc-node-1234abcd1234abcd → 0x1234abcd1234abcd
-    distance = 0xabcd1234abcd1234 XOR 0x1234abcd1234abcd
+    dpc-node-abcd1234abcd1234abcd1234abcd1234 → 0xabcd1234abcd1234abcd1234abcd1234
+    dpc-node-1234abcd1234abcd1234abcd1234abcd → 0x1234abcd1234abcd1234abcd1234abcd
+    distance = XOR of the two 128-bit integers
 """
 
 import logging
@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Node ID constants
 NODE_ID_PREFIX = "dpc-node-"
-NODE_ID_HEX_LENGTH = 16  # 16 hex chars = 64 bits per half = 128 bits total (if extended to 32 chars)
+NODE_ID_HEX_LENGTH = 32  # 32 hex chars = 128 bits (4 bits per hex char)
 NODE_ID_BITS = 128  # Key space size
 
 
@@ -28,7 +28,7 @@ def parse_node_id(node_id: str) -> int:
     Parse node ID string to 128-bit integer.
 
     Args:
-        node_id: Node identifier (e.g., "dpc-node-abcd1234abcd1234")
+        node_id: Node identifier (e.g., "dpc-node-abcd1234abcd1234abcd1234abcd1234")
 
     Returns:
         128-bit integer representation
@@ -37,8 +37,8 @@ def parse_node_id(node_id: str) -> int:
         ValueError: If node ID format is invalid
 
     Example:
-        >>> parse_node_id("dpc-node-abcd1234abcd1234")
-        192103489273048934826495
+        >>> parse_node_id("dpc-node-abcd1234abcd1234abcd1234abcd1234")
+        228826127032234627312174085396624261684
     """
     if not node_id.startswith(NODE_ID_PREFIX):
         raise ValueError(f"Node ID must start with '{NODE_ID_PREFIX}': {node_id}")
@@ -72,8 +72,8 @@ def xor_distance(node_id_a: str, node_id_b: str) -> int:
         XOR distance as integer (0 to 2^128 - 1)
 
     Example:
-        >>> xor_distance("dpc-node-abcd1234abcd1234", "dpc-node-1234abcd1234abcd")
-        184608942106673827906560
+        >>> xor_distance("dpc-node-abcd1234abcd1234abcd1234abcd1234", "dpc-node-1234abcd1234abcd1234abcd1234abcd")
+        198294774853351167490970896651327676241
     """
     a_int = parse_node_id(node_id_a)
     b_int = parse_node_id(node_id_b)
@@ -225,7 +225,7 @@ def generate_random_node_id_in_bucket(reference_id: str, bucket_idx: int) -> str
         Random node ID in specified bucket
 
     Example:
-        >>> random_id = generate_random_node_id_in_bucket("dpc-node-0000000000000000", 5)
+        >>> random_id = generate_random_node_id_in_bucket("dpc-node-00000000000000000000000000000000", 5)
         >>> # random_id will have distance in range [2^5, 2^6) from reference
     """
     import random
@@ -239,6 +239,6 @@ def generate_random_node_id_in_bucket(reference_id: str, bucket_idx: int) -> str
     reference_int = parse_node_id(reference_id)
     random_int = reference_int ^ random_distance
 
-    # Convert back to node ID string (16 hex chars, zero-padded)
-    hex_part = f"{random_int:016x}"
+    # Convert back to node ID string (32 hex chars, zero-padded)
+    hex_part = f"{random_int:032x}"
     return f"{NODE_ID_PREFIX}{hex_part}"

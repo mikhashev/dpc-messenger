@@ -26,7 +26,7 @@ from dpc_client_core.dht.routing import RoutingTable, DHTNode
 @pytest.fixture
 def routing_table():
     """Create test routing table."""
-    return RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    return RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
 
 
 @pytest.fixture
@@ -59,7 +59,7 @@ async def test_message_serialization(rpc_handler):
     message = {
         "type": "PING",
         "rpc_id": "test-123",
-        "node_id": "dpc-node-0000000000000001",
+        "node_id": "dpc-node-00000000000000000000000000000001",
         "timestamp": 1234567890.0,
     }
 
@@ -71,7 +71,7 @@ async def test_message_serialization(rpc_handler):
 
     assert decoded["type"] == "PING"
     assert decoded["rpc_id"] == "test-123"
-    assert decoded["node_id"] == "dpc-node-0000000000000001"
+    assert decoded["node_id"] == "dpc-node-00000000000000000000000000000001"
 
 
 @pytest.mark.asyncio
@@ -95,7 +95,7 @@ async def test_ping_pong_success(rpc_server):
     rpc_handler, port = rpc_server
 
     # Create second RPC handler to receive PING
-    responder_table = RoutingTable(node_id="dpc-node-0000000000000001", k=20)
+    responder_table = RoutingTable(node_id="dpc-node-00000000000000000000000000000001", k=20)
     responder = DHTRPCHandler(responder_table)
     await responder.start(host="127.0.0.1", port=0)
     responder_port = responder.transport.get_extra_info('sockname')[1]
@@ -107,10 +107,10 @@ async def test_ping_pong_success(rpc_server):
         # Verify PONG response
         assert response is not None
         assert response["type"] == "PONG"
-        assert response["node_id"] == "dpc-node-0000000000000001"
+        assert response["node_id"] == "dpc-node-00000000000000000000000000000001"
 
         # Verify routing table updated
-        node = rpc_handler.routing_table.get_node("dpc-node-0000000000000001")
+        node = rpc_handler.routing_table.get_node("dpc-node-00000000000000000000000000000001")
         assert node is not None
         assert node.ip == "127.0.0.1"
 
@@ -142,9 +142,9 @@ async def test_find_node_success(rpc_server):
     rpc_handler, port = rpc_server
 
     # Create responder with populated routing table
-    responder_table = RoutingTable(node_id="dpc-node-0000000000000001", k=20)
-    responder_table.add_node("dpc-node-0000000000000002", "10.0.0.2", 8889)
-    responder_table.add_node("dpc-node-0000000000000003", "10.0.1.3", 8889)
+    responder_table = RoutingTable(node_id="dpc-node-00000000000000000000000000000001", k=20)
+    responder_table.add_node("dpc-node-00000000000000000000000000000002", "10.0.0.2", 8889)
+    responder_table.add_node("dpc-node-00000000000000030000000000000003", "10.0.1.3", 8889)
 
     responder = DHTRPCHandler(responder_table)
     await responder.start(host="127.0.0.1", port=0)
@@ -155,7 +155,7 @@ async def test_find_node_success(rpc_server):
         nodes = await rpc_handler.find_node(
             "127.0.0.1",
             responder_port,
-            "dpc-node-0000000000000002"
+            "dpc-node-00000000000000000000000000000002"
         )
 
         # Verify response
@@ -163,8 +163,8 @@ async def test_find_node_success(rpc_server):
         assert len(nodes) == 2  # Should return 2 nodes
 
         node_ids = {node.node_id for node in nodes}
-        assert "dpc-node-0000000000000002" in node_ids
-        assert "dpc-node-0000000000000003" in node_ids
+        assert "dpc-node-00000000000000000000000000000002" in node_ids
+        assert "dpc-node-00000000000000030000000000000003" in node_ids
 
     finally:
         await responder.stop()
@@ -176,7 +176,7 @@ async def test_find_node_empty_table(rpc_server):
     rpc_handler, port = rpc_server
 
     # Create responder with empty routing table
-    responder_table = RoutingTable(node_id="dpc-node-0000000000000001", k=20)
+    responder_table = RoutingTable(node_id="dpc-node-00000000000000000000000000000001", k=20)
     responder = DHTRPCHandler(responder_table)
     await responder.start(host="127.0.0.1", port=0)
     responder_port = responder.transport.get_extra_info('sockname')[1]
@@ -186,7 +186,7 @@ async def test_find_node_empty_table(rpc_server):
         nodes = await rpc_handler.find_node(
             "127.0.0.1",
             responder_port,
-            "dpc-node-0000000000000002"
+            "dpc-node-00000000000000000000000000000002"
         )
 
         # Should return empty list
@@ -205,7 +205,7 @@ async def test_store_success(rpc_server):
     rpc_handler, port = rpc_server
 
     # Create responder
-    responder_table = RoutingTable(node_id="dpc-node-0000000000000001", k=20)
+    responder_table = RoutingTable(node_id="dpc-node-00000000000000000000000000000001", k=20)
     responder = DHTRPCHandler(responder_table)
     await responder.start(host="127.0.0.1", port=0)
     responder_port = responder.transport.get_extra_info('sockname')[1]
@@ -215,7 +215,7 @@ async def test_store_success(rpc_server):
         success = await rpc_handler.store(
             "127.0.0.1",
             responder_port,
-            key="dpc-node-0000000000000002",
+            key="dpc-node-00000000000000000000000000000002",
             value="10.0.0.2:8889"
         )
 
@@ -223,8 +223,8 @@ async def test_store_success(rpc_server):
         assert success is True
 
         # Verify value stored in responder
-        assert "dpc-node-0000000000000002" in responder._storage
-        assert responder._storage["dpc-node-0000000000000002"] == "10.0.0.2:8889"
+        assert "dpc-node-00000000000000000000000000000002" in responder._storage
+        assert responder._storage["dpc-node-00000000000000000000000000000002"] == "10.0.0.2:8889"
 
     finally:
         await responder.stop()
@@ -258,7 +258,7 @@ async def test_find_value_found(rpc_server):
     rpc_handler, port = rpc_server
 
     # Create responder with stored value
-    responder_table = RoutingTable(node_id="dpc-node-0000000000000001", k=20)
+    responder_table = RoutingTable(node_id="dpc-node-00000000000000000000000000000001", k=20)
     responder = DHTRPCHandler(responder_table)
     responder._storage["test-key"] = "test-value"
 
@@ -284,8 +284,8 @@ async def test_find_value_not_found(rpc_server):
     rpc_handler, port = rpc_server
 
     # Create responder without stored value but with routing table entries
-    responder_table = RoutingTable(node_id="dpc-node-0000000000000001", k=20)
-    responder_table.add_node("dpc-node-0000000000000002", "10.0.0.2", 8889)
+    responder_table = RoutingTable(node_id="dpc-node-00000000000000000000000000000001", k=20)
+    responder_table.add_node("dpc-node-00000000000000000000000000000002", "10.0.0.2", 8889)
 
     responder = DHTRPCHandler(responder_table)
     await responder.start(host="127.0.0.1", port=0)
@@ -296,14 +296,14 @@ async def test_find_value_not_found(rpc_server):
         result = await rpc_handler.find_value(
             "127.0.0.1",
             responder_port,
-            "dpc-node-0000000000000099"  # Valid node ID format
+            "dpc-node-00000000000000990000000000000099"  # Valid node ID format
         )
 
         # Should return nodes instead
         assert result is not None
         assert "nodes" in result
         assert len(result["nodes"]) == 1
-        assert result["nodes"][0].node_id == "dpc-node-0000000000000002"
+        assert result["nodes"][0].node_id == "dpc-node-00000000000000000000000000000002"
 
     finally:
         await responder.stop()
@@ -434,7 +434,7 @@ async def test_missing_fields_handling(rpc_server):
     message = {
         "type": "FIND_NODE",
         "rpc_id": "test-123",
-        "node_id": "dpc-node-0000000000000001",
+        "node_id": "dpc-node-00000000000000000000000000000001",
     }
 
     data = json.dumps(message).encode('utf-8')
@@ -449,7 +449,7 @@ async def test_missing_fields_handling(rpc_server):
 @pytest.mark.asyncio
 async def test_dht_protocol_datagram_received():
     """Test DHTProtocol datagram_received method."""
-    routing_table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    routing_table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
     rpc_handler = DHTRPCHandler(routing_table)
     protocol = DHTProtocol(rpc_handler)
 
@@ -460,7 +460,7 @@ async def test_dht_protocol_datagram_received():
     message = {
         "type": "PING",
         "rpc_id": "test-123",
-        "node_id": "dpc-node-0000000000000001",
+        "node_id": "dpc-node-00000000000000000000000000000001",
         "timestamp": 1234567890.0,
     }
 
@@ -477,7 +477,7 @@ async def test_dht_protocol_datagram_received():
 @pytest.mark.asyncio
 async def test_dht_protocol_error_handling():
     """Test DHTProtocol error_received method."""
-    routing_table = RoutingTable(node_id="dpc-node-0000000000000000", k=20)
+    routing_table = RoutingTable(node_id="dpc-node-00000000000000000000000000000000", k=20)
     rpc_handler = DHTRPCHandler(routing_table)
     protocol = DHTProtocol(rpc_handler)
 
@@ -492,12 +492,12 @@ async def test_dht_protocol_error_handling():
 async def test_full_rpc_exchange():
     """Test full RPC exchange between two nodes."""
     # Create two RPC handlers
-    table1 = RoutingTable(node_id="dpc-node-0000000000000001", k=20)
+    table1 = RoutingTable(node_id="dpc-node-00000000000000000000000000000001", k=20)
     handler1 = DHTRPCHandler(table1)
     await handler1.start(host="127.0.0.1", port=0)
     port1 = handler1.transport.get_extra_info('sockname')[1]
 
-    table2 = RoutingTable(node_id="dpc-node-0000000000000002", k=20)
+    table2 = RoutingTable(node_id="dpc-node-00000000000000000000000000000002", k=20)
     handler2 = DHTRPCHandler(table2)
     await handler2.start(host="127.0.0.1", port=0)
     port2 = handler2.transport.get_extra_info('sockname')[1]
@@ -522,15 +522,15 @@ async def test_full_rpc_exchange():
         assert result["value"] == "test-value"
 
         # 4. Add nodes to handler2's routing table
-        table2.add_node("dpc-node-0000000000000003", "10.0.0.3", 8889)
+        table2.add_node("dpc-node-00000000000000030000000000000003", "10.0.0.3", 8889)
 
         # 5. FIND_NODE from handler1 to handler2
-        nodes = await handler1.find_node("127.0.0.1", port2, "dpc-node-0000000000000003")
+        nodes = await handler1.find_node("127.0.0.1", port2, "dpc-node-00000000000000030000000000000003")
         assert nodes is not None
         assert len(nodes) >= 1  # Should have at least the node we added
         # Find the node we added
         node_ids = {node.node_id for node in nodes}
-        assert "dpc-node-0000000000000003" in node_ids
+        assert "dpc-node-00000000000000030000000000000003" in node_ids
 
     finally:
         await handler1.stop()

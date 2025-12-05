@@ -106,6 +106,18 @@ class Settings:
             'collect_ai_models': 'false'         # Collect locally available AI models (opt-in for compute-sharing)
         }
 
+        self._config['dht'] = {
+            'enabled': 'true',  # Enable DHT peer discovery
+            'port': '8889',  # UDP port for DHT RPCs (TLS port + 1)
+            'k': '20',  # Kademlia k parameter (nodes per bucket)
+            'alpha': '3',  # Parallelism factor for iterative lookups
+            'bootstrap_timeout': '30',  # Bootstrap timeout in seconds
+            'lookup_timeout': '10',  # Lookup timeout in seconds
+            'bucket_refresh_interval': '3600',  # Bucket refresh interval (1 hour)
+            'announce_interval': '3600',  # Re-announce interval (1 hour)
+            'seed_nodes': ''  # Comma-separated list of seed nodes (ip:port)
+        }
+
         self._config['knowledge'] = {
             'token_warning_threshold': '0.8',  # Warn when context window reaches 80%
             'auto_extraction_enabled': 'true',  # Automatically suggest knowledge extraction
@@ -342,6 +354,65 @@ class Settings:
         # Save to file
         with open(self.config_file, 'w') as f:
             self._config.write(f)
+
+    def get_dht_enabled(self) -> bool:
+        """Check if DHT peer discovery is enabled."""
+        value = self.get('dht', 'enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dht_port(self) -> int:
+        """Get DHT UDP port."""
+        return int(self.get('dht', 'port', '8889'))
+
+    def get_dht_k(self) -> int:
+        """Get Kademlia k parameter (nodes per bucket)."""
+        return int(self.get('dht', 'k', '20'))
+
+    def get_dht_alpha(self) -> int:
+        """Get Kademlia alpha parameter (lookup parallelism)."""
+        return int(self.get('dht', 'alpha', '3'))
+
+    def get_dht_bootstrap_timeout(self) -> float:
+        """Get DHT bootstrap timeout in seconds."""
+        return float(self.get('dht', 'bootstrap_timeout', '30'))
+
+    def get_dht_lookup_timeout(self) -> float:
+        """Get DHT lookup timeout in seconds."""
+        return float(self.get('dht', 'lookup_timeout', '10'))
+
+    def get_dht_bucket_refresh_interval(self) -> float:
+        """Get DHT bucket refresh interval in seconds."""
+        return float(self.get('dht', 'bucket_refresh_interval', '3600'))
+
+    def get_dht_announce_interval(self) -> float:
+        """Get DHT announce interval in seconds."""
+        return float(self.get('dht', 'announce_interval', '3600'))
+
+    def get_dht_seed_nodes(self) -> list[tuple[str, int]]:
+        """
+        Get list of DHT seed nodes from configuration.
+
+        Returns:
+            List of (ip, port) tuples for seed nodes
+        """
+        try:
+            seeds_str = self.get('dht', 'seed_nodes', '')
+            if not seeds_str:
+                return []
+
+            seeds = []
+            for seed in seeds_str.split(','):
+                seed = seed.strip()
+                if ':' in seed:
+                    ip, port_str = seed.rsplit(':', 1)
+                    try:
+                        port = int(port_str)
+                        seeds.append((ip, port))
+                    except ValueError:
+                        print(f"[Warning] Invalid DHT seed node format: {seed}")
+            return seeds
+        except KeyError:
+            return []
 
     def reload(self):
         """Reload configuration from file."""

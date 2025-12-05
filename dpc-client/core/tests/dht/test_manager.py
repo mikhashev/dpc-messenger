@@ -25,7 +25,7 @@ from dpc_client_core.dht.routing import DHTNode
 async def dht_manager():
     """Create DHT manager for testing."""
     manager = DHTManager(
-        node_id="dpc-node-0000000000000001",
+        node_id="dpc-node-00000000000000000000000000000001",
         ip="127.0.0.1",
         port=0,  # Random port
         config=DHTConfig(
@@ -49,7 +49,7 @@ async def seed_network():
     managers = []
 
     for i in range(5):
-        node_id = f"dpc-node-{i:016x}"  # 16 hex characters
+        node_id = f"dpc-node-{i:032x}"  # 32 hex characters
         manager = DHTManager(
             node_id=node_id,
             ip="127.0.0.1",
@@ -72,12 +72,12 @@ async def seed_network():
 async def test_dht_manager_initialization():
     """Test DHT manager initialization."""
     manager = DHTManager(
-        node_id="dpc-node-test123",
+        node_id="dpc-node-74657374313233000000000000000000",
         ip="192.168.1.100",
         port=8889
     )
 
-    assert manager.node_id == "dpc-node-test123"
+    assert manager.node_id == "dpc-node-74657374313233000000000000000000"
     assert manager.ip == "192.168.1.100"
     assert manager.port == 8889
     assert manager.config.k == 20
@@ -100,7 +100,7 @@ async def test_dht_manager_start_stop(dht_manager):
 async def test_dht_manager_double_start():
     """Test that double start is handled gracefully."""
     manager = DHTManager(
-        node_id="dpc-node-double",
+        node_id="dpc-node-646f75626c6500000000000000000000",
         ip="127.0.0.1",
         port=0
     )
@@ -141,7 +141,7 @@ async def test_bootstrap_success(seed_network):
     """Test successful bootstrap from seed network."""
     # Create new node to bootstrap
     new_node = DHTManager(
-        node_id="dpc-node-1111111111111111",  # Valid 16 hex chars
+        node_id="dpc-node-11111111111111111111111111111111",  # Valid 32 hex chars
         ip="127.0.0.1",
         port=0,
         config=DHTConfig(bootstrap_timeout=10.0)
@@ -177,7 +177,7 @@ async def test_bootstrap_success(seed_network):
 async def test_bootstrap_partial_failure(seed_network):
     """Test bootstrap with some unresponsive seeds."""
     new_node = DHTManager(
-        node_id="dpc-node-2222222222222222",  # Valid 16 hex chars
+        node_id="dpc-node-22222222222222222222222222222222",  # Valid 32 hex chars
         ip="127.0.0.1",
         port=0,
         config=DHTConfig(bootstrap_timeout=10.0)
@@ -264,7 +264,7 @@ async def test_find_node_convergence():
     managers = []
     for i in range(3):
         manager = DHTManager(
-            node_id=f"dpc-node-{i:016x}",  # 16 hex characters
+            node_id=f"dpc-node-{i:032x}",  # 32 hex characters
             ip="127.0.0.1",
             port=0,
             config=DHTConfig(alpha=2)
@@ -281,7 +281,7 @@ async def test_find_node_convergence():
                     await manager.rpc_handler.ping("127.0.0.1", other_port)
 
         # Perform lookup
-        target_id = "dpc-node-aaaaaaaaaaaaaaaa"  # Valid 16 hex chars
+        target_id = "dpc-node-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"  # Valid 32 hex chars
         nodes = await managers[0].find_node(target_id)
 
         # Should return at most k nodes
@@ -341,7 +341,7 @@ async def test_find_peer_not_found(dht_manager, seed_network):
     await dht_manager.bootstrap(seeds)
 
     # Try to find non-existent peer
-    result = await dht_manager.find_peer("dpc-node-9999999999999999")  # Valid 16 hex chars
+    result = await dht_manager.find_peer("dpc-node-99999999999999999999999999999999")  # Valid 32 hex chars
 
     assert result is None  # Should not find
 
@@ -353,7 +353,7 @@ async def test_find_peer_success():
     managers = []
     for i in range(3):
         manager = DHTManager(
-            node_id=f"dpc-node-{i:016x}",  # 16 hex characters
+            node_id=f"dpc-node-{i:032x}",  # 32 hex characters
             ip="127.0.0.1",
             port=10000 + i,  # Use known ports for this test
             config=DHTConfig()
@@ -395,7 +395,7 @@ async def test_find_peer_success():
 async def test_maintenance_loop_starts():
     """Test that maintenance loop starts correctly."""
     manager = DHTManager(
-        node_id="dpc-node-maintenance",
+        node_id="dpc-node-6d61696e74656e616e636500000000000",
         ip="127.0.0.1",
         port=0
     )
@@ -414,7 +414,7 @@ async def test_maintenance_loop_starts():
 async def test_bucket_refresh():
     """Test bucket refresh logic."""
     manager = DHTManager(
-        node_id="dpc-node-3333333333333333",  # Valid 16 hex chars
+        node_id="dpc-node-33333333333333333333333333333333",  # Valid 32 hex chars
         ip="127.0.0.1",
         port=0,
         config=DHTConfig(bucket_refresh_interval=1.0)  # 1 second for testing
@@ -425,7 +425,7 @@ async def test_bucket_refresh():
     try:
         # Manually add a node to populate a bucket
         manager.routing_table.add_node(
-            "dpc-node-1234567890abcdef",  # Valid 16 hex chars
+            "dpc-node-1234567890abcdef1234567890abcdef",  # Valid 32 hex chars
             "127.0.0.1",
             8889
         )
@@ -494,7 +494,7 @@ async def test_full_dht_workflow():
     managers = []
     for i in range(4):
         manager = DHTManager(
-            node_id=f"dpc-node-{i:016x}",  # 16 hex characters
+            node_id=f"dpc-node-{i:032x}",  # 32 hex characters
             ip="127.0.0.1",
             port=20000 + i,
             config=DHTConfig(bootstrap_timeout=15.0, lookup_timeout=10.0)
@@ -546,7 +546,7 @@ async def test_concurrent_lookups():
     managers = []
     for i in range(3):
         manager = DHTManager(
-            node_id=f"dpc-node-{i:016x}",  # 16 hex characters
+            node_id=f"dpc-node-{i:032x}",  # 32 hex characters
             ip="127.0.0.1",
             port=0,
             config=DHTConfig(alpha=2)
@@ -560,7 +560,7 @@ async def test_concurrent_lookups():
         await managers[0].bootstrap([("127.0.0.1", node1_port)])
 
         # Perform concurrent lookups
-        targets = [f"dpc-node-{i:016x}" for i in range(1000, 1005)]  # Valid 16 hex chars
+        targets = [f"dpc-node-{i:032x}" for i in range(1000, 1005)]  # Valid 32 hex chars
         lookup_tasks = [managers[0].find_node(tid) for tid in targets]
 
         results = await asyncio.gather(*lookup_tasks, return_exceptions=True)
