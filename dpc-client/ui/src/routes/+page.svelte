@@ -5,6 +5,7 @@
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
+  import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
@@ -82,6 +83,8 @@
   let showCommitResultToast: boolean = false;
   let commitResultMessage: string = "";
   let commitResultType: "info" | "error" | "warning" = "info";
+  let showVoteResultDialog: boolean = false;
+  let currentVoteResult: any = null;
 
   // Add AI Chat dialog state
   let showAddAIChatDialog: boolean = false;
@@ -143,23 +146,26 @@
   $: if ($knowledgeCommitResult) {
     const { status, topic, vote_tally } = $knowledgeCommitResult;
 
+    // Store full result for detailed view
+    currentVoteResult = $knowledgeCommitResult;
+
     if (status === "approved") {
-      commitResultMessage = `✅ Knowledge commit approved: ${topic} (${vote_tally.approve}/${vote_tally.total} votes)`;
+      commitResultMessage = `✅ Knowledge commit approved: ${topic} (${vote_tally.approve}/${vote_tally.total} votes) - Click for details`;
       commitResultType = "info";
     } else if (status === "rejected") {
-      commitResultMessage = `❌ Knowledge commit rejected: ${topic} (${vote_tally.reject} reject, ${vote_tally.request_changes} change requests)`;
+      commitResultMessage = `❌ Knowledge commit rejected: ${topic} (${vote_tally.reject} reject, ${vote_tally.request_changes} change requests) - Click for details`;
       commitResultType = "error";
     } else if (status === "revision_needed") {
-      commitResultMessage = `📝 Changes requested for: ${topic} (${vote_tally.request_changes}/${vote_tally.total} requested changes)`;
+      commitResultMessage = `📝 Changes requested for: ${topic} (${vote_tally.request_changes}/${vote_tally.total} requested changes) - Click for details`;
       commitResultType = "warning";
     } else if (status === "timeout") {
-      commitResultMessage = `⏱️ Voting timeout for: ${topic} (${vote_tally.total} votes received)`;
+      commitResultMessage = `⏱️ Voting timeout for: ${topic} (${vote_tally.total} votes received) - Click for details`;
       commitResultType = "warning";
     }
 
     showCommitResultToast = true;
 
-    // Clear the result after showing
+    // Clear the result from store after showing
     knowledgeCommitResult.set(null);
   }
 
@@ -1367,8 +1373,21 @@
     onDismiss={() => {
       showCommitResultToast = false;
     }}
+    onClick={() => {
+      showVoteResultDialog = true;
+      showCommitResultToast = false;
+    }}
   />
 {/if}
+
+<!-- Vote Result Details Dialog -->
+<VoteResultDialog
+  result={currentVoteResult}
+  open={showVoteResultDialog}
+  on:close={() => {
+    showVoteResultDialog = false;
+  }}
+/>
 
 <!-- Add AI Chat Dialog -->
 {#if showAddAIChatDialog}
