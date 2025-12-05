@@ -18,7 +18,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Set
 
-from .dht_distance import (
+from .distance import (
     xor_distance,
     bucket_index,
     NODE_ID_BITS,

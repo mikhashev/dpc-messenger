@@ -23,8 +23,8 @@ import time
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 
-from .dht_routing import DHTNode, RoutingTable
-from .dht_rpc import DHTRPCHandler, RPCConfig
+from .routing import DHTNode, RoutingTable
+from .rpc import DHTRPCHandler, RPCConfig
 
 logger = logging.getLogger(__name__)
 
@@ -348,7 +348,7 @@ class DHTManager:
                             new_nodes_found = True
 
             # Re-sort shortlist by distance to target
-            from .dht_distance import xor_distance
+            from .distance import xor_distance
             shortlist = sorted(
                 shortlist,
                 key=lambda n: xor_distance(target_id, n.node_id)
@@ -564,7 +564,7 @@ class DHTManager:
         self.stats["bucket_refreshes"] += 1
 
         # Generate random node ID in each bucket's range and perform lookup
-        from .dht_distance import parse_node_id
+        from .distance import parse_node_id
         import random
 
         for bucket_idx in stale_buckets:
@@ -592,7 +592,7 @@ class DHTManager:
         logger.info("Refreshing %d non-empty k-buckets", len(non_empty_buckets))
 
         # Generate random node ID in each bucket's range and perform lookup
-        from .dht_distance import parse_node_id
+        from .distance import parse_node_id
         import random
 
         refresh_tasks = []

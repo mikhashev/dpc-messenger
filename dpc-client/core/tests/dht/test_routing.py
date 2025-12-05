@@ -11,7 +11,7 @@ Tests cover:
 
 import pytest
 import time
-from dpc_client_core.dht_distance import (
+from dpc_client_core.dht.distance import (
     parse_node_id,
     xor_distance,
     bucket_index,
@@ -21,7 +21,7 @@ from dpc_client_core.dht_distance import (
     is_closer,
     generate_random_node_id_in_bucket,
 )
-from dpc_client_core.dht_routing import DHTNode, KBucket, RoutingTable
+from dpc_client_core.dht.routing import DHTNode, KBucket, RoutingTable
 
 
 # ===== Helper Functions =====

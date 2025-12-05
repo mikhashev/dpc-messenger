@@ -17,8 +17,8 @@ import pytest_asyncio
 import asyncio
 import json
 from unittest.mock import Mock, patch, AsyncMock
-from dpc_client_core.dht_rpc import DHTRPCHandler, RPCConfig, DHTProtocol
-from dpc_client_core.dht_routing import RoutingTable, DHTNode
+from dpc_client_core.dht.rpc import DHTRPCHandler, RPCConfig, DHTProtocol
+from dpc_client_core.dht.routing import RoutingTable, DHTNode
 
 
 # ===== Test Fixtures =====

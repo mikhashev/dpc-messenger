@@ -27,7 +27,7 @@ import uuid
 from typing import Dict, Any, List, Optional, Tuple, Callable
 from dataclasses import dataclass
 
-from .dht_routing import DHTNode, RoutingTable
+from .routing import DHTNode, RoutingTable
 
 logger = logging.getLogger(__name__)
 

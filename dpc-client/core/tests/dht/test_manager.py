@@ -15,8 +15,8 @@ import asyncio
 import pytest
 import pytest_asyncio
 
-from dpc_client_core.dht_manager import DHTManager, DHTConfig
-from dpc_client_core.dht_routing import DHTNode
+from dpc_client_core.dht.manager import DHTManager, DHTConfig
+from dpc_client_core.dht.routing import DHTNode
 
 
 # ===== Fixtures =====
