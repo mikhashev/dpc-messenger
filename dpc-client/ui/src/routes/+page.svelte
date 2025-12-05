@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, unreadMessageCounts, resetUnreadCount } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
@@ -106,6 +106,9 @@
   let lastSentContextHash: Map<string, string> = new Map();  // Per-conversation: last hash sent to AI
   let peerContextHashes: Map<string, string> = new Map();  // Per-peer: current hash from backend
   let lastSentPeerHashes: Map<string, Map<string, string>> = new Map();  // Per-conversation, per-peer: last hash sent
+
+  // Reactive: Update active chat in coreService to prevent unread badges on open chats
+  $: setActiveChat(activeChatId);
 
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
