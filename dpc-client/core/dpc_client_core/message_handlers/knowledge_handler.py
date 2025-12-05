@@ -89,3 +89,42 @@ class VoteKnowledgeCommitHandler(MessageHandler):
         """
         await self.service.consensus_manager.handle_vote_message(sender_node_id, payload)
         return None
+
+
+class KnowledgeCommitResultHandler(MessageHandler):
+    """Handles KNOWLEDGE_COMMIT_RESULT messages (voting outcome notification)."""
+
+    @property
+    def command_name(self) -> str:
+        return "KNOWLEDGE_COMMIT_RESULT"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        """
+        Handle voting result notification from peer.
+
+        Updates local session status and notifies UI.
+
+        Args:
+            sender_node_id: Node ID of the node that finalized voting
+            payload: Contains voting result data (status, vote_tally, votes, etc.)
+        """
+        proposal_id = payload.get("proposal_id")
+        status = payload.get("status")
+
+        self.logger.info(
+            "Received KNOWLEDGE_COMMIT_RESULT from %s: proposal=%s, status=%s",
+            sender_node_id[:20],
+            proposal_id,
+            status
+        )
+
+        # Update consensus manager session (if exists)
+        session = self.service.consensus_manager.get_session(proposal_id)
+        if session:
+            session.status = status
+            self.logger.debug("Updated local session status to: %s", status)
+
+        # Broadcast event to UI
+        await self.service.local_api.broadcast_event("knowledge_commit_result", payload)
+
+        return None

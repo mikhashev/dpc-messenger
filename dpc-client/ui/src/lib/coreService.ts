@@ -10,6 +10,7 @@ export const p2pMessages = writable<any>(null);
 
 // Knowledge Architecture stores (Phase 1-6 integration)
 export const knowledgeCommitProposal = writable<any>(null);
+export const knowledgeCommitResult = writable<any>(null);
 export const personalContext = writable<any>(null);
 
 // Token tracking stores (Phase 2)
@@ -193,6 +194,9 @@ export function connectToCoreService() {
                     console.log("Knowledge commit approved:", message.payload);
                     // Refresh personal context after approval
                     sendCommand("get_personal_context");
+                } else if (message.event === "knowledge_commit_result") {
+                    console.log("Knowledge commit result received:", message.payload);
+                    knowledgeCommitResult.set(message.payload);
                 }
                 // Handle token limit warning (Phase 2)
                 else if (message.event === "token_limit_warning") {

@@ -93,6 +93,7 @@ class ConsensusManager:
         self.on_commit_approved: Optional[Callable] = None
         self.on_commit_rejected: Optional[Callable] = None
         self.on_commit_applied: Optional[Callable] = None  # Called after commit is applied to personal.json
+        self.on_result_broadcast: Optional[Callable] = None  # Broadcast voting results to participants
 
     async def propose_commit(
         self,
@@ -284,6 +285,41 @@ class ConsensusManager:
             proposal.status = "revised"
 
             # Could trigger revision workflow here
+
+        # Prepare result notification payload
+        result_payload = {
+            "proposal_id": proposal.proposal_id,
+            "topic": proposal.topic,
+            "summary": proposal.summary,
+            "status": session.status,  # "approved", "rejected", "revision_needed", "timeout"
+            "vote_tally": {
+                "approve": approve_count,
+                "reject": reject_count,
+                "request_changes": change_count,
+                "total": total_votes,
+                "threshold": self.consensus_threshold,
+                "approval_rate": approval_rate
+            },
+            "votes": [
+                {
+                    "node_id": v.voter_node_id,
+                    "vote": v.vote,
+                    "comment": v.comment,
+                    "is_required_dissent": v.is_required_dissent,
+                    "timestamp": v.timestamp
+                } for v in votes.values()
+            ],
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        # Add commit_id if approved
+        if session.status == "approved":
+            result_payload["commit_id"] = commit.commit_id
+
+        # Broadcast result to all participants (if callback registered)
+        if self.on_result_broadcast:
+            await self.on_result_broadcast(result_payload, proposal.participants)
+            logger.info("Broadcasted KNOWLEDGE_COMMIT_RESULT for proposal %s", proposal.proposal_id)
 
     async def _apply_commit(self, commit: KnowledgeCommit) -> None:
         """Apply approved commit to local PCM with cryptographic integrity

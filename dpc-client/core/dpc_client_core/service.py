@@ -154,6 +154,9 @@ class CoreService:
         # Register callback to broadcast peer proposals to UI
         self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
 
+        # Register callback to broadcast voting results to participants
+        self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
+
         # Inference orchestrator (coordinates local and remote AI inference)
         self.inference_orchestrator = InferenceOrchestrator(self)
 
@@ -2442,6 +2445,32 @@ class CoreService:
 
             except Exception as e:
                 logger.error("Error notifying %s of provider changes: %s", peer_id, e, exc_info=True)
+
+    async def _broadcast_commit_result(self, result_payload: dict, participants: List[str]):
+        """Broadcast KNOWLEDGE_COMMIT_RESULT to all participants
+
+        Args:
+            result_payload: Complete voting result data (status, vote_tally, votes, etc.)
+            participants: List of participant node_ids who should receive the notification
+        """
+        message = {
+            "command": "KNOWLEDGE_COMMIT_RESULT",
+            "payload": result_payload
+        }
+
+        # Send to all participants (who are currently connected)
+        for node_id in participants:
+            if node_id in self.p2p_manager.peers:
+                try:
+                    await self.p2p_manager.send_message_to_peer(node_id, message)
+                    logger.info("Sent KNOWLEDGE_COMMIT_RESULT to %s", node_id[:20])
+                except Exception as e:
+                    logger.error("Failed to send result to %s: %s", node_id[:20], e, exc_info=True)
+            else:
+                logger.debug("Participant %s not connected, skipping result broadcast", node_id[:20])
+
+        # Also emit to local UI
+        await self.local_api.broadcast_event("knowledge_commit_result", result_payload)
 
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """

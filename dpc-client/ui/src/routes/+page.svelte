@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, unreadMessageCounts, resetUnreadCount } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, unreadMessageCounts, resetUnreadCount } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
@@ -78,6 +78,11 @@
   let showExtractionFailure: boolean = false;
   let extractionFailureMessage: string = "";
 
+  // Knowledge commit result notification state
+  let showCommitResultToast: boolean = false;
+  let commitResultMessage: string = "";
+  let commitResultType: "info" | "error" | "warning" = "info";
+
   // Add AI Chat dialog state
   let showAddAIChatDialog: boolean = false;
   let selectedProviderForNewChat: string = "";
@@ -129,6 +134,30 @@
     const {conversation_id, reason} = $extractionFailure;
     showExtractionFailure = true;
     extractionFailureMessage = `Knowledge extraction failed for ${conversation_id}: ${reason}`;
+  }
+
+  // Reactive: Handle knowledge commit voting results
+  $: if ($knowledgeCommitResult) {
+    const { status, topic, vote_tally } = $knowledgeCommitResult;
+
+    if (status === "approved") {
+      commitResultMessage = `✅ Knowledge commit approved: ${topic} (${vote_tally.approve}/${vote_tally.total} votes)`;
+      commitResultType = "info";
+    } else if (status === "rejected") {
+      commitResultMessage = `❌ Knowledge commit rejected: ${topic} (${vote_tally.reject} reject, ${vote_tally.request_changes} change requests)`;
+      commitResultType = "error";
+    } else if (status === "revision_needed") {
+      commitResultMessage = `📝 Changes requested for: ${topic} (${vote_tally.request_changes}/${vote_tally.total} requested changes)`;
+      commitResultType = "warning";
+    } else if (status === "timeout") {
+      commitResultMessage = `⏱️ Voting timeout for: ${topic} (${vote_tally.total} votes received)`;
+      commitResultType = "warning";
+    }
+
+    showCommitResultToast = true;
+
+    // Clear the result after showing
+    knowledgeCommitResult.set(null);
   }
 
   // Phase 7: Handle personal context updates (for "Updated" status indicator)
@@ -895,6 +924,8 @@
           <div class="knowledge-toggle">
             <label class="toggle-container">
               <input
+                id="auto-knowledge-detection"
+                name="auto-knowledge-detection"
                 type="checkbox"
                 bind:checked={autoKnowledgeDetection}
                 on:change={toggleAutoKnowledgeDetection}
@@ -916,6 +947,8 @@
         <div class="connect-section">
           <h3>Connect to Peer</h3>
           <input
+            id="peer-input"
+            name="peer-input"
             type="text"
             bind:value={peerInput}
             placeholder="node_id or dpc://IP:port?node_id=..."
@@ -1124,6 +1157,8 @@
           <div class="context-toggle">
             <label class="context-checkbox">
               <input
+                id="include-personal-context"
+                name="include-personal-context"
                 type="checkbox"
                 bind:checked={includePersonalContext}
               />
@@ -1156,6 +1191,8 @@
                   {@const isPeerContextUpdated = peerContextsUpdated.has(peer.node_id)}
                   <label class="peer-context-checkbox">
                     <input
+                      id={`peer-context-${peer.node_id}`}
+                      name={`peer-context-${peer.node_id}`}
                       type="checkbox"
                       checked={selectedPeerContexts.has(peer.node_id)}
                       on:change={() => togglePeerContext(peer.node_id)}
@@ -1220,6 +1257,8 @@
         {/if}
         <div class="input-row">
           <textarea
+            id="message-input"
+            name="message-input"
             bind:value={currentInput}
             placeholder={
               isContextWindowFull ? 'Context window full - End session to continue' :
@@ -1311,6 +1350,19 @@
     onDismiss={() => {
       showExtractionFailure = false;
       extractionFailure.set(null);
+    }}
+  />
+{/if}
+
+<!-- Knowledge Commit Result Toast -->
+{#if showCommitResultToast}
+  <Toast
+    message={commitResultMessage}
+    type={commitResultType}
+    duration={6000}
+    dismissible={true}
+    onDismiss={() => {
+      showCommitResultToast = false;
     }}
   />
 {/if}
