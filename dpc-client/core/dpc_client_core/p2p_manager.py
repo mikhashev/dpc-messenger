@@ -213,6 +213,49 @@ class P2PManager:
             logger.info("P2PManager Direct TLS server listening on %s:%d for node %s",
                       formatted_host, port, self.node_id)
 
+        # Initialize DHT (Distributed Hash Table) for peer discovery
+        if self.settings.get_dht_enabled():
+            try:
+                from .dht import DHTConfig
+
+                # Get DHT configuration from settings
+                dht_config = DHTConfig(
+                    k=self.settings.get_dht_k(),
+                    alpha=self.settings.get_dht_alpha(),
+                    bootstrap_timeout=self.settings.get_dht_bootstrap_timeout(),
+                    lookup_timeout=self.settings.get_dht_lookup_timeout(),
+                    bucket_refresh_interval=self.settings.get_dht_bucket_refresh_interval(),
+                    announce_interval=self.settings.get_dht_announce_interval()
+                )
+
+                # Initialize DHT manager
+                dht_port = self.settings.get_dht_port()
+                self.dht_manager = DHTManager(
+                    node_id=self.node_id,
+                    ip=host if host != "dual" else "0.0.0.0",
+                    port=dht_port,
+                    config=dht_config
+                )
+
+                # Start DHT UDP server
+                await self.dht_manager.start(host="0.0.0.0", port=dht_port)
+                logger.info("DHT started on UDP port %d for node %s", dht_port, self.node_id)
+
+                # Bootstrap DHT from seed nodes if available
+                seed_nodes = self.settings.get_dht_seed_nodes()
+                if seed_nodes:
+                    logger.info("Bootstrapping DHT from %d seed nodes", len(seed_nodes))
+                    success = await self.dht_manager.bootstrap(seed_nodes)
+                    if success:
+                        logger.info("DHT bootstrap successful")
+                    else:
+                        logger.warning("DHT bootstrap failed (no responsive seeds)")
+            except Exception as e:
+                logger.error("Failed to initialize DHT: %s", e, exc_info=True)
+                self.dht_manager = None
+        else:
+            logger.info("DHT disabled in configuration")
+
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
         peer_node_id = None
@@ -810,5 +853,14 @@ class P2PManager:
         self._hub_client_refs.clear()
         self._intentional_disconnects.clear()
         self._ice_candidates_buffer.clear()
+
+        # Shutdown DHT if active
+        if self.dht_manager:
+            try:
+                await self.dht_manager.stop()
+                logger.info("DHT shut down")
+            except Exception as e:
+                logger.error("Error shutting down DHT: %s", e)
+            self.dht_manager = None
 
         logger.info("P2P Manager shut down")
