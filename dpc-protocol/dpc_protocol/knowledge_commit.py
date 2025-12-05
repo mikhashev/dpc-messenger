@@ -107,6 +107,8 @@ class KnowledgeCommitProposal:
             required_dissenter=data.get('required_dissenter'),
             dissenting_opinions=data.get('dissenting_opinions', []),
             avg_confidence=data.get('avg_confidence', 1.0),
+            extraction_model=data.get('extraction_model'),
+            extraction_host=data.get('extraction_host'),
             status=data.get('status', 'proposed'),
             votes=data.get('votes', {}),
             vote_deadline=data.get('vote_deadline')
