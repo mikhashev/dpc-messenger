@@ -113,6 +113,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Enables P2P DHT communication without Hub dependency
 - Next: Phase 3 - DHT Manager (bootstrap, iterative lookup, announce)
 
+**Phase 2.1: DHT-Based Peer Discovery (Phase 3 - DHT Manager Core)**
+
+- **DHT Manager Orchestration** - High-level Kademlia DHT operations
+  - `DHTManager` class - Main DHT coordinator (~630 lines)
+    - `bootstrap()` - Initialize routing table from seed nodes
+      - PING all seed nodes to populate initial routing table
+      - Perform self-lookup to discover nearby peers
+      - Refresh all k-buckets asynchronously
+      - Returns True if at least one seed responsive
+    - `find_node()` - Iterative FIND_NODE lookup (Kademlia's core algorithm)
+      - O(log n) complexity with alpha parallelism (default alpha=3)
+      - Start with k closest nodes from local routing table
+      - Send parallel FIND_NODE RPCs to alpha closest unqueried nodes
+      - Converge when no closer nodes found or k nodes responded
+      - Returns list of k closest nodes to target (sorted by XOR distance)
+    - `announce()` - Advertise node presence via DHT STORE operations
+      - Find k closest nodes to self
+      - Store contact info (ip:port) on all k nodes
+      - Returns count of successful STORE operations
+    - `find_peer()` - Discover specific peer's contact information
+      - Perform iterative lookup for target_node_id
+      - Try FIND_VALUE on closest nodes to retrieve stored contact info
+      - Returns (ip, port) tuple if found, None otherwise
+    - `_maintenance_loop()` - Background maintenance tasks
+      - Refresh stale k-buckets (every hour by default)
+      - Re-announce node presence (every hour by default)
+      - Runs continuously while DHT is active
+  - `DHTConfig` dataclass - Configuration parameters
+    - k: 20 (bucket size)
+    - alpha: 3 (parallelism factor for iterative lookup)
+    - subnet_diversity_limit: 2 (max nodes per /24 subnet)
+    - bootstrap_timeout: 30s
+    - lookup_timeout: 10s
+    - bucket_refresh_interval: 3600s (1 hour)
+    - announce_interval: 3600s (1 hour)
+  - File created: [dht_manager.py](dpc-client/core/dpc_client_core/dht_manager.py) (~630 lines)
+
+- **Iterative Lookup Algorithm** - Core Kademlia peer discovery
+  - Parallel FIND_NODE RPCs to alpha closest nodes (default alpha=3)
+  - Convergence detection: stop when no closer nodes found for 2 rounds
+  - Timeout protection: 10s default lookup timeout
+  - Handles partial failures gracefully (some nodes unresponsive)
+  - Returns up to k closest nodes found (default k=20)
+
+- **Bootstrap Algorithm** - DHT network initialization
+  - Contact all seed nodes in parallel with PING RPCs
+  - Populate routing table with responsive seeds
+  - Perform self-lookup to discover nearby peers (Kademlia standard)
+  - Asynchronously refresh all buckets for better coverage
+  - Succeeds if at least one seed node responds
+
+- **Node Announcement** - DHT presence advertisement
+  - Find k closest nodes to self via iterative lookup
+  - STORE own contact info (node_id → ip:port) on all k nodes
+  - Enables other peers to find us via FIND_VALUE(node_id)
+  - Re-announce periodically (default: every hour)
+
+- **Periodic Maintenance** - Background DHT health tasks
+  - Bucket refresh: generate random ID in stale bucket's range, perform lookup
+  - Re-announce: periodically re-advertise node presence
+  - Runs in background asyncio task (every minute check)
+  - Configurable intervals (default: 1 hour for all operations)
+
+- **Comprehensive Manager Tests** - 21 tests validating DHT orchestration
+  - Initialization and lifecycle (start/stop, double start) (3 tests)
+  - Bootstrap (empty seeds, unreachable seeds, success, partial failure) (4 tests)
+  - Iterative lookup (empty table, in network, self-lookup, convergence) (4 tests)
+  - Node announcement (empty table, in network) (2 tests)
+  - Peer discovery (not found, success) (2 tests)
+  - Maintenance (loop starts, bucket refresh) (2 tests)
+  - Statistics and diagnostics (get_stats, get_known_peers) (2 tests)
+  - Integration tests (full workflow, concurrent lookups) (2 tests)
+  - All tests passing (21/21) with async fixtures
+  - File created: [test_dht_manager.py](dpc-client/core/tests/test_dht_manager.py) (~580 lines)
+
+**Key Features:**
+- Complete Kademlia DHT implementation (bootstrap → lookup → announce)
+- O(log n) iterative lookup with parallel RPCs (alpha=3)
+- Automatic routing table population and maintenance
+- Periodic bucket refresh and re-announcement
+- Resilient to partial failures (some seeds/peers unresponsive)
+- Configurable timeouts and intervals
+- Background maintenance tasks via asyncio
+- Foundation for Phase 4: P2P Integration
+
+**Roadmap Alignment:**
+- Completes Phase 2.1 DHT Manager Core (Week 3 of Month 1)
+- Provides complete decentralized peer discovery without Hub
+- Next: Phase 4 - P2P Integration (integrate into p2p_manager, service, settings)
+- Target: 95%+ DHT lookup success rate, 80%+ Hub-independent connections
+
 ---
 
 ## [0.9.4] - 2025-12-05
