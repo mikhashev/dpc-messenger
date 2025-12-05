@@ -20,12 +20,22 @@ CERT_FILE = DPC_HOME_DIR / "node.crt"
 NODE_ID_FILE = DPC_HOME_DIR / "node.id"
 
 def generate_node_id(public_key: rsa.RSAPublicKey) -> str:
+    """
+    Generate node ID from RSA public key.
+
+    Uses first 32 hex characters (128 bits) of SHA256 hash of public key.
+    This ensures compatibility with Kademlia DHT which expects 128-bit node IDs.
+
+    Returns:
+        Node ID in format: dpc-node-[32 hex chars] (e.g., "dpc-node-a1b2c3d4...")
+    """
     public_bytes = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
     sha256_hash = hashlib.sha256(public_bytes).hexdigest()
-    return f"dpc-node-{sha256_hash[:16]}"
+    # Use first 32 hex chars (128 bits) for Kademlia DHT compatibility
+    return f"dpc-node-{sha256_hash[:32]}"
 
 def generate_identity():
     logger.info("Generating new node identity")
