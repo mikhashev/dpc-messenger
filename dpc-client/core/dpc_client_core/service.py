@@ -42,7 +42,8 @@ from .message_handlers.inference_handler import (
 )
 from .message_handlers.provider_handler import GetProvidersHandler, ProvidersResponseHandler
 from .message_handlers.knowledge_handler import (
-    ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler
+    ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler,
+    KnowledgeCommitResultHandler
 )
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
@@ -223,6 +224,7 @@ class CoreService:
         self.message_router.register_handler(ContextUpdatedHandler(self))
         self.message_router.register_handler(ProposeKnowledgeCommitHandler(self))
         self.message_router.register_handler(VoteKnowledgeCommitHandler(self))
+        self.message_router.register_handler(KnowledgeCommitResultHandler(self))
 
         # Peer handshake
         self.message_router.register_handler(HelloHandler(self))
@@ -1897,7 +1899,12 @@ class CoreService:
         try:
             monitor = self._get_or_create_conversation_monitor(conversation_id)
             logger.info("End Session - attempting manual extraction for %s", conversation_id)
-            logger.info("Buffer: %d messages, Score: %.2f", len(monitor.message_buffer), monitor.knowledge_score)
+            logger.info(
+                "Full conversation: %d messages (incremental buffer: %d), Score: %.2f",
+                len(monitor.full_conversation),
+                len(monitor.message_buffer),
+                monitor.knowledge_score
+            )
 
             # Force knowledge extraction even if threshold not met
             proposal = await monitor.generate_commit_proposal(force=True)
