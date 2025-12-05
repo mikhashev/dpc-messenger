@@ -45,6 +45,10 @@ class KnowledgeSource:
     confidence_score: float = 1.0
     sources_cited: List[str] = field(default_factory=list)
 
+    # Extraction metadata (for ai_summary type)
+    extraction_model: Optional[str] = None  # Model used for extraction (e.g., "claude-haiku-4-5")
+    extraction_host: Optional[str] = None  # Compute host ("local" or node_id)
+
 @dataclass
 class KnowledgeEntry:
     """Individual knowledge item with full provenance and bias tracking"""

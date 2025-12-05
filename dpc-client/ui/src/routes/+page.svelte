@@ -3,8 +3,9 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
+  import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
@@ -78,6 +79,13 @@
   let showExtractionFailure: boolean = false;
   let extractionFailureMessage: string = "";
 
+  // Knowledge commit result notification state
+  let showCommitResultToast: boolean = false;
+  let commitResultMessage: string = "";
+  let commitResultType: "info" | "error" | "warning" = "info";
+  let showVoteResultDialog: boolean = false;
+  let currentVoteResult: any = null;
+
   // Add AI Chat dialog state
   let showAddAIChatDialog: boolean = false;
   let selectedProviderForNewChat: string = "";
@@ -101,6 +109,9 @@
   let lastSentContextHash: Map<string, string> = new Map();  // Per-conversation: last hash sent to AI
   let peerContextHashes: Map<string, string> = new Map();  // Per-peer: current hash from backend
   let lastSentPeerHashes: Map<string, Map<string, string>> = new Map();  // Per-conversation, per-peer: last hash sent
+
+  // Reactive: Update active chat in coreService to prevent unread badges on open chats
+  $: setActiveChat(activeChatId);
 
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
@@ -129,6 +140,33 @@
     const {conversation_id, reason} = $extractionFailure;
     showExtractionFailure = true;
     extractionFailureMessage = `Knowledge extraction failed for ${conversation_id}: ${reason}`;
+  }
+
+  // Reactive: Handle knowledge commit voting results
+  $: if ($knowledgeCommitResult) {
+    const { status, topic, vote_tally } = $knowledgeCommitResult;
+
+    // Store full result for detailed view
+    currentVoteResult = $knowledgeCommitResult;
+
+    if (status === "approved") {
+      commitResultMessage = `✅ Knowledge commit approved: ${topic} (${vote_tally.approve}/${vote_tally.total} votes) - Click for details`;
+      commitResultType = "info";
+    } else if (status === "rejected") {
+      commitResultMessage = `❌ Knowledge commit rejected: ${topic} (${vote_tally.reject} reject, ${vote_tally.request_changes} change requests) - Click for details`;
+      commitResultType = "error";
+    } else if (status === "revision_needed") {
+      commitResultMessage = `📝 Changes requested for: ${topic} (${vote_tally.request_changes}/${vote_tally.total} requested changes) - Click for details`;
+      commitResultType = "warning";
+    } else if (status === "timeout") {
+      commitResultMessage = `⏱️ Voting timeout for: ${topic} (${vote_tally.total} votes received) - Click for details`;
+      commitResultType = "warning";
+    }
+
+    showCommitResultToast = true;
+
+    // Clear the result from store after showing
+    knowledgeCommitResult.set(null);
   }
 
   // Phase 7: Handle personal context updates (for "Updated" status indicator)
@@ -895,6 +933,8 @@
           <div class="knowledge-toggle">
             <label class="toggle-container">
               <input
+                id="auto-knowledge-detection"
+                name="auto-knowledge-detection"
                 type="checkbox"
                 bind:checked={autoKnowledgeDetection}
                 on:change={toggleAutoKnowledgeDetection}
@@ -916,6 +956,8 @@
         <div class="connect-section">
           <h3>Connect to Peer</h3>
           <input
+            id="peer-input"
+            name="peer-input"
             type="text"
             bind:value={peerInput}
             placeholder="node_id or dpc://IP:port?node_id=..."
@@ -973,16 +1015,21 @@
             <!-- P2P Peer Chats -->
             {#if $nodeStatus.p2p_peers && $nodeStatus.p2p_peers.length > 0}
               {#each $nodeStatus.p2p_peers as peerId (`${peerId}-${peerDisplayNames.get(peerId)}`)}
-
                 <li class="peer-item">
                   <button
                     type="button"
                     class="chat-button"
                     class:active={activeChatId === peerId}
-                    on:click={() => activeChatId = peerId}
+                    on:click={() => {
+                      activeChatId = peerId;
+                      resetUnreadCount(peerId);
+                    }}
                     title={peerId}
                   >
-                    👤 {getPeerDisplayName(peerId)}
+                    <span class="peer-name">👤 {getPeerDisplayName(peerId)}</span>
+                    {#if ($unreadMessageCounts.get(peerId) ?? 0) > 0}
+                      <span class="unread-badge">{$unreadMessageCounts.get(peerId)}</span>
+                    {/if}
                   </button>
                   <button
                     type="button"
@@ -1119,6 +1166,8 @@
           <div class="context-toggle">
             <label class="context-checkbox">
               <input
+                id="include-personal-context"
+                name="include-personal-context"
                 type="checkbox"
                 bind:checked={includePersonalContext}
               />
@@ -1151,6 +1200,8 @@
                   {@const isPeerContextUpdated = peerContextsUpdated.has(peer.node_id)}
                   <label class="peer-context-checkbox">
                     <input
+                      id={`peer-context-${peer.node_id}`}
+                      name={`peer-context-${peer.node_id}`}
                       type="checkbox"
                       checked={selectedPeerContexts.has(peer.node_id)}
                       on:change={() => togglePeerContext(peer.node_id)}
@@ -1215,6 +1266,8 @@
         {/if}
         <div class="input-row">
           <textarea
+            id="message-input"
+            name="message-input"
             bind:value={currentInput}
             placeholder={
               isContextWindowFull ? 'Context window full - End session to continue' :
@@ -1310,6 +1363,32 @@
   />
 {/if}
 
+<!-- Knowledge Commit Result Toast -->
+{#if showCommitResultToast}
+  <Toast
+    message={commitResultMessage}
+    type={commitResultType}
+    duration={6000}
+    dismissible={true}
+    onDismiss={() => {
+      showCommitResultToast = false;
+    }}
+    onClick={() => {
+      showVoteResultDialog = true;
+      showCommitResultToast = false;
+    }}
+  />
+{/if}
+
+<!-- Vote Result Details Dialog -->
+<VoteResultDialog
+  result={currentVoteResult}
+  open={showVoteResultDialog}
+  on:close={() => {
+    showVoteResultDialog = false;
+  }}
+/>
+
 <!-- Add AI Chat Dialog -->
 {#if showAddAIChatDialog}
   <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -1355,7 +1434,7 @@
 <style>
   .container {
     padding: 1.5rem;
-    max-width: 1400px;
+    width: auto;
     margin: 0 auto;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   }
@@ -1390,7 +1469,7 @@
   
   .grid {
     display: grid;
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 380px 1fr;
     gap: 1.5rem;
   }
   
@@ -1744,35 +1823,57 @@
   }
   
   .chat-button {
+    display: flex;
+    align-items: center;
     text-align: left;
     background: transparent;
     color: #333;
     border: 1px solid transparent;
     padding: 0.6rem;
     transition: all 0.2s;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
     flex: 1;
+    position: relative;
   }
-  
+
   .chat-button:hover {
     background: #f0f0f0;
   }
-  
+
   .chat-button.active {
     background: #e0e7ff;
     border-color: #c7d2fe;
     font-weight: bold;
   }
-  
+
+  /* Peer name wrapper (v0.9.3) - handles overflow so badge stays visible */
+  .peer-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+
+  /* Unread message badge (v0.9.3) */
+  .unread-badge {
+    display: inline-block;
+    background: #dc3545;
+    color: white;
+    font-size: 0.7rem;
+    font-weight: bold;
+    padding: 0.15rem 0.4rem;
+    border-radius: 10px;
+    margin-left: 0.5rem;
+    min-width: 1.2rem;
+    text-align: center;
+  }
+
   .disconnect-btn {
-    width: auto;
     padding: 0.3rem 0.6rem;
     background: transparent;
     color: #999;
     font-size: 1.5rem;
     border: 1px solid transparent;
+    flex: 1;
   }
 
   .disconnect-btn:hover {

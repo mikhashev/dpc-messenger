@@ -72,7 +72,8 @@ class ConversationMonitor:
         self.auto_detect = auto_detect  # Controls automatic detection vs manual-only
 
         # Message buffer
-        self.message_buffer: List[Message] = []
+        self.message_buffer: List[Message] = []  # Cleared after each extraction (for incremental auto-detect)
+        self.full_conversation: List[Message] = []  # Never cleared (for manual "End Session" extraction)
         self.knowledge_score: float = 0.0
 
         # Tracking
@@ -86,23 +87,19 @@ class ConversationMonitor:
 
         # Conversation history tracking (Phase 7: Conversation History)
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
-        self.context_included: bool = False  # Flag: has context been sent in this conversation?
-        self.context_hash: str = ""  # Hash of personal.json + device_context.json when last sent
-        self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer contexts
+        self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
 
         # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
         self.peer_context_cache: Dict[str, Any] = {}  # {node_id: PersonalContext} cached peer contexts
         self.peer_device_context_cache: Dict[str, dict] = {}  # {node_id: device_context_dict} cached device contexts
 
-        # Knowledge detection inference settings (supports both local and remote)
-        self.compute_host: str | None = None  # Node ID for remote inference (None = local)
-        self.model: str | None = None  # Model name for remote/local inference
-        self.provider_alias: str | None = None  # Provider alias for local inference
-
-        # Track last used compute settings for knowledge extraction fallback
+        # Track last used compute settings for knowledge extraction
         self.last_compute_host: str | None = None  # Track last compute host used
         self.last_model: str | None = None  # Track last model used
         self.last_provider: str | None = None  # Track last provider used
+
+        # Conversation type classification (v0.9.3)
+        self.conversation_type: str = "general"  # Detected type: task/technical/decision/general
 
     def set_inference_settings(self, compute_host: str | None, model: str | None, provider: str | None):
         """Update inference settings (called after each AI query in this conversation).
@@ -133,7 +130,8 @@ class ConversationMonitor:
             KnowledgeCommitProposal if knowledge detected (when auto_detect=True), None otherwise
         """
         # Always buffer messages (even if auto_detect is disabled, for manual extraction)
-        self.message_buffer.append(message)
+        self.message_buffer.append(message)  # For incremental auto-detection
+        self.full_conversation.append(message)  # For manual "End Session" extraction
 
         # Only run automatic detection if enabled
         if not self.auto_detect:
@@ -191,26 +189,310 @@ class ConversationMonitor:
 
         return None
 
-    def update_inference_settings(self, compute_host: str | None = None, model: str | None = None, provider: str | None = None):
-        """Update inference settings for knowledge detection
+    def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
+        """Infer inference settings when not explicitly tracked.
 
-        Knowledge detection can use either local or remote inference:
-        - If compute_host is None: Uses local LLM with provider_alias
-        - If compute_host is set: Uses remote peer's LLM with specified model
+        For peer conversations (conversation_id = node_id), ALWAYS uses peer compute for consistency.
+        For local AI conversations, uses tracked settings or defaults to local inference.
 
-        Args:
-            compute_host: Node ID for remote inference (None = local)
-            model: Model name for remote inference
-            provider: Provider alias for local inference
+        Returns:
+            (compute_host, model, provider) tuple
         """
-        self.compute_host = compute_host
-        self.model = model
-        self.provider_alias = provider
-
-        if compute_host:
-            logger.info("Monitor %s: Knowledge detection using REMOTE inference on %s, model=%s", self.conversation_id, compute_host, model or 'default')
+        # Peer conversations: conversation_id = node_id (starts with "dpc-node-")
+        if self.conversation_id.startswith("dpc-node-"):
+            # ALWAYS use peer as compute host for peer conversations (for consistency)
+            # Even if local models are available, peer conversations should use peer compute
+            if self.last_model:
+                logger.info("Monitor %s: Using tracked model for knowledge extraction (compute_host=%s, model=%s)",
+                           self.conversation_id, self.conversation_id, self.last_model)
+            else:
+                logger.info("Monitor %s: Using peer compute for knowledge extraction (compute_host=%s)",
+                           self.conversation_id, self.conversation_id)
+            return (self.conversation_id, self.last_model, None)  # Always use peer, track model if available
         else:
-            logger.info("Monitor %s: Knowledge detection using LOCAL inference, provider=%s", self.conversation_id, provider or 'default')
+            # Local AI conversation: use tracked settings or default to local inference
+            if self.last_provider is not None:
+                logger.info("Monitor %s: Using tracked local inference settings (provider=%s)",
+                           self.conversation_id, self.last_provider)
+                return (None, self.last_model, self.last_provider)
+            else:
+                logger.info("Monitor %s: Defaulting to local inference for knowledge extraction",
+                           self.conversation_id)
+                return (None, None, None)  # Local inference with default provider
+
+    def _detect_conversation_type(self) -> str:
+        """Detect conversation type from message content and participant context.
+
+        Uses simple keyword matching on message text. Checks both full_conversation
+        (for manual extraction) and message_buffer (for auto-detection).
+
+        Returns:
+            Conversation type: "task", "technical", "decision", or "general"
+        """
+        # Use full_conversation if available (manual extraction), otherwise message_buffer
+        messages = self.full_conversation if self.full_conversation else self.message_buffer
+
+        # Combine all message text for analysis
+        all_text = " ".join([msg.text.lower() for msg in messages])
+
+        # Task/Planning keywords (highest priority - user's primary use case)
+        task_keywords = [
+            "task", "deadline", "assigned", "project", "deliverable",
+            "milestone", "schedule", "priority", "estimate", "sprint",
+            "ticket", "issue", "todo", "action item", "owner"
+        ]
+
+        # Technical keywords
+        technical_keywords = [
+            "code", "implementation", "architecture", "refactor", "bug",
+            "api", "database", "function", "class", "module", "library",
+            "framework", "algorithm", "performance", "optimization", "test"
+        ]
+
+        # Decision keywords
+        decision_keywords = [
+            "decide", "decision", "choose", "option", "alternative",
+            "propose", "vote", "approve", "reject", "consensus",
+            "recommend", "suggest", "evaluate", "tradeoff", "pros and cons"
+        ]
+
+        # Count keyword matches
+        task_count = sum(1 for kw in task_keywords if kw in all_text)
+        technical_count = sum(1 for kw in technical_keywords if kw in all_text)
+        decision_count = sum(1 for kw in decision_keywords if kw in all_text)
+
+        # Determine type based on highest count (task has priority for ties)
+        if task_count >= technical_count and task_count >= decision_count and task_count > 0:
+            return "task"
+        elif technical_count > task_count and technical_count >= decision_count:
+            return "technical"
+        elif decision_count > 0:
+            return "decision"
+        else:
+            return "general"
+
+    def _get_task_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt optimized for task/planning conversations.
+
+        Focuses on: task names, assignments, deadlines, status, decisions.
+        """
+        json_format = """{
+  "topic": "concise_task_or_project_name",
+  "summary": "One sentence: who is doing what, by when",
+  "entries": [
+    {
+      "content": "Task name, assignment, deadline, or status fact",
+      "tags": ["task_assignment", "deadline", "status"],
+      "confidence": 0.9,
+      "sources": ["participant_name"],
+      "reasoning": "Direct statement or agreed commitment"
+    }
+  ],
+  "alternatives": [],
+  "devil_advocate": "Any risks or unclear requirements",
+  "flagged_assumptions": ["Implicit assumptions about scope or timeline"]
+}"""
+
+        rules_section = """EXTRACTION RULES FOR TASK CONVERSATIONS:
+1. PRIMARY FOCUS: Extract the main task/project NAME (often in first few messages)
+2. WHO: Identify who is assigned (mentioned by name or "you"/"I")
+3. WHEN: Extract ALL time references (deadlines, start dates, milestones)
+4. STATUS: Capture acceptance/rejection ("yes I can", "will take it", "cannot do")
+5. SCOPE: Note any deliverables or requirements mentioned
+6. CONFIDENCE: Rate 0.9+ for explicit statements, 0.7 for implicit agreements
+7. IGNORE: Procedural questions about availability unless they lead to commitment
+8. TOPIC: Use task/project NAME, not meta-conversation labels like "deadline inquiry"
+
+EXAMPLE GOOD EXTRACTION:
+Topic: "Core Service Refactoring"
+Entry 1: "Mike Windows assigned to core service refactoring task"
+Entry 2: "Deadline: 3 days from start (tomorrow as start date)"
+Entry 3: "Status: Accepted ('yes I can')"
+
+AVOID: Topics like "Task Deadline Inquiry", "Availability Check"
+"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+
+CONVERSATION TYPE: Task/Planning (formal work coordination)
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract task assignments, deadlines, and commitments. Focus on FACTS, not procedural questions.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+
+    def _get_technical_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt optimized for technical discussions.
+
+        Focuses on: architecture, implementation details, technical decisions.
+        """
+        json_format = """{
+  "topic": "technical_topic_name",
+  "summary": "One sentence technical summary",
+  "entries": [
+    {
+      "content": "Technical fact, decision, or implementation detail",
+      "tags": ["architecture", "implementation", "technical_decision"],
+      "confidence": 0.8,
+      "sources": ["participant_name"],
+      "reasoning": "Technical rationale or evidence"
+    }
+  ],
+  "alternatives": ["Alternative technical approaches discussed"],
+  "devil_advocate": "Technical risks or tradeoffs",
+  "flagged_assumptions": ["Technical assumptions to validate"]
+}"""
+
+        rules_section = """EXTRACTION RULES FOR TECHNICAL CONVERSATIONS:
+1. Focus on: Architecture, implementation details, technical decisions
+2. Capture rationale: WHY decisions were made (not just what was decided)
+3. Alternative approaches: List other options discussed
+4. Tradeoffs: Document pros/cons of chosen approach
+5. Technical risks: Flag potential issues or unknowns
+6. Confidence: Higher for tested/proven solutions, lower for experimental
+"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+
+CONVERSATION TYPE: Technical Discussion
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract technical knowledge with architectural rationale and tradeoffs.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+
+    def _get_decision_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt optimized for decision-making conversations.
+
+        Focuses on: options evaluated, decision made, consensus reached.
+        """
+        json_format = """{
+  "topic": "decision_or_proposal_topic",
+  "summary": "One sentence: what was decided and why",
+  "entries": [
+    {
+      "content": "Decision, option evaluated, or consensus point",
+      "tags": ["decision", "option_evaluation", "consensus"],
+      "confidence": 0.85,
+      "sources": ["participant_name"],
+      "reasoning": "Evidence or criteria used for decision"
+    }
+  ],
+  "alternatives": ["Options that were NOT chosen and why"],
+  "devil_advocate": "Counter-arguments or dissenting views",
+  "flagged_assumptions": ["Assumptions underlying the decision"]
+}"""
+
+        rules_section = """EXTRACTION RULES FOR DECISION CONVERSATIONS:
+1. DECISION: State clearly what was decided
+2. OPTIONS: List all alternatives evaluated (chosen and rejected)
+3. CRITERIA: Capture decision criteria or evaluation factors
+4. CONSENSUS: Note level of agreement (unanimous vs. majority)
+5. DISSENT: Preserve any dissenting opinions or concerns
+6. NEXT STEPS: Extract any follow-up actions decided
+"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+
+CONVERSATION TYPE: Decision Making
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract decision made, options evaluated, and consensus reached.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+
+    def _get_general_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt for general conversations (fallback).
+
+        Uses current v0.9.2 prompt logic (existing implementation).
+        """
+        # Check if cultural perspectives are enabled
+        cultural_perspectives_enabled = False
+        if self.settings:
+            cultural_perspectives_enabled = self.settings.get_cultural_perspectives_enabled()
+
+        if cultural_perspectives_enabled:
+            json_format = """{
+  "topic": "brief_topic_name",
+  "summary": "One sentence overview",
+  "entries": [
+    {
+      "content": "Knowledge statement",
+      "tags": ["tag1", "tag2"],
+      "confidence": 0.8,
+      "cultural_context": "Universal",
+      "sources": ["participant_name"],
+      "reasoning": "Why notable"
+    }
+  ],
+  "cultural_perspectives": ["Western individualistic", "Eastern collective"],
+  "alternatives": ["Alternative perspective 1"],
+  "devil_advocate": "Critical analysis",
+  "flagged_assumptions": ["Assumption if any"]
+}"""
+            rules_section = """RULES:
+- Rate confidence 0.0-1.0 for each claim
+- Mark cultural_context as "Universal" or "Context: [specific culture]"
+- Include devil's advocate critique
+- List alternative viewpoints
+- Flag cultural assumptions"""
+        else:
+            json_format = """{
+  "topic": "brief_topic_name",
+  "summary": "One sentence overview",
+  "entries": [
+    {
+      "content": "Knowledge statement",
+      "tags": ["tag1", "tag2"],
+      "confidence": 0.8,
+      "sources": ["participant_name"],
+      "reasoning": "Why notable"
+    }
+  ],
+  "alternatives": ["Alternative perspective 1"],
+  "devil_advocate": "Critical analysis",
+  "flagged_assumptions": ["Assumption if any"]
+}"""
+            rules_section = """RULES:
+- Rate confidence 0.0-1.0 for each claim
+- Include devil's advocate critique
+- List alternative viewpoints
+- Flag problematic assumptions"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract structured knowledge with bias mitigation.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
 
     async def _calculate_knowledge_score(self) -> float:
         """Calculate knowledge-worthiness score for conversation segment
@@ -248,20 +530,23 @@ REQUIRED OUTPUT FORMAT (raw JSON only):
 DO NOT include any text before or after the JSON. DO NOT use markdown code blocks. DO NOT explain your analysis outside the JSON."""
 
         try:
+            # Infer inference settings (uses tracked settings if available, otherwise infers from conversation type)
+            compute_host, model, provider = self._infer_inference_settings()
+
             # Use AI query function if available (supports remote inference), otherwise use llm_manager (local only)
             if self.ai_query_func:
                 result = await self.ai_query_func(
                     prompt=prompt,
-                    compute_host=self.last_compute_host,
-                    model=self.last_model,
-                    provider=self.last_provider
+                    compute_host=compute_host,
+                    model=model,
+                    provider=provider
                 )
                 response = result["response"]
             else:
                 # Fallback to direct llm_manager call (local only)
                 response = await self.llm_manager.query(
                     prompt=prompt,
-                    provider_alias=self.provider_alias
+                    provider_alias=provider
                 )
 
             # Try to extract JSON if wrapped in markdown or text
@@ -383,7 +668,12 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         Returns:
             KnowledgeCommitProposal object
         """
-        # Check if cultural perspectives are enabled
+        # Detect conversation type (v0.9.3)
+        self.conversation_type = self._detect_conversation_type()
+        logger.info("Monitor %s: Detected conversation type: %s",
+                   self.conversation_id, self.conversation_type)
+
+        # Get cultural perspectives setting
         cultural_perspectives_enabled = False
         if self.settings:
             cultural_perspectives_enabled = self.settings.get_cultural_perspectives_enabled()
@@ -399,7 +689,10 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                             cultural_contexts.append(context.cognitive_profile.cultural_background)
 
         # Format conversation
-        messages_text = self._format_messages_for_analysis(self.message_buffer)
+        # Use full_conversation for manual extraction (includes all messages)
+        # Use message_buffer only for automatic incremental extraction
+        messages_to_analyze = self.full_conversation if self.full_conversation else self.message_buffer
+        messages_text = self._format_messages_for_analysis(messages_to_analyze)
 
         # Build cultural context section (conditional)
         cultural_section = ""
@@ -409,85 +702,35 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 {', '.join(cultural_contexts) if cultural_contexts else 'Not specified'}
 """
 
-        # Build JSON format with conditional cultural fields
-        if cultural_perspectives_enabled:
-            json_format = """{
-  "topic": "brief_topic_name",
-  "summary": "One sentence overview",
-  "entries": [
-    {
-      "content": "Knowledge statement",
-      "tags": ["tag1", "tag2"],
-      "confidence": 0.8,
-      "cultural_context": "Universal",
-      "sources": ["participant_name"],
-      "reasoning": "Why notable"
-    }
-  ],
-  "cultural_perspectives": ["Western individualistic", "Eastern collective"],
-  "alternatives": ["Alternative perspective 1"],
-  "devil_advocate": "Critical analysis",
-  "flagged_assumptions": ["Assumption if any"]
-}"""
-            rules_section = """RULES:
-- Rate confidence 0.0-1.0 for each claim
-- Mark cultural_context as "Universal" or "Context: [specific culture]"
-- Include devil's advocate critique
-- List alternative viewpoints
-- Flag cultural assumptions"""
-        else:
-            json_format = """{
-  "topic": "brief_topic_name",
-  "summary": "One sentence overview",
-  "entries": [
-    {
-      "content": "Knowledge statement",
-      "tags": ["tag1", "tag2"],
-      "confidence": 0.8,
-      "sources": ["participant_name"],
-      "reasoning": "Why notable"
-    }
-  ],
-  "alternatives": ["Alternative perspective 1"],
-  "devil_advocate": "Critical analysis",
-  "flagged_assumptions": ["Assumption if any"]
-}"""
-            rules_section = """RULES:
-- Rate confidence 0.0-1.0 for each claim
-- Include devil's advocate critique
-- List alternative viewpoints
-- Flag problematic assumptions"""
-
-        # Build bias-resistant prompt
-        prompt = f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
-{cultural_section}
-CONVERSATION:
-{messages_text}
-
-TASK: Extract structured knowledge with bias mitigation.
-
-REQUIRED JSON FORMAT (output ONLY this, nothing else):
-{json_format}
-
-{rules_section}
-
-DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+        # Select type-specific prompt builder (v0.9.3)
+        if self.conversation_type == "task":
+            prompt = self._get_task_extraction_prompt(messages_text, cultural_section)
+        elif self.conversation_type == "technical":
+            prompt = self._get_technical_extraction_prompt(messages_text, cultural_section)
+        elif self.conversation_type == "decision":
+            prompt = self._get_decision_extraction_prompt(messages_text, cultural_section)
+        else:  # general (fallback)
+            prompt = self._get_general_extraction_prompt(messages_text, cultural_section)
 
         try:
+            # Infer inference settings (uses tracked settings if available, otherwise infers from conversation type)
+            compute_host, model, provider = self._infer_inference_settings()
+
             # Use AI query function if available (supports remote inference), otherwise use llm_manager (local only)
+            inference_result = None  # Save for metadata extraction
             if self.ai_query_func:
-                result = await self.ai_query_func(
+                inference_result = await self.ai_query_func(
                     prompt=prompt,
-                    compute_host=self.last_compute_host,
-                    model=self.last_model,
-                    provider=self.last_provider
+                    compute_host=compute_host,
+                    model=model,
+                    provider=provider
                 )
-                response = result["response"]
+                response = inference_result["response"]
             else:
                 # Fallback to direct llm_manager call (local only)
                 response = await self.llm_manager.query(
                     prompt=prompt,
-                    provider_alias=self.provider_alias
+                    provider_alias=provider
                 )
 
             # Try to extract and parse JSON from response (with repair attempts)
@@ -527,6 +770,14 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                         # All attempts failed
                         raise ValueError(f"Failed to extract valid JSON after repair attempts: {e}")
 
+            # Determine extraction model and host from inference result
+            extraction_model_name = model  # From _infer_inference_settings()
+            if not extraction_model_name and inference_result:
+                # Try to extract from inference result dict (has model, provider, compute_host)
+                extraction_model_name = inference_result.get('model')
+
+            extraction_host_name = "local" if not compute_host else compute_host
+
             # Build knowledge entries
             entries = []
             for entry_data in result.get('entries', []):
@@ -536,7 +787,9 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                     participants=[p['node_id'] for p in self.participants],
                     confidence_score=entry_data.get('confidence', 1.0),
                     sources_cited=entry_data.get('sources', []),
-                    cultural_perspectives_considered=result.get('cultural_perspectives', [])
+                    cultural_perspectives_considered=result.get('cultural_perspectives', []),
+                    extraction_model=extraction_model_name,
+                    extraction_host=extraction_host_name
                 )
 
                 # Handle cultural context (only if enabled)
@@ -555,7 +808,7 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
             # Calculate average confidence
             avg_confidence = sum(e.confidence for e in entries) / len(entries) if entries else 1.0
 
-            # Create proposal
+            # Create proposal (extraction_model_name and extraction_host_name already determined above)
             proposal = KnowledgeCommitProposal(
                 conversation_id=self.conversation_id,
                 topic=result.get('topic', 'conversation_summary'),
@@ -568,6 +821,8 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
                 flagged_assumptions=result.get('flagged_assumptions', []),
                 devil_advocate=result.get('devil_advocate'),
                 avg_confidence=avg_confidence,
+                extraction_model=extraction_model_name,
+                extraction_host=extraction_host_name,
                 status='proposed'
             )
 
@@ -696,26 +951,6 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
         """
         return self.message_history.copy()
 
-    def mark_context_included(self, context_hash: str):
-        """Mark that context has been included in this conversation
-
-        Args:
-            context_hash: SHA256 hash of personal.json + device_context.json
-        """
-        self.context_included = True
-        self.context_hash = context_hash
-
-    def has_context_changed(self, new_hash: str) -> bool:
-        """Check if context files have changed since last inclusion
-
-        Args:
-            new_hash: Current hash of context files
-
-        Returns:
-            True if context has changed
-        """
-        return new_hash != self.context_hash
-
     def update_peer_context_hash(self, node_id: str, context_hash: str):
         """Update the stored hash for a peer's context
 
@@ -741,13 +976,11 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
     def reset_conversation(self):
         """Reset conversation history and context tracking (for "New Chat" button)"""
         self.message_history = []
-        self.context_included = False
-        self.context_hash = ""
         self.peer_context_hashes = {}
         self.current_token_count = 0
         self.message_buffer = []
         self.knowledge_score = 0.0
-        # Phase 7: Also clear peer context caches
+        # Clear peer context caches
         self.peer_context_cache = {}
         self.peer_device_context_cache = {}
 

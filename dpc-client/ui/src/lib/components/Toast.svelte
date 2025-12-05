@@ -7,6 +7,7 @@
   export let duration: number = 5000; // Auto-dismiss after 5 seconds (0 = no auto-dismiss)
   export let dismissible: boolean = true;
   export let onDismiss: (() => void) | null = null;
+  export let onClick: (() => void) | null = null; // Optional click handler for the toast
 
   let visible = false;
   let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -50,14 +51,18 @@
   $: config = typeConfig[type];
 </script>
 
+<!-- svelte-ignore a11y-click-events-have-key-events -->
+<!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
 <div
   class="toast"
   class:visible
   class:info={type === 'info'}
   class:warning={type === 'warning'}
   class:error={type === 'error'}
+  class:clickable={onClick !== null}
   role="alert"
   aria-live="polite"
+  on:click={() => onClick && onClick()}
 >
   <div class="toast-content">
     <span class="toast-icon">{config.icon}</span>
@@ -100,6 +105,14 @@
   .toast.visible {
     opacity: 1;
     transform: translateX(0);
+  }
+
+  .toast.clickable {
+    cursor: pointer;
+  }
+
+  .toast.clickable:hover {
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.2);
   }
 
   .toast.info {

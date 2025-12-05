@@ -10,6 +10,7 @@ export const p2pMessages = writable<any>(null);
 
 // Knowledge Architecture stores (Phase 1-6 integration)
 export const knowledgeCommitProposal = writable<any>(null);
+export const knowledgeCommitResult = writable<any>(null);
 export const personalContext = writable<any>(null);
 
 // Token tracking stores (Phase 2)
@@ -27,6 +28,12 @@ export const peerProviders = writable<Map<string, any[]>>(new Map());
 // Phase 7: Context update stores (for status indicators)
 export const contextUpdated = writable<any>(null);
 export const peerContextUpdated = writable<any>(null);
+
+// Unread message counter (v0.9.3)
+export const unreadMessageCounts = writable<Map<string, number>>(new Map());
+
+// Track currently active chat to prevent unread badges on open chats
+let activeChat: string | null = null;
 
 let socket: WebSocket | null = null;
 let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -159,6 +166,21 @@ export function connectToCoreService() {
                     nodeStatus.set({ ...message.payload });
                 } else if (message.event === "new_p2p_message") {
                     p2pMessages.set(message.payload);
+
+                    // Track unread messages (v0.9.3) - only if this message is not from active chat
+                    // Message payload contains: sender_node_id, sender_name, text, message_id
+                    const senderId = message.payload.sender_node_id;
+                    if (senderId && typeof window !== 'undefined') {
+                        // Only increment unread count if this chat is NOT currently active
+                        if (senderId !== activeChat) {
+                            // Get current unread counts
+                            const currentCounts = get(unreadMessageCounts);
+                            const currentCount = currentCounts.get(senderId) || 0;
+                            // Increment count
+                            currentCounts.set(senderId, currentCount + 1);
+                            unreadMessageCounts.set(new Map(currentCounts));
+                        }
+                    }
                 } else if (message.event === "connection_status_changed") {
                     // Update node status with new connection status
                     const currentStatus = get(nodeStatus);
@@ -178,6 +200,9 @@ export function connectToCoreService() {
                     console.log("Knowledge commit approved:", message.payload);
                     // Refresh personal context after approval
                     sendCommand("get_personal_context");
+                } else if (message.event === "knowledge_commit_result") {
+                    console.log("Knowledge commit result received:", message.payload);
+                    knowledgeCommitResult.set(message.payload);
                 }
                 // Handle token limit warning (Phase 2)
                 else if (message.event === "token_limit_warning") {
@@ -329,5 +354,19 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
     } catch (error) {
         console.error(`Error sending command '${command}':`, error);
         return false;
+    }
+}
+
+// Helper function to set the currently active chat (prevents unread badges on open chats)
+export function setActiveChat(chatId: string | null) {
+    activeChat = chatId;
+}
+
+// Helper function to reset unread count when chat becomes active (v0.9.3)
+export function resetUnreadCount(peerId: string) {
+    const currentCounts = get(unreadMessageCounts);
+    if (currentCounts.has(peerId)) {
+        currentCounts.delete(peerId);
+        unreadMessageCounts.set(new Map(currentCounts));
     }
 }

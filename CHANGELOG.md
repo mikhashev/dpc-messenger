@@ -9,6 +9,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.9.4] - 2025-12-05
+
+### Added
+- **Knowledge Commit Voting Result Notifications** - Real-time P2P notifications when voting completes
+  - New `KNOWLEDGE_COMMIT_RESULT` DPTP message broadcasts voting outcomes to all participants
+  - Shows vote tallies, approval rate, and individual votes with comments
+  - Notifies users immediately when proposals are approved/rejected/need revision
+  - Answers "what changes requested" and "who voted for what" questions
+  - Files modified: [consensus_manager.py:96,288-321](dpc-client/core/dpc_client_core/consensus_manager.py), [service.py:45-46,158,227,2446-2470](dpc-client/core/dpc_client_core/service.py), [knowledge_handler.py:94-130](dpc-client/core/dpc_client_core/message_handlers/knowledge_handler.py)
+
+- **Detailed Vote Results Dialog** - Comprehensive breakdown of voting outcomes
+  - Click toast notifications to see full voting details
+  - Shows each voter's choice (approve/reject/request_changes) with timestamps
+  - Displays voter comments explaining their decisions
+  - Highlights devil's advocate votes with special badge
+  - Vote statistics with visual grid (approve/reject/changes counts)
+  - Files added: [VoteResultDialog.svelte](dpc-client/ui/src/lib/components/VoteResultDialog.svelte)
+  - Files modified: [Toast.svelte:10,54-55,60-64,105-111](dpc-client/ui/src/lib/components/Toast.svelte), [+page.svelte:6,8,86-87,149-170,1367-1390](dpc-client/ui/src/routes/+page.svelte), [coreService.ts:13,197-200](dpc-client/ui/src/lib/coreService.ts)
+
+- **Clickable Toast Notifications** - Toast component now supports onClick handlers
+  - Hover effect on clickable toasts
+  - Used for opening detailed vote results dialog
+  - Generic enhancement for future interactive notifications
+
+### Fixed
+- **Unread badge on active chat** - Badge no longer increments for currently open conversation
+  - Tracks which chat is currently active
+  - Skips unread count increment for messages from active peer
+  - Prevents confusing notification on open chat window
+  - Files modified: [coreService.ts:36,175,361-363](dpc-client/ui/src/lib/coreService.ts), [+page.svelte:111](dpc-client/ui/src/routes/+page.svelte)
+
+- **Missing KNOWLEDGE_COMMIT_RESULT handler registration** - Fixed "Unknown P2P message command" warning
+  - KnowledgeCommitResultHandler now properly registered in message router
+  - Resolves warning when receiving voting results from peers
+  - Files modified: [service.py:45-46,227](dpc-client/core/dpc_client_core/service.py)
+
+- **Misleading buffer logging** - Clarified that messages are preserved after proposal rejection
+  - Log now shows both `full_conversation` and `message_buffer` counts
+  - Eliminates confusion about "0 messages" after extraction
+  - Makes clear that all messages are preserved for re-extraction
+  - Files modified: [service.py:1902-1907](dpc-client/core/dpc_client_core/service.py)
+
+### Technical Details
+- Extended DPTP v1 specification with KNOWLEDGE_COMMIT_RESULT message type
+- Added `on_result_broadcast` callback to ConsensusManager
+- Implemented `_broadcast_commit_result()` method in CoreService
+- Created comprehensive VoteResultDialog with TypeScript types
+- Enhanced Toast component with optional click handling and accessibility
+- Added `activeChat` tracking in coreService for badge logic
+- Two-buffer architecture: `message_buffer` (incremental) + `full_conversation` (never cleared)
+
+---
+
+## [0.9.3] - 2025-12-04
+
+### Added
+- **Topic-Specific Knowledge Extraction Prompts** - Conversation type detection with tailored extraction strategies
+  - Automatic type detection using keyword matching: task, technical, decision, or general
+  - **Task extraction**: Optimized for work coordination (task assignments, deadlines, status tracking)
+    - Extracts project/task NAME (not meta-conversation labels like "deadline inquiry")
+    - Captures who/what/when/status with high confidence
+    - Example: "Core Service Refactoring" instead of "Task Deadline Inquiry"
+  - **Technical extraction**: Focuses on architecture rationale, tradeoffs, and alternatives
+  - **Decision extraction**: Captures options evaluated, consensus reached, and dissent
+  - **General extraction**: Fallback to v0.9.2 behavior for unclassified conversations
+  - Lays foundation for Phase 2.2's "Knowledge Commit Templates" feature
+  - Files modified: [conversation_monitor.py:101-102,220-495,671-713](dpc-client/core/dpc_client_core/conversation_monitor.py)
+
+### Added (continued)
+- **Unread message indicator for peer chats** - Visual notification for new messages
+  - Red badge shows unread count next to peer name in sidebar
+  - Badge clears automatically when opening the chat
+  - Helps users track activity across multiple peer conversations
+  - Files modified: [coreService.ts:32,164-176,350-357](dpc-client/ui/src/lib/coreService.ts), [+page.svelte:6,982-991,1776-1788](dpc-client/ui/src/routes/+page.svelte)
+
+### Fixed
+- **Outgoing messages now tracked in knowledge extraction** - Fixed missing conversation context
+  - Outgoing peer messages now buffered in conversation monitor
+  - Fixes incomplete extraction (only saw incoming messages before)
+  - Both sides of conversation now included in knowledge proposals
+  - Files modified: [service.py:2066-2096](dpc-client/core/dpc_client_core/service.py)
+
+### Technical Details
+- Added `conversation_type` field to ConversationMonitor
+- Implemented `_detect_conversation_type()` with simple keyword matching
+- Created 4 prompt builder methods: task, technical, decision, general
+- Modified `_generate_commit_proposal()` to select type-specific prompts
+- Added outgoing message tracking in `send_p2p_message()` method
+- All 56 existing tests pass with no regressions
+
+---
+
 ## [0.9.2] - 2025-12-02
 
 ### Fixed

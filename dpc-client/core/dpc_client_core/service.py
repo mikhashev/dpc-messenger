@@ -27,6 +27,9 @@ from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .stun_discovery import discover_external_ip
+from .inference_orchestrator import InferenceOrchestrator
+from .context_coordinator import ContextCoordinator
+from .p2p_coordinator import P2PCoordinator
 from .message_router import MessageRouter
 from .message_handlers.hello_handler import HelloHandler
 from .message_handlers.text_handler import SendTextHandler
@@ -39,7 +42,8 @@ from .message_handlers.inference_handler import (
 )
 from .message_handlers.provider_handler import GetProvidersHandler, ProvidersResponseHandler
 from .message_handlers.knowledge_handler import (
-    ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler
+    ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler,
+    KnowledgeCommitResultHandler
 )
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
@@ -151,6 +155,18 @@ class CoreService:
         # Register callback to broadcast peer proposals to UI
         self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
 
+        # Register callback to broadcast voting results to participants
+        self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
+
+        # Inference orchestrator (coordinates local and remote AI inference)
+        self.inference_orchestrator = InferenceOrchestrator(self)
+
+        # Context coordinator (coordinates context requests and responses)
+        self.context_coordinator = ContextCoordinator(self)
+
+        # P2P coordinator (coordinates P2P connection lifecycle)
+        self.p2p_coordinator = P2PCoordinator(self)
+
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
@@ -166,12 +182,6 @@ class CoreService:
         
         # Store peer metadata (names, profiles, etc.)
         self.peer_metadata: Dict[str, Dict[str, Any]] = {}
-
-        # Track pending context requests (for request-response matching)
-        self._pending_context_requests: Dict[str, asyncio.Future] = {}
-
-        # Track pending device context requests (for request-response matching)
-        self._pending_device_context_requests: Dict[str, asyncio.Future] = {}
 
         # Track pending inference requests (for request-response matching)
         self._pending_inference_requests: Dict[str, asyncio.Future] = {}
@@ -214,6 +224,7 @@ class CoreService:
         self.message_router.register_handler(ContextUpdatedHandler(self))
         self.message_router.register_handler(ProposeKnowledgeCommitHandler(self))
         self.message_router.register_handler(VoteKnowledgeCommitHandler(self))
+        self.message_router.register_handler(KnowledgeCommitResultHandler(self))
 
         # Peer handshake
         self.message_router.register_handler(HelloHandler(self))
@@ -1822,11 +1833,7 @@ class CoreService:
 
         Used by ConsensusManager to broadcast votes and proposals.
         """
-        for peer_id in list(self.p2p_manager.peers.keys()):
-            try:
-                await self.p2p_manager.send_message_to_peer(peer_id, message)
-            except Exception as e:
-                logger.warning("Failed to broadcast to %s: %s", peer_id, e)
+        await self.p2p_coordinator.broadcast_to_peers(message)
 
     def _get_or_create_conversation_monitor(self, conversation_id: str) -> ConversationMonitor:
         """Get or create a conversation monitor for a conversation/peer.
@@ -1892,7 +1899,12 @@ class CoreService:
         try:
             monitor = self._get_or_create_conversation_monitor(conversation_id)
             logger.info("End Session - attempting manual extraction for %s", conversation_id)
-            logger.info("Buffer: %d messages, Score: %.2f", len(monitor.message_buffer), monitor.knowledge_score)
+            logger.info(
+                "Full conversation: %d messages (incremental buffer: %d), Score: %.2f",
+                len(monitor.full_conversation),
+                len(monitor.message_buffer),
+                monitor.knowledge_score
+            )
 
             # Force knowledge extraction even if threshold not met
             proposal = await monitor.generate_commit_proposal(force=True)
@@ -2032,13 +2044,7 @@ class CoreService:
         Args:
             uri: dpc:// URI with host, port, and node_id query parameter
         """
-        logger.info("Orchestrating direct connection to %s", uri)
-
-        # Parse the URI to extract host, port, and node_id
-        host, port, target_node_id = parse_dpc_uri(uri)
-        
-        # Use connect_directly from P2PManager
-        await self.p2p_manager.connect_directly(host, port, target_node_id)
+        await self.p2p_coordinator.connect_via_uri(uri)
 
     async def test_port(self, uri: str) -> dict:
         """
@@ -2054,63 +2060,56 @@ class CoreService:
             - host (str): Target host
             - port (int): Target port
         """
-        from dpc_protocol.utils import parse_dpc_uri
-
-        # Parse the URI to extract host and port
-        host, port, target_node_id = parse_dpc_uri(uri)
-
-        # Test port connectivity
-        success, message = await self.p2p_manager.test_port_connectivity(host, port)
-
-        return {
-            "success": success,
-            "message": message,
-            "host": host,
-            "port": port,
-            "node_id": target_node_id
-        }
+        return await self.p2p_coordinator.test_port_connectivity(uri)
 
     async def connect_to_peer_by_id(self, node_id: str):
         """
         Orchestrates a P2P connection to a peer using its node_id via Hub.
         Uses WebRTC with NAT traversal.
         """
-        logger.info("Orchestrating WebRTC connection to %s via Hub", node_id)
-
-        # Check if Hub is connected
-        if not self.hub_client.websocket or self.hub_client.websocket.state != websockets.State.OPEN:
-            raise ConnectionError("Not connected to Hub. Cannot establish WebRTC connection.")
-
-        # Use WebRTC connection via Hub
-        await self.p2p_manager.connect_via_hub(
-            target_node_id=node_id,
-            hub_client=self.hub_client
-        )
+        await self.p2p_coordinator.connect_via_hub(node_id)
 
     async def disconnect_from_peer(self, node_id: str):
         """Disconnect from a peer."""
-        await self.p2p_manager.shutdown_peer_connection(node_id)
+        await self.p2p_coordinator.disconnect(node_id)
 
     async def send_p2p_message(self, target_node_id: str, text: str):
         """Send a text message to a connected peer."""
-        logger.debug("Sending text message to %s: %s", target_node_id, text)
+        await self.p2p_coordinator.send_message(target_node_id, text)
 
-        message = {
-            "command": "SEND_TEXT",
-            "payload": {
-                "text": text
-            }
-        }
-
+        # Track outgoing message in conversation monitor (v0.9.3 fix)
         try:
-            await self.p2p_manager.send_message_to_peer(target_node_id, message)
+            from datetime import datetime
+            from .conversation_monitor import Message as ConvMessage
+            import hashlib
+            import time
+
+            monitor = self._get_or_create_conversation_monitor(target_node_id)
+
+            # Create message object for outgoing message
+            message_id = hashlib.sha256(
+                f"{self.p2p_manager.node_id}:{text}:{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
+
+            outgoing_message = ConvMessage(
+                message_id=message_id,
+                conversation_id=target_node_id,
+                sender_node_id=self.p2p_manager.node_id,
+                sender_name="You",  # Outgoing messages from local user
+                text=text,
+                timestamp=datetime.utcnow().isoformat()
+            )
+
+            # Buffer the outgoing message (conversation monitor handles both directions)
+            await monitor.on_message(outgoing_message)
         except Exception as e:
-            logger.error("Error sending message to %s: %s", target_node_id, e, exc_info=True)
-            raise
+            logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
 
     async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None):
         """
         Send an AI query, either to local LLM or to a remote peer for inference.
+
+        Delegates to InferenceOrchestrator for execution.
 
         Args:
             prompt: The prompt to send to the AI
@@ -2125,122 +2124,30 @@ class CoreService:
             ValueError: If compute_host is specified but peer is not connected
             RuntimeError: If inference fails
         """
-        logger.info("AI Query - compute_host: %s, model: %s", compute_host or 'local', model or 'default')
-
-        # Local inference
-        if not compute_host:
-            try:
-                result = await self.llm_manager.query(prompt, provider_alias=provider, return_metadata=True)
-                result['compute_host'] = 'local'
-                return result
-            except Exception as e:
-                logger.error("Local inference failed: %s", e, exc_info=True)
-                raise RuntimeError(f"Local inference failed: {e}") from e
-
-        # Remote inference
-        try:
-            result_data = await self._request_inference_from_peer(
-                peer_id=compute_host,
-                prompt=prompt,
-                model=model,
-                provider=provider
-            )
-            # result_data is now a dict with response and token metadata
-            return {
-                "response": result_data.get("response") if isinstance(result_data, dict) else result_data,
-                "model": model or "unknown",
-                "provider": provider or "unknown",
-                "compute_host": compute_host,
-                # Include token metadata if available
-                "tokens_used": result_data.get("tokens_used") if isinstance(result_data, dict) else None,
-                "model_max_tokens": result_data.get("model_max_tokens") if isinstance(result_data, dict) else None,
-                "prompt_tokens": result_data.get("prompt_tokens") if isinstance(result_data, dict) else None,
-                "response_tokens": result_data.get("response_tokens") if isinstance(result_data, dict) else None
-            }
-        except ConnectionError as e:
-            raise ValueError(f"Compute host {compute_host} is not connected") from e
-        except Exception as e:
-            logger.error("Remote inference failed: %s", e, exc_info=True)
-            raise RuntimeError(f"Remote inference failed: {e}") from e
+        return await self.inference_orchestrator.execute_inference(
+            prompt=prompt,
+            compute_host=compute_host,
+            model=model,
+            provider=provider
+        )
 
     # --- Context Request Methods ---
 
     async def _handle_context_request(self, peer_id: str, query: str, request_id: str):
         """
         Handle incoming context request from a peer.
-        Apply firewall rules and return filtered context.
+
+        Delegates to ContextCoordinator.
         """
-        logger.debug("Handling context request from %s (request_id: %s)", peer_id, request_id)
-
-        # Apply firewall to filter context based on peer
-        filtered_context = self.firewall.filter_context_for_peer(
-            context=self.p2p_manager.local_context,
-            peer_id=peer_id,
-            query=query
-        )
-
-        logger.debug("Context filtered by firewall for %s", peer_id)
-
-        # Convert to dict for JSON serialization
-        context_dict = asdict(filtered_context)
-
-        # Send response back to peer with request_id
-        response = {
-            "command": "CONTEXT_RESPONSE",
-            "payload": {
-                "request_id": request_id,
-                "context": context_dict,
-                "query": query
-            }
-        }
-
-        try:
-            await self.p2p_manager.send_message_to_peer(peer_id, response)
-            logger.debug("Sent filtered context response to %s", peer_id)
-        except Exception as e:
-            logger.error("Error sending context response to %s: %s", peer_id, e, exc_info=True)
+        await self.context_coordinator.handle_context_request(peer_id, query, request_id)
 
     async def _handle_device_context_request(self, peer_id: str, request_id: str):
         """
         Handle incoming device context request from a peer.
-        Apply firewall rules and return filtered device context.
+
+        Delegates to ContextCoordinator.
         """
-        logger.debug("Handling device context request from %s (request_id: %s)", peer_id, request_id)
-
-        # Check if device context is available
-        if not self.device_context:
-            logger.debug("Device context not available, sending empty response")
-            response = {
-                "command": "DEVICE_CONTEXT_RESPONSE",
-                "payload": {
-                    "request_id": request_id,
-                    "device_context": {},
-                    "error": "Device context not available"
-                }
-            }
-        else:
-            # Apply firewall to filter device context based on peer
-            filtered_device_context = self.firewall.filter_device_context_for_peer(
-                device_context=self.device_context,
-                peer_id=peer_id
-            )
-
-            logger.debug("Device context filtered by firewall for %s", peer_id)
-
-            # Send response back to peer with request_id
-            response = {
-                "command": "DEVICE_CONTEXT_RESPONSE",
-                "payload": {
-                    "request_id": request_id,
-                    "device_context": filtered_device_context
-                }
-            }
-
-        try:
-            await self.p2p_manager.send_message_to_peer(peer_id, response)
-            logger.debug("Sent filtered device context response to %s", peer_id)
-        except Exception as e:
-            logger.error("Error sending device context response to %s: %s", peer_id, e, exc_info=True)
+        await self.context_coordinator.handle_device_context_request(peer_id, request_id)
 
     async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None):
         """
@@ -2546,63 +2453,45 @@ class CoreService:
             except Exception as e:
                 logger.error("Error notifying %s of provider changes: %s", peer_id, e, exc_info=True)
 
+    async def _broadcast_commit_result(self, result_payload: dict, participants: List[str]):
+        """Broadcast KNOWLEDGE_COMMIT_RESULT to all participants
+
+        Args:
+            result_payload: Complete voting result data (status, vote_tally, votes, etc.)
+            participants: List of participant node_ids who should receive the notification
+        """
+        message = {
+            "command": "KNOWLEDGE_COMMIT_RESULT",
+            "payload": result_payload
+        }
+
+        # Send to all participants (who are currently connected)
+        for node_id in participants:
+            if node_id in self.p2p_manager.peers:
+                try:
+                    await self.p2p_manager.send_message_to_peer(node_id, message)
+                    logger.info("Sent KNOWLEDGE_COMMIT_RESULT to %s", node_id[:20])
+                except Exception as e:
+                    logger.error("Failed to send result to %s: %s", node_id[:20], e, exc_info=True)
+            else:
+                logger.debug("Participant %s not connected, skipping result broadcast", node_id[:20])
+
+        # Also emit to local UI
+        await self.local_api.broadcast_event("knowledge_commit_result", result_payload)
+
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """
         Request context from a specific peer for the given query.
-        Uses async request-response pattern with Future.
+
+        Delegates to ContextCoordinator.
         """
-        logger.debug("Requesting context from peer: %s", peer_id)
-
-        if peer_id not in self.p2p_manager.peers:
-            logger.debug("Peer %s not connected, skipping context request", peer_id)
-            return None
-
-        try:
-            # Generate unique request ID
-            request_id = str(uuid.uuid4())
-
-            # Create Future to wait for response
-            response_future = asyncio.Future()
-            self._pending_context_requests[request_id] = response_future
-
-            # Create context request message
-            request_message = {
-                "command": "REQUEST_CONTEXT",
-                "payload": {
-                    "request_id": request_id,
-                    "query": query,
-                    "requestor_id": self.p2p_manager.node_id
-                }
-            }
-
-            # Send request using P2PManager's method
-            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
-
-            # Wait for response with timeout
-            try:
-                context = await asyncio.wait_for(response_future, timeout=5.0)
-
-                if context:
-                    # Already a PersonalContext object (deserialized in CONTEXT_RESPONSE handler)
-                    return context
-
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for context from %s", peer_id)
-                return None
-            finally:
-                # Clean up pending request
-                self._pending_context_requests.pop(request_id, None)
-
-            return None
-
-        except Exception as e:
-            logger.error("Error requesting context from %s: %s", peer_id, e, exc_info=True)
-            return None
+        return await self.context_coordinator.request_peer_context(peer_id, query)
 
     async def _request_device_context_from_peer(self, peer_id: str) -> Dict:
         """
         Request device context from a specific peer.
-        Uses async request-response pattern with Future.
+
+        Delegates to ContextCoordinator.
 
         Args:
             peer_id: The node_id of the peer to request device context from
@@ -2610,47 +2499,7 @@ class CoreService:
         Returns:
             Dict containing filtered device context, or None if request fails
         """
-        logger.debug("Requesting device context from peer: %s", peer_id)
-
-        if peer_id not in self.p2p_manager.peers:
-            logger.debug("Peer %s not connected, skipping device context request", peer_id)
-            return None
-
-        try:
-            # Generate unique request ID
-            request_id = str(uuid.uuid4())
-
-            # Create Future to wait for response
-            response_future = asyncio.Future()
-            self._pending_device_context_requests[request_id] = response_future
-
-            # Create device context request message
-            request_message = {
-                "command": "REQUEST_DEVICE_CONTEXT",
-                "payload": {
-                    "request_id": request_id,
-                    "requestor_id": self.p2p_manager.node_id
-                }
-            }
-
-            # Send request using P2PManager's method
-            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
-
-            # Wait for response with timeout
-            try:
-                device_context_dict = await asyncio.wait_for(response_future, timeout=5.0)
-                return device_context_dict if device_context_dict else None
-
-            except asyncio.TimeoutError:
-                logger.warning("Timeout waiting for device context from %s", peer_id)
-                return None
-            finally:
-                # Clean up pending request
-                self._pending_device_context_requests.pop(request_id, None)
-
-        except Exception as e:
-            logger.error("Error requesting device context from %s: %s", peer_id, e, exc_info=True)
-            return None
+        return await self.context_coordinator.request_device_context(peer_id)
 
     async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, timeout: float = 60.0) -> str:
         """
@@ -2785,34 +2634,22 @@ class CoreService:
                 logger.warning("BLOCKED: %s", error_msg)
                 raise RuntimeError(error_msg)
 
-        # Phase 7: Compute context hash and determine if context should be included
-        current_context_hash = self._compute_context_hash()
-
-        # Determine if we should include full context in this query
-        should_include_full_context = False
+        # Simplified context inclusion: Always include when checkbox checked
+        # Rationale: Modern AI models have large context windows (128K+ tokens)
+        # Always including contexts ensures information is never lost and simplifies logic
+        # User controls token usage via checkbox (checked = include, unchecked = exclude)
+        aggregated_contexts = {}
+        device_context_data = None
 
         if include_context:
-            # Include context if:
-            # 1. This is the first message (context not yet included), OR
-            # 2. Context files have changed since last inclusion, OR
-            # 3. User just toggled the checkbox (checkbox state change handled by frontend)
-            if not monitor.context_included or monitor.has_context_changed(current_context_hash):
-                should_include_full_context = True
-                logger.info("Full context will be included (first message or context changed)")
-            else:
-                logger.debug("Context already included, using conversation history only")
-        else:
-            logger.debug("User disabled context inclusion")
-
-        # Conditionally include local context based on flag
-        aggregated_contexts = {}
-        if should_include_full_context:
+            logger.debug("Including contexts (checkbox enabled)")
             aggregated_contexts = {'local': self.p2p_manager.local_context}
 
-        # Add device context if available and should include full context
-        device_context_data = None
-        if should_include_full_context and self.device_context:
-            device_context_data = self.device_context
+            # Always include device context when checkbox is checked
+            if self.device_context:
+                device_context_data = self.device_context
+        else:
+            logger.debug("User disabled context inclusion")
 
         # Phase 7: Fetch remote contexts if context_ids provided (with caching)
         peer_device_contexts = {}
@@ -2884,15 +2721,6 @@ class CoreService:
                 else:
                     logger.warning("Peer %s... not connected", node_id[:20])
 
-        # Phase 7: Update should_include_full_context if peer contexts were added
-        # BugFix: Even if local context wasn't included, if we have peer contexts, we need full context mode
-        if len(aggregated_contexts) > 0 and not should_include_full_context:
-            # Check if we have any peer contexts (non-'local' entries)
-            has_peer_contexts = any(key != 'local' for key in aggregated_contexts.keys())
-            if has_peer_contexts:
-                should_include_full_context = True
-                logger.info("Including peer contexts in this query (peer context changed)")
-
         # Phase 7: Add user prompt to conversation history BEFORE assembling prompt
         monitor.add_message('user', prompt)
 
@@ -2906,13 +2734,8 @@ class CoreService:
             device_context=device_context_data,
             peer_device_contexts=peer_device_contexts,
             message_history=message_history,
-            include_full_context=should_include_full_context
+            include_full_context=include_context  # Simplified: just use checkbox state
         )
-
-        # Phase 7: Mark context as included if we just sent it
-        if should_include_full_context:
-            monitor.mark_context_included(current_context_hash)
-            logger.debug("Context marked as included (hash: %s...)", current_context_hash[:8])
 
         response_payload = {}
         status = "OK"
@@ -2999,11 +2822,9 @@ class CoreService:
                            conversation_id, len(monitor.message_buffer))
 
                 # Update monitor's inference settings to match the query (for knowledge detection)
-                monitor.update_inference_settings(
-                    compute_host=compute_host,
-                    model=model,
-                    provider=provider
-                )
+                # Note: set_inference_settings is also called after query completion (line 2701)
+                # but we call it here too for buffering code path consistency
+                monitor.set_inference_settings(compute_host, model, provider)
 
                 # Feed user message
                 # Group chat support: Include short node_id prefix for global uniqueness

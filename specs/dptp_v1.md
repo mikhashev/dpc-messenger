@@ -319,6 +319,189 @@ Indicates an error occurred during processing.
 }
 ```
 
+---
+
+### 3.7 Knowledge Commit Messages
+
+#### PROPOSE_KNOWLEDGE_COMMIT
+
+Proposes a new knowledge commit for collaborative knowledge building after multi-party AI discussion.
+
+**Format:**
+```json
+{
+  "command": "PROPOSE_KNOWLEDGE_COMMIT",
+  "payload": {
+    "proposal_id": "prop-abc123",
+    "conversation_id": "conv-xyz789",
+    "topic": "game_design",
+    "summary": "Environmental storytelling principles",
+    "entries": [
+      {
+        "content": "Environmental storytelling is powerful in games",
+        "tags": ["game_design"],
+        "confidence": 0.90,
+        "cultural_specific": false,
+        "requires_context": [],
+        "alternative_viewpoints": ["Some games prioritize mechanics over narrative"]
+      }
+    ],
+    "participants": ["dpc-node-alice", "dpc-node-bob", "dpc-node-charlie"],
+    "cultural_perspectives": ["Western game design", "Eastern narrative traditions"],
+    "alternatives": ["Alternative interpretation: mechanics-first design"],
+    "devil_advocate": "Counter-argument: not all games need environmental storytelling",
+    "avg_confidence": 0.90,
+    "vote_deadline": "2025-12-05T10:30:00Z",
+    "required_dissenter": "dpc-node-charlie",
+    "extraction_model": "llama3.1:70b",
+    "extraction_host": "dpc-node-alice"
+  }
+}
+```
+
+**Fields:**
+- `proposal_id` (string, required): Unique proposal identifier
+- `conversation_id` (string, required): Source conversation ID
+- `topic` (string, required): Knowledge topic name
+- `summary` (string, required): Brief description of proposal
+- `entries` (array, required): Knowledge entries to commit
+- `participants` (array, required): List of participant node_ids
+- `cultural_perspectives` (array, optional): Cultural viewpoints considered
+- `alternatives` (array, optional): Alternative interpretations
+- `devil_advocate` (string, optional): Critical analysis for anti-groupthink
+- `avg_confidence` (number, required): Average confidence score (0.0-1.0)
+- `vote_deadline` (string, optional): ISO 8601 deadline for voting
+- `required_dissenter` (string, optional): Node assigned as devil's advocate
+- `extraction_model` (string, optional): AI model used for extraction
+- `extraction_host` (string, optional): Node that performed extraction
+
+**Response:** VOTE_KNOWLEDGE_COMMIT messages from each participant
+
+**UI Behavior:** Opens voting dialog showing proposal details, bias mitigation info, and voting options (approve/reject/request_changes)
+
+---
+
+#### VOTE_KNOWLEDGE_COMMIT
+
+Casts a vote on a knowledge commit proposal.
+
+**Format:**
+```json
+{
+  "command": "VOTE_KNOWLEDGE_COMMIT",
+  "payload": {
+    "proposal_id": "prop-abc123",
+    "voter_node_id": "dpc-node-alice",
+    "vote": "approve",
+    "comment": "Looks good, captures our discussion well",
+    "timestamp": "2025-12-05T10:15:00Z",
+    "is_required_dissent": false
+  }
+}
+```
+
+**Fields:**
+- `proposal_id` (string, required): Proposal identifier being voted on
+- `voter_node_id` (string, required): Node ID of voter
+- `vote` (string, required): Vote choice - `"approve"` | `"reject"` | `"request_changes"`
+- `comment` (string, optional): Optional comment/feedback
+- `timestamp` (string, required): ISO 8601 timestamp of vote
+- `is_required_dissent` (boolean, required): True if voter is assigned devil's advocate
+
+**Response:** KNOWLEDGE_COMMIT_RESULT (when all votes collected or deadline reached)
+
+---
+
+#### KNOWLEDGE_COMMIT_RESULT
+
+Notifies all participants of voting outcome after all votes are collected or the deadline is reached.
+
+**Format:**
+```json
+{
+  "command": "KNOWLEDGE_COMMIT_RESULT",
+  "payload": {
+    "proposal_id": "prop-abc123",
+    "topic": "game_design",
+    "summary": "Environmental storytelling principles",
+    "status": "approved",
+    "vote_tally": {
+      "approve": 3,
+      "reject": 0,
+      "request_changes": 1,
+      "total": 4,
+      "threshold": 0.75,
+      "approval_rate": 0.75
+    },
+    "votes": [
+      {
+        "node_id": "dpc-node-alice",
+        "vote": "approve",
+        "comment": "Great!",
+        "is_required_dissent": false,
+        "timestamp": "2025-12-05T10:15:00Z"
+      },
+      {
+        "node_id": "dpc-node-bob",
+        "vote": "approve",
+        "comment": null,
+        "is_required_dissent": false,
+        "timestamp": "2025-12-05T10:16:00Z"
+      },
+      {
+        "node_id": "dpc-node-charlie",
+        "vote": "approve",
+        "comment": "Good, but we should document exceptions",
+        "is_required_dissent": true,
+        "timestamp": "2025-12-05T10:17:00Z"
+      },
+      {
+        "node_id": "dpc-node-dave",
+        "vote": "request_changes",
+        "comment": "Add examples",
+        "is_required_dissent": false,
+        "timestamp": "2025-12-05T10:18:00Z"
+      }
+    ],
+    "commit_id": "commit-xyz789",
+    "timestamp": "2025-12-05T10:18:00Z"
+  }
+}
+```
+
+**Fields:**
+- `proposal_id` (string, required): Proposal identifier
+- `topic` (string, required): Knowledge topic
+- `summary` (string, required): Brief summary of proposal
+- `status` (string, required): Voting outcome - `"approved"` | `"rejected"` | `"revision_needed"` | `"timeout"`
+- `vote_tally` (object, required): Vote statistics
+  - `approve` (integer): Number of approve votes
+  - `reject` (integer): Number of reject votes
+  - `request_changes` (integer): Number of change requests
+  - `total` (integer): Total votes received
+  - `threshold` (number): Required approval threshold (e.g., 0.75)
+  - `approval_rate` (number): Actual approval rate (approve/total)
+- `votes` (array, required): All participant votes with details
+  - `node_id` (string): Voter's node ID
+  - `vote` (string): Vote choice
+  - `comment` (string, nullable): Optional comment
+  - `is_required_dissent` (boolean): Devil's advocate flag
+  - `timestamp` (string): ISO 8601 vote timestamp
+- `commit_id` (string, optional): Commit ID if status is "approved"
+- `timestamp` (string, required): ISO 8601 timestamp of result finalization
+
+**Response:** None (notification message)
+
+**UI Behavior:** Shows toast notification with outcome (✅ approved, ❌ rejected, ⏱️ timeout) and optional detailed vote breakdown dialog
+
+**Voting Rules:**
+- **Approval**: Requires ≥75% of participants to vote "approve"
+- **Rejection**: More "reject" votes than "request_changes"
+- **Revision Needed**: More "request_changes" than "reject" votes
+- **Timeout**: Deadline reached before all votes collected (finalizes with current votes)
+
+---
+
 ## 4. Node Identity System
 
 ### Node ID Format

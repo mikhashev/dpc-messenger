@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.9.0
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.9.4
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
@@ -145,65 +145,6 @@ If this vision resonates with you, let's connect:
 - Hub-free operation mode planned for Phase 3 (DHT-based discovery)
 
 **Legal implication:** This software provides a communication tool, not a communication service. Users are solely responsible for their use of this software and any infrastructure they choose to deploy.
-
----
-
-## Project Structure
-
-```
-dpc-messenger/
-│
-├── dpc-hub/              # Federation Hub (AGPL v3)
-│   ├── dpc_hub/
-│   │   ├── main.py       # FastAPI app & routes
-│   │   ├── auth.py       # JWT + OAuth authentication
-│   │   ├── crypto_validation.py  # Node identity validation
-│   │   ├── models.py     # Database models
-│   │   ├── crud.py       # Database operations
-│   │   └── alembic/      # Database migrations
-│   └── README.md         # Hub setup guide
-│
-├── dpc-client/           # Desktop Client Application
-│   ├── core/             # Python backend (WebRTC, P2P, AI)
-│   │   ├── dpc_client_core/
-│   │   │   ├── service.py        # Main orchestrator
-│   │   │   ├── p2p_manager.py    # WebRTC & TLS connections
-│   │   │   ├── webrtc_peer.py    # WebRTC peer connection
-│   │   │   ├── hub_client.py     # Hub communication
-│   │   │   ├── llm_manager.py    # AI provider integration
-│   │   │   ├── backup_manager.py # Encrypted backup/restore
-│   │   │   └── cli_backup.py     # Backup CLI commands
-│   │   └── README.md
-│   │
-│   └── ui/               # Frontend (Tauri + SvelteKit)
-│       ├── src/          # Svelte components
-│       └── README.md
-│
-├── dpc-protocol/         # Shared protocol library (LGPL)
-│   ├── dpc_protocol/
-│   │   ├── crypto.py     # Identity & encryption
-│   │   ├── protocol.py   # Message serialization
-│   │   └── pcm_core.py   # Personal Context Model
-│   └── README.md
-│
-├── specs/                # Protocol specifications (CC0)
-│   ├── hub_api_v1.md
-│   └── dptp_v1.md
-│
-├── docs/                 # Additional documentation
-│   ├── QUICK_START.md           # 5-minute setup
-│   ├── KNOWLEDGE_ARCHITECTURE.md # Knowledge management architecture
-│   ├── WEBRTC_SETUP_GUIDE.md    # Production deployment
-│   ├── USER_SOVEREIGNTY.md      # Privacy philosophy & vision
-│   ├── BACKUP_RESTORE.md        # Encrypted backup guide
-│   ├── GITHUB_AUTH_SETUP.md     # GitHub OAuth setup
-│   └── README_WEBRTC_INTEGRATION.md
-│
-├── PRODUCT_VISION.md     # Product vision & technical philosophy
-├── VISION.md             # Business vision & market opportunity
-├── LICENSE.md            # Multi-license explanation
-└── README.md             # This file
-```
 
 ---
 
@@ -553,7 +494,7 @@ Special thanks to all contributors and early testers!
 | **Hub Server** | Production Ready |
 | **Crypto Identity** | v0.5.0 |
 | **Knowledge Architecture** | v2.0 (Phase 4.2 Complete) |
-| **Desktop Client** | Beta (v0.9.0) |
+| **Desktop Client** | Beta (v0.9.4) |
 | **Mobile Clients** | Planned (Phase 2) |
 | **Test Coverage** | In Progress |
 | **Documentation** | Good |

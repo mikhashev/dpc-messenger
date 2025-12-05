@@ -1,8 +1,8 @@
 [package]
 name = "dpc-messenger"
-version = "0.9.2"
-description = "A Tauri App"
-authors = ["you"]
+version = "0.9.4"
+description = "Privacy-first peer-to-peer messaging with collaborative AI intelligence"
+authors = ["Mike Shevchenko <legoogmiha@gmail.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
