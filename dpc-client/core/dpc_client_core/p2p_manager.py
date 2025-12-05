@@ -256,6 +256,110 @@ class P2PManager:
         else:
             logger.info("DHT disabled in configuration")
 
+    # --- DHT Peer Discovery Methods ---
+
+    async def find_peer_via_dht(self, target_node_id: str) -> tuple[str, int] | None:
+        """
+        Look up a peer's IP and port via DHT.
+
+        Args:
+            target_node_id: Node ID to look up
+
+        Returns:
+            Tuple of (ip, port) if found, None otherwise
+        """
+        if not self.dht_manager:
+            logger.debug("DHT not available for peer lookup")
+            return None
+
+        try:
+            logger.info("Looking up %s via DHT", target_node_id)
+            peers = await self.dht_manager.find_peer(target_node_id)
+
+            if peers:
+                peer = peers[0]  # Use closest peer
+                logger.info("DHT found %s at %s:%d", target_node_id, peer.ip, peer.port)
+                return (peer.ip, peer.port)
+            else:
+                logger.info("DHT lookup for %s returned no results", target_node_id)
+                return None
+
+        except Exception as e:
+            logger.error("DHT lookup failed for %s: %s", target_node_id, e)
+            return None
+
+    async def announce_to_dht(self):
+        """Announce our presence to the DHT for peer discovery."""
+        if not self.dht_manager:
+            return
+
+        try:
+            count = await self.dht_manager.announce()
+            if count > 0:
+                logger.info("Announced to DHT (%d nodes)", count)
+            else:
+                logger.debug("DHT announce sent (no nearby nodes)")
+        except Exception as e:
+            logger.error("DHT announce failed: %s", e)
+
+    async def connect_via_node_id(self, target_node_id: str, timeout: float = None) -> bool:
+        """
+        Connect to a peer using just their node ID.
+
+        Tries discovery methods in order:
+        1. DHT lookup
+        2. Cached peer info
+        3. Hub WebRTC (if available)
+
+        Args:
+            target_node_id: Node ID to connect to
+            timeout: Connection timeout in seconds
+
+        Returns:
+            True if connection established, False otherwise
+        """
+        # Check if already connected
+        if target_node_id in self.peers:
+            logger.info("Already connected to %s", target_node_id)
+            return True
+
+        # Try 1: DHT lookup
+        dht_result = await self.find_peer_via_dht(target_node_id)
+        if dht_result:
+            ip, port = dht_result
+            try:
+                await self.connect_directly(ip, port, target_node_id, timeout)
+                logger.info("Connected to %s via DHT", target_node_id)
+
+                # Announce ourselves after successful connection
+                await self.announce_to_dht()
+                return True
+            except Exception as e:
+                logger.warning("DHT connection failed: %s", e)
+
+        # Try 2: Cached peer info
+        cached_peer = self.peer_cache.get_peer(target_node_id)
+        if cached_peer:
+            logger.info("Trying cached info for %s", target_node_id)
+            try:
+                await self.connect_directly(
+                    cached_peer['last_ip'],
+                    cached_peer.get('port', 8888),
+                    target_node_id,
+                    timeout
+                )
+                logger.info("Connected to %s via cache", target_node_id)
+                await self.announce_to_dht()
+                return True
+            except Exception as e:
+                logger.warning("Cached connection failed: %s", e)
+
+        # Try 3: Hub WebRTC (if available)
+        # This will be implemented in Phase 5
+
+        logger.error("Failed to connect to %s - all methods exhausted", target_node_id)
+        return False
+
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
         peer_node_id = None
@@ -291,6 +395,9 @@ class P2PManager:
             self.peers[peer_node_id] = peer
             await self._notify_peer_change()
             logger.info("Direct TLS connection established with %s", peer_node_id)
+
+            # Announce to DHT after successful connection
+            asyncio.create_task(self.announce_to_dht())
 
             asyncio.create_task(self._listen_to_peer(peer))
 
@@ -421,6 +528,9 @@ class P2PManager:
             self.peers[target_node_id] = peer
             await self._notify_peer_change()
             logger.info("Direct connection established with %s", target_node_id)
+
+            # Announce to DHT after successful connection
+            asyncio.create_task(self.announce_to_dht())
 
             asyncio.create_task(self._listen_to_peer(peer))
 
