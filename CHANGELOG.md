@@ -55,6 +55,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Critical infrastructure for eliminating Hub as single point of failure
 - Target: 95%+ DHT lookup success rate, 80%+ Hub-independent connections
 
+**Phase 2.1: DHT-Based Peer Discovery (Phase 2 - UDP RPC Layer)**
+
+- **UDP-Based RPC Handler** - Kademlia RPC protocol over UDP
+  - `DHTRPCHandler` class - Main RPC orchestration (~550 lines)
+    - `ping()` / `_handle_ping()` - Node liveness checks (PING/PONG)
+    - `find_node()` / `_handle_find_node()` - Find k closest nodes to target (iterative lookup)
+    - `store()` / `_handle_store()` - Store key-value pairs (node_id → ip:port)
+    - `find_value()` / `_handle_find_value()` - Find stored value or return k closest nodes
+  - `DHTProtocol` class - asyncio.DatagramProtocol for UDP communication
+  - `RPCConfig` dataclass - Configurable RPC parameters
+    - timeout: 2.0s (configurable)
+    - max_retries: 3 (configurable)
+    - max_packet_size: 8KB
+    - rate_limit_per_ip: 100 RPCs/minute
+  - File created: [dht_rpc.py](dpc-client/core/dpc_client_core/dht_rpc.py) (~550 lines)
+
+- **RPC Protocol Features**
+  - JSON over UDP message format (10-byte header compatibility planned)
+  - Request-response matching via rpc_id (UUID)
+  - Timeout and retry logic with exponential backoff
+  - Rate limiting (100 RPCs/minute per IP - security)
+  - Statistics tracking (rpcs_sent, rpcs_received, timeouts, errors)
+  - Automatic routing table updates on successful RPCs
+
+- **Security Features**
+  - Rate limiting prevents DDoS attacks (100 RPCs/min per IP)
+  - Subnet diversity enforcement (inherited from routing table)
+  - Message size limits (8KB max packet size)
+  - Invalid JSON handling (graceful error recovery)
+  - UDP amplification prevention
+
+- **Comprehensive RPC Tests** - 20 tests validating UDP RPC operations
+  - PING/PONG exchange (2 tests)
+  - FIND_NODE requests (2 tests)
+  - STORE/STORED operations (2 tests)
+  - FIND_VALUE (found and not found) (2 tests)
+  - Timeout and retry logic (2 tests)
+  - Rate limiting enforcement (2 tests)
+  - Statistics tracking (1 test)
+  - Error handling (invalid JSON, missing fields) (2 tests)
+  - Protocol layer tests (2 tests)
+  - Full RPC integration test (1 test)
+  - All tests passing (20/20) with async fixtures
+  - File created: [test_dht_rpc.py](dpc-client/core/tests/test_dht_rpc.py) (~540 lines)
+
+**Key Features:**
+- Asynchronous UDP communication via asyncio.DatagramProtocol
+- Kademlia RPC: PING, FIND_NODE, STORE, FIND_VALUE
+- Timeout/retry with exponential backoff (2s timeout, 3 retries)
+- Rate limiting for security (100 RPCs/min per IP)
+- JSON message serialization (future: binary protocol)
+- Foundation for Phase 3: DHT Manager Core
+
+**Roadmap Alignment:**
+- Completes Phase 2.1 UDP RPC Layer (Week 2 of Month 1)
+- Enables P2P DHT communication without Hub dependency
+- Next: Phase 3 - DHT Manager (bootstrap, iterative lookup, announce)
+
 ---
 
 ## [0.9.4] - 2025-12-05
