@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+**Phase 2.1: DHT-Based Peer Discovery (Phase 1 - Core Data Structures)**
+
+- **XOR Distance Utilities** - Foundation for Kademlia DHT distance metric
+  - `parse_node_id()` - Parse node ID strings to 128-bit integers
+  - `xor_distance()` - Compute XOR distance between node IDs
+  - `bucket_index()` - Determine k-bucket index from distance (O(1))
+  - `sort_by_distance()` - Sort nodes by proximity to target
+  - `generate_random_node_id_in_bucket()` - Random ID generation for testing
+  - File created: [dht_distance.py](dpc-client/core/dpc_client_core/dht_distance.py) (~250 lines)
+
+- **Kademlia Routing Table** - 128 k-buckets for O(log n) peer lookups
+  - `DHTNode` dataclass - Represents known DHT peer with IP, port, last_seen, failed_pings
+  - `KBucket` class - Single k-bucket with LRU eviction policy
+    - Max k nodes per bucket (default k=20)
+    - Replacement cache for overflow nodes
+    - Stale node detection (15-minute timeout)
+    - **Security: Subnet diversity enforcement** (max 2 nodes per /24 subnet)
+  - `RoutingTable` class - Main routing table with 128 k-buckets
+    - `add_node()` - Add peer to appropriate bucket based on XOR distance
+    - `remove_node()` - Remove unresponsive peer
+    - `find_closest_nodes()` - O(log n) lookup for k closest nodes to target
+    - `get_bucket_stats()` - Routing table statistics (node count, full buckets)
+    - `get_buckets_needing_refresh()` - Periodic refresh detection
+  - File created: [dht_routing.py](dpc-client/core/dpc_client_core/dht_routing.py) (~450 lines)
+
+- **Comprehensive Unit Tests** - 32 tests validating DHT core algorithms
+  - XOR distance correctness (10 tests)
+  - K-bucket operations: add, remove, eviction, replacement cache (13 tests)
+  - Routing table operations: find_closest_nodes, bucket management (9 tests)
+  - All tests passing (32/32) with ~95% code coverage
+  - File created: [test_dht_routing.py](dpc-client/core/tests/test_dht_routing.py) (~530 lines)
+
+**Key Features:**
+- 128-bit node ID space (compatible with existing `dpc-node-*` format)
+- Symmetric XOR distance metric: d(A, B) = d(B, A)
+- Logarithmic overlay topology for efficient O(log n) lookups
+- LRU eviction policy with ping verification (Kademlia standard)
+- Security: Subnet diversity prevents eclipse attacks
+- Foundation for Phase 2: UDP RPC Layer
+
+**Roadmap Alignment:**
+- Part of Phase 2.1: Foundations + Decentralized Infrastructure (Month 1-3)
+- Implements ROADMAP.md Feature #5 (DHT-Based Peer Discovery, High complexity, 3 weeks)
+- Critical infrastructure for eliminating Hub as single point of failure
+- Target: 95%+ DHT lookup success rate, 80%+ Hub-independent connections
+
 ---
 
 ## [0.9.4] - 2025-12-05
