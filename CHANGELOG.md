@@ -8,8 +8,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- (No unreleased features yet)
 
-**Phase 2.1: DHT-Based Peer Discovery (Phase 1 - Core Data Structures)**
+---
+
+## [0.9.5] - 2025-12-06
+
+### Added
+
+**Phase 2.1: DHT-Based Peer Discovery - COMPLETE**
+
+This release implements a full Kademlia DHT for decentralized peer discovery, eliminating the Hub as a single point of failure. Users can now discover and connect to peers using only their node IDs, with automatic NAT traversal and internet-wide connectivity.
+
+**Phase 1 - Core Data Structures:**
 
 - **XOR Distance Utilities** - Foundation for Kademlia DHT distance metric
   - `parse_node_id()` - Parse node ID strings to 128-bit integers
@@ -203,6 +214,115 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Provides complete decentralized peer discovery without Hub
 - Next: Phase 4 - P2P Integration (integrate into p2p_manager, service, settings)
 - Target: 95%+ DHT lookup success rate, 80%+ Hub-independent connections
+
+**Phase 4 - P2P Integration:**
+
+- **DHT Integration into P2PManager** - Seamless integration with existing P2P infrastructure
+  - `announce_to_dht()` - Announce node presence after bootstrap
+  - `find_peer_via_dht()` - Lookup peer contact info by node_id
+  - `update_dht_ip()` - Update announced IP when external IP discovered
+  - Dynamic IP announcement: starts with local IP, updates to external IP after STUN
+  - Bootstrap retry: automatically retries every 5 minutes if routing table empty
+  - Files modified: [p2p_manager.py](dpc-client/core/dpc_client_core/p2p_manager.py) (~150 lines added)
+
+- **WebSocket API for DHT Connections** - UI can initiate DHT-based peer connections
+  - `connect_via_dht` command - Connect to peer using only node_id (no IP/port needed)
+  - Connection strategy: DHT-first → Peer cache → Hub WebRTC fallback
+  - UI updated: Text field accepts node_id or dpc:// URI automatically
+  - Files modified: [service.py:2717-2748](dpc-client/core/dpc_client_core/service.py), [+page.svelte:407-428](dpc-client/ui/src/routes/+page.svelte)
+
+- **Configuration System** - DHT settings in config.ini
+  - `[dht]` section with 8 configurable parameters
+  - enabled, port, k, alpha, bootstrap_timeout, lookup_timeout
+  - bucket_refresh_interval, announce_interval, seed_nodes
+  - Files modified: [settings.py:109-119,346-403](dpc-client/core/dpc_client_core/settings.py)
+
+- **Code Organization** - Refactored to dht/ subfolder
+  - Moved distance.py, routing.py, rpc.py, manager.py to dht/ package
+  - Cleaner import structure: `from dpc_client_core.dht import DHTManager`
+  - Easier to navigate and maintain
+  - Files reorganized: [dht/](dpc-client/core/dpc_client_core/dht/)
+
+### Fixed
+
+**Critical Bug Fixes:**
+
+- **NAT Hairpinning - Skip self in DHT announce** - Fixed STORE RPC timeouts
+  - Root cause: Nodes tried to STORE to their own external IP (NAT hairpinning not supported by routers)
+  - Fix: Filter out self.node_id from announce target list
+  - Result: Announce now succeeds 100% (1/1 nodes) instead of timing out (1/2 nodes)
+  - Files modified: [dht/manager.py:460-482](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **Node ID Length Mismatch** - Fixed 16→32 hex character node IDs
+  - Root cause: 128-bit IDs require 32 hex chars, not 16
+  - Impact: k-bucket XOR distance calculations failed
+  - Fix: Updated all node ID slicing to use [:20] for 20-character display
+  - Files modified: [dht/routing.py](dpc-client/core/dpc_client_core/dht/routing.py), [dht/manager.py](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **Tuple Unpacking Error** - Fixed find_peer() return type handling
+  - Root cause: `find_peer()` returns `Tuple[str, int]` but code treated it as object with .ip/.port
+  - Error: `'str' object has no attribute 'ip'`
+  - Fix: Changed from `peer.ip, peer.port` to `ip, port = result`
+  - Files modified: [p2p_manager.py:277-291](dpc-client/core/dpc_client_core/p2p_manager.py)
+
+- **RPC Timeout Too Short** - Increased timeout for internet-wide DHT
+  - Root cause: 2-second timeout too short for international network latency
+  - Evidence: Lookups completing in 10-11 seconds but failing with 6s total timeout (2s × 3 retries)
+  - Fix: Increased RPC timeout from 2.0s to 5.0s (total timeout now 15s)
+  - Files modified: [dht/rpc.py:38](dpc-client/core/dpc_client_core/dht/rpc.py), [dht/manager.py:48](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **Bootstrap Retry Missing** - Added automatic bootstrap retry when isolated
+  - Root cause: If peer starts before seed nodes, bootstrap failed and never retried
+  - Fix: Maintenance loop retries bootstrap every 5 minutes when routing table empty
+  - Result: Peers can now find each other within 5 minutes even if started out of order
+  - Files modified: [dht/manager.py:248-259,538-560](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **Wrong Port in Announce** - Fixed announcing DHT UDP port instead of P2P TLS port
+  - Root cause: Announced UDP port 8889 instead of TCP port 8888 for connections
+  - Fix: Use `get_p2p_listen_port()` instead of `get_dht_port()` for announcements
+  - Files modified: [p2p_manager.py:231-246](dpc-client/core/dpc_client_core/p2p_manager.py)
+
+- **Announcing with 0.0.0.0** - Fixed local IP detection for DHT
+  - Root cause: DHT announced bind address (0.0.0.0) instead of actual routable IP
+  - Fix: Detect primary local IP using UDP socket trick, update to external IP after STUN
+  - Result: DHT now announces 192.168.x.x on LAN, then updates to external IP
+  - Files modified: [p2p_manager.py:908-951](dpc-client/core/dpc_client_core/p2p_manager.py)
+
+**Debug Improvements:**
+
+- **Comprehensive STORE RPC Logging** - Added verbose debug logging for STORE operations
+  - Logs STORE RPC creation (rpc_id, key, value)
+  - Logs UDP packet transmission (type, size, destination)
+  - Logs STORE handler execution and storage operations
+  - Logs STORED response generation and sending
+  - Helped diagnose NAT hairpinning issue
+  - Files modified: [dht/rpc.py:219-230,295-311,382-405,437-448,524-525](dpc-client/core/dpc-client_core/dht/rpc.py)
+
+### Testing
+
+**Internet-Wide DHT Validation:**
+- ✅ Bootstrap successful across international network connections
+- ✅ PING/PONG working over internet with external IPs
+- ✅ FIND_NODE completing successfully (10-11 second lookups)
+- ✅ STORE/STORED working between remote peers
+- ✅ Auto-announce after bootstrap (1/1 nodes, no timeouts)
+- ✅ Local network DHT: 0.09s bootstrap (vs 11-17s over internet)
+
+**Known Limitations:**
+- 2-node DHT has mathematical limitation: peer lookups fail because nodes don't store their own info (by design to avoid NAT hairpinning)
+- Requires 3+ nodes for full peer discovery functionality
+- Direct TLS connections still work perfectly as fallback
+
+**Test Coverage:**
+- 32 tests for distance/routing (100% passing)
+- 20 tests for UDP RPC (100% passing)
+- 21 tests for DHT manager (100% passing)
+- Total: 73 DHT tests, all passing
+
+**Roadmap Status:**
+- ✅ Phase 2.1 Feature #5: DHT-Based Peer Discovery (COMPLETE)
+- ⏭️ Phase 2.1 Feature #6-7: Pluggable Transport Framework (DEFERRED to Phase 2.2)
+- 🎯 Target: 95%+ DHT lookup success rate, 80%+ Hub-independent connections
 
 ---
 

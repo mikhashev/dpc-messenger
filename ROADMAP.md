@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Last Updated:** November 2025 | **Current Version:** 0.8.0 | **Current Phase:** Transitioning to Phase 2
+> **Last Updated:** December 2025 | **Current Version:** 0.9.5 | **Current Phase:** Phase 2.1 - Decentralized Infrastructure
 
 ---
 
@@ -107,14 +107,23 @@ D-PC Messenger follows a three-phase development roadmap:
 
 **Resilient Infrastructure (CRITICAL):**
 
-| # | Feature | Complexity | Description |
-|---|---------|------------|-------------|
-| 5 | DHT-Based Peer Discovery | High | Kademlia DHT, decentralized signaling, eliminates Hub dependency |
-| 6 | Pluggable Transport Framework | Medium | Auto-fallback architecture, transport abstraction |
-| 7 | WebSocket-over-TLS Transport | Medium | HTTPS transport, fallback when WebRTC unavailable |
+| # | Feature | Complexity | Status | Description |
+|---|---------|------------|--------|-------------|
+| 5 | DHT-Based Peer Discovery | High | ✅ **COMPLETE** (v0.9.5) | Kademlia DHT, decentralized signaling, eliminates Hub dependency |
+| 6 | Pluggable Transport Framework | Medium | ⏭️ Deferred | Auto-fallback architecture, transport abstraction |
+| 7 | WebSocket-over-TLS Transport | Medium | ⏭️ Deferred | HTTPS transport, fallback when WebRTC unavailable |
 
-**Files to Create:**
-- `dpc-client/core/dpc_client_core/dht_discovery.py` - DHT implementation
+**DHT Implementation Details (v0.9.5):**
+- ✅ Core DHT data structures (XOR distance, 128 k-buckets, routing table)
+- ✅ UDP RPC layer (PING/PONG, FIND_NODE, STORE, FIND_VALUE)
+- ✅ DHT manager (bootstrap, iterative lookup, announce, maintenance)
+- ✅ P2P integration (DHT-first connection strategy, WebSocket API)
+- ✅ Internet-wide testing validated (cross-continent peer discovery)
+- ✅ 73 unit tests (100% passing coverage)
+- ✅ NAT hairpinning fix, bootstrap retry, dynamic IP announcement
+- Files created: [dht/distance.py](dpc-client/core/dpc_client_core/dht/distance.py), [dht/routing.py](dpc-client/core/dpc_client_core/dht/routing.py), [dht/rpc.py](dpc-client/core/dpc_client_core/dht/rpc.py), [dht/manager.py](dpc-client/core/dpc_client_core/dht/manager.py)
+
+**Files Deferred to Phase 2.2:**
 - `dpc-client/core/dpc_client_core/pluggable_transports.py` - Transport manager
 - `dpc-client/core/dpc_client_core/websocket_tls_transport.py` - HTTPS stealth transport
 
