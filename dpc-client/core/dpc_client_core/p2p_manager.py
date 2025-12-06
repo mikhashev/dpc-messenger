@@ -307,9 +307,8 @@ class P2PManager:
         Connect to a peer using just their node ID.
 
         Tries discovery methods in order:
-        1. DHT lookup
-        2. Cached peer info
-        3. Hub WebRTC (if available)
+        1. DHT lookup (finds peer's current IP/port)
+        2. Hub WebRTC (Phase 5 - not yet implemented)
 
         Args:
             target_node_id: Node ID to connect to
@@ -337,27 +336,11 @@ class P2PManager:
             except Exception as e:
                 logger.warning("DHT connection failed: %s", e)
 
-        # Try 2: Cached peer info
-        cached_peer = self.peer_cache.get_peer(target_node_id)
-        if cached_peer:
-            logger.info("Trying cached info for %s", target_node_id)
-            try:
-                await self.connect_directly(
-                    cached_peer['last_ip'],
-                    cached_peer.get('port', 8888),
-                    target_node_id,
-                    timeout
-                )
-                logger.info("Connected to %s via cache", target_node_id)
-                await self.announce_to_dht()
-                return True
-            except Exception as e:
-                logger.warning("Cached connection failed: %s", e)
-
-        # Try 3: Hub WebRTC (if available)
+        # Try 2: Hub WebRTC (if available)
         # This will be implemented in Phase 5
+        # TODO: Implement peer_cache for last known IP/port (Phase 5)
 
-        logger.error("Failed to connect to %s - all methods exhausted", target_node_id)
+        logger.error("Failed to connect to %s - DHT lookup failed, Hub not available", target_node_id)
         return False
 
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
