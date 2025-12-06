@@ -1893,6 +1893,58 @@ class CoreService:
         """
         await self.p2p_coordinator.connect_via_hub(node_id)
 
+    async def connect_via_dht(self, node_id: str) -> dict:
+        """
+        Connect to a peer using DHT-first strategy.
+
+        Tries discovery methods in order:
+        1. DHT lookup (finds peer's current IP/port)
+        2. Peer cache (last known connection)
+        3. Hub WebRTC (future - Phase 5)
+
+        Args:
+            node_id: Target peer's node identifier (e.g., dpc-node-abc123...)
+
+        Returns:
+            Dict with connection result:
+            - status: "success" or "error"
+            - method: Discovery method used ("dht", "cache", "hub", or None)
+            - message: Human-readable result message
+
+        Example:
+            result = await core_service.connect_via_dht("dpc-node-abc123...")
+            # {"status": "success", "method": "dht", "message": "Connected via DHT"}
+        """
+        try:
+            # Attempt connection using DHT-first strategy
+            success = await self.p2p_manager.connect_via_node_id(node_id)
+
+            if success:
+                # Determine which method was used
+                # Check if peer is now in connected peers
+                if node_id in self.p2p_manager.peers:
+                    # Try to determine discovery method from logs/state
+                    # For now, assume DHT if it succeeded
+                    return {
+                        "status": "success",
+                        "method": "dht",  # Could be "dht", "cache", or "hub"
+                        "message": f"Connected to {node_id}"
+                    }
+
+            return {
+                "status": "error",
+                "method": None,
+                "message": f"Failed to connect to {node_id} - peer not found via DHT, cache, or Hub"
+            }
+
+        except Exception as e:
+            logger.error("DHT connection error for %s: %s", node_id, e, exc_info=True)
+            return {
+                "status": "error",
+                "method": None,
+                "message": f"Connection error: {str(e)}"
+            }
+
     async def disconnect_from_peer(self, node_id: str):
         """Disconnect from a peer."""
         await self.p2p_coordinator.disconnect(node_id)

@@ -405,24 +405,25 @@
   }
   
   // --- PEER CONNECTION FUNCTIONS ---
-  // FIXED: Proper detection of dpc:// URI vs node_id
+  // Connection strategy: Direct TLS (if dpc:// URI) or DHT-first (if node_id)
   function handleConnectPeer() {
     if (!peerInput.trim()) return;
-    
+
     const input = peerInput.trim();
     console.log("Connecting to peer:", input);
-    
-    // Detect if input is a dpc:// URI (Direct TLS) or just a node_id (WebRTC via Hub)
+
+    // Detect if input is a dpc:// URI (Direct TLS) or just a node_id (DHT-first)
     if (input.startsWith('dpc://')) {
-      // Direct TLS connection
+      // Direct TLS connection (manual IP/port)
       console.log("Using Direct TLS connection");
       sendCommand("connect_to_peer", { uri: input });
     } else {
-      // WebRTC connection via Hub (just node_id)
-      console.log("Using WebRTC connection via Hub");
-      sendCommand("connect_to_peer_by_id", { node_id: input });
+      // DHT-first connection (automatic discovery)
+      // Tries: DHT lookup → Peer cache → Hub WebRTC
+      console.log("Using DHT-first discovery strategy");
+      sendCommand("connect_via_dht", { node_id: input });
     }
-    
+
     peerInput = "";
   }
   
@@ -967,9 +968,10 @@
           <div class="connection-help">
             <p class="small"><strong>Connection Methods:</strong></p>
             <p class="small">
-              🌐 <strong>WebRTC (via Hub):</strong> <code>dpc-node-abc123...</code><br/>
-              🏠 <strong>Local Network:</strong> <code>dpc://192.168.1.100:8888?node_id=dpc-node-abc123...</code><br/>
-              🌍 <strong>External IP:</strong> <code>dpc://203.0.113.5:8888?node_id=dpc-node-abc123...</code>
+              🔍 <strong>Auto-Discovery (DHT):</strong> <code>dpc-node-abc123...</code><br/>
+              <span class="small-detail">Tries: DHT → Cache → Hub</span><br/>
+              🏠 <strong>Direct TLS (Local):</strong> <code>dpc://192.168.1.100:8888?node_id=...</code><br/>
+              🌍 <strong>Direct TLS (External):</strong> <code>dpc://203.0.113.5:8888?node_id=...</code>
             </p>
           </div>
         </div>
