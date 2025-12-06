@@ -457,11 +457,19 @@ class DHTManager:
             logger.warning("Announce failed: no nodes found")
             return 0
 
-        # Store our contact info on all k nodes
+        # Store our contact info on all k nodes (excluding self)
+        # Note: We skip storing to ourselves to avoid NAT hairpinning issues
+        # (sending UDP to our own external IP usually fails at the router)
         value = f"{self.ip}:{self.port}"
+        target_nodes = [node for node in closest if node.node_id != self.node_id]
+
+        if not target_nodes:
+            logger.warning("Announce skipped: only found self in DHT")
+            return 0
+
         store_tasks = [
             self.rpc_handler.store(node.ip, node.port, self.node_id, value)
-            for node in closest
+            for node in target_nodes
         ]
 
         results = await asyncio.gather(*store_tasks, return_exceptions=True)
@@ -470,7 +478,7 @@ class DHTManager:
 
         logger.info(
             "Announced to %d/%d nodes (key=%s, value=%s)",
-            success_count, len(closest), self.node_id[:20], value
+            success_count, len(target_nodes), self.node_id[:20], value
         )
 
         return success_count
