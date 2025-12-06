@@ -46,7 +46,7 @@ class DHTConfig:
     republish_interval: float = 3600.0  # 1 hour
 
     # Network settings
-    rpc_timeout: float = 2.0  # RPC timeout
+    rpc_timeout: float = 5.0  # RPC timeout (increased for internet-wide DHT)
     rpc_retries: int = 3  # RPC retry attempts
 
 

@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class RPCConfig:
     """RPC configuration parameters."""
-    timeout: float = 2.0  # RPC timeout in seconds
+    timeout: float = 5.0  # RPC timeout in seconds (increased for internet-wide DHT)
     max_retries: int = 3  # Max retry attempts
     max_packet_size: int = 8192  # Max UDP packet size (8KB)
     rate_limit_per_ip: int = 100  # Max RPCs per minute per IP
