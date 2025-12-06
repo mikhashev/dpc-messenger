@@ -567,6 +567,7 @@ class DHTProtocol(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         """Called when UDP packet is received."""
+        logger.info("DHT: Received UDP packet from %s:%d (%d bytes)", addr[0], addr[1], len(data))
         # Handle RPC asynchronously
         asyncio.create_task(self.rpc_handler.handle_rpc(data, addr))
 
