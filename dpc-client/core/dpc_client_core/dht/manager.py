@@ -595,15 +595,6 @@ class DHTManager:
         from .distance import parse_node_id
         import random
 
-        refresh_tasks = []
-        for bucket_idx in non_empty_buckets:
-            self_int = parse_node_id(self.node_id)
-            random_distance = (1 << bucket_idx) | random.randint(0, (1 << bucket_idx) - 1)
-            target_int = self_int ^ random_distance
-            target_id = f"dpc-node-{target_int:016x}"  # 16 hex characters
-
-            refresh_tasks.append(self.find_node(target_id))
-
         # Run lookups in parallel (with semaphore to limit concurrency)
         sem = asyncio.Semaphore(self.config.alpha)
 

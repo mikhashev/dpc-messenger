@@ -248,6 +248,8 @@ class P2PManager:
                     success = await self.dht_manager.bootstrap(seed_nodes)
                     if success:
                         logger.info("DHT bootstrap successful")
+                        # Announce our presence to the DHT
+                        await self.announce_to_dht()
                     else:
                         logger.warning("DHT bootstrap failed (no responsive seeds)")
             except Exception as e:
