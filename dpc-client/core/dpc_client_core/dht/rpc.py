@@ -313,7 +313,7 @@ class DHTRPCHandler:
             logger.error("Invalid JSON from %s: %s", sender_ip, e)
             self.stats["errors"] += 1
         except Exception as e:
-            logger.error("Error handling RPC from %s: %s", sender_ip, e)
+            logger.error("Error handling RPC from %s: %s", sender_ip, e, exc_info=True)
             self.stats["errors"] += 1
 
     async def _handle_ping(self, message: Dict, addr: Tuple[str, int]):
@@ -322,9 +322,15 @@ class DHTRPCHandler:
         sender_id = message.get("node_id")
         rpc_id = message.get("rpc_id")
 
+        logger.info("DHT: Handling PING from %s (node_id=%s, rpc_id=%s)", addr, sender_id, rpc_id)
+
         # Update routing table
         if sender_id:
-            self.routing_table.add_node(sender_id, sender_ip, sender_port)
+            try:
+                self.routing_table.add_node(sender_id, sender_ip, sender_port)
+                logger.info("DHT: Added %s to routing table", sender_id[:20])
+            except Exception as e:
+                logger.error("DHT: Failed to add node to routing table: %s", e)
 
         # Send PONG response
         response = {
@@ -334,7 +340,9 @@ class DHTRPCHandler:
             "timestamp": time.time(),
         }
 
+        logger.info("DHT: Sending PONG to %s (rpc_id=%s)", addr, rpc_id)
         await self._send_response(addr, response)
+        logger.info("DHT: PONG sent to %s", addr)
 
     async def _handle_find_node(self, message: Dict, addr: Tuple[str, int]):
         """Handle FIND_NODE RPC (return k closest nodes)."""
