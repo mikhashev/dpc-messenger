@@ -116,6 +116,7 @@ class DHTManager:
         # Background tasks
         self._maintenance_task: Optional[asyncio.Task] = None
         self._running = False
+        self._seed_nodes: List[Tuple[str, int]] = []  # Stored for bootstrap retries
 
         # Statistics
         self.stats = {
@@ -192,6 +193,9 @@ class DHTManager:
         logger.info("Starting DHT bootstrap with %d seed nodes", len(seed_nodes))
         self.stats["bootstraps"] += 1
 
+        # Store seed nodes for retry attempts
+        self._seed_nodes = seed_nodes
+
         if not seed_nodes:
             logger.warning("No seed nodes provided for bootstrap")
             return False
@@ -240,6 +244,19 @@ class DHTManager:
         )
 
         return True
+
+    async def _retry_bootstrap(self):
+        """
+        Retry bootstrap when routing table is empty.
+
+        Called by maintenance loop when no nodes are known.
+        """
+        if not self._seed_nodes:
+            logger.debug("No seed nodes available for bootstrap retry")
+            return
+
+        logger.info("Retrying bootstrap with %d seed nodes", len(self._seed_nodes))
+        await self.bootstrap(self._seed_nodes)
 
     async def _ping_node(self, ip: str, port: int) -> Optional[Dict]:
         """
@@ -527,12 +544,21 @@ class DHTManager:
 
         last_bucket_refresh = time.time()
         last_announce = time.time()
+        last_bootstrap_retry = 0  # Track bootstrap retry timing
 
         while self._running:
             try:
                 await asyncio.sleep(60)  # Check every minute
 
                 now = time.time()
+
+                # Bootstrap retry if routing table is empty (retry every 5 minutes)
+                node_count = self.routing_table.get_node_count()
+                if node_count == 0 and now - last_bootstrap_retry >= 300:
+                    logger.info("Routing table empty - retrying bootstrap")
+                    # Try bootstrap again (seed nodes stored in config)
+                    asyncio.create_task(self._retry_bootstrap())
+                    last_bootstrap_retry = now
 
                 # Bucket refresh (every hour)
                 if now - last_bucket_refresh >= self.config.bucket_refresh_interval:

@@ -451,6 +451,9 @@ class CoreService:
                 self._external_ip = external_ip
                 logger.info("External IP discovered: %s", external_ip)
 
+                # Update DHT to announce with external IP (for internet-wide discovery)
+                await self.p2p_manager.update_dht_ip(external_ip)
+
                 # Notify UI of status update (to refresh external URIs)
                 await self.local_api.broadcast_event("status_update", await self.get_status())
             else:
@@ -469,6 +472,9 @@ class CoreService:
                         logger.info("External IP changed: %s -> %s",
                                   self._external_ip or "(none)", external_ip)
                         self._external_ip = external_ip
+
+                        # Update DHT with new external IP
+                        await self.p2p_manager.update_dht_ip(external_ip)
 
                         # Notify UI
                         await self.local_api.broadcast_event("status_update", await self.get_status())

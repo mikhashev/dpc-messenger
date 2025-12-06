@@ -230,10 +230,17 @@ class P2PManager:
 
                 # Initialize DHT manager
                 dht_port = self.settings.get_dht_port()
+
+                # Get local IP for DHT announcements (not 0.0.0.0)
+                dht_announce_ip = await self._get_primary_local_ip()
+
+                # DHT announces the configured P2P TLS port for connections, not the DHT UDP port
+                p2p_port = self.settings.get_p2p_listen_port()
+
                 self.dht_manager = DHTManager(
                     node_id=self.node_id,
-                    ip=host if host != "dual" else "0.0.0.0",
-                    port=dht_port,
+                    ip=dht_announce_ip,
+                    port=p2p_port,  # P2P TLS port for connections
                     config=dht_config
                 )
 
@@ -276,12 +283,12 @@ class P2PManager:
 
         try:
             logger.info("Looking up %s via DHT", target_node_id)
-            peers = await self.dht_manager.find_peer(target_node_id)
+            result = await self.dht_manager.find_peer(target_node_id)
 
-            if peers:
-                peer = peers[0]  # Use closest peer
-                logger.info("DHT found %s at %s:%d", target_node_id, peer.ip, peer.port)
-                return (peer.ip, peer.port)
+            if result:
+                ip, port = result  # Unpack (ip, port) tuple
+                logger.info("DHT found %s at %s:%d", target_node_id, ip, port)
+                return (ip, port)
             else:
                 logger.info("DHT lookup for %s returned no results", target_node_id)
                 return None
@@ -897,6 +904,51 @@ class P2PManager:
         
         peer = self.peers[node_id]
         await peer.send(message)
+
+    async def _get_primary_local_ip(self) -> str:
+        """
+        Get the primary local IP address for DHT announcements.
+
+        Returns the first non-Docker, non-loopback IPv4 address,
+        or falls back to 0.0.0.0 if none found.
+
+        Note: For local network testing, this returns LAN IP (192.168.x.x).
+        For internet-wide DHT, external IP should be used instead (call update_dht_ip()).
+        """
+        import socket
+        try:
+            # Use UDP socket trick to get local IP (doesn't actually send packet)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            logger.debug("Detected primary local IP for DHT: %s", local_ip)
+            return local_ip
+        except Exception as e:
+            logger.warning("Failed to detect local IP for DHT, using 0.0.0.0: %s", e)
+            return "0.0.0.0"
+
+    async def update_dht_ip(self, external_ip: str):
+        """
+        Update DHT announcement IP (e.g., after external IP is discovered via STUN).
+
+        This allows DHT to announce with external IP for internet-wide discovery
+        instead of local IP.
+
+        Args:
+            external_ip: External/public IP address to announce
+        """
+        if not self.dht_manager:
+            return
+
+        logger.info("Updating DHT announcement IP to %s", external_ip)
+        self.dht_manager.ip = external_ip
+
+        # Re-announce with new IP
+        try:
+            await self.announce_to_dht()
+        except Exception as e:
+            logger.error("Failed to re-announce with new IP: %s", e)
 
     async def shutdown_peer_connection(self, peer_id: str):
         """Close connection with a peer (user-initiated)."""
