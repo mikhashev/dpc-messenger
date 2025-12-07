@@ -18,13 +18,16 @@ Architecture:
 """
 
 import asyncio
+import json
 import logging
+import socket
 import time
 from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass
 
 from .routing import DHTNode, RoutingTable
 from .rpc import DHTRPCHandler, RPCConfig
+from ..models.peer_endpoint import PeerEndpoint, IPv4Info, IPv6Info, RelayInfo, PunchInfo
 
 logger = logging.getLogger(__name__)
 
@@ -529,6 +532,230 @@ class DHTManager:
                         )
 
                         return (ip, port)
+
+            except Exception as e:
+                logger.debug("FIND_VALUE to %s failed: %s", node.node_id[:20], e)
+                continue
+
+        logger.warning("Peer %s not found in DHT", target_node_id[:20])
+        return None
+
+    # ===== Phase 6: Enhanced Announcement and Discovery =====
+
+    def _get_global_ipv6(self) -> Optional[str]:
+        """
+        Get global IPv6 address for this node (if available).
+
+        Checks for IPv6 addresses in the 2000::/3 range (global unicast).
+        Excludes ULA (fc00::/7) and link-local (fe80::/10) addresses.
+
+        Returns:
+            IPv6 address string (without port) or None if not available
+
+        Example:
+            >>> manager._get_global_ipv6()
+            '2001:db8::1'
+        """
+        try:
+            import netifaces
+
+            for interface in netifaces.interfaces():
+                addrs = netifaces.ifaddresses(interface)
+                if netifaces.AF_INET6 in addrs:
+                    for addr_info in addrs[netifaces.AF_INET6]:
+                        addr = addr_info.get('addr', '').split('%')[0]  # Remove scope ID
+
+                        # Check if global unicast (2000::/3)
+                        if addr.startswith('2') or addr.startswith('3'):
+                            return addr
+        except ImportError:
+            # netifaces not available - try socket module fallback
+            try:
+                # Connect to a public IPv6 address to determine our IPv6
+                s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+                s.connect(("2001:4860:4860::8888", 80))  # Google Public DNS IPv6
+                addr = s.getsockname()[0]
+                s.close()
+
+                # Verify it's global unicast
+                if addr.startswith('2') or addr.startswith('3'):
+                    return addr
+            except Exception:
+                pass
+        except Exception as e:
+            logger.debug("Failed to get global IPv6: %s", e)
+
+        return None
+
+    async def announce_full(
+        self,
+        relay_available: bool = False,
+        relay_max_peers: int = 0,
+        punch_supported: bool = False,
+        punch_port: Optional[int] = None
+    ) -> int:
+        """
+        Announce node presence with full Phase 6 endpoint information.
+
+        Stores enhanced PeerEndpoint schema including IPv4, IPv6, relay,
+        and hole punching metadata.
+
+        Args:
+            relay_available: Whether this node volunteers as a relay
+            relay_max_peers: Max concurrent relayed connections
+            punch_supported: Whether this node supports UDP hole punching
+            punch_port: UDP port for hole punching (usually TLS port + 1)
+
+        Returns:
+            Number of successful STORE operations
+
+        Example:
+            >>> await dht.announce_full(
+            ...     relay_available=True,
+            ...     relay_max_peers=10,
+            ...     punch_supported=True,
+            ...     punch_port=8889
+            ... )
+            15
+        """
+        logger.info("Announcing full endpoint info to DHT")
+        self.stats["announcements"] += 1
+
+        # Find k closest nodes to self
+        closest = await self.find_node(self.node_id)
+
+        if not closest:
+            logger.warning("Announce failed: no nodes found")
+            return 0
+
+        # Build enhanced endpoint information
+        ipv4 = IPv4Info(
+            local=f"{self.ip}:{self.port}",
+            external=None,  # Will be discovered via STUN/NAT detection in Week 2
+            nat_type="unknown"
+        )
+
+        # Check for IPv6
+        ipv6 = None
+        ipv6_addr = self._get_global_ipv6()
+        if ipv6_addr:
+            ipv6 = IPv6Info(
+                address=f"[{ipv6_addr}]:{self.port}",
+                type="global"
+            )
+
+        # Relay info (if volunteering)
+        relay = None
+        if relay_available:
+            relay = RelayInfo(
+                available=True,
+                max_peers=relay_max_peers,
+                region="global",  # TODO: Detect from IP geolocation
+                uptime=0.99  # TODO: Track actual uptime
+            )
+
+        # Hole punching info (if supported)
+        punch = None
+        if punch_supported and punch_port:
+            punch = PunchInfo(
+                supported=True,
+                stun_port=punch_port,
+                success_rate=0.0  # TODO: Track actual success rate
+            )
+
+        # Create PeerEndpoint
+        endpoint = PeerEndpoint(
+            schema_version="2.0",
+            node_id=self.node_id,
+            ipv4=ipv4,
+            ipv6=ipv6,
+            relay=relay,
+            punch=punch
+        )
+
+        # Store JSON on all k nodes (excluding self)
+        value = endpoint.to_json()
+        target_nodes = [node for node in closest if node.node_id != self.node_id]
+
+        if not target_nodes:
+            logger.warning("Announce skipped: only found self in DHT")
+            return 0
+
+        store_tasks = [
+            self.rpc_handler.store(node.ip, node.port, self.node_id, value)
+            for node in target_nodes
+        ]
+
+        results = await asyncio.gather(*store_tasks, return_exceptions=True)
+        success_count = sum(1 for r in results if r is True)
+
+        logger.info(
+            "Announced full endpoint to %d/%d nodes (IPv6=%s, relay=%s, punch=%s)",
+            success_count, len(target_nodes),
+            "yes" if ipv6 else "no",
+            "yes" if relay_available else "no",
+            "yes" if punch_supported else "no"
+        )
+
+        return success_count
+
+    async def find_peer_full(self, target_node_id: str) -> Optional[PeerEndpoint]:
+        """
+        Find full endpoint information for a specific peer.
+
+        Returns enhanced PeerEndpoint with IPv4, IPv6, relay, and punch metadata.
+        Falls back to legacy "ip:port" format for backward compatibility.
+
+        Args:
+            target_node_id: Node ID to find
+
+        Returns:
+            PeerEndpoint with full connection info, or None if not found
+
+        Example:
+            >>> endpoint = await dht.find_peer_full("dpc-node-abc123")
+            >>> if endpoint.has_ipv6():
+            ...     print(f"Peer has IPv6: {endpoint.ipv6.address}")
+            >>> if endpoint.supports_relay():
+            ...     print(f"Peer volunteers as relay (max {endpoint.relay.max_peers} peers)")
+        """
+        logger.info("Searching for full endpoint: %s", target_node_id[:20])
+
+        # Perform iterative lookup
+        closest = await self.find_node(target_node_id)
+
+        if not closest:
+            logger.warning("Peer search failed: no nodes found")
+            return None
+
+        # Try FIND_VALUE on closest nodes
+        for node in closest:
+            try:
+                result = await self.rpc_handler.find_value(node.ip, node.port, target_node_id)
+
+                if result and "value" in result:
+                    value = result["value"]
+
+                    # Try parsing as JSON (schema v2.0)
+                    try:
+                        endpoint = PeerEndpoint.from_json(value)
+                        logger.info(
+                            "Found full endpoint for %s (IPv6=%s, relay=%s, punch=%s)",
+                            target_node_id[:20],
+                            "yes" if endpoint.has_ipv6() else "no",
+                            "yes" if endpoint.supports_relay() else "no",
+                            "yes" if endpoint.supports_hole_punching() else "no"
+                        )
+                        return endpoint
+                    except (json.JSONDecodeError, ValueError):
+                        # Fall back to legacy "ip:port" format
+                        if ":" in value:
+                            endpoint = PeerEndpoint.from_legacy_string(target_node_id, value)
+                            logger.info(
+                                "Found legacy endpoint for %s: %s",
+                                target_node_id[:20], value
+                            )
+                            return endpoint
 
             except Exception as e:
                 logger.debug("FIND_VALUE to %s failed: %s", node.node_id[:20], e)
