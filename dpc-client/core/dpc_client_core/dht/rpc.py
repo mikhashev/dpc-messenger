@@ -273,6 +273,41 @@ class DHTRPCHandler:
 
         return None
 
+    async def discover_endpoint(
+        self,
+        ip: str,
+        port: int
+    ) -> Optional[Dict]:
+        """
+        Send DISCOVER_ENDPOINT RPC to node.
+
+        Peer responds with our reflexive address (source IP:port they see).
+        Used for NAT traversal endpoint discovery without STUN servers.
+
+        Args:
+            ip: Target IP address
+            port: Target UDP port
+
+        Returns:
+            {"reflexive_ip": str, "reflexive_port": int} if successful, None otherwise
+        """
+        rpc = {
+            "type": "DISCOVER_ENDPOINT",
+            "rpc_id": str(uuid.uuid4()),
+            "node_id": self.routing_table.node_id,
+            "timestamp": time.time(),
+        }
+
+        response = await self._send_rpc(ip, port, rpc)
+
+        if response and response.get("type") == "ENDPOINT_DISCOVERED":
+            return {
+                "reflexive_ip": response.get("reflexive_ip"),
+                "reflexive_port": response.get("reflexive_port")
+            }
+
+        return None
+
     # ===== Incoming RPCs (Server-side) =====
 
     async def handle_rpc(self, data: bytes, addr: Tuple[str, int]):
@@ -311,7 +346,9 @@ class DHTRPCHandler:
                 await self._handle_store(message, addr)
             elif rpc_type == "FIND_VALUE":
                 await self._handle_find_value(message, addr)
-            elif rpc_type in ["PONG", "NODES_FOUND", "STORED", "VALUE_FOUND"]:
+            elif rpc_type == "DISCOVER_ENDPOINT":
+                await self._handle_discover_endpoint(message, addr)
+            elif rpc_type in ["PONG", "NODES_FOUND", "STORED", "VALUE_FOUND", "ENDPOINT_DISCOVERED"]:
                 # Response to our RPC - resolve pending future
                 logger.info("DHT: Dispatching response %s to handler (rpc_id=%s)", rpc_type, rpc_id)
                 await self._handle_response(rpc_id, message)
@@ -446,6 +483,36 @@ class DHTRPCHandler:
                 "timestamp": time.time(),
             }
 
+        await self._send_response(addr, response)
+
+    async def _handle_discover_endpoint(self, message: Dict, addr: Tuple[str, int]):
+        """
+        Handle DISCOVER_ENDPOINT RPC (respond with sender's reflexive address).
+
+        This enables DHT-based endpoint discovery for NAT traversal without STUN servers.
+        The reflexive address is the source IP:port we see when receiving the request.
+
+        Args:
+            message: RPC message dict
+            addr: (ip, port) tuple of sender
+        """
+        rpc_id = message.get("rpc_id")
+        sender_ip, sender_port = addr  # Reflexive address (what we see)
+
+        logger.info("DHT: Handling DISCOVER_ENDPOINT from %s:%d (rpc_id=%s)",
+                   sender_ip, sender_port, rpc_id)
+
+        # Respond with reflexive address
+        response = {
+            "type": "ENDPOINT_DISCOVERED",
+            "rpc_id": rpc_id,
+            "reflexive_ip": sender_ip,
+            "reflexive_port": sender_port,
+            "timestamp": time.time(),
+        }
+
+        logger.debug("DHT: Sending ENDPOINT_DISCOVERED to %s:%d (reflexive=%s:%d)",
+                    sender_ip, sender_port, sender_ip, sender_port)
         await self._send_response(addr, response)
 
     async def _handle_response(self, rpc_id: str, message: Dict):

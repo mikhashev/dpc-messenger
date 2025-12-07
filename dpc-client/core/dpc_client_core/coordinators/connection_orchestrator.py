@@ -23,12 +23,14 @@ from ..connection_strategies.base import ConnectionStrategy, StrategyNotApplicab
 from ..connection_strategies.ipv6_direct import IPv6DirectStrategy
 from ..connection_strategies.ipv4_direct import IPv4DirectStrategy
 from ..connection_strategies.hub_webrtc import HubWebRTCStrategy
+from ..connection_strategies.udp_hole_punch import UDPHolePunchStrategy
 
 if TYPE_CHECKING:
     from ..p2p_manager import P2PManager
     from ..dht.manager import DHTManager
     from ..hub_client import HubClient
     from ..models.peer_endpoint import PeerEndpoint
+    from ..managers.hole_punch_manager import HolePunchManager
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,7 @@ class ConnectionOrchestrator:
         p2p_manager: P2P connection manager (for direct TLS connections)
         dht_manager: DHT manager (for peer discovery and endpoint lookup)
         hub_client: Hub client (for WebRTC signaling, optional)
+        hole_punch_manager: Hole punch manager (for UDP NAT traversal, optional)
         strategies: List of connection strategies (sorted by priority)
 
     Example:
@@ -65,7 +68,8 @@ class ConnectionOrchestrator:
         self,
         p2p_manager: "P2PManager",
         dht_manager: "DHTManager",
-        hub_client: Optional["HubClient"] = None
+        hub_client: Optional["HubClient"] = None,
+        hole_punch_manager: Optional["HolePunchManager"] = None
     ):
         """
         Initialize connection orchestrator.
@@ -74,17 +78,19 @@ class ConnectionOrchestrator:
             p2p_manager: P2P connection manager
             dht_manager: DHT manager for peer discovery
             hub_client: Hub client (optional, for WebRTC)
+            hole_punch_manager: Hole punch manager (optional, for UDP hole punching)
         """
         self.p2p_manager = p2p_manager
         self.dht_manager = dht_manager
         self.hub_client = hub_client
+        self.hole_punch_manager = hole_punch_manager
 
         # Initialize strategies (sorted by priority)
         self.strategies: List[ConnectionStrategy] = [
             IPv6DirectStrategy(),           # Priority 1 (always try first)
             IPv4DirectStrategy(),           # Priority 2 (local network)
             HubWebRTCStrategy(),            # Priority 3 (existing STUN/TURN via Hub)
-            # Priority 4: UDPHolePunchStrategy() - TODO: Week 2
+            UDPHolePunchStrategy(),         # Priority 4 (DHT hole punching - Hub-independent)
             # Priority 5: VolunteerRelayStrategy() - TODO: Week 3
             # Priority 6: GossipStoreForwardStrategy() - TODO: Week 4
         ]
