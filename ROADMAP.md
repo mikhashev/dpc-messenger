@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Last Updated:** December 2025 | **Current Version:** 0.9.5 | **Current Phase:** Phase 2.1 - Decentralized Infrastructure
+> **Last Updated:** December 2025 | **Current Version:** 0.10.0 | **Current Phase:** Phase 2.1 - Decentralized Infrastructure
 
 ---
 
@@ -110,8 +110,9 @@ D-PC Messenger follows a three-phase development roadmap:
 | # | Feature | Complexity | Status | Description |
 |---|---------|------------|--------|-------------|
 | 5 | DHT-Based Peer Discovery | High | ✅ **COMPLETE** (v0.9.5) | Kademlia DHT, decentralized signaling, eliminates Hub dependency |
-| 6 | Pluggable Transport Framework | Medium | ⏭️ Deferred | Auto-fallback architecture, transport abstraction |
-| 7 | WebSocket-over-TLS Transport | Medium | ⏭️ Deferred | HTTPS transport, fallback when WebRTC unavailable |
+| 6 | Fallback Logic & Hybrid Mode | High | ✅ **COMPLETE** (v0.10.0) | 6-tier connection hierarchy (IPv6, IPv4, WebRTC, hole punch, relay, gossip), Hub-optional architecture |
+| 7 | Pluggable Transport Framework | Medium | ⏭️ Deferred (replaced by #6) | Auto-fallback architecture, transport abstraction |
+| 8 | WebSocket-over-TLS Transport | Medium | ⏭️ Deferred | HTTPS transport, fallback when WebRTC unavailable |
 
 **DHT Implementation Details (v0.9.5):**
 - ✅ Core DHT data structures (XOR distance, 128 k-buckets, routing table)
@@ -122,6 +123,19 @@ D-PC Messenger follows a three-phase development roadmap:
 - ✅ 73 unit tests (100% passing coverage)
 - ✅ NAT hairpinning fix, bootstrap retry, dynamic IP announcement
 - Files created: [dht/distance.py](dpc-client/core/dpc_client_core/dht/distance.py), [dht/routing.py](dpc-client/core/dpc_client_core/dht/routing.py), [dht/rpc.py](dpc-client/core/dpc_client_core/dht/rpc.py), [dht/manager.py](dpc-client/core/dpc_client_core/dht/manager.py)
+
+**Fallback Logic Implementation Details (v0.10.0):**
+- ✅ ConnectionOrchestrator - Intelligent strategy coordinator with 6-tier fallback
+- ✅ DHT schema enhancement - IPv4/IPv6/relay/punch metadata
+- ✅ Priority 1-2: IPv6/IPv4 direct connection strategies
+- ✅ Priority 3: Hub WebRTC integration (existing STUN/TURN)
+- ✅ Priority 4: UDP hole punching (DHT-coordinated, 60-70% NAT success)
+- ✅ Priority 5: Volunteer relay nodes (100% NAT coverage, privacy-preserving)
+- ✅ Priority 6: Gossip store-and-forward (epidemic spreading, disaster resilience)
+- ✅ VectorClock - Lamport timestamps for distributed causality
+- ✅ Anti-entropy sync - Periodic reconciliation (5-minute interval)
+- ✅ Configuration: 4 new config sections (connection, hole_punch, relay, gossip), 23 getter methods
+- Files created: [coordinators/connection_orchestrator.py](dpc-client/core/dpc_client_core/coordinators/connection_orchestrator.py), [managers/hole_punch_manager.py](dpc-client/core/dpc_client_core/managers/hole_punch_manager.py), [managers/relay_manager.py](dpc-client/core/dpc_client_core/managers/relay_manager.py), [managers/gossip_manager.py](dpc-client/core/dpc_client_core/managers/gossip_manager.py), plus 12 supporting files
 
 **Files Deferred to Phase 2.2:**
 - `dpc-client/core/dpc_client_core/pluggable_transports.py` - Transport manager
