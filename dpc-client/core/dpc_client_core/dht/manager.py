@@ -232,7 +232,7 @@ class DHTManager:
         logger.info("Bootstrap: %d/%d seed nodes responsive", responsive_seeds, len(seed_nodes))
 
         # Step 2: Lookup self to discover nearby peers
-        logger.info("Bootstrap: performing self-lookup to discover nearby peers")
+        logger.debug("Bootstrap: performing self-lookup to discover nearby peers")
         await self.find_node(self.node_id)
 
         # Step 3: Refresh buckets (optional, can be async)
@@ -503,7 +503,7 @@ class DHTManager:
         Returns:
             (ip, port) tuple if found, None otherwise
         """
-        logger.info("Searching for peer %s", target_node_id[:20])
+        logger.debug("Searching for peer %s", target_node_id[:20])
 
         # Perform iterative lookup
         closest = await self.find_node(target_node_id)
@@ -618,7 +618,7 @@ class DHTManager:
             ... )
             15
         """
-        logger.info("Announcing full endpoint info to DHT")
+        logger.debug("Announcing full endpoint info to DHT")
         self.stats["announcements"] += 1
 
         # Find k closest nodes to self
@@ -719,7 +719,7 @@ class DHTManager:
             >>> if endpoint.supports_relay():
             ...     print(f"Peer volunteers as relay (max {endpoint.relay.max_peers} peers)")
         """
-        logger.info("Searching for full endpoint: %s", target_node_id[:20])
+        logger.debug("Searching for full endpoint: %s", target_node_id[:20])
 
         # Perform iterative lookup
         closest = await self.find_node(target_node_id)

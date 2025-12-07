@@ -216,13 +216,13 @@ class DHTRPCHandler:
             "timestamp": time.time(),
         }
 
-        logger.info("DHT: Sending STORE to %s:%d (rpc_id=%s, key=%s, value=%s)",
-                   ip, port, rpc["rpc_id"], key[:20] if len(key) > 20 else key, value)
+        logger.debug("DHT: Sending STORE to %s:%d (rpc_id=%s, key=%s, value=%s)",
+                    ip, port, rpc["rpc_id"], key[:20] if len(key) > 20 else key, value)
 
         response = await self._send_rpc(ip, port, rpc)
 
         if response and response.get("type") == "STORED":
-            logger.info("DHT: STORE successful to %s:%d (rpc_id=%s)", ip, port, rpc["rpc_id"])
+            logger.debug("DHT: STORE successful to %s:%d (rpc_id=%s)", ip, port, rpc["rpc_id"])
             return response.get("success", False)
 
         logger.warning("DHT: STORE failed to %s:%d (rpc_id=%s, response=%s)",
@@ -333,7 +333,7 @@ class DHTRPCHandler:
             rpc_type = message.get("type")
             rpc_id = message.get("rpc_id")
 
-            logger.info("DHT: Routing message type=%s from %s:%d (rpc_id=%s)",
+            logger.debug("DHT: Routing message type=%s from %s:%d (rpc_id=%s)",
                        rpc_type, sender_ip, sender_port, rpc_id)
 
             # Route to handler
@@ -342,7 +342,7 @@ class DHTRPCHandler:
             elif rpc_type == "FIND_NODE":
                 await self._handle_find_node(message, addr)
             elif rpc_type == "STORE":
-                logger.info("DHT: Dispatching STORE to handler (rpc_id=%s)", rpc_id)
+                logger.debug("DHT: Dispatching STORE to handler (rpc_id=%s)", rpc_id)
                 await self._handle_store(message, addr)
             elif rpc_type == "FIND_VALUE":
                 await self._handle_find_value(message, addr)
@@ -350,7 +350,7 @@ class DHTRPCHandler:
                 await self._handle_discover_endpoint(message, addr)
             elif rpc_type in ["PONG", "NODES_FOUND", "STORED", "VALUE_FOUND", "ENDPOINT_DISCOVERED"]:
                 # Response to our RPC - resolve pending future
-                logger.info("DHT: Dispatching response %s to handler (rpc_id=%s)", rpc_type, rpc_id)
+                logger.debug("DHT: Dispatching response %s to handler (rpc_id=%s)", rpc_type, rpc_id)
                 await self._handle_response(rpc_id, message)
             else:
                 logger.warning("Unknown RPC type: %s", rpc_type)
@@ -368,13 +368,13 @@ class DHTRPCHandler:
         sender_id = message.get("node_id")
         rpc_id = message.get("rpc_id")
 
-        logger.info("DHT: Handling PING from %s (node_id=%s, rpc_id=%s)", addr, sender_id, rpc_id)
+        logger.debug("DHT: Handling PING from %s (node_id=%s, rpc_id=%s)", addr, sender_id, rpc_id)
 
         # Update routing table
         if sender_id:
             try:
                 self.routing_table.add_node(sender_id, sender_ip, sender_port)
-                logger.info("DHT: Added %s to routing table", sender_id[:20])
+                logger.debug("DHT: Added %s to routing table", sender_id[:20])
             except Exception as e:
                 logger.error("DHT: Failed to add node to routing table: %s", e)
 
@@ -386,9 +386,9 @@ class DHTRPCHandler:
             "timestamp": time.time(),
         }
 
-        logger.info("DHT: Sending PONG to %s (rpc_id=%s)", addr, rpc_id)
+        logger.debug("DHT: Sending PONG to %s (rpc_id=%s)", addr, rpc_id)
         await self._send_response(addr, response)
-        logger.info("DHT: PONG sent to %s", addr)
+        logger.debug("DHT: PONG sent to %s", addr)
 
     async def _handle_find_node(self, message: Dict, addr: Tuple[str, int]):
         """Handle FIND_NODE RPC (return k closest nodes)."""
@@ -425,7 +425,7 @@ class DHTRPCHandler:
         rpc_id = message.get("rpc_id")
         sender_id = message.get("node_id")
 
-        logger.info("DHT: Handling STORE from %s (node_id=%s, rpc_id=%s, key=%s, value=%s)",
+        logger.debug("DHT: Handling STORE from %s (node_id=%s, rpc_id=%s, key=%s, value=%s)",
                    addr, sender_id[:20] if sender_id else None, rpc_id,
                    key[:20] if key and len(key) > 20 else key, value)
 
@@ -435,7 +435,7 @@ class DHTRPCHandler:
 
         # Store key-value pair
         self._storage[key] = value
-        logger.info("DHT: Stored %s → %s (storage now has %d entries)",
+        logger.debug("DHT: Stored %s → %s (storage now has %d entries)",
                    key[:20] if len(key) > 20 else key, value, len(self._storage))
 
         # Send response
@@ -446,9 +446,9 @@ class DHTRPCHandler:
             "timestamp": time.time(),
         }
 
-        logger.info("DHT: Sending STORED response to %s (rpc_id=%s)", addr, rpc_id)
+        logger.debug("DHT: Sending STORED response to %s (rpc_id=%s)", addr, rpc_id)
         await self._send_response(addr, response)
-        logger.info("DHT: STORED response sent to %s", addr)
+        logger.debug("DHT: STORED response sent to %s", addr)
 
     async def _handle_find_value(self, message: Dict, addr: Tuple[str, int]):
         """Handle FIND_VALUE RPC (return value or k closest nodes)."""
@@ -499,7 +499,7 @@ class DHTRPCHandler:
         rpc_id = message.get("rpc_id")
         sender_ip, sender_port = addr  # Reflexive address (what we see)
 
-        logger.info("DHT: Handling DISCOVER_ENDPOINT from %s:%d (rpc_id=%s)",
+        logger.debug("DHT: Handling DISCOVER_ENDPOINT from %s:%d (rpc_id=%s)",
                    sender_ip, sender_port, rpc_id)
 
         # Respond with reflexive address
@@ -518,14 +518,14 @@ class DHTRPCHandler:
     async def _handle_response(self, rpc_id: str, message: Dict):
         """Handle RPC response (resolve pending future)."""
         msg_type = message.get("type")
-        logger.info("DHT: Handling response %s (rpc_id=%s, pending=%s)",
+        logger.debug("DHT: Handling response %s (rpc_id=%s, pending=%s)",
                    msg_type, rpc_id, rpc_id in self._pending_rpcs)
 
         if rpc_id in self._pending_rpcs:
             future = self._pending_rpcs.pop(rpc_id)
             if not future.done():
                 future.set_result(message)
-                logger.info("DHT: Response %s resolved for rpc_id=%s", msg_type, rpc_id)
+                logger.debug("DHT: Response %s resolved for rpc_id=%s", msg_type, rpc_id)
             else:
                 logger.warning("DHT: Future already done for rpc_id=%s", rpc_id)
         else:
@@ -614,7 +614,7 @@ class DHTRPCHandler:
 
             msg_type = message.get("type")
             rpc_id = message.get("rpc_id")
-            logger.info("DHT: Sending UDP packet to %s:%d (type=%s, rpc_id=%s, %d bytes)",
+            logger.debug("DHT: Sending UDP packet to %s:%d (type=%s, rpc_id=%s, %d bytes)",
                        ip, port, msg_type, rpc_id, len(data))
 
             self.transport.sendto(data, (ip, port))
@@ -673,7 +673,7 @@ class DHTProtocol(asyncio.DatagramProtocol):
 
     def datagram_received(self, data: bytes, addr: Tuple[str, int]):
         """Called when UDP packet is received."""
-        logger.info("DHT: Received UDP packet from %s:%d (%d bytes)", addr[0], addr[1], len(data))
+        logger.debug("DHT: Received UDP packet from %s:%d (%d bytes)", addr[0], addr[1], len(data))
         # Handle RPC asynchronously
         asyncio.create_task(self.rpc_handler.handle_rpc(data, addr))
 
