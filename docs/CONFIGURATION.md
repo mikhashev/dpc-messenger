@@ -754,6 +754,32 @@ stun_timeout = 5
 punch_attempts = 3
 ```
 
+#### ⚠️ Security Warning: DTLS Encryption (v0.10.0)
+
+**Current Status:** UDP hole punching establishes **unencrypted** UDP connections.
+
+**DTLS (Datagram Transport Layer Security)** upgrade is deferred to **v0.11.0+**.
+
+**Recommendation for v0.10.0:**
+```ini
+[connection]
+enable_hole_punching = false  # Disable unencrypted UDP (recommended)
+```
+
+**Why disable hole punching in v0.10.0?**
+- UDP connections lack encryption layer (privacy violation)
+- Better encrypted alternatives exist:
+  - Priority 3 (Hub WebRTC) - Has built-in DTLS encryption
+  - Priority 5 (Volunteer Relays) - Uses TLS encryption
+- Implementation planned for v0.11.0
+
+**Current Workarounds:**
+1. **Disable hole punching** (recommended) - Use Priority 3 or 5 instead
+2. **Use only for testing** - Don't send sensitive data
+3. **Local network only** - Use UDP hole punching only on trusted networks
+
+See [FALLBACK_LOGIC.md](./FALLBACK_LOGIC.md#security-warning-dtls-encryption-v0100) for detailed explanation.
+
 ---
 
 ### Volunteer Relay Settings (`[relay]`)

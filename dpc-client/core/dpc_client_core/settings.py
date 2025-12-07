@@ -123,7 +123,7 @@ class Settings:
             'enable_ipv6': 'true',  # Try IPv6 direct connections (Priority 1)
             'enable_ipv4': 'true',  # Try IPv4 direct connections (Priority 2)
             'enable_hub_webrtc': 'true',  # Try Hub WebRTC with STUN/TURN (Priority 3)
-            'enable_hole_punching': 'true',  # Try DHT-coordinated UDP hole punching (Priority 4)
+            'enable_hole_punching': 'false',  # Try DHT-coordinated UDP hole punching (Priority 4) - DISABLED: lacks DTLS encryption (v0.10.0)
             'enable_relays': 'true',  # Try volunteer relay nodes (Priority 5)
             'enable_gossip': 'true',  # Use gossip store-and-forward fallback (Priority 6)
             # Timeouts per strategy (seconds)

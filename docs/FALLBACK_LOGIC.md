@@ -233,6 +233,39 @@ servers = turn:your-turn-server.com:3478
 - **Timing-sensitive** - Requires clock synchronization
 - **UDP only** - Needs DTLS upgrade for encryption (TODO)
 
+### ⚠️ Security Warning: DTLS Encryption (v0.10.0)
+
+**Current Status:** UDP hole punching establishes **unencrypted** UDP connections.
+
+**DTLS (Datagram Transport Layer Security)** upgrade is deferred to **v0.11.0+**. Until then:
+
+**Recommendation:**
+```ini
+[connection]
+enable_hole_punching = false  # Disable unencrypted UDP (recommended for v0.10.0)
+```
+
+**Why is it disabled by default?**
+- **Privacy violation:** UDP connections lack encryption layer
+- **Better alternatives exist:**
+  - Priority 3 (Hub WebRTC) - Has built-in DTLS encryption
+  - Priority 5 (Volunteer Relays) - Uses TLS encryption
+- **Implementation complexity:** DTLS handshake adds 2-3 seconds to connection time
+
+**When will DTLS be implemented?**
+- **v0.11.0 (Future):** Full DTLS upgrade
+- **Flow:**
+  1. Perform UDP hole punch (as before)
+  2. Exchange certificates over punched UDP hole
+  3. Perform DTLS handshake (similar to TLS)
+  4. Upgrade socket to DTLS wrapper
+  5. All subsequent messages encrypted via DTLS
+
+**Current Workarounds:**
+1. **Disable hole punching** (recommended) - Use Priority 3 or 5 instead
+2. **Use only for testing** - Don't send sensitive data
+3. **Local network only** - Use UDP hole punching only on trusted networks
+
 ### Configuration
 
 ```ini

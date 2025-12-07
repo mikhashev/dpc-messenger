@@ -39,6 +39,8 @@ docker --version   # Should show docker version (if using Hub)
 
 **Use this if:** You want to test between computers on the same network.
 
+**NEW in v0.10.0:** Direct connections now support 6-tier fallback hierarchy (IPv6 → IPv4 → WebRTC → UDP hole punching → Volunteer relays → Gossip) for near-universal connectivity!
+
 ### Step 1: Clone the Repository
 
 ```bash
@@ -99,6 +101,8 @@ Repeat Step 2 on another computer on the same network.
 ## Option B: Internet-Wide Connections (Recommended)
 
 **Use this if:** You want to connect to anyone, anywhere.
+
+**NEW in v0.10.0:** Hub is now **optional**! The system can establish connections without Hub using DHT-based hole punching and volunteer relay nodes.
 
 ### Step 1: Clone the Repository
 
