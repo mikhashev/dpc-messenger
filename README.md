@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.9.5
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.10.0
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
@@ -70,8 +70,9 @@ If this vision resonates with you, let's connect:
 - **Rich Markdown Rendering** - AI responses display with GitHub-style formatting, intelligent caching (50-200x faster)
 - **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - **Local-First** - Your data stays on your device
-- **Internet-Wide** - Connect to anyone, anywhere via WebRTC
-- **Offline Mode** - Works seamlessly when Hub is unavailable with cached tokens and Direct TLS
+- **Universal Connectivity** - 6-tier connection fallback for near-universal P2P connectivity (IPv6, IPv4, WebRTC, UDP hole punching, volunteer relays, gossip)
+- **Hub-Optional Architecture** - Works seamlessly offline with direct connections, DHT-based hole punching, and volunteer relay nodes
+- **Resilient Messaging** - Gossip store-and-forward protocol ensures message delivery even during infrastructure outages
 - **Cryptographic Identity** - Self-sovereign node IDs based on public keys
 - **Context Firewall** - Granular control over what data you share
 

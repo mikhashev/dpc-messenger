@@ -12,6 +12,154 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.10.0] - 2025-12-07
+
+### Added
+
+**Phase 6: Fallback Logic & Hybrid Mode - 6-Tier Connection Hierarchy - COMPLETE**
+
+This release implements a comprehensive 6-tier connection fallback hierarchy for near-universal P2P connectivity, making the Hub completely optional. The system now gracefully falls back through multiple connection strategies, from direct IPv6 connections down to multi-hop gossip routing in disaster scenarios.
+
+**Week 1: DHT Schema Enhancement & Connection Orchestrator**
+
+- **Enhanced DHT Storage Schema** - Unified schema for all connection metadata
+  - IPv4 endpoints (local, external, NAT type)
+  - IPv6 global addresses
+  - Relay node support flags
+  - Hole punching capability indicators
+  - Backward compatibility with legacy string format
+  - File modified: [dht/manager.py](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **ConnectionOrchestrator** - Intelligent connection strategy coordinator
+  - Tries 6 connection strategies in priority order until one succeeds
+  - Per-strategy timeout configuration
+  - Connection statistics tracking (success rate, strategy usage)
+  - Dynamic strategy enable/disable
+  - File created: [coordinators/connection_orchestrator.py](dpc-client/core/dpc_client_core/coordinators/connection_orchestrator.py)
+
+- **ConnectionStrategy Pattern** - Pluggable connection strategy interface
+  - Base class with `is_applicable()`, `connect()` methods
+  - Per-strategy priority, timeout, name
+  - Files created:
+    - [connection_strategies/base.py](dpc-client/core/dpc_client_core/connection_strategies/base.py)
+    - [connection_strategies/ipv6_direct.py](dpc-client/core/dpc_client_core/connection_strategies/ipv6_direct.py)
+    - [connection_strategies/ipv4_direct.py](dpc-client/core/dpc_client_core/connection_strategies/ipv4_direct.py)
+    - [connection_strategies/hub_webrtc.py](dpc-client/core/dpc_client_core/connection_strategies/hub_webrtc.py)
+
+- **PeerEndpoint Model** - Enhanced endpoint metadata
+  - IPv4 (local, external, NAT type)
+  - IPv6 (global address)
+  - Relay support, hole punching capability
+  - File created: [models/peer_endpoint.py](dpc-client/core/dpc_client_core/models/peer_endpoint.py)
+
+**Week 2: UDP Hole Punching (Priority 4 - DHT-Coordinated)**
+
+- **HolePunchManager** - STUN-like endpoint discovery via DHT
+  - `discover_external_endpoint()` - Query 3 random DHT peers for reflexive address
+  - `_detect_nat_type()` - Detect cone vs symmetric NAT
+  - `punch_hole()` - Coordinated simultaneous UDP send (birthday paradox)
+  - Success rate: 60-70% for cone NAT (fails gracefully for symmetric NAT)
+  - File created: [managers/hole_punch_manager.py](dpc-client/core/dpc_client_core/managers/hole_punch_manager.py)
+
+- **UDPHolePunchStrategy** - Priority 4 connection strategy
+  - DHT-coordinated hole punching (no STUN servers required)
+  - Hub-independent NAT traversal
+  - File created: [connection_strategies/udp_hole_punch.py](dpc-client/core/dpc_client_core/connection_strategies/udp_hole_punch.py)
+
+- **DISCOVER_ENDPOINT RPC** - DHT protocol extension for endpoint discovery
+  - Peers report reflexive IP:port to requester
+  - File modified: [dht/rpc.py](dpc-client/core/dpc_client_core/dht/rpc.py)
+
+**Week 3: Volunteer Relay Nodes (Priority 5 - 100% NAT Coverage)**
+
+- **RelayManager** - Client and server modes for volunteer relays
+  - Client mode:
+    - `find_relay()` - Query DHT for available relays
+    - Relay quality scoring: uptime (50%), capacity (30%), latency (20%)
+    - Regional preference support
+    - 5-minute relay discovery cache
+  - Server mode:
+    - `announce_relay_availability()` - Advertise relay in DHT
+    - `handle_relay_register()` - Create relay session when both peers register
+    - `handle_relay_message()` - Forward encrypted messages
+    - Rate limiting (100 messages/second per peer)
+    - Bandwidth limits, capacity management
+  - File created: [managers/relay_manager.py](dpc-client/core/dpc_client_core/managers/relay_manager.py)
+
+- **RelayedPeerConnection** - Relayed connection wrapper
+  - Provides same API as direct PeerConnection
+  - End-to-end encryption maintained (relay sees only encrypted payloads)
+  - RELAY_MESSAGE, RELAY_REGISTER, RELAY_DISCONNECT protocol
+  - File created: [transports/relayed_connection.py](dpc-client/core/dpc_client_core/transports/relayed_connection.py)
+
+- **VolunteerRelayStrategy** - Priority 5 connection strategy
+  - 100% NAT coverage (works for symmetric NAT, CGNAT, restrictive firewalls)
+  - Hub-independent alternative to TURN servers
+  - File created: [connection_strategies/volunteer_relay.py](dpc-client/core/dpc_client_core/connection_strategies/volunteer_relay.py)
+
+- **RelayNode Model** - Relay metadata and quality scoring
+  - Quality score algorithm (uptime, capacity, latency)
+  - Relay session tracking
+  - File created: [models/relay_node.py](dpc-client/core/dpc_client_core/models/relay_node.py)
+
+**Week 4: Gossip Store-and-Forward (Priority 6 - Disaster Fallback)**
+
+- **VectorClock** - Lamport timestamps for distributed causality tracking
+  - `increment()`, `merge()` - Local events and knowledge propagation
+  - `happens_before()`, `concurrent_with()` - Causal relationship detection
+  - Used for conflict detection and message ordering
+  - File created: [models/vector_clock.py](dpc-client/core/dpc_client_core/models/vector_clock.py)
+
+- **GossipMessage** - Multi-hop message structure
+  - TTL (24 hours default), hop limits (5 max)
+  - Already-forwarded tracking for loop prevention
+  - Vector clock embedding for causality
+  - Priority levels (low, normal, high)
+  - File created: [models/gossip_message.py](dpc-client/core/dpc_client_core/models/gossip_message.py)
+
+- **GossipManager** - Epidemic spreading protocol
+  - `send_gossip()` - Create and send gossip message
+  - `handle_gossip_message()` - Deliver or forward
+  - `_forward_message()` - Epidemic fanout (3 random peers, excludes already_forwarded)
+  - `_anti_entropy_loop()` - Periodic vector clock sync (5-minute interval)
+    - Exchange vector clocks with random peer
+    - Request missing messages
+    - Send messages peer is missing
+  - `_cleanup_loop()` - Expired message removal (10-minute interval)
+  - Message deduplication (seen_messages set)
+  - Statistics: messages sent, delivered, forwarded, dropped, sync cycles
+  - File created: [managers/gossip_manager.py](dpc-client/core/dpc_client_core/managers/gossip_manager.py)
+
+- **GossipStoreForwardStrategy** - Priority 6 connection strategy
+  - Always applicable (last resort)
+  - Returns virtual connection (eventual delivery, not real-time)
+  - Use cases: offline messaging, disaster scenarios, infrastructure outages
+  - File created: [connection_strategies/gossip_store_forward.py](dpc-client/core/dpc_client_core/connection_strategies/gossip_store_forward.py)
+
+**6-Tier Connection Hierarchy:**
+1. **Priority 1: IPv6 Direct** - No NAT (40%+ networks) → 10s timeout
+2. **Priority 2: IPv4 Direct** - Local network / port forward → 10s timeout
+3. **Priority 3: Hub WebRTC** - STUN/TURN via Hub (when Hub available) → 30s timeout
+4. **Priority 4: UDP Hole Punch** - DHT-coordinated (60-70% NAT, Hub-independent) → 15s timeout
+5. **Priority 5: Volunteer Relay** - 100% NAT coverage (Hub-independent) → 20s timeout
+6. **Priority 6: Gossip Store-and-Forward** - Disaster fallback (eventual delivery) → 5s timeout
+
+**Configuration:**
+- 4 new config sections: `[connection]`, `[hole_punch]`, `[relay]`, `[gossip]`
+- 23 new getter methods in Settings class
+- Per-strategy enable/disable toggles
+- Relay volunteering opt-in (`relay.volunteer = false` by default)
+- File modified: [settings.py](dpc-client/core/dpc_client_core/settings.py)
+
+**Key Benefits:**
+- **Hub becomes optional** - System works without Hub using direct, DHT, relay, gossip fallback
+- **Near-universal connectivity** - 6 fallback layers from IPv6 down to gossip
+- **Disaster resilience** - Gossip protocol ensures eventual delivery during infrastructure outages
+- **Privacy-preserving** - Relays forward encrypted payloads, cannot read message content
+- **No infrastructure cost** - Volunteer relays replace expensive TURN servers
+
+---
+
 ## [0.9.5] - 2025-12-06
 
 ### Added
