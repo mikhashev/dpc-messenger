@@ -25,6 +25,7 @@ from ..connection_strategies.ipv4_direct import IPv4DirectStrategy
 from ..connection_strategies.hub_webrtc import HubWebRTCStrategy
 from ..connection_strategies.udp_hole_punch import UDPHolePunchStrategy
 from ..connection_strategies.volunteer_relay import VolunteerRelayStrategy
+from ..connection_strategies.gossip_store_forward import GossipStoreForwardStrategy
 
 if TYPE_CHECKING:
     from ..p2p_manager import P2PManager
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
     from ..models.peer_endpoint import PeerEndpoint
     from ..managers.hole_punch_manager import HolePunchManager
     from ..managers.relay_manager import RelayManager
+    from ..managers.gossip_manager import GossipManager
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +57,7 @@ class ConnectionOrchestrator:
         hub_client: Hub client (for WebRTC signaling, optional)
         hole_punch_manager: Hole punch manager (for UDP NAT traversal, optional)
         relay_manager: Relay manager (for volunteer relay fallback, optional)
+        gossip_manager: Gossip manager (for store-and-forward fallback, optional)
         strategies: List of connection strategies (sorted by priority)
 
     Example:
@@ -73,7 +76,8 @@ class ConnectionOrchestrator:
         dht_manager: "DHTManager",
         hub_client: Optional["HubClient"] = None,
         hole_punch_manager: Optional["HolePunchManager"] = None,
-        relay_manager: Optional["RelayManager"] = None
+        relay_manager: Optional["RelayManager"] = None,
+        gossip_manager: Optional["GossipManager"] = None
     ):
         """
         Initialize connection orchestrator.
@@ -84,12 +88,14 @@ class ConnectionOrchestrator:
             hub_client: Hub client (optional, for WebRTC)
             hole_punch_manager: Hole punch manager (optional, for UDP hole punching)
             relay_manager: Relay manager (optional, for volunteer relay fallback)
+            gossip_manager: Gossip manager (optional, for store-and-forward fallback)
         """
         self.p2p_manager = p2p_manager
         self.dht_manager = dht_manager
         self.hub_client = hub_client
         self.hole_punch_manager = hole_punch_manager
         self.relay_manager = relay_manager
+        self.gossip_manager = gossip_manager
 
         # Initialize strategies (sorted by priority)
         self.strategies: List[ConnectionStrategy] = [
@@ -98,7 +104,7 @@ class ConnectionOrchestrator:
             HubWebRTCStrategy(),            # Priority 3 (existing STUN/TURN via Hub)
             UDPHolePunchStrategy(),         # Priority 4 (DHT hole punching - Hub-independent)
             VolunteerRelayStrategy(),       # Priority 5 (volunteer relays - 100% NAT coverage)
-            # Priority 6: GossipStoreForwardStrategy() - TODO: Week 4
+            GossipStoreForwardStrategy(),   # Priority 6 (store-and-forward - disaster fallback)
         ]
 
         # Sort by priority (lowest number = highest priority)
