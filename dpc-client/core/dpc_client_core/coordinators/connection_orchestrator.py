@@ -22,6 +22,7 @@ from typing import Optional, List, TYPE_CHECKING
 from ..connection_strategies.base import ConnectionStrategy, StrategyNotApplicableError
 from ..connection_strategies.ipv6_direct import IPv6DirectStrategy
 from ..connection_strategies.ipv4_direct import IPv4DirectStrategy
+from ..connection_strategies.hub_webrtc import HubWebRTCStrategy
 
 if TYPE_CHECKING:
     from ..p2p_manager import P2PManager
@@ -82,7 +83,7 @@ class ConnectionOrchestrator:
         self.strategies: List[ConnectionStrategy] = [
             IPv6DirectStrategy(),           # Priority 1 (always try first)
             IPv4DirectStrategy(),           # Priority 2 (local network)
-            # Priority 3: HubWebRTCStrategy() - TODO: Implement in next step
+            HubWebRTCStrategy(),            # Priority 3 (existing STUN/TURN via Hub)
             # Priority 4: UDPHolePunchStrategy() - TODO: Week 2
             # Priority 5: VolunteerRelayStrategy() - TODO: Week 3
             # Priority 6: GossipStoreForwardStrategy() - TODO: Week 4
