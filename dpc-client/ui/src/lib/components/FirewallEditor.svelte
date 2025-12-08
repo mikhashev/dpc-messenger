@@ -169,6 +169,11 @@
     if (!editedRules || !editedRules.node_groups) return;
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
     if (nodeId && nodeId.startsWith('dpc-node-')) {
+      // Check for duplicates
+      if (editedRules.node_groups[groupName].includes(nodeId)) {
+        alert('This node is already in the group');
+        return;
+      }
       // Use immutable update to trigger Svelte reactivity
       editedRules.node_groups[groupName] = [
         ...editedRules.node_groups[groupName],
