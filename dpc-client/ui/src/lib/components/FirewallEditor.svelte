@@ -169,7 +169,11 @@
     if (!editedRules || !editedRules.node_groups) return;
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
     if (nodeId && nodeId.startsWith('dpc-node-')) {
-      editedRules.node_groups[groupName].push(nodeId);
+      // Use immutable update to trigger Svelte reactivity
+      editedRules.node_groups[groupName] = [
+        ...editedRules.node_groups[groupName],
+        nodeId
+      ];
     } else if (nodeId) {
       alert('Node ID must start with "dpc-node-"');
     }
