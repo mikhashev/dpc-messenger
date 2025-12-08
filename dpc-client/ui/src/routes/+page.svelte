@@ -38,6 +38,7 @@
   let selectedComputeHost: string = "local";  // "local" or node_id for remote inference
   let selectedRemoteModel: string = "";  // Selected model when using remote compute host
   let selectedPeerContexts: Set<string> = new Set();  // Set of peer node_ids to fetch context from
+  let showConnectionMethods: boolean = false;  // Toggle visibility of connection methods help
 
   // Resizable chat panel state
   let chatPanelHeight: number = (() => {
@@ -955,7 +956,16 @@
 
         <!-- Connect to Peer -->
         <div class="connect-section">
-          <h3>Connect to Peer</h3>
+          <div class="connect-header">
+            <h3>Connect to Peer</h3>
+            <button
+              class="info-button"
+              on:click={() => showConnectionMethods = !showConnectionMethods}
+              title="Show/hide connection methods"
+            >
+              ℹ️
+            </button>
+          </div>
           <input
             id="peer-input"
             name="peer-input"
@@ -965,15 +975,17 @@
             on:keydown={(e) => e.key === 'Enter' && handleConnectPeer()}
           />
           <button on:click={handleConnectPeer}>Connect</button>
-          <div class="connection-help">
-            <p class="small"><strong>Connection Methods:</strong></p>
-            <p class="small">
-              🔍 <strong>Auto-Discovery (DHT):</strong> <code>dpc-node-abc123...</code><br/>
-              <span class="small-detail">Tries: DHT → Cache → Hub</span><br/>
-              🏠 <strong>Direct TLS (Local):</strong> <code>dpc://192.168.1.100:8888?node_id=...</code><br/>
-              🌍 <strong>Direct TLS (External):</strong> <code>dpc://203.0.113.5:8888?node_id=...</code>
-            </p>
-          </div>
+          {#if showConnectionMethods}
+            <div class="connection-help">
+              <p class="small"><strong>Connection Methods:</strong></p>
+              <p class="small">
+                🔍 <strong>Auto-Discovery (DHT):</strong> <code>dpc-node-abc123...</code><br/>
+                <span class="small-detail">Tries: DHT → Cache → Hub</span><br/>
+                🏠 <strong>Direct TLS (Local):</strong> <code>dpc://192.168.1.100:8888?node_id=...</code><br/>
+                🌍 <strong>Direct TLS (External):</strong> <code>dpc://203.0.113.5:8888?node_id=...</code>
+              </p>
+            </div>
+          {/if}
         </div>
 
         <!-- Chat List -->
@@ -1522,7 +1534,34 @@
     border-bottom: 1px solid #eee;
     padding-bottom: 0.5rem;
   }
-  
+
+  .connect-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 0.75rem;
+  }
+
+  .connect-header h3 {
+    margin: 0;
+    border: none;
+    padding: 0;
+  }
+
+  .info-button {
+    background: none;
+    border: none;
+    font-size: 1.2rem;
+    cursor: pointer;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    transition: background-color 0.2s;
+  }
+
+  .info-button:hover {
+    background-color: #f0f0f0;
+  }
+
   .node-id {
     font-family: monospace;
     font-size: 0.85rem;
