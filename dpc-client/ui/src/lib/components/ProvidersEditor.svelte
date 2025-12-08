@@ -310,7 +310,7 @@
   <div class="modal-overlay" on:click={close} role="presentation">
     <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="modal-title" tabindex="-1">
       <div class="modal-header">
-        <h2 id="modal-title">🤖 AI Providers Configuration</h2>
+        <h2 id="modal-title">AI Providers Configuration</h2>
         <div class="header-actions">
           {#if !editMode}
             <button class="btn btn-edit" on:click={startEditing}>Edit</button>

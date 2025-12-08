@@ -1110,7 +1110,6 @@
 
         {#if $aiChats.has(activeChatId) && currentTokenUsage.limit > 0}
           <div class="token-counter">
-            <span class="token-label">Context:</span>
             <span class="token-value">
               {currentTokenUsage.used.toLocaleString()} / {currentTokenUsage.limit.toLocaleString()} tokens
             </span>
@@ -1996,11 +1995,6 @@
     background: #f8f9fa;
     border-radius: 6px;
     border: 1px solid #e0e0e0;
-  }
-
-  .token-label {
-    color: #666;
-    font-weight: 500;
   }
 
   .token-value {
