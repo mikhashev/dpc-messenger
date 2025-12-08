@@ -529,7 +529,7 @@ class CoreService:
             logger.info("Stopping Hole Punch Manager...")
             await self.hole_punch_manager.stop()
 
-        if hasattr(self, 'gossip_manager'):
+        if hasattr(self, 'gossip_manager') and self.gossip_manager:
             logger.info("Stopping Gossip Manager...")
             await self.gossip_manager.stop()
 
