@@ -54,7 +54,7 @@
 
   // Store AI chat metadata (chatId -> {name: string, provider: string})
   const aiChats = writable<Map<string, {name: string, provider: string}>>(
-    new Map([['local_ai', {name: 'Local AI Assistant', provider: ''}]])
+    new Map([['local_ai', {name: 'Local AI Chat', provider: ''}]])
   );
 
   // Track which chat each AI command belongs to (commandId -> chatId)
@@ -915,19 +915,19 @@
         <!-- Personal Context Button (Knowledge Architecture) -->
         <div class="context-section">
           <button class="btn-context" on:click={loadPersonalContext}>
-            📚 View Personal Context
+            View Personal Context
           </button>
 
           <button class="btn-context" on:click={openInstructionsEditor}>
-            ⚙️ AI Instructions
+            AI Instructions
           </button>
 
           <button class="btn-context" on:click={openFirewallEditor}>
-            🛡️ Firewall Rules
+            Firewall and Privacy Rules
           </button>
 
           <button class="btn-context" on:click={openProvidersEditor}>
-            🤖 AI Providers
+            AI Providers
           </button>
 
           <!-- Auto Knowledge Detection Toggle -->
@@ -1077,9 +1077,9 @@
         <div class="chat-title-section">
           <h2>
             {#if $aiChats.has(activeChatId)}
-              🤖 {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
+              {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
             {:else}
-              👤 Chat with {getPeerDisplayName(activeChatId)}
+              Chat with {getPeerDisplayName(activeChatId)}
             {/if}
           </h2>
 
@@ -1104,9 +1104,6 @@
                   </option>
                 {/each}
               </select>
-              {#if $availableProviders.providers.length === 1}
-                <span class="provider-hint">(Configure more in ~/.dpc/providers.toml)</span>
-              {/if}
             </div>
           {/if}
         </div>
@@ -1125,10 +1122,10 @@
 
         <div class="chat-actions">
           <button class="btn-new-chat" on:click={() => handleNewChat(activeChatId)}>
-            🔄 New Chat
+            New Session
           </button>
           <button class="btn-end-session" on:click={() => handleEndSession(activeChatId)}>
-            📚 End Session & Save Knowledge
+            End Session & Save Knowledge
           </button>
           {#if $aiChats.has(activeChatId)}
             <button
@@ -1137,7 +1134,7 @@
               on:click={() => enableMarkdown = !enableMarkdown}
               title={enableMarkdown ? 'Disable markdown rendering' : 'Enable markdown rendering'}
             >
-              {enableMarkdown ? '📝 Markdown' : '📄 Plain Text'}
+              {enableMarkdown ? 'Markdown' : 'Text'}
             </button>
           {/if}
         </div>
@@ -1185,7 +1182,7 @@
                 bind:checked={includePersonalContext}
               />
               <span>
-                📚 Include Personal Context (profile, instructions, device info)
+                Include Personal Context (profile, instructions, device info)
                 {#if localContextUpdated}
                   <span class="status-badge updated">Updated</span>
                 {/if}
@@ -1200,7 +1197,7 @@
           {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
             <div class="peer-context-selector">
               <div class="peer-context-header">
-                <span class="peer-context-label">🧠 Include Peer Context:</span>
+                <span class="peer-context-label">Include Peer Context:</span>
                 <span class="peer-context-hint">
                   ({selectedPeerContexts.size} selected)
                 </span>
@@ -1495,7 +1492,7 @@
     flex-direction: column;
     gap: 1rem;
     overflow-y: auto;
-    max-height: 100vh;
+    max-height: calc(100vh - 8rem);
     padding-right: 0.5rem;
   }
 
