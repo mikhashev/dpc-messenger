@@ -129,6 +129,15 @@ class P2PManager:
 
         return sorted(list(external_ips))
 
+    def get_connected_peers(self) -> list:
+        """
+        Get list of currently connected peer connection objects.
+
+        Returns:
+            List of PeerConnection/WebRTCPeerConnection objects
+        """
+        return list(self.peers.values())
+
     # --- Direct TLS Connection Methods (existing code) ---
 
     async def start_server(self, host: str = "0.0.0.0", port: int = 8888):

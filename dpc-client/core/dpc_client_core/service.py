@@ -420,23 +420,28 @@ class CoreService:
             hole_punch_task.set_name("hole_punch_manager")
             self._background_tasks.add(hole_punch_task)
 
-        # Start Relay Manager
-        logger.info("Starting Relay Manager...")
-        # Relay manager doesn't have a start() method, it's on-demand
-        if self.relay_manager.volunteer:
-            # Announce relay availability after DHT bootstrap
-            await asyncio.sleep(1.0)  # Wait for DHT bootstrap
-            relay_announce_task = asyncio.create_task(self.relay_manager.announce_relay_availability())
-            relay_announce_task.set_name("relay_announce")
-            self._background_tasks.add(relay_announce_task)
+        # Start Relay Manager (if available)
+        if self.relay_manager:
+            logger.info("Starting Relay Manager...")
+            # Relay manager doesn't have a start() method, it's on-demand
+            if self.relay_manager.volunteer:
+                # Announce relay availability after DHT bootstrap
+                await asyncio.sleep(1.0)  # Wait for DHT bootstrap
+                relay_announce_task = asyncio.create_task(self.relay_manager.announce_relay_availability())
+                relay_announce_task.set_name("relay_announce")
+                self._background_tasks.add(relay_announce_task)
 
-        # Start Gossip Manager
-        logger.info("Starting Gossip Manager...")
-        gossip_task = asyncio.create_task(self.gossip_manager.start())
-        gossip_task.set_name("gossip_manager")
-        self._background_tasks.add(gossip_task)
+        # Start Gossip Manager (if available)
+        if self.gossip_manager:
+            logger.info("Starting Gossip Manager...")
+            gossip_task = asyncio.create_task(self.gossip_manager.start())
+            gossip_task.set_name("gossip_manager")
+            self._background_tasks.add(gossip_task)
 
-        logger.info("Phase 6 managers started (DHT, Hole Punch, Relay, Gossip)")
+        if dht_manager:
+            logger.info("Phase 6 managers started (DHT, Hole Punch, Relay, Gossip)")
+        else:
+            logger.warning("Phase 6 managers unavailable (DHT not initialized)")
 
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
