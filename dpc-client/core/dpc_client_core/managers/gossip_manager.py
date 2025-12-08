@@ -321,7 +321,7 @@ class GossipManager:
         # Send to selected peers
         for peer in forward_to:
             try:
-                await peer.send_message({
+                await peer.send({
                     "command": "GOSSIP_MESSAGE",
                     "payload": msg.to_dict()
                 })
@@ -384,7 +384,7 @@ class GossipManager:
                 logger.debug("Anti-entropy sync with %s", peer.node_id[:20])
 
                 # Send our vector clock
-                await peer.send_message({
+                await peer.send({
                     "command": "GOSSIP_SYNC",
                     "payload": {
                         "vector_clock": self.vector_clock.to_dict(),
