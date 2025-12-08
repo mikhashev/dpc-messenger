@@ -156,6 +156,11 @@
     const groupName = prompt('Enter group name:');
     if (groupName) {
       if (!editedRules.node_groups) editedRules.node_groups = {};
+      // Check for duplicates
+      if (editedRules.node_groups[groupName]) {
+        alert('This group already exists');
+        return;
+      }
       editedRules.node_groups[groupName] = [];
     }
   }
@@ -195,6 +200,11 @@
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
     if (nodeId && nodeId.startsWith('dpc-node-')) {
       if (!editedRules.nodes) editedRules.nodes = {};
+      // Check for duplicates
+      if (editedRules.nodes[nodeId]) {
+        alert('This node already has permission rules');
+        return;
+      }
       editedRules.nodes[nodeId] = {};
     } else if (nodeId) {
       alert('Node ID must start with "dpc-node-"');
@@ -210,6 +220,11 @@
     if (!editedRules || !editedRules.nodes) return;
     const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
     if (resourcePath) {
+      // Check for duplicates
+      if (editedRules.nodes[nodeId][resourcePath]) {
+        alert('This rule already exists for this node');
+        return;
+      }
       editedRules.nodes[nodeId][resourcePath] = 'allow';
     }
   }
@@ -225,6 +240,11 @@
     const groupName = prompt('Enter group name:');
     if (groupName) {
       if (!editedRules.groups) editedRules.groups = {};
+      // Check for duplicates
+      if (editedRules.groups[groupName]) {
+        alert('This group already has permission rules');
+        return;
+      }
       editedRules.groups[groupName] = {};
     }
   }
@@ -238,6 +258,11 @@
     if (!editedRules || !editedRules.groups) return;
     const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
     if (resourcePath) {
+      // Check for duplicates
+      if (editedRules.groups[groupName][resourcePath]) {
+        alert('This rule already exists for this group');
+        return;
+      }
       editedRules.groups[groupName][resourcePath] = 'allow';
     }
   }
@@ -427,7 +452,11 @@
                         bind:value={allowNodesText}
                         on:blur={() => {
                           if (editedRules?.compute) {
-                            editedRules.compute.allow_nodes = allowNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            // Remove duplicates using Set
+                            const nodes = allowNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.compute.allow_nodes = [...new Set(nodes)];
+                            // Update textarea to show deduplicated list
+                            allowNodesText = editedRules.compute.allow_nodes.join('\n');
                           }
                         }}
                       ></textarea>
@@ -452,7 +481,11 @@
                         bind:value={allowGroupsText}
                         on:blur={() => {
                           if (editedRules?.compute) {
-                            editedRules.compute.allow_groups = allowGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            // Remove duplicates using Set
+                            const groups = allowGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.compute.allow_groups = [...new Set(groups)];
+                            // Update textarea to show deduplicated list
+                            allowGroupsText = editedRules.compute.allow_groups.join('\n');
                           }
                         }}
                       ></textarea>
@@ -478,7 +511,11 @@
                         bind:value={allowedModelsText}
                         on:blur={() => {
                           if (editedRules?.compute) {
-                            editedRules.compute.allowed_models = allowedModelsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            // Remove duplicates using Set
+                            const models = allowedModelsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.compute.allowed_models = [...new Set(models)];
+                            // Update textarea to show deduplicated list
+                            allowedModelsText = editedRules.compute.allowed_models.join('\n');
                           }
                         }}
                       ></textarea>
