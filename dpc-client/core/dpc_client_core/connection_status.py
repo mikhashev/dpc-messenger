@@ -40,6 +40,12 @@ class ConnectionStatus:
     auth_method: Optional[str] = None  # "oauth", "cached"
     node_id: Optional[str] = None
 
+    # Phase 6: Decentralized connectivity (v0.10.0+)
+    dht_available: bool = False          # DHT peer discovery
+    hole_punch_available: bool = False   # UDP hole punching
+    relay_available: bool = False        # Volunteer relay nodes
+    gossip_available: bool = False       # Store-and-forward
+
     # Callbacks for status changes
     _on_status_change: Optional[Callable] = None
 
@@ -100,6 +106,30 @@ class ConnectionStatus:
         self.auth_method = method
         self.node_id = node_id
 
+    def update_dht_status(self, available: bool):
+        """Update DHT peer discovery availability (Phase 6)."""
+        old_mode = self.get_operation_mode()
+        self.dht_available = available
+        self._notify_if_changed(old_mode)
+
+    def update_hole_punch_status(self, available: bool):
+        """Update UDP hole punching availability (Phase 6)."""
+        old_mode = self.get_operation_mode()
+        self.hole_punch_available = available
+        self._notify_if_changed(old_mode)
+
+    def update_relay_status(self, available: bool):
+        """Update volunteer relay availability (Phase 6)."""
+        old_mode = self.get_operation_mode()
+        self.relay_available = available
+        self._notify_if_changed(old_mode)
+
+    def update_gossip_status(self, available: bool):
+        """Update gossip routing availability (Phase 6)."""
+        old_mode = self.get_operation_mode()
+        self.gossip_available = available
+        self._notify_if_changed(old_mode)
+
     def set_on_status_change(self, callback: Callable):
         """Set callback for status changes."""
         self._on_status_change = callback
@@ -111,13 +141,14 @@ class ConnectionStatus:
             self._on_status_change(old_mode, new_mode)
 
     def get_available_features(self) -> dict:
-        """Get dictionary of available features."""
+        """Get dictionary of available Phase 6 connection features (6-tier fallback)."""
         return {
-            "hub_discovery": self.hub_connected,
-            "webrtc_connections": self.webrtc_available,
-            "direct_tls_connections": self.direct_tls_available,
-            "peer_discovery": self.hub_connected,
-            "authentication": self.authenticated
+            "ipv6_direct": self.direct_tls_available,  # Priority 1
+            "ipv4_direct": self.direct_tls_available,  # Priority 2
+            "hub_webrtc": self.webrtc_available,       # Priority 3
+            "dht_hole_punch": self.hole_punch_available,  # Priority 4
+            "volunteer_relay": self.relay_available,   # Priority 5
+            "gossip_routing": self.gossip_available    # Priority 6
         }
 
     def get_status_message(self) -> str:

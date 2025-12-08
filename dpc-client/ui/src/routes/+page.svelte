@@ -782,7 +782,7 @@
           <!-- Direct TLS Connection URIs (Local Network) -->
           {#if $nodeStatus.dpc_uris && $nodeStatus.dpc_uris.length > 0}
             <div class="dpc-uris-section">
-              <details class="uri-details" open>
+              <details class="uri-details">
                 <summary class="uri-summary">
                   <span class="uri-icon">🔗</span>
                   <span class="uri-title">Local Network ({$nodeStatus.dpc_uris.length})</span>
@@ -818,7 +818,7 @@
           <!-- External URIs (From STUN Servers) -->
           {#if $nodeStatus.external_uris && $nodeStatus.external_uris.length > 0}
             <div class="dpc-uris-section">
-              <details class="uri-details" open>
+              <details class="uri-details">
                 <summary class="uri-summary">
                   <span class="uri-icon">🌐</span>
                   <span class="uri-title">External (Internet) ({$nodeStatus.external_uris.length})</span>
@@ -1010,7 +1010,7 @@
                   on:click={() => activeChatId = chatId}
                   title={chatInfo.provider ? `Provider: ${chatInfo.provider}` : 'Default AI Assistant'}
                 >
-                  🤖 {chatInfo.name}
+                  {chatInfo.name}
                 </button>
                 {#if chatId !== 'local_ai'}
                   <button
@@ -1838,28 +1838,6 @@
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   }
 
-  /* Connection Help Styles */
-  .connection-help {
-    margin-top: 0.75rem;
-    padding: 0.75rem;
-    background: #f8f9fa;
-    border-radius: 6px;
-    border: 1px solid #dee2e6;
-  }
-
-  .connection-help code {
-    background: #e9ecef;
-    padding: 0.1rem 0.3rem;
-    border-radius: 3px;
-    font-family: 'Courier New', monospace;
-    font-size: 0.85rem;
-  }
-
-  .connection-help .small {
-    margin: 0.25rem 0;
-    line-height: 1.6;
-  }
-
   .chat-list ul {
     list-style: none;
     padding: 0;
@@ -2007,13 +1985,6 @@
     background: #f5f5f5;
     cursor: not-allowed;
     opacity: 0.7;
-  }
-
-  .provider-hint {
-    font-size: 0.75rem;
-    color: #888;
-    font-style: italic;
-    margin-left: 0.5rem;
   }
 
   .token-counter {

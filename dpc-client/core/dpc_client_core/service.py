@@ -363,6 +363,7 @@ class CoreService:
         dht_manager = self.p2p_manager.dht_manager
         if dht_manager:
             logger.info("DHT Manager available from P2PManager")
+            self.connection_status.update_dht_status(True)
 
             # Hole Punch Manager (Phase 6 - UDP NAT traversal)
             if self.settings.get_enable_hole_punching():
@@ -374,8 +375,10 @@ class CoreService:
                     punch_timeout=self.settings.get_hole_punch_timeout()
                 )
                 logger.info("Hole Punch Manager initialized on port %d", hole_punch_port)
+                self.connection_status.update_hole_punch_status(True)
             else:
                 logger.info("Hole Punch Manager disabled (requires DTLS encryption in v0.11.0+)")
+                self.connection_status.update_hole_punch_status(False)
 
             # Relay Manager (Phase 6 - Volunteer relay nodes)
             relay_volunteer = self.settings.get_relay_volunteer()
@@ -388,6 +391,7 @@ class CoreService:
                 region="global"
             )
             logger.info("Relay Manager initialized (volunteer=%s)", relay_volunteer)
+            self.connection_status.update_relay_status(True)
 
             # Gossip Manager (Phase 6 - Store-and-forward messaging)
             self.gossip_manager = GossipManager(
@@ -399,6 +403,7 @@ class CoreService:
                 sync_interval=self.settings.get_gossip_sync_interval()
             )
             logger.info("Gossip Manager initialized")
+            self.connection_status.update_gossip_status(True)
 
             # Connection Orchestrator (Phase 6 - 6-tier connection fallback)
             self.connection_orchestrator = ConnectionOrchestrator(
@@ -412,6 +417,10 @@ class CoreService:
             logger.info("Connection Orchestrator initialized with 6-tier fallback")
         else:
             logger.warning("DHT Manager not available - Phase 6 features disabled")
+            self.connection_status.update_dht_status(False)
+            self.connection_status.update_hole_punch_status(False)
+            self.connection_status.update_relay_status(False)
+            self.connection_status.update_gossip_status(False)
 
         # Start Hole Punch Manager (if enabled)
         if self.hole_punch_manager:

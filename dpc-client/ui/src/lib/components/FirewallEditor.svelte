@@ -345,7 +345,7 @@
                     <div class="rule-item">
                       <strong>{path}:</strong>
                       {#if editMode && editedRules && editedRules.hub}
-                        <select bind:value={editedRules.hub[path]}>
+                        <select id="hub-rule-{path}" name="hub-rule-{path}" bind:value={editedRules.hub[path]}>
                           <option value="allow">allow</option>
                           <option value="deny">deny</option>
                         </select>
@@ -433,9 +433,9 @@
                 <div class="setting-item">
                   <label>
                     {#if editMode && editedRules && editedRules.compute}
-                      <input type="checkbox" bind:checked={editedRules.compute.enabled} />
+                      <input id="compute-enabled" name="compute-enabled" type="checkbox" bind:checked={editedRules.compute.enabled} />
                     {:else}
-                      <input type="checkbox" checked={displayRules.compute.enabled} disabled />
+                      <input id="compute-enabled-display" name="compute-enabled-display" type="checkbox" checked={displayRules.compute.enabled} disabled />
                     {/if}
                     <strong>Enable Compute Sharing</strong>
                   </label>
@@ -446,6 +446,8 @@
                     <h4>Allowed Nodes</h4>
                     {#if editMode && editedRules}
                       <textarea
+                        id="compute-allow-nodes"
+                        name="compute-allow-nodes"
                         class="edit-textarea"
                         rows="3"
                         placeholder="Enter node IDs (one per line)"
@@ -475,6 +477,8 @@
                     <h4>Allowed Groups</h4>
                     {#if editMode && editedRules}
                       <textarea
+                        id="compute-allow-groups"
+                        name="compute-allow-groups"
                         class="edit-textarea"
                         rows="2"
                         placeholder="Enter group names (one per line)"
@@ -505,6 +509,8 @@
                     <p class="help-text-small">Leave empty to allow all models.</p>
                     {#if editMode && editedRules}
                       <textarea
+                        id="compute-allowed-models"
+                        name="compute-allowed-models"
                         class="edit-textarea"
                         rows="3"
                         placeholder="Enter model names (one per line)"
@@ -567,7 +573,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.nodes && editedRules.nodes[nodeId]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select bind:value={editedRules.nodes[nodeId][path]}>
+                                <select id="node-rule-{nodeId}-{path}" name="node-rule-{nodeId}-{path}" bind:value={editedRules.nodes[nodeId][path]}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
@@ -625,7 +631,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.groups && editedRules.groups[groupName]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select bind:value={editedRules.groups[groupName][path]}>
+                                <select id="group-rule-{groupName}-{path}" name="group-rule-{groupName}-{path}" bind:value={editedRules.groups[groupName][path]}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
