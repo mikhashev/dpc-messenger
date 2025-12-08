@@ -30,7 +30,12 @@ from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
 from .p2p_coordinator import P2PCoordinator
+from .coordinators.connection_orchestrator import ConnectionOrchestrator
 from .message_router import MessageRouter
+from .dht.manager import DHTManager, DHTConfig
+from .managers.hole_punch_manager import HolePunchManager
+from .managers.relay_manager import RelayManager
+from .managers.gossip_manager import GossipManager
 from .message_handlers.hello_handler import HelloHandler
 from .message_handlers.text_handler import SendTextHandler
 from .message_handlers.context_handler import (
@@ -157,6 +162,66 @@ class CoreService:
 
         # Register callback to broadcast voting results to participants
         self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
+
+        # DHT Manager (Phase 6 - Decentralized peer discovery)
+        dht_port = self.settings.get_dht_port()
+        dht_config = DHTConfig()  # Use default configuration
+        self.dht_manager = DHTManager(
+            node_id=self.p2p_manager.node_id,
+            ip="0.0.0.0",  # Will be updated after STUN discovery
+            port=dht_port,
+            config=dht_config
+        )
+        logger.info("DHT Manager initialized on port %d", dht_port)
+
+        # Hole Punch Manager (Phase 6 - UDP NAT traversal)
+        if self.settings.get_enable_hole_punching():
+            hole_punch_port = self.settings.get_hole_punch_port()
+            self.hole_punch_manager = HolePunchManager(
+                dht_manager=self.dht_manager,
+                punch_port=hole_punch_port,
+                discovery_peers=3,
+                punch_timeout=self.settings.get_hole_punch_timeout()
+            )
+            logger.info("Hole Punch Manager initialized on port %d", hole_punch_port)
+        else:
+            self.hole_punch_manager = None
+            logger.info("Hole Punch Manager disabled (requires DTLS encryption in v0.11.0+)")
+
+        # Relay Manager (Phase 6 - Volunteer relay nodes)
+        relay_volunteer = self.settings.get_relay_volunteer()
+        self.relay_manager = RelayManager(
+            dht_manager=self.dht_manager,
+            p2p_manager=self.p2p_manager,
+            volunteer=relay_volunteer,
+            max_peers=self.settings.get_relay_max_peers(),
+            bandwidth_limit_mbps=self.settings.get_relay_bandwidth_limit(),
+            region="global"
+        )
+        logger.info("Relay Manager initialized (volunteer=%s)", relay_volunteer)
+
+        # Gossip Manager (Phase 6 - Store-and-forward messaging)
+        self.gossip_manager = GossipManager(
+            p2p_manager=self.p2p_manager,
+            node_id=self.p2p_manager.node_id,
+            fanout=self.settings.get_gossip_fanout(),
+            max_hops=self.settings.get_gossip_max_hops(),
+            ttl_seconds=self.settings.get_gossip_ttl(),
+            sync_interval=self.settings.get_gossip_sync_interval()
+        )
+        logger.info("Gossip Manager initialized")
+
+        # Connection Orchestrator (Phase 6 - 6-tier connection fallback)
+        self.connection_orchestrator = ConnectionOrchestrator(
+            p2p_manager=self.p2p_manager,
+            dht_manager=self.dht_manager,
+            hub_client=self.hub_client,
+            hole_punch_manager=self.hole_punch_manager,
+            relay_manager=self.relay_manager,
+            gossip_manager=self.gossip_manager,
+            settings=self.settings
+        )
+        logger.info("Connection Orchestrator initialized with 6-tier fallback")
 
         # Inference orchestrator (coordinates local and remote AI inference)
         self.inference_orchestrator = InferenceOrchestrator(self)
@@ -348,6 +413,46 @@ class CoreService:
         self.connection_status.update_direct_tls_status(available=True, port=p2p_port)
         logger.info(f"Direct TLS server started on port {p2p_port}")
 
+        # Start DHT Manager (Phase 6)
+        logger.info("Starting DHT Manager...")
+        dht_task = asyncio.create_task(self.dht_manager.start())
+        dht_task.set_name("dht_manager")
+        self._background_tasks.add(dht_task)
+        await asyncio.sleep(0.2)  # Allow DHT to start
+
+        # Bootstrap DHT from seed nodes
+        seed_nodes = self.settings.get_dht_seed_nodes()
+        if seed_nodes:
+            logger.info("Bootstrapping DHT from %d seed nodes", len(seed_nodes))
+            bootstrap_task = asyncio.create_task(self.dht_manager.bootstrap(seed_nodes))
+            bootstrap_task.set_name("dht_bootstrap")
+            self._background_tasks.add(bootstrap_task)
+
+        # Start Hole Punch Manager (if enabled)
+        if self.hole_punch_manager:
+            logger.info("Starting Hole Punch Manager...")
+            hole_punch_task = asyncio.create_task(self.hole_punch_manager.start())
+            hole_punch_task.set_name("hole_punch_manager")
+            self._background_tasks.add(hole_punch_task)
+
+        # Start Relay Manager
+        logger.info("Starting Relay Manager...")
+        # Relay manager doesn't have a start() method, it's on-demand
+        if self.relay_manager.volunteer:
+            # Announce relay availability after DHT bootstrap
+            await asyncio.sleep(1.0)  # Wait for DHT bootstrap
+            relay_announce_task = asyncio.create_task(self.relay_manager.announce_relay_availability())
+            relay_announce_task.set_name("relay_announce")
+            self._background_tasks.add(relay_announce_task)
+
+        # Start Gossip Manager
+        logger.info("Starting Gossip Manager...")
+        gossip_task = asyncio.create_task(self.gossip_manager.start())
+        gossip_task.set_name("gossip_manager")
+        self._background_tasks.add(gossip_task)
+
+        logger.info("Phase 6 managers started (DHT, Hole Punch, Relay, Gossip)")
+
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
 
@@ -424,6 +529,21 @@ class CoreService:
         """Performs a clean shutdown of all components."""
         self._is_running = False
         logger.info("Shutting down components")
+
+        # Shutdown Phase 6 managers
+        if hasattr(self, 'dht_manager'):
+            logger.info("Stopping DHT Manager...")
+            await self.dht_manager.stop()
+
+        if hasattr(self, 'hole_punch_manager') and self.hole_punch_manager:
+            logger.info("Stopping Hole Punch Manager...")
+            await self.hole_punch_manager.stop()
+
+        if hasattr(self, 'gossip_manager'):
+            logger.info("Stopping Gossip Manager...")
+            await self.gossip_manager.stop()
+
+        # Shutdown core components
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()
         await self.hub_client.close()

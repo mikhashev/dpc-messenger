@@ -110,7 +110,7 @@ D-PC Messenger follows a three-phase development roadmap:
 | # | Feature | Complexity | Status | Description |
 |---|---------|------------|--------|-------------|
 | 5 | DHT-Based Peer Discovery | High | ✅ **COMPLETE** (v0.9.5) | Kademlia DHT, decentralized signaling, eliminates Hub dependency |
-| 6 | Fallback Logic & Hybrid Mode | High | ✅ **COMPLETE** (v0.10.0) | 6-tier connection hierarchy (IPv6, IPv4, WebRTC, hole punch, relay, gossip), Hub-optional architecture |
+| 6 | Fallback Logic & Hybrid Mode | High | ✅ **COMPLETE** (v0.10.0) | 6-tier connection hierarchy fully integrated (IPv6, IPv4, WebRTC, hole punch, relay, gossip), ConnectionOrchestrator operational, Hub-optional architecture |
 | 7 | Pluggable Transport Framework | Medium | ⏭️ Deferred (replaced by #6) | Auto-fallback architecture, transport abstraction |
 | 8 | WebSocket-over-TLS Transport | Medium | ⏭️ Deferred | HTTPS transport, fallback when WebRTC unavailable |
 

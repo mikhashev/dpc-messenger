@@ -11,6 +11,31 @@ D-PC Messenger implements an intelligent 6-tier connection fallback hierarchy fo
 
 ---
 
+## Integration Status (v0.10.0)
+
+The ConnectionOrchestrator is **fully integrated** into CoreService as of v0.10.0. All P2P connection attempts automatically use the 6-tier fallback hierarchy.
+
+**How it works:**
+1. User clicks "Connect" or sends message to peer
+2. Service calls `connection_orchestrator.connect(node_id)`
+3. Orchestrator tries strategies in priority order (IPv6 → IPv4 → WebRTC → etc.)
+4. First successful strategy wins, connection established
+5. Statistics tracked for monitoring (see `get_connection_stats` command)
+
+**Developer Usage:**
+```python
+# CoreService automatically uses orchestrator
+peer_connection = await self.connection_orchestrator.connect(node_id)
+
+# Manual orchestrator usage (advanced)
+from dpc_client_core.coordinators.connection_orchestrator import ConnectionOrchestrator
+orchestrator = ConnectionOrchestrator(p2p_manager, dht_manager, hub_client, ...)
+connection = await orchestrator.connect("dpc-node-abc123")
+print(f"Connected via {connection.strategy_used}")
+```
+
+---
+
 ## The 6-Tier Hierarchy
 
 ```

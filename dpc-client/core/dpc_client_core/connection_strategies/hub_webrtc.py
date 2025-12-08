@@ -48,7 +48,7 @@ class HubWebRTCStrategy(ConnectionStrategy):
 
     name = "hub_webrtc"
     priority = 3
-    timeout = 60.0  # 60 seconds for WebRTC negotiation (ICE gathering + TURN fallback)
+    timeout = 30.0  # Default 30s, configurable via connection.webrtc_timeout
 
     def is_applicable(self, endpoints: "PeerEndpoint") -> bool:
         """

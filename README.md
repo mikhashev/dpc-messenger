@@ -70,7 +70,7 @@ If this vision resonates with you, let's connect:
 - **Rich Markdown Rendering** - AI responses display with GitHub-style formatting, intelligent caching (50-200x faster)
 - **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - **Local-First** - Your data stays on your device
-- **Universal Connectivity** - 6-tier connection fallback for near-universal P2P connectivity (IPv6, IPv4, WebRTC, UDP hole punching, volunteer relays, gossip)
+- **Universal Connectivity** - Intelligent 6-tier connection orchestrator ensures connectivity in nearly any network condition (IPv6, IPv4, WebRTC, UDP hole punching, volunteer relays, gossip)
 - **Hub-Optional Architecture** - Works seamlessly offline with direct connections, DHT-based hole punching, and volunteer relay nodes
 - **Resilient Messaging** - Gossip store-and-forward protocol ensures message delivery even during infrastructure outages
 - **Cryptographic Identity** - Self-sovereign node IDs based on public keys

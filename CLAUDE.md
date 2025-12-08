@@ -191,7 +191,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
    - NAT traversal via STUN/TURN (existing infrastructure)
    - Hub provides signaling only (no message routing)
    - Uses aiortc library
-   - Timeout: 30s
+   - Timeout: 30s (configurable via connection.webrtc_timeout)
    - Location: `connection_strategies/hub_webrtc.py`, `webrtc_peer.py`
 
 **Priority 4: UDP Hole Punching** (60-70% NAT, Hub-independent)
@@ -238,12 +238,39 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
   - Component initialization
   - Configuration loading
   - WebSocket API server coordination
+  - MessageRouter integration for command dispatch
+
+**Message Routing System (v0.8.0+):**
+- `message_router.py` - Command dispatcher for P2P messages
+  - Routes incoming messages to appropriate handlers
+  - Handler registry pattern for extensibility
+  - Supports handler registration/unregistration at runtime
+- `message_handlers/hello_handler.py` - HELLO command (initial handshake)
+- `message_handlers/text_handler.py` - SEND_TEXT command (chat messages)
+- `message_handlers/context_handler.py` - Context request/response handlers
+  - RequestContextHandler - GET_CONTEXT requests
+  - ContextResponseHandler - CONTEXT_RESPONSE handling
+  - RequestDeviceContextHandler - GET_DEVICE_CONTEXT requests
+  - DeviceContextResponseHandler - DEVICE_CONTEXT_RESPONSE handling
+- `message_handlers/inference_handler.py` - AI inference handlers
+  - RemoteInferenceRequestHandler - REMOTE_INFERENCE_REQUEST
+  - RemoteInferenceResponseHandler - REMOTE_INFERENCE_RESPONSE
+- `message_handlers/provider_handler.py` - Provider discovery handlers
+  - GetProvidersHandler - GET_PROVIDERS requests
+  - ProvidersResponseHandler - PROVIDERS_RESPONSE handling
+- `message_handlers/knowledge_handler.py` - Knowledge commit handlers
+  - ContextUpdatedHandler - CONTEXT_UPDATED broadcast
+  - ProposeKnowledgeCommitHandler - PROPOSE_KNOWLEDGE_COMMIT
+  - VoteKnowledgeCommitHandler - VOTE_KNOWLEDGE_COMMIT
+  - KnowledgeCommitResultHandler - KNOWLEDGE_COMMIT_RESULT
 
 **Coordinators (v0.10.0+):**
 - `connection_orchestrator.py` - 6-tier connection fallback coordinator (v0.10.0)
+  - **Integration Status:** Fully implemented and integrated in CoreService
   - Tries IPv6, IPv4, WebRTC, hole punch, relay, gossip in priority order
   - Per-strategy timeout configuration
   - Connection statistics tracking (success rate, strategy usage)
+  - Dynamic strategy enable/disable
 - `inference_orchestrator.py` - AI inference coordination (local/remote)
   - Executes queries on local LLM or remote peer
   - Assembles prompts with contexts and history
@@ -256,6 +283,18 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
   - Direct TLS connections (via dpc:// URIs)
   - WebRTC connections (via Hub signaling)
   - Peer messaging and broadcasting
+
+**Knowledge & Consensus System (v0.9.0+):**
+- `consensus_manager.py` - Multi-party knowledge voting
+  - Devil's advocate mechanism (required dissenter for 3+ participants)
+  - Voting session management with configurable thresholds
+  - Timeout handling and vote aggregation
+  - **Known Issue:** No locking during proposal edits (documented in code)
+- `conversation_monitor.py` - Background knowledge detection
+  - Real-time conversation analysis
+  - AI-powered knowledge extraction
+  - Configurable detection threshold
+  - Supports local and remote inference
 
 **Managers:**
 - `p2p_manager.py` - Low-level P2P connection manager (TLS + WebRTC)
@@ -278,6 +317,12 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `local_api.py` - WebSocket API for UI (localhost:9999)
 - `settings.py` - Configuration management
 - `device_context_collector.py` - Device/system info collector (generates device_context.json)
+
+**Caching Systems:**
+- `context_cache.py` - In-memory personal/device context cache
+- `peer_cache.py` - Known peers cache (persisted to known_peers.json)
+- `token_cache.py` - OAuth token cache for offline mode
+- `connection_status.py` - Connection state tracking with operation mode (online/offline/degraded)
 
 **Client Frontend (`dpc-client/ui`):**
 - Built with SvelteKit 5.0 + Tauri 2.x
