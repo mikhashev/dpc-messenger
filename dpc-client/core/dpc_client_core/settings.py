@@ -559,6 +559,15 @@ class Settings:
         """Get default gossip message priority."""
         return self.get('gossip', 'priority', 'normal')
 
+    # Convenience methods for connection strategies
+    def get_enable_hole_punching(self) -> bool:
+        """Get whether UDP hole punching is enabled."""
+        return self.get_connection_strategy_enabled('hole_punching')
+
+    def get_hole_punch_timeout(self) -> float:
+        """Get hole punch connection timeout."""
+        return self.get_connection_timeout('hole_punch')
+
     def reload(self):
         """Reload configuration from file."""
         if self.config_file.exists():
