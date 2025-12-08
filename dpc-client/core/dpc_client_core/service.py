@@ -32,7 +32,6 @@ from .context_coordinator import ContextCoordinator
 from .p2p_coordinator import P2PCoordinator
 from .coordinators.connection_orchestrator import ConnectionOrchestrator
 from .message_router import MessageRouter
-from .dht.manager import DHTManager, DHTConfig
 from .managers.hole_punch_manager import HolePunchManager
 from .managers.relay_manager import RelayManager
 from .managers.gossip_manager import GossipManager
@@ -163,64 +162,11 @@ class CoreService:
         # Register callback to broadcast voting results to participants
         self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
 
-        # DHT Manager (Phase 6 - Decentralized peer discovery)
-        dht_port = self.settings.get_dht_port()
-        dht_config = DHTConfig()  # Use default configuration
-        self.dht_manager = DHTManager(
-            node_id=self.p2p_manager.node_id,
-            ip="0.0.0.0",  # Will be updated after STUN discovery
-            port=dht_port,
-            config=dht_config
-        )
-        logger.info("DHT Manager initialized on port %d", dht_port)
-
-        # Hole Punch Manager (Phase 6 - UDP NAT traversal)
-        if self.settings.get_enable_hole_punching():
-            hole_punch_port = self.settings.get_hole_punch_port()
-            self.hole_punch_manager = HolePunchManager(
-                dht_manager=self.dht_manager,
-                punch_port=hole_punch_port,
-                discovery_peers=3,
-                punch_timeout=self.settings.get_hole_punch_timeout()
-            )
-            logger.info("Hole Punch Manager initialized on port %d", hole_punch_port)
-        else:
-            self.hole_punch_manager = None
-            logger.info("Hole Punch Manager disabled (requires DTLS encryption in v0.11.0+)")
-
-        # Relay Manager (Phase 6 - Volunteer relay nodes)
-        relay_volunteer = self.settings.get_relay_volunteer()
-        self.relay_manager = RelayManager(
-            dht_manager=self.dht_manager,
-            p2p_manager=self.p2p_manager,
-            volunteer=relay_volunteer,
-            max_peers=self.settings.get_relay_max_peers(),
-            bandwidth_limit_mbps=self.settings.get_relay_bandwidth_limit(),
-            region="global"
-        )
-        logger.info("Relay Manager initialized (volunteer=%s)", relay_volunteer)
-
-        # Gossip Manager (Phase 6 - Store-and-forward messaging)
-        self.gossip_manager = GossipManager(
-            p2p_manager=self.p2p_manager,
-            node_id=self.p2p_manager.node_id,
-            fanout=self.settings.get_gossip_fanout(),
-            max_hops=self.settings.get_gossip_max_hops(),
-            ttl_seconds=self.settings.get_gossip_ttl(),
-            sync_interval=self.settings.get_gossip_sync_interval()
-        )
-        logger.info("Gossip Manager initialized")
-
-        # Connection Orchestrator (Phase 6 - 6-tier connection fallback)
-        self.connection_orchestrator = ConnectionOrchestrator(
-            p2p_manager=self.p2p_manager,
-            dht_manager=self.dht_manager,
-            hub_client=self.hub_client,
-            hole_punch_manager=self.hole_punch_manager,
-            relay_manager=self.relay_manager,
-            gossip_manager=self.gossip_manager
-        )
-        logger.info("Connection Orchestrator initialized with 6-tier fallback")
+        # Phase 6 managers will be initialized in start() after DHT is created by P2PManager
+        self.hole_punch_manager = None
+        self.relay_manager = None
+        self.gossip_manager = None
+        self.connection_orchestrator = None
 
         # Inference orchestrator (coordinates local and remote AI inference)
         self.inference_orchestrator = InferenceOrchestrator(self)
@@ -412,20 +358,60 @@ class CoreService:
         self.connection_status.update_direct_tls_status(available=True, port=p2p_port)
         logger.info(f"Direct TLS server started on port {p2p_port}")
 
-        # Start DHT Manager (Phase 6)
-        logger.info("Starting DHT Manager...")
-        dht_task = asyncio.create_task(self.dht_manager.start())
-        dht_task.set_name("dht_manager")
-        self._background_tasks.add(dht_task)
-        await asyncio.sleep(0.2)  # Allow DHT to start
+        # Initialize Phase 6 managers (after P2PManager has created DHT Manager)
+        # DHT Manager is created and started by P2PManager.start_server()
+        dht_manager = self.p2p_manager.dht_manager
+        if dht_manager:
+            logger.info("DHT Manager available from P2PManager")
 
-        # Bootstrap DHT from seed nodes
-        seed_nodes = self.settings.get_dht_seed_nodes()
-        if seed_nodes:
-            logger.info("Bootstrapping DHT from %d seed nodes", len(seed_nodes))
-            bootstrap_task = asyncio.create_task(self.dht_manager.bootstrap(seed_nodes))
-            bootstrap_task.set_name("dht_bootstrap")
-            self._background_tasks.add(bootstrap_task)
+            # Hole Punch Manager (Phase 6 - UDP NAT traversal)
+            if self.settings.get_enable_hole_punching():
+                hole_punch_port = self.settings.get_hole_punch_port()
+                self.hole_punch_manager = HolePunchManager(
+                    dht_manager=dht_manager,
+                    punch_port=hole_punch_port,
+                    discovery_peers=3,
+                    punch_timeout=self.settings.get_hole_punch_timeout()
+                )
+                logger.info("Hole Punch Manager initialized on port %d", hole_punch_port)
+            else:
+                logger.info("Hole Punch Manager disabled (requires DTLS encryption in v0.11.0+)")
+
+            # Relay Manager (Phase 6 - Volunteer relay nodes)
+            relay_volunteer = self.settings.get_relay_volunteer()
+            self.relay_manager = RelayManager(
+                dht_manager=dht_manager,
+                p2p_manager=self.p2p_manager,
+                volunteer=relay_volunteer,
+                max_peers=self.settings.get_relay_max_peers(),
+                bandwidth_limit_mbps=self.settings.get_relay_bandwidth_limit(),
+                region="global"
+            )
+            logger.info("Relay Manager initialized (volunteer=%s)", relay_volunteer)
+
+            # Gossip Manager (Phase 6 - Store-and-forward messaging)
+            self.gossip_manager = GossipManager(
+                p2p_manager=self.p2p_manager,
+                node_id=self.p2p_manager.node_id,
+                fanout=self.settings.get_gossip_fanout(),
+                max_hops=self.settings.get_gossip_max_hops(),
+                ttl_seconds=self.settings.get_gossip_ttl(),
+                sync_interval=self.settings.get_gossip_sync_interval()
+            )
+            logger.info("Gossip Manager initialized")
+
+            # Connection Orchestrator (Phase 6 - 6-tier connection fallback)
+            self.connection_orchestrator = ConnectionOrchestrator(
+                p2p_manager=self.p2p_manager,
+                dht_manager=dht_manager,
+                hub_client=self.hub_client,
+                hole_punch_manager=self.hole_punch_manager,
+                relay_manager=self.relay_manager,
+                gossip_manager=self.gossip_manager
+            )
+            logger.info("Connection Orchestrator initialized with 6-tier fallback")
+        else:
+            logger.warning("DHT Manager not available - Phase 6 features disabled")
 
         # Start Hole Punch Manager (if enabled)
         if self.hole_punch_manager:
