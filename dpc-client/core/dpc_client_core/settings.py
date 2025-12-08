@@ -139,7 +139,11 @@ class Settings:
             'udp_punch_port': '8890',  # UDP port for hole punching
             'nat_detection_enabled': 'true',  # Detect NAT type (cone vs symmetric)
             'stun_timeout': '5',  # Endpoint discovery timeout (seconds)
-            'punch_attempts': '3'  # Number of punch attempts before giving up
+            'punch_attempts': '3',  # Number of punch attempts before giving up
+            # DTLS encryption settings (v0.10.1+)
+            'enable_dtls': 'true',  # Enable DTLS encryption for hole-punched connections
+            'dtls_handshake_timeout': '3',  # DTLS handshake timeout (seconds)
+            'dtls_version': '1.2'  # DTLS protocol version (1.2 or 1.3)
         }
 
         self._config['relay'] = {
@@ -499,6 +503,19 @@ class Settings:
     def get_hole_punch_attempts(self) -> int:
         """Get number of hole punch attempts before giving up."""
         return int(self.get('hole_punch', 'punch_attempts', '3'))
+
+    def get_hole_punch_dtls_enabled(self) -> bool:
+        """Check if DTLS encryption is enabled for hole-punched connections."""
+        value = self.get('hole_punch', 'enable_dtls', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_hole_punch_dtls_handshake_timeout(self) -> float:
+        """Get DTLS handshake timeout in seconds."""
+        return float(self.get('hole_punch', 'dtls_handshake_timeout', '3'))
+
+    def get_hole_punch_dtls_version(self) -> str:
+        """Get DTLS protocol version (1.2 or 1.3)."""
+        return self.get('hole_punch', 'dtls_version', '1.2')
 
     def get_relay_enabled(self) -> bool:
         """Check if relay client mode is enabled."""

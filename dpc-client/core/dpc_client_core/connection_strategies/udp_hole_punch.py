@@ -25,6 +25,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from .base import ConnectionStrategy, StrategyNotApplicableError
+from ..transports import DTLSPeerConnection, UDPPeerConnection, DTLSHandshakeError, DTLSCertificateError
 
 if TYPE_CHECKING:
     from ..models.peer_endpoint import PeerEndpoint
@@ -182,17 +183,40 @@ class UDPHolePunchStrategy(ConnectionStrategy):
             if not sock:
                 raise ConnectionError("Hole punching failed - no response from peer")
 
-            # TODO: Upgrade to DTLS for encryption
-            # For now, return raw socket wrapped in a basic connection
-            # (This will be enhanced in future with DTLS transport)
+            logger.info("UDP hole punch successful to %s, upgrading to DTLS...", node_id[:20])
 
-            logger.info("UDP hole punch successful to %s", node_id[:20])
+            # Step 8: Upgrade to DTLS for encryption
+            try:
+                # Create DTLS connection wrapper
+                dtls_conn = DTLSPeerConnection(
+                    udp_socket=sock,
+                    remote_addr=peer_endpoint,
+                    expected_node_id=node_id,
+                    is_server=False,  # We initiated the connection (client role)
+                    handshake_timeout=3.0
+                )
 
-            # TODO: Wrap socket in PeerConnection or DTLSConnection
-            # For now, raise NotImplementedError to fall back to next strategy
-            raise NotImplementedError(
-                "DTLS transport not yet implemented - hole punching successful but connection upgrade pending"
-            )
+                # Perform DTLS handshake
+                await dtls_conn.connect(timeout=3.0)
+
+                # Wrap in UDPPeerConnection for PeerConnection compatibility
+                peer_connection = UDPPeerConnection(node_id=node_id, dtls_conn=dtls_conn)
+
+                logger.info(
+                    "UDP hole punch + DTLS successful to %s (encrypted)",
+                    node_id[:20]
+                )
+
+                return peer_connection
+
+            except (DTLSHandshakeError, DTLSCertificateError) as e:
+                logger.error(
+                    "DTLS handshake failed after successful hole punch to %s: %s",
+                    node_id[:20], e
+                )
+                # Close the UDP socket
+                sock.close()
+                raise ConnectionError(f"DTLS handshake failed: {e}")
 
         except asyncio.TimeoutError:
             logger.warning(
@@ -200,9 +224,6 @@ class UDPHolePunchStrategy(ConnectionStrategy):
                 node_id[:20], self.timeout
             )
             raise ConnectionError(f"Hole punch timeout to {node_id[:20]}")
-        except NotImplementedError:
-            # Re-raise to signal this is a TODO, not a failure
-            raise
         except Exception as e:
             logger.warning(
                 "UDP hole punch failed to %s: %s",
