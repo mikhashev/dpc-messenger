@@ -218,8 +218,7 @@ class CoreService:
             hub_client=self.hub_client,
             hole_punch_manager=self.hole_punch_manager,
             relay_manager=self.relay_manager,
-            gossip_manager=self.gossip_manager,
-            settings=self.settings
+            gossip_manager=self.gossip_manager
         )
         logger.info("Connection Orchestrator initialized with 6-tier fallback")
 
