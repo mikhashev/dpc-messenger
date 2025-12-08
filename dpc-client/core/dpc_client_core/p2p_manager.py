@@ -184,19 +184,12 @@ class P2PManager:
                     logger.error("Failed to bind dual-stack on Windows: %s", e)
                     raise
             else:
-                # Linux/macOS: Try dual-stack binding first (more efficient)
-                try:
-                    # On Unix systems, binding to :: with IPV6_V6ONLY=0 accepts both IPv4 and IPv6
-                    server = await asyncio.start_server(
-                        self._handle_direct_connection, "::", port, ssl=ssl_context
-                    )
-                    self._server_task = asyncio.create_task(server.serve_forever())
-                    logger.info("P2PManager Direct TLS server listening on [::]:%d (dual-stack) for node %s",
-                              port, self.node_id)
-                except Exception as e:
-                    # Fallback: Create separate IPv4 and IPv6 listeners
-                    logger.warning("Dual-stack binding failed (%s), binding IPv4 and IPv6 separately", e)
+                # Linux/macOS: Create separate IPv4 and IPv6 listeners
+                # Note: asyncio.start_server doesn't set IPV6_V6ONLY=0, so binding to ::
+                # only accepts IPv6 on most modern systems. We need separate listeners.
+                logger.info("Linux/macOS detected - creating separate IPv4 and IPv6 listeners")
 
+                try:
                     server_v4 = await asyncio.start_server(
                         self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
                     )
@@ -208,8 +201,11 @@ class P2PManager:
                         server_v4.serve_forever(),
                         server_v6.serve_forever()
                     ))
-                    logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d for node %s",
+                    logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d (dual-stack) for node %s",
                               port, port, self.node_id)
+                except Exception as e:
+                    logger.error("Failed to bind dual-stack on Linux/macOS: %s", e)
+                    raise
         else:
             # Single-stack mode (IPv4 or IPv6 only)
             server = await asyncio.start_server(
