@@ -38,7 +38,6 @@
   let selectedComputeHost: string = "local";  // "local" or node_id for remote inference
   let selectedRemoteModel: string = "";  // Selected model when using remote compute host
   let selectedPeerContexts: Set<string> = new Set();  // Set of peer node_ids to fetch context from
-  let showConnectionMethods: boolean = false;  // Toggle visibility of connection methods help
 
   // Resizable chat panel state
   let chatPanelHeight: number = (() => {
@@ -956,16 +955,7 @@
 
         <!-- Connect to Peer -->
         <div class="connect-section">
-          <div class="connect-header">
-            <h3>Connect to Peer</h3>
-            <button
-              class="info-button"
-              on:click={() => showConnectionMethods = !showConnectionMethods}
-              title="Show/hide connection methods"
-            >
-              ℹ️
-            </button>
-          </div>
+          <h3>Connect to Peer</h3>
           <input
             id="peer-input"
             name="peer-input"
@@ -975,17 +965,26 @@
             on:keydown={(e) => e.key === 'Enter' && handleConnectPeer()}
           />
           <button on:click={handleConnectPeer}>Connect</button>
-          {#if showConnectionMethods}
-            <div class="connection-help">
-              <p class="small"><strong>Connection Methods:</strong></p>
+
+          <!-- Connection Methods Help (Collapsible) -->
+          <details class="connection-methods-details">
+            <summary class="connection-methods-summary">
+              <span class="uri-icon">ℹ️</span>
+              <span class="uri-title">Connection Methods</span>
+            </summary>
+            <div class="connection-help-content">
               <p class="small">
                 🔍 <strong>Auto-Discovery (DHT):</strong> <code>dpc-node-abc123...</code><br/>
-                <span class="small-detail">Tries: DHT → Cache → Hub</span><br/>
-                🏠 <strong>Direct TLS (Local):</strong> <code>dpc://192.168.1.100:8888?node_id=...</code><br/>
+                <span class="small-detail">Tries: DHT → Cache → Hub</span>
+              </p>
+              <p class="small">
+                🏠 <strong>Direct TLS (Local):</strong> <code>dpc://192.168.1.100:8888?node_id=...</code>
+              </p>
+              <p class="small">
                 🌍 <strong>Direct TLS (External):</strong> <code>dpc://203.0.113.5:8888?node_id=...</code>
               </p>
             </div>
-          {/if}
+          </details>
         </div>
 
         <!-- Chat List -->
@@ -1535,31 +1534,48 @@
     padding-bottom: 0.5rem;
   }
 
-  .connect-header {
+  /* Connection Methods Collapsible Section */
+  .connection-methods-details {
+    margin-top: 0.75rem;
+    background: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .connection-methods-details[open] {
+    border-color: #007bff;
+  }
+
+  .connection-methods-summary {
+    padding: 0.75rem 1rem;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    cursor: pointer;
+    list-style: none;
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.75rem;
+    gap: 0.5rem;
+    font-weight: 600;
+    color: #333;
+    transition: background 0.2s;
   }
 
-  .connect-header h3 {
-    margin: 0;
-    border: none;
-    padding: 0;
+  .connection-methods-summary:hover {
+    background: linear-gradient(135deg, #e9ecef 0%, #dee2e6 100%);
   }
 
-  .info-button {
-    background: none;
-    border: none;
-    font-size: 1.2rem;
-    cursor: pointer;
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    transition: background-color 0.2s;
+  .connection-methods-summary::-webkit-details-marker {
+    display: none;
   }
 
-  .info-button:hover {
-    background-color: #f0f0f0;
+  .connection-help-content {
+    padding: 1rem;
+    background: #ffffff;
+  }
+
+  .connection-help-content p {
+    margin: 0.5rem 0;
   }
 
   .node-id {
