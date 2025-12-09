@@ -38,7 +38,7 @@ class IPv4DirectStrategy(ConnectionStrategy):
 
     name = "ipv4_direct"
     priority = 2
-    timeout = 10.0  # 10 seconds for direct connection
+    timeout = 60.0  # 60 seconds for direct connection (includes 30s pre-flight + 30s SSL handshake)
 
     def is_applicable(self, endpoints: "PeerEndpoint") -> bool:
         """

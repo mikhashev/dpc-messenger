@@ -413,7 +413,7 @@ class P2PManager:
         Args:
             host: Target IP address
             port: Target port
-            timeout: Test timeout in seconds (default 5.0)
+            timeout: Test timeout in seconds (default 10.0)
 
         Returns:
             Tuple of (success: bool, message: str)
@@ -473,7 +473,7 @@ class P2PManager:
         # Pre-flight check: Test basic port connectivity before SSL handshake
         # This provides clearer error messages than cryptic SSL errors (e.g., WinError 121)
         logger.debug("Running pre-flight port connectivity check for %s:%d", host, port)
-        preflight_timeout = 5.0  # Quick check - separate from full connection timeout
+        preflight_timeout = 30.0  # Increased for high-latency networks (mobile carriers, CGNAT)
         port_accessible, port_message = await self.test_port_connectivity(host, port, preflight_timeout)
 
         if not port_accessible:

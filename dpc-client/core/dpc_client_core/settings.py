@@ -126,9 +126,9 @@ class Settings:
             'enable_hole_punching': 'false',  # Try DHT-coordinated UDP hole punching (Priority 4) - DISABLED: lacks DTLS encryption (v0.10.0)
             'enable_relays': 'true',  # Try volunteer relay nodes (Priority 5)
             'enable_gossip': 'true',  # Use gossip store-and-forward fallback (Priority 6)
-            # Timeouts per strategy (seconds)
-            'ipv6_timeout': '10',
-            'ipv4_timeout': '10',
+            # Timeouts per strategy (seconds) - increased for high-latency networks (mobile, CGNAT)
+            'ipv6_timeout': '60',  # Includes 30s pre-flight check + 30s SSL handshake
+            'ipv4_timeout': '60',  # Includes 30s pre-flight check + 30s SSL handshake
             'webrtc_timeout': '30',
             'hole_punch_timeout': '15',
             'relay_timeout': '20',
