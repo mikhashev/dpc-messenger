@@ -164,25 +164,72 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
 
 ## Architecture Overview
 
-### Connection Types
+### Connection Types (6-Tier Fallback Hierarchy - v0.10.1)
 
-1. **Direct TLS** (Local Network & IPv6)
+D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near-universal P2P connectivity. The ConnectionOrchestrator tries each strategy in priority order until one succeeds, making the Hub completely optional.
+
+**Priority 1: IPv6 Direct** (40%+ networks, no NAT)
+   - Direct connection over IPv6 (no NAT required)
+   - Lowest latency, best performance
    - Server listens on port 8888 (default)
-   - **Dual-stack support**: IPv4 and IPv6
-   - Uses self-signed X.509 certificates for node identity
-   - Location: `dpc-client/core/dpc_client_core/p2p_manager.py`
-   - Lowest latency, requires network visibility
    - **IPv6 URIs**: Use bracket notation: `dpc://[2001:db8::1]:8888?node_id=...`
+   - Timeout: 60s (increased in v0.10.1 for mobile/CGNAT support)
+   - Location: `connection_strategies/ipv6_direct.py`
+
+**Priority 2: IPv4 Direct** (Local network / port forward)
+   - Direct TLS connection over IPv4
+   - Uses self-signed X.509 certificates for node identity
+   - **Dual-stack support**: IPv4 and IPv6
    - **Configuration**: Set `listen_host` in config.ini:
      - `dual` (default) - Listens on both IPv4 and IPv6
      - `0.0.0.0` - IPv4 only
      - `::` - IPv6 only
+   - Timeout: 60s (increased in v0.10.1 for mobile/CGNAT support)
+   - Location: `connection_strategies/ipv4_direct.py`, `p2p_manager.py`
 
-2. **WebRTC** (Internet-Wide)
-   - NAT traversal via STUN/TURN
+**Priority 3: Hub WebRTC** (When Hub available)
+   - NAT traversal via STUN/TURN (existing infrastructure)
    - Hub provides signaling only (no message routing)
-   - Location: `dpc-client/core/dpc_client_core/webrtc_peer.py`
    - Uses aiortc library
+   - Timeout: 30s (configurable via connection.webrtc_timeout)
+   - Location: `connection_strategies/hub_webrtc.py`, `webrtc_peer.py`
+
+**Priority 4: UDP Hole Punching** (60-70% NAT, Hub-independent)
+   - DHT-coordinated simultaneous UDP send (birthday paradox)
+   - **DTLS 1.2 encryption** (v0.10.1+) - End-to-end encrypted UDP transport
+   - STUN-like endpoint discovery via DHT peers
+   - NAT type detection (cone vs symmetric)
+   - Success rate: 60-70% for cone NAT (fails gracefully for symmetric NAT)
+   - Timeout: 15s
+   - **Status**: Production-ready with DTLS encryption (enabled by default in v0.10.1)
+   - Location: `connection_strategies/udp_hole_punch.py`, `managers/hole_punch_manager.py`
+   - Testing: See `docs/MANUAL_TESTING_GUIDE.md`
+
+**Priority 5: Volunteer Relay** (100% NAT coverage, Hub-independent)
+   - Relay discovery via DHT quality scoring (uptime 50%, capacity 30%, latency 20%)
+   - End-to-end encryption maintained (relay sees only encrypted payloads)
+   - Privacy-preserving: relay cannot decrypt message content
+   - Optional server mode: volunteer as relay (opt-in via `relay.volunteer = true`)
+   - Timeout: 20s
+   - Location: `connection_strategies/volunteer_relay.py`, `managers/relay_manager.py`, `transports/relayed_connection.py`
+
+**Priority 6: Gossip Store-and-Forward** (Disaster fallback, eventual delivery)
+   - Multi-hop epidemic routing (fanout=3 random peers)
+   - Vector clocks for distributed causality tracking
+   - Anti-entropy sync (5-minute interval for message reconciliation)
+   - TTL: 24 hours, max hops: 5
+   - Use cases: offline messaging, infrastructure outages, disaster scenarios
+   - Not real-time (eventual delivery guarantee)
+   - Timeout: 5s (before falling back to gossip)
+   - Location: `connection_strategies/gossip_store_forward.py`, `managers/gossip_manager.py`
+
+**Key Benefits:**
+- **Hub-optional architecture**: System works without Hub using direct, DHT, relay, gossip fallback
+- **Near-universal connectivity**: 6 fallback layers ensure connections in almost any network condition
+- **Disaster resilience**: Gossip protocol provides eventual delivery during infrastructure outages
+- **Zero infrastructure cost**: Volunteer relays replace expensive TURN servers
+
+**Configuration:** See `settings.py` for `[connection]`, `[hole_punch]`, `[relay]`, `[gossip]` config sections
 
 ### Key Components
 
@@ -194,8 +241,39 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
   - Component initialization
   - Configuration loading
   - WebSocket API server coordination
+  - MessageRouter integration for command dispatch
+
+**Message Routing System (v0.8.0+):**
+- `message_router.py` - Command dispatcher for P2P messages
+  - Routes incoming messages to appropriate handlers
+  - Handler registry pattern for extensibility
+  - Supports handler registration/unregistration at runtime
+- `message_handlers/hello_handler.py` - HELLO command (initial handshake)
+- `message_handlers/text_handler.py` - SEND_TEXT command (chat messages)
+- `message_handlers/context_handler.py` - Context request/response handlers
+  - RequestContextHandler - GET_CONTEXT requests
+  - ContextResponseHandler - CONTEXT_RESPONSE handling
+  - RequestDeviceContextHandler - GET_DEVICE_CONTEXT requests
+  - DeviceContextResponseHandler - DEVICE_CONTEXT_RESPONSE handling
+- `message_handlers/inference_handler.py` - AI inference handlers
+  - RemoteInferenceRequestHandler - REMOTE_INFERENCE_REQUEST
+  - RemoteInferenceResponseHandler - REMOTE_INFERENCE_RESPONSE
+- `message_handlers/provider_handler.py` - Provider discovery handlers
+  - GetProvidersHandler - GET_PROVIDERS requests
+  - ProvidersResponseHandler - PROVIDERS_RESPONSE handling
+- `message_handlers/knowledge_handler.py` - Knowledge commit handlers
+  - ContextUpdatedHandler - CONTEXT_UPDATED broadcast
+  - ProposeKnowledgeCommitHandler - PROPOSE_KNOWLEDGE_COMMIT
+  - VoteKnowledgeCommitHandler - VOTE_KNOWLEDGE_COMMIT
+  - KnowledgeCommitResultHandler - KNOWLEDGE_COMMIT_RESULT
 
 **Coordinators (v0.10.0+):**
+- `connection_orchestrator.py` - 6-tier connection fallback coordinator (v0.10.0)
+  - **Integration Status:** Fully implemented and integrated in CoreService
+  - Tries IPv6, IPv4, WebRTC, hole punch, relay, gossip in priority order
+  - Per-strategy timeout configuration
+  - Connection statistics tracking (success rate, strategy usage)
+  - Dynamic strategy enable/disable
 - `inference_orchestrator.py` - AI inference coordination (local/remote)
   - Executes queries on local LLM or remote peer
   - Assembles prompts with contexts and history
@@ -209,8 +287,32 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
   - WebRTC connections (via Hub signaling)
   - Peer messaging and broadcasting
 
+**Knowledge & Consensus System (v0.9.0+):**
+- `consensus_manager.py` - Multi-party knowledge voting
+  - Devil's advocate mechanism (required dissenter for 3+ participants)
+  - Voting session management with configurable thresholds
+  - Timeout handling and vote aggregation
+  - **Known Issue:** No locking during proposal edits (documented in code)
+- `conversation_monitor.py` - Background knowledge detection
+  - Real-time conversation analysis
+  - AI-powered knowledge extraction
+  - Configurable detection threshold
+  - Supports local and remote inference
+
 **Managers:**
 - `p2p_manager.py` - Low-level P2P connection manager (TLS + WebRTC)
+- `hole_punch_manager.py` - UDP hole punching coordinator (v0.10.0)
+  - DHT-based endpoint discovery (reflexive address from 3 random DHT peers)
+  - NAT type detection (cone vs symmetric)
+  - Coordinated simultaneous UDP send
+- `relay_manager.py` - Volunteer relay management (v0.10.0)
+  - Client mode: find_relay() via DHT, quality scoring, connect_via_relay()
+  - Server mode: announce_relay_availability(), handle_relay_register(), handle_relay_message()
+  - Privacy-preserving (forwards encrypted payloads only)
+- `gossip_manager.py` - Epidemic gossip protocol (v0.10.0)
+  - send_gossip(), handle_gossip_message(), _forward_message() (fanout=3)
+  - Anti-entropy sync loop (5-minute interval, vector clock reconciliation)
+  - Message deduplication, TTL enforcement
 - `webrtc_peer.py` - WebRTC peer wrapper (aiortc)
 - `hub_client.py` - Federation Hub communication (OAuth, WebSocket signaling)
 - `llm_manager.py` - AI provider integration (Ollama, OpenAI, Anthropic)
@@ -218,6 +320,12 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
 - `local_api.py` - WebSocket API for UI (localhost:9999)
 - `settings.py` - Configuration management
 - `device_context_collector.py` - Device/system info collector (generates device_context.json)
+
+**Caching Systems:**
+- `context_cache.py` - In-memory personal/device context cache
+- `peer_cache.py` - Known peers cache (persisted to known_peers.json)
+- `token_cache.py` - OAuth token cache for offline mode
+- `connection_status.py` - Connection state tracking with operation mode (online/offline/degraded)
 
 **Client Frontend (`dpc-client/ui`):**
 - Built with SvelteKit 5.0 + Tauri 2.x

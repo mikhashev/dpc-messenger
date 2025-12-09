@@ -19,6 +19,7 @@ from dpc_protocol.utils import parse_dpc_uri
 from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
+from .dht import DHTManager, DHTConfig
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +63,10 @@ class P2PManager:
         # Auto-reconnect tracking
         self._intentional_disconnects: set = set()  # Track user-initiated disconnects
         self._hub_client_refs: Dict[str, HubClient] = {}  # Store hub_client for reconnection
-        
+
+        # DHT (Distributed Hash Table) for decentralized peer discovery
+        self.dht_manager: DHTManager | None = None  # Initialized in start_server()
+
         try:
             self.node_id, self.key_file, self.cert_file = load_identity()
             logger.info("Existing node identity loaded")
@@ -125,6 +129,15 @@ class P2PManager:
 
         return sorted(list(external_ips))
 
+    def get_connected_peers(self) -> list:
+        """
+        Get list of currently connected peer connection objects.
+
+        Returns:
+            List of PeerConnection/WebRTCPeerConnection objects
+        """
+        return list(self.peers.values())
+
     # --- Direct TLS Connection Methods (existing code) ---
 
     async def start_server(self, host: str = "0.0.0.0", port: int = 8888):
@@ -171,19 +184,12 @@ class P2PManager:
                     logger.error("Failed to bind dual-stack on Windows: %s", e)
                     raise
             else:
-                # Linux/macOS: Try dual-stack binding first (more efficient)
-                try:
-                    # On Unix systems, binding to :: with IPV6_V6ONLY=0 accepts both IPv4 and IPv6
-                    server = await asyncio.start_server(
-                        self._handle_direct_connection, "::", port, ssl=ssl_context
-                    )
-                    self._server_task = asyncio.create_task(server.serve_forever())
-                    logger.info("P2PManager Direct TLS server listening on [::]:%d (dual-stack) for node %s",
-                              port, self.node_id)
-                except Exception as e:
-                    # Fallback: Create separate IPv4 and IPv6 listeners
-                    logger.warning("Dual-stack binding failed (%s), binding IPv4 and IPv6 separately", e)
+                # Linux/macOS: Create separate IPv4 and IPv6 listeners
+                # Note: asyncio.start_server doesn't set IPV6_V6ONLY=0, so binding to ::
+                # only accepts IPv6 on most modern systems. We need separate listeners.
+                logger.info("Linux/macOS detected - creating separate IPv4 and IPv6 listeners")
 
+                try:
                     server_v4 = await asyncio.start_server(
                         self._handle_direct_connection, "0.0.0.0", port, ssl=ssl_context
                     )
@@ -191,12 +197,15 @@ class P2PManager:
                         self._handle_direct_connection, "::", port, ssl=ssl_context
                     )
 
-                    self._server_task = asyncio.create_task(asyncio.gather(
+                    self._server_task = asyncio.gather(
                         server_v4.serve_forever(),
                         server_v6.serve_forever()
-                    ))
-                    logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d for node %s",
+                    )
+                    logger.info("P2PManager Direct TLS server listening on 0.0.0.0:%d and [::]:%d (dual-stack) for node %s",
                               port, port, self.node_id)
+                except Exception as e:
+                    logger.error("Failed to bind dual-stack on Linux/macOS: %s", e)
+                    raise
         else:
             # Single-stack mode (IPv4 or IPv6 only)
             server = await asyncio.start_server(
@@ -208,6 +217,145 @@ class P2PManager:
             formatted_host = f"[{host}]" if ":" in host else host
             logger.info("P2PManager Direct TLS server listening on %s:%d for node %s",
                       formatted_host, port, self.node_id)
+
+        # Initialize DHT (Distributed Hash Table) for peer discovery
+        if self.settings.get_dht_enabled():
+            try:
+                from .dht import DHTConfig
+
+                # Get DHT configuration from settings
+                dht_config = DHTConfig(
+                    k=self.settings.get_dht_k(),
+                    alpha=self.settings.get_dht_alpha(),
+                    bootstrap_timeout=self.settings.get_dht_bootstrap_timeout(),
+                    lookup_timeout=self.settings.get_dht_lookup_timeout(),
+                    bucket_refresh_interval=self.settings.get_dht_bucket_refresh_interval(),
+                    announce_interval=self.settings.get_dht_announce_interval()
+                )
+
+                # Initialize DHT manager
+                dht_port = self.settings.get_dht_port()
+
+                # Get local IP for DHT announcements (not 0.0.0.0)
+                dht_announce_ip = await self._get_primary_local_ip()
+
+                # DHT announces the configured P2P TLS port for connections, not the DHT UDP port
+                p2p_port = self.settings.get_p2p_listen_port()
+
+                self.dht_manager = DHTManager(
+                    node_id=self.node_id,
+                    ip=dht_announce_ip,
+                    port=p2p_port,  # P2P TLS port for connections
+                    config=dht_config
+                )
+
+                # Start DHT UDP server
+                await self.dht_manager.start(host="0.0.0.0", port=dht_port)
+                logger.info("DHT started on UDP port %d for node %s", dht_port, self.node_id)
+
+                # Bootstrap DHT from seed nodes if available
+                seed_nodes = self.settings.get_dht_seed_nodes()
+                if seed_nodes:
+                    logger.info("Bootstrapping DHT from %d seed nodes", len(seed_nodes))
+                    success = await self.dht_manager.bootstrap(seed_nodes)
+                    if success:
+                        logger.info("DHT bootstrap successful")
+                        # Announce our presence to the DHT
+                        await self.announce_to_dht()
+                    else:
+                        logger.warning("DHT bootstrap failed (no responsive seeds)")
+            except Exception as e:
+                logger.error("Failed to initialize DHT: %s", e, exc_info=True)
+                self.dht_manager = None
+        else:
+            logger.info("DHT disabled in configuration")
+
+    # --- DHT Peer Discovery Methods ---
+
+    async def find_peer_via_dht(self, target_node_id: str) -> tuple[str, int] | None:
+        """
+        Look up a peer's IP and port via DHT.
+
+        Args:
+            target_node_id: Node ID to look up
+
+        Returns:
+            Tuple of (ip, port) if found, None otherwise
+        """
+        if not self.dht_manager:
+            logger.debug("DHT not available for peer lookup")
+            return None
+
+        try:
+            logger.info("Looking up %s via DHT", target_node_id)
+            result = await self.dht_manager.find_peer(target_node_id)
+
+            if result:
+                ip, port = result  # Unpack (ip, port) tuple
+                logger.info("DHT found %s at %s:%d", target_node_id, ip, port)
+                return (ip, port)
+            else:
+                logger.info("DHT lookup for %s returned no results", target_node_id)
+                return None
+
+        except Exception as e:
+            logger.error("DHT lookup failed for %s: %s", target_node_id, e)
+            return None
+
+    async def announce_to_dht(self):
+        """Announce our presence to the DHT for peer discovery."""
+        if not self.dht_manager:
+            return
+
+        try:
+            count = await self.dht_manager.announce()
+            if count > 0:
+                logger.info("Announced to DHT (%d nodes)", count)
+            else:
+                logger.debug("DHT announce sent (no nearby nodes)")
+        except Exception as e:
+            logger.error("DHT announce failed: %s", e)
+
+    async def connect_via_node_id(self, target_node_id: str, timeout: float = None) -> bool:
+        """
+        Connect to a peer using just their node ID.
+
+        Tries discovery methods in order:
+        1. DHT lookup (finds peer's current IP/port)
+        2. Hub WebRTC (Phase 5 - not yet implemented)
+
+        Args:
+            target_node_id: Node ID to connect to
+            timeout: Connection timeout in seconds
+
+        Returns:
+            True if connection established, False otherwise
+        """
+        # Check if already connected
+        if target_node_id in self.peers:
+            logger.info("Already connected to %s", target_node_id)
+            return True
+
+        # Try 1: DHT lookup
+        dht_result = await self.find_peer_via_dht(target_node_id)
+        if dht_result:
+            ip, port = dht_result
+            try:
+                await self.connect_directly(ip, port, target_node_id, timeout)
+                logger.info("Connected to %s via DHT", target_node_id)
+
+                # Announce ourselves after successful connection
+                await self.announce_to_dht()
+                return True
+            except Exception as e:
+                logger.warning("DHT connection failed: %s", e)
+
+        # Try 2: Hub WebRTC (if available)
+        # This will be implemented in Phase 5
+        # TODO: Implement peer_cache for last known IP/port (Phase 5)
+
+        logger.error("Failed to connect to %s - DHT lookup failed, Hub not available", target_node_id)
+        return False
 
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
@@ -241,9 +389,24 @@ class P2PManager:
             await write_message(writer, ack)
 
             peer = PeerConnection(node_id=peer_node_id, reader=reader, writer=writer)
+
+            # Set strategy_used for incoming connections (for UI display)
+            sock = writer.get_extra_info('socket')
+            if sock:
+                import socket as socket_module
+                if sock.family == socket_module.AF_INET6:
+                    peer.strategy_used = "ipv6_direct"
+                else:
+                    peer.strategy_used = "ipv4_direct"
+            else:
+                peer.strategy_used = "ipv4_direct"  # Default fallback
+
             self.peers[peer_node_id] = peer
             await self._notify_peer_change()
             logger.info("Direct TLS connection established with %s", peer_node_id)
+
+            # Announce to DHT after successful connection
+            asyncio.create_task(self.announce_to_dht())
 
             asyncio.create_task(self._listen_to_peer(peer))
 
@@ -262,7 +425,7 @@ class P2PManager:
         Args:
             host: Target IP address
             port: Target port
-            timeout: Test timeout in seconds (default 5.0)
+            timeout: Test timeout in seconds (default 10.0)
 
         Returns:
             Tuple of (success: bool, message: str)
@@ -322,7 +485,7 @@ class P2PManager:
         # Pre-flight check: Test basic port connectivity before SSL handshake
         # This provides clearer error messages than cryptic SSL errors (e.g., WinError 121)
         logger.debug("Running pre-flight port connectivity check for %s:%d", host, port)
-        preflight_timeout = 5.0  # Quick check - separate from full connection timeout
+        preflight_timeout = 30.0  # Increased for high-latency networks (mobile carriers, CGNAT)
         port_accessible, port_message = await self.test_port_connectivity(host, port, preflight_timeout)
 
         if not port_accessible:
@@ -371,9 +534,24 @@ class P2PManager:
                     self._core_service_ref.set_peer_metadata(target_node_id, name=peer_name)
 
             peer = PeerConnection(node_id=target_node_id, reader=reader, writer=writer)
+
+            # Set strategy_used for outgoing direct connections (for UI display)
+            sock = writer.get_extra_info('socket')
+            if sock:
+                import socket as socket_module
+                if sock.family == socket_module.AF_INET6:
+                    peer.strategy_used = "ipv6_direct"
+                else:
+                    peer.strategy_used = "ipv4_direct"
+            else:
+                peer.strategy_used = "ipv4_direct"  # Default fallback
+
             self.peers[target_node_id] = peer
             await self._notify_peer_change()
             logger.info("Direct connection established with %s", target_node_id)
+
+            # Announce to DHT after successful connection
+            asyncio.create_task(self.announce_to_dht())
 
             asyncio.create_task(self._listen_to_peer(peer))
 
@@ -699,6 +877,10 @@ class P2PManager:
 
             # Move from pending to active peers
             self._pending_webrtc.pop(node_id, None)
+
+            # Set strategy_used for WebRTC connections (for UI display)
+            webrtc_peer.strategy_used = "hub_webrtc"
+
             self.peers[node_id] = webrtc_peer
 
             await self._notify_peer_change()
@@ -756,6 +938,51 @@ class P2PManager:
         peer = self.peers[node_id]
         await peer.send(message)
 
+    async def _get_primary_local_ip(self) -> str:
+        """
+        Get the primary local IP address for DHT announcements.
+
+        Returns the first non-Docker, non-loopback IPv4 address,
+        or falls back to 0.0.0.0 if none found.
+
+        Note: For local network testing, this returns LAN IP (192.168.x.x).
+        For internet-wide DHT, external IP should be used instead (call update_dht_ip()).
+        """
+        import socket
+        try:
+            # Use UDP socket trick to get local IP (doesn't actually send packet)
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+            s.close()
+            logger.debug("Detected primary local IP for DHT: %s", local_ip)
+            return local_ip
+        except Exception as e:
+            logger.warning("Failed to detect local IP for DHT, using 0.0.0.0: %s", e)
+            return "0.0.0.0"
+
+    async def update_dht_ip(self, external_ip: str):
+        """
+        Update DHT announcement IP (e.g., after external IP is discovered via STUN).
+
+        This allows DHT to announce with external IP for internet-wide discovery
+        instead of local IP.
+
+        Args:
+            external_ip: External/public IP address to announce
+        """
+        if not self.dht_manager:
+            return
+
+        logger.info("Updating DHT announcement IP to %s", external_ip)
+        self.dht_manager.ip = external_ip
+
+        # Re-announce with new IP
+        try:
+            await self.announce_to_dht()
+        except Exception as e:
+            logger.error("Failed to re-announce with new IP: %s", e)
+
     async def shutdown_peer_connection(self, peer_id: str):
         """Close connection with a peer (user-initiated)."""
         # Mark this as an intentional disconnect to prevent auto-reconnect
@@ -806,5 +1033,14 @@ class P2PManager:
         self._hub_client_refs.clear()
         self._intentional_disconnects.clear()
         self._ice_candidates_buffer.clear()
+
+        # Shutdown DHT if active
+        if self.dht_manager:
+            try:
+                await self.dht_manager.stop()
+                logger.info("DHT shut down")
+            except Exception as e:
+                logger.error("Error shutting down DHT: %s", e)
+            self.dht_manager = None
 
         logger.info("P2P Manager shut down")

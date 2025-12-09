@@ -122,16 +122,17 @@ chore: maintenance tasks (dependencies, config)
 
 ### Example: Current State
 
-**Current Status (2025-01-XX):**
-- `main`: Stable v0.1.0 (last tested release)
-- `dev`: Contains Phase 1-6 Knowledge Architecture implementations (UNTESTED)
+**Current Status (2025-12-09):**
+- `main`: Stable v0.9.3 (Phase 5 - Knowledge Architecture complete)
+- `dev`: v0.10.1 development (Phase 6 complete + DTLS improvements)
+  - Includes v0.9.4, v0.9.5, v0.10.0, v0.10.1 (all documented, awaiting merge)
 
 **Next Steps:**
-1. Test Phase 1-6 implementations in `dev` branch
-2. Document any issues found
-3. Fix issues in `dev`
-4. When stable, merge `dev` → `main` as v0.2.0
-5. Update CHANGELOG.md with Phase 1-6 features
+1. Complete v0.10.1 documentation (CHANGELOG.md, RELEASE_NOTES) ✓
+2. Final testing of all changes (v0.9.4 → v0.10.1)
+3. When stable, merge `dev` → `main` (will jump from v0.9.3 to v0.10.1)
+4. Update CHANGELOG.md with actual release date
+5. Create GitHub release with full v0.9.4 → v0.10.1 notes
 
 ## Code Style
 

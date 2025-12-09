@@ -156,6 +156,11 @@
     const groupName = prompt('Enter group name:');
     if (groupName) {
       if (!editedRules.node_groups) editedRules.node_groups = {};
+      // Check for duplicates
+      if (editedRules.node_groups[groupName]) {
+        alert('This group already exists');
+        return;
+      }
       editedRules.node_groups[groupName] = [];
     }
   }
@@ -169,7 +174,16 @@
     if (!editedRules || !editedRules.node_groups) return;
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
     if (nodeId && nodeId.startsWith('dpc-node-')) {
-      editedRules.node_groups[groupName].push(nodeId);
+      // Check for duplicates
+      if (editedRules.node_groups[groupName].includes(nodeId)) {
+        alert('This node is already in the group');
+        return;
+      }
+      // Use immutable update to trigger Svelte reactivity
+      editedRules.node_groups[groupName] = [
+        ...editedRules.node_groups[groupName],
+        nodeId
+      ];
     } else if (nodeId) {
       alert('Node ID must start with "dpc-node-"');
     }
@@ -186,6 +200,11 @@
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
     if (nodeId && nodeId.startsWith('dpc-node-')) {
       if (!editedRules.nodes) editedRules.nodes = {};
+      // Check for duplicates
+      if (editedRules.nodes[nodeId]) {
+        alert('This node already has permission rules');
+        return;
+      }
       editedRules.nodes[nodeId] = {};
     } else if (nodeId) {
       alert('Node ID must start with "dpc-node-"');
@@ -201,6 +220,11 @@
     if (!editedRules || !editedRules.nodes) return;
     const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
     if (resourcePath) {
+      // Check for duplicates
+      if (editedRules.nodes[nodeId][resourcePath]) {
+        alert('This rule already exists for this node');
+        return;
+      }
       editedRules.nodes[nodeId][resourcePath] = 'allow';
     }
   }
@@ -216,6 +240,11 @@
     const groupName = prompt('Enter group name:');
     if (groupName) {
       if (!editedRules.groups) editedRules.groups = {};
+      // Check for duplicates
+      if (editedRules.groups[groupName]) {
+        alert('This group already has permission rules');
+        return;
+      }
       editedRules.groups[groupName] = {};
     }
   }
@@ -229,6 +258,11 @@
     if (!editedRules || !editedRules.groups) return;
     const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
     if (resourcePath) {
+      // Check for duplicates
+      if (editedRules.groups[groupName][resourcePath]) {
+        alert('This rule already exists for this group');
+        return;
+      }
       editedRules.groups[groupName][resourcePath] = 'allow';
     }
   }
@@ -311,7 +345,7 @@
                     <div class="rule-item">
                       <strong>{path}:</strong>
                       {#if editMode && editedRules && editedRules.hub}
-                        <select bind:value={editedRules.hub[path]}>
+                        <select id="hub-rule-{path}" name="hub-rule-{path}" bind:value={editedRules.hub[path]}>
                           <option value="allow">allow</option>
                           <option value="deny">deny</option>
                         </select>
@@ -399,9 +433,9 @@
                 <div class="setting-item">
                   <label>
                     {#if editMode && editedRules && editedRules.compute}
-                      <input type="checkbox" bind:checked={editedRules.compute.enabled} />
+                      <input id="compute-enabled" name="compute-enabled" type="checkbox" bind:checked={editedRules.compute.enabled} />
                     {:else}
-                      <input type="checkbox" checked={displayRules.compute.enabled} disabled />
+                      <input id="compute-enabled-display" name="compute-enabled-display" type="checkbox" checked={displayRules.compute.enabled} disabled />
                     {/if}
                     <strong>Enable Compute Sharing</strong>
                   </label>
@@ -412,13 +446,19 @@
                     <h4>Allowed Nodes</h4>
                     {#if editMode && editedRules}
                       <textarea
+                        id="compute-allow-nodes"
+                        name="compute-allow-nodes"
                         class="edit-textarea"
                         rows="3"
                         placeholder="Enter node IDs (one per line)"
                         bind:value={allowNodesText}
                         on:blur={() => {
                           if (editedRules?.compute) {
-                            editedRules.compute.allow_nodes = allowNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            // Remove duplicates using Set
+                            const nodes = allowNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.compute.allow_nodes = [...new Set(nodes)];
+                            // Update textarea to show deduplicated list
+                            allowNodesText = editedRules.compute.allow_nodes.join('\n');
                           }
                         }}
                       ></textarea>
@@ -437,13 +477,19 @@
                     <h4>Allowed Groups</h4>
                     {#if editMode && editedRules}
                       <textarea
+                        id="compute-allow-groups"
+                        name="compute-allow-groups"
                         class="edit-textarea"
                         rows="2"
                         placeholder="Enter group names (one per line)"
                         bind:value={allowGroupsText}
                         on:blur={() => {
                           if (editedRules?.compute) {
-                            editedRules.compute.allow_groups = allowGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            // Remove duplicates using Set
+                            const groups = allowGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.compute.allow_groups = [...new Set(groups)];
+                            // Update textarea to show deduplicated list
+                            allowGroupsText = editedRules.compute.allow_groups.join('\n');
                           }
                         }}
                       ></textarea>
@@ -463,13 +509,19 @@
                     <p class="help-text-small">Leave empty to allow all models.</p>
                     {#if editMode && editedRules}
                       <textarea
+                        id="compute-allowed-models"
+                        name="compute-allowed-models"
                         class="edit-textarea"
                         rows="3"
                         placeholder="Enter model names (one per line)"
                         bind:value={allowedModelsText}
                         on:blur={() => {
                           if (editedRules?.compute) {
-                            editedRules.compute.allowed_models = allowedModelsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            // Remove duplicates using Set
+                            const models = allowedModelsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.compute.allowed_models = [...new Set(models)];
+                            // Update textarea to show deduplicated list
+                            allowedModelsText = editedRules.compute.allowed_models.join('\n');
                           }
                         }}
                       ></textarea>
@@ -521,7 +573,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.nodes && editedRules.nodes[nodeId]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select bind:value={editedRules.nodes[nodeId][path]}>
+                                <select id="node-rule-{nodeId}-{path}" name="node-rule-{nodeId}-{path}" bind:value={editedRules.nodes[nodeId][path]}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>
@@ -579,7 +631,7 @@
                             <code class="rule-path">{path}</code>
                             {#if editMode && editedRules && editedRules.groups && editedRules.groups[groupName]}
                               <div style="display: flex; gap: 0.5rem; align-items: center;">
-                                <select bind:value={editedRules.groups[groupName][path]}>
+                                <select id="group-rule-{groupName}-{path}" name="group-rule-{groupName}-{path}" bind:value={editedRules.groups[groupName][path]}>
                                   <option value="allow">allow</option>
                                   <option value="deny">deny</option>
                                 </select>

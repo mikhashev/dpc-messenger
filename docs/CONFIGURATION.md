@@ -1,7 +1,7 @@
 # DPC-Client Configuration Guide
 
-> **Version:** 0.5.0+
-> **Last Updated:** 2025-11-11
+> **Version:** 0.10.0+
+> **Last Updated:** 2025-12-08
 
 ## Overview
 
@@ -624,6 +624,306 @@ Device 1 with node_id "dpc-node-aaaa1111":
 - Later, login with GitHub → Hub: {email: "user@github.com", node_id: "dpc-node-aaaa1111", provider: "github"}
 
 Same device, different OAuth accounts = different Hub user profiles
+```
+
+---
+
+## Phase 6: Connection Strategy Configuration (v0.10.0+)
+
+Phase 6 introduces a 6-tier connection fallback hierarchy for near-universal P2P connectivity. This section documents the new configuration options for connection strategies, UDP hole punching, volunteer relays, and gossip protocols.
+
+### Connection Strategy Settings (`[connection]`)
+
+Configure which connection strategies are enabled and their timeouts.
+
+#### `enable_ipv6`
+- **Description:** Try IPv6 direct connections (Priority 1)
+- **Default:** `true`
+- **Values:** `true`, `false`
+- **Example:**
+  ```ini
+  enable_ipv6 = true
+  ```
+
+#### `enable_ipv4`
+- **Description:** Try IPv4 direct connections (Priority 2)
+- **Default:** `true`
+- **Values:** `true`, `false`
+
+#### `enable_hub_webrtc`
+- **Description:** Try Hub WebRTC with STUN/TURN (Priority 3)
+- **Default:** `true`
+- **Values:** `true`, `false`
+- **Note:** Requires Hub connection
+
+#### `enable_hole_punching`
+- **Description:** Try DHT-coordinated UDP hole punching (Priority 4)
+- **Default:** `true`
+- **Values:** `true`, `false`
+- **Success Rate:** 60-70% for cone NAT (fails gracefully for symmetric NAT)
+
+#### `enable_relays`
+- **Description:** Try volunteer relay nodes (Priority 5)
+- **Default:** `true`
+- **Values:** `true`, `false`
+- **Note:** 100% NAT coverage, Hub-independent
+
+#### `enable_gossip`
+- **Description:** Use gossip store-and-forward fallback (Priority 6)
+- **Default:** `true`
+- **Values:** `true`, `false`
+- **Note:** Eventual delivery, not real-time
+
+#### Strategy Timeouts
+
+Per-strategy timeout configuration in seconds:
+
+```ini
+[connection]
+ipv6_timeout = 10          # IPv6 direct connection timeout
+ipv4_timeout = 10          # IPv4 direct connection timeout
+webrtc_timeout = 30        # Hub WebRTC timeout
+hole_punch_timeout = 15    # UDP hole punching timeout
+relay_timeout = 20         # Volunteer relay timeout
+gossip_timeout = 5         # Gossip fallback timeout
+```
+
+**Example Configuration:**
+```ini
+[connection]
+# Enable all strategies (default)
+enable_ipv6 = true
+enable_ipv4 = true
+enable_hub_webrtc = true
+enable_hole_punching = true
+enable_relays = true
+enable_gossip = true
+
+# Customize timeouts
+ipv6_timeout = 10
+webrtc_timeout = 30
+relay_timeout = 20
+```
+
+**Disable Specific Strategies:**
+```ini
+[connection]
+# Work only with direct connections and WebRTC (disable Hub-independent fallbacks)
+enable_hole_punching = false
+enable_relays = false
+enable_gossip = false
+```
+
+---
+
+### UDP Hole Punching Settings (`[hole_punch]`)
+
+Configure DHT-coordinated UDP hole punching (Priority 4 strategy).
+
+#### `udp_punch_port`
+- **Description:** UDP port for hole punching
+- **Default:** `8890`
+- **Environment Variable:** `DPC_HOLE_PUNCH_UDP_PUNCH_PORT`
+- **Example:**
+  ```ini
+  udp_punch_port = 8890
+  ```
+
+#### `nat_detection_enabled`
+- **Description:** Detect NAT type (cone vs symmetric)
+- **Default:** `true`
+- **Values:** `true`, `false`
+- **Note:** Automatic NAT type detection helps optimize connection strategy
+
+#### `stun_timeout`
+- **Description:** Endpoint discovery timeout in seconds
+- **Default:** `5`
+- **Note:** Timeout for querying DHT peers for reflexive address
+
+#### `punch_attempts`
+- **Description:** Number of punch attempts before giving up
+- **Default:** `3`
+- **Note:** Higher values increase success rate but add latency
+
+**Example Configuration:**
+```ini
+[hole_punch]
+udp_punch_port = 8890
+nat_detection_enabled = true
+stun_timeout = 5
+punch_attempts = 3
+```
+
+#### ⚠️ Security Warning: DTLS Encryption (v0.10.0)
+
+**Current Status:** UDP hole punching establishes **unencrypted** UDP connections.
+
+**DTLS (Datagram Transport Layer Security)** upgrade is deferred to **v0.11.0+**.
+
+**Recommendation for v0.10.0:**
+```ini
+[connection]
+enable_hole_punching = false  # Disable unencrypted UDP (recommended)
+```
+
+**Why disable hole punching in v0.10.0?**
+- UDP connections lack encryption layer (privacy violation)
+- Better encrypted alternatives exist:
+  - Priority 3 (Hub WebRTC) - Has built-in DTLS encryption
+  - Priority 5 (Volunteer Relays) - Uses TLS encryption
+- Implementation planned for v0.11.0
+
+**Current Workarounds:**
+1. **Disable hole punching** (recommended) - Use Priority 3 or 5 instead
+2. **Use only for testing** - Don't send sensitive data
+3. **Local network only** - Use UDP hole punching only on trusted networks
+
+See [FALLBACK_LOGIC.md](./FALLBACK_LOGIC.md#security-warning-dtls-encryption-v0100) for detailed explanation.
+
+---
+
+### Volunteer Relay Settings (`[relay]`)
+
+Configure volunteer relay functionality (Priority 5 strategy). Relays provide 100% NAT coverage by forwarding encrypted messages between peers.
+
+#### Client Mode Settings
+
+#### `enabled`
+- **Description:** Enable relay client mode (use relays for outbound connections)
+- **Default:** `true`
+- **Values:** `true`, `false`
+
+#### `prefer_region`
+- **Description:** Preferred geographic region for relay selection
+- **Default:** `global`
+- **Values:** `us-west`, `eu-central`, `ap-southeast`, `global`, etc.
+- **Note:** Regional relays reduce latency
+
+#### `cache_timeout`
+- **Description:** Relay discovery cache timeout in seconds
+- **Default:** `300` (5 minutes)
+- **Note:** Caching reduces DHT queries
+
+#### Server Mode Settings (Volunteering)
+
+#### `volunteer`
+- **Description:** Volunteer this node as relay for others (opt-in)
+- **Default:** `false`
+- **Values:** `true`, `false`
+- **Important:** Requires stable internet connection and firewall configuration
+
+#### `max_peers`
+- **Description:** Maximum concurrent relay sessions (server mode)
+- **Default:** `10`
+- **Note:** Higher values allow helping more peers but consume more bandwidth
+
+#### `bandwidth_limit_mbps`
+- **Description:** Bandwidth limit for relaying in Mbps
+- **Default:** `10.0`
+- **Note:** Prevents relay abuse
+
+#### `region`
+- **Description:** Geographic region for relay announcements
+- **Default:** `global`
+- **Values:** `us-west`, `eu-central`, `ap-southeast`, `global`, etc.
+
+**Example Configuration (Client Mode):**
+```ini
+[relay]
+enabled = true
+prefer_region = us-west      # Prefer US West relays
+cache_timeout = 300          # 5-minute cache
+volunteer = false            # Don't volunteer as relay
+```
+
+**Example Configuration (Server Mode - Volunteering):**
+```ini
+[relay]
+enabled = true
+volunteer = true             # Volunteer as relay
+max_peers = 20               # Support up to 20 concurrent sessions
+bandwidth_limit_mbps = 50.0  # 50 Mbps limit
+region = eu-central          # Announce in EU Central region
+```
+
+**Privacy Note:** Relays forward encrypted payloads only. They cannot decrypt message content but can see:
+- Peer node IDs
+- Message sizes
+- Message timing
+
+---
+
+### Gossip Protocol Settings (`[gossip]`)
+
+Configure epidemic gossip store-and-forward protocol (Priority 6 strategy). Gossip provides eventual message delivery in disaster scenarios.
+
+#### `enabled`
+- **Description:** Enable gossip protocol
+- **Default:** `true`
+- **Values:** `true`, `false`
+
+#### `max_hops`
+- **Description:** Maximum hops for message forwarding
+- **Default:** `5`
+- **Range:** 1-10
+- **Note:** Higher values increase reach but add latency
+
+#### `fanout`
+- **Description:** Number of random peers to forward to
+- **Default:** `3`
+- **Range:** 1-10
+- **Note:** Higher values increase reliability but add bandwidth
+
+#### `ttl_seconds`
+- **Description:** Message TTL (time-to-live) in seconds
+- **Default:** `86400` (24 hours)
+- **Note:** Messages expire after TTL to prevent indefinite forwarding
+
+#### `sync_interval`
+- **Description:** Anti-entropy sync interval in seconds
+- **Default:** `300` (5 minutes)
+- **Note:** Periodic reconciliation using vector clocks
+
+#### `cleanup_interval`
+- **Description:** Expired message cleanup interval in seconds
+- **Default:** `600` (10 minutes)
+- **Note:** Remove expired messages from storage
+
+#### `priority`
+- **Description:** Default gossip message priority
+- **Default:** `normal`
+- **Values:** `low`, `normal`, `high`
+
+**Example Configuration:**
+```ini
+[gossip]
+enabled = true
+max_hops = 5                 # Max 5 hops
+fanout = 3                   # Forward to 3 random peers
+ttl_seconds = 86400          # 24-hour TTL
+sync_interval = 300          # Sync every 5 minutes
+cleanup_interval = 600       # Cleanup every 10 minutes
+priority = normal
+```
+
+**High-Reliability Configuration:**
+```ini
+[gossip]
+enabled = true
+max_hops = 7                 # Increase reach
+fanout = 5                   # Increase redundancy
+ttl_seconds = 172800         # 48-hour TTL
+sync_interval = 180          # Sync every 3 minutes
+```
+
+**Low-Bandwidth Configuration:**
+```ini
+[gossip]
+enabled = true
+max_hops = 3                 # Reduce hops
+fanout = 2                   # Reduce redundancy
+ttl_seconds = 43200          # 12-hour TTL
+sync_interval = 600          # Sync every 10 minutes
 ```
 
 ---

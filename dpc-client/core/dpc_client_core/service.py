@@ -30,7 +30,11 @@ from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
 from .p2p_coordinator import P2PCoordinator
+from .coordinators.connection_orchestrator import ConnectionOrchestrator
 from .message_router import MessageRouter
+from .managers.hole_punch_manager import HolePunchManager
+from .managers.relay_manager import RelayManager
+from .managers.gossip_manager import GossipManager
 from .message_handlers.hello_handler import HelloHandler
 from .message_handlers.text_handler import SendTextHandler
 from .message_handlers.context_handler import (
@@ -158,6 +162,12 @@ class CoreService:
         # Register callback to broadcast voting results to participants
         self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
 
+        # Phase 6 managers will be initialized in start() after DHT is created by P2PManager
+        self.hole_punch_manager = None
+        self.relay_manager = None
+        self.gossip_manager = None
+        self.connection_orchestrator = None
+
         # Inference orchestrator (coordinates local and remote AI inference)
         self.inference_orchestrator = InferenceOrchestrator(self)
 
@@ -255,175 +265,6 @@ class CoreService:
         except Exception as e:
             logger.error("Error notifying UI of status change: %s", e, exc_info=True)
 
-    async def _cleanup_schema_v2(self):
-        """
-        One-time cleanup to migrate to v2.0 schema.
-
-        Prerequisites:
-            - COMMIT_INTEGRITY must be implemented first
-            - Hash-based commit_ids already in use
-
-        Steps:
-            1. Fix instruction field (via migrate_instructions)
-            2. Export knowledge to versioned markdown files
-            3. Clear entries arrays from JSON
-            4. Update format_version to 2.0
-        """
-        import hashlib
-        from datetime import datetime
-        from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
-        from dpc_protocol.pcm_core import PersonalContext
-
-        personal_json_path = DPC_HOME_DIR / "personal.json"
-
-        if not personal_json_path.exists():
-            logger.info("No personal.json found, skipping cleanup")
-            return
-
-        logger.info("Schema v2.0 Cleanup")
-
-        # Load current data
-        with open(personal_json_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        # Check if already v2.0 and clean
-        if data.get('metadata', {}).get('format_version') == '2.0':
-            has_instruction = 'instruction' in data
-            has_entries = any(
-                len(topic.get('entries', [])) > 0
-                for topic in data.get('knowledge', {}).values()
-            )
-
-            if not has_instruction and not has_entries:
-                logger.info("Already v2.0 and clean")
-                return
-
-        changes_made = False
-
-        # STEP 1: Fix instruction field
-        logger.info("Step 1: Checking instruction field")
-        if migrate_instructions_from_personal_context():
-            logger.info("Instructions migrated")
-            changes_made = True
-
-            # Reload data
-            with open(personal_json_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-        else:
-            logger.info("Instructions already clean")
-
-        # STEP 2: Export knowledge to markdown
-        logger.info("Step 2: Exporting knowledge to markdown")
-
-        markdown_manager = MarkdownKnowledgeManager()
-        context = PersonalContext.from_dict(data)
-
-        for topic_name, topic in context.knowledge.items():
-            # Skip if already has markdown_file
-            if hasattr(topic, 'markdown_file') and topic.markdown_file:
-                markdown_path = DPC_HOME_DIR / topic.markdown_file
-                if markdown_path.exists():
-                    logger.info("%s: Already has markdown", topic_name)
-                    continue
-
-            # Get commit_id (should be hash-based from COMMIT_INTEGRITY)
-            commit_id = getattr(topic, 'commit_id', None) or context.last_commit_id
-
-            if not commit_id:
-                # Fallback: generate hash-based commit_id
-                logger.warning("%s: No commit_id, generating new one", topic_name)
-
-                from dpc_protocol.knowledge_commit import KnowledgeCommit
-                from dpc_protocol.commit_integrity import compute_commit_hash
-
-                temp_commit = KnowledgeCommit(
-                    topic=topic_name,
-                    summary=topic.summary,
-                    entries=topic.entries
-                )
-                commit_hash = compute_commit_hash(temp_commit)
-                commit_id = f"commit-{commit_hash[:16]}"
-
-            # Create versioned markdown file
-            safe_name = topic_name.lower().replace(' ', '_').replace("'", '').replace('"', '')
-            markdown_filename = f"{safe_name}_{commit_id}.md"
-            markdown_path = markdown_manager.knowledge_dir / markdown_filename
-
-            # Convert topic to markdown
-            markdown_content = markdown_manager.topic_to_markdown_content(topic)
-
-            # Compute content hash
-            content_hash = hashlib.sha256(markdown_content.encode('utf-8')).hexdigest()[:16]
-
-            # Create frontmatter
-            frontmatter = {
-                'topic': topic_name,
-                'commit_id': commit_id,
-                'content_hash': content_hash,
-                'version': topic.version,
-                'created_at': topic.created_at,
-                'last_modified': topic.last_modified,
-                'mastery_level': topic.mastery_level
-            }
-
-            # If this commit has integrity data (from COMMIT_INTEGRITY)
-            for commit in context.commit_history:
-                if commit.get('commit_id') == commit_id:
-                    frontmatter['commit_hash'] = commit.get('commit_hash', '')
-                    frontmatter['parent_commit'] = commit.get('parent_commit_id', '')
-                    frontmatter['participants'] = commit.get('participants', [])
-                    frontmatter['approved_by'] = commit.get('approved_by', [])
-                    frontmatter['consensus'] = commit.get('consensus', 'unanimous')
-                    frontmatter['signatures'] = commit.get('signatures', {})
-                    break
-
-            # Write markdown file
-            full_content = markdown_manager.build_markdown_with_frontmatter(
-                frontmatter,
-                markdown_content
-            )
-            markdown_path.write_text(full_content, encoding='utf-8')
-
-            # Update JSON metadata
-            data['knowledge'][topic_name]['markdown_file'] = f"knowledge/{markdown_filename}"
-            data['knowledge'][topic_name]['commit_id'] = commit_id
-
-            # Clear entries
-            entry_count = len(data['knowledge'][topic_name].get('entries', []))
-            data['knowledge'][topic_name]['entries'] = []
-
-            logger.info("%s: Exported %d entries to %s", topic_name, entry_count, markdown_filename)
-            changes_made = True
-
-        # STEP 3: Update format_version
-        if 'metadata' not in data:
-            data['metadata'] = {}
-
-        data['metadata']['format_version'] = '2.0'
-        data['metadata']['last_updated'] = datetime.utcnow().isoformat()
-
-        # STEP 4: Save cleaned personal.json
-        if changes_made:
-            # Backup original
-            import shutil
-            backup_path = personal_json_path.with_suffix('.json.v1_backup')
-            shutil.copy(personal_json_path, backup_path)
-            logger.info("Backed up to %s", backup_path)
-
-            # Save cleaned version
-            with open(personal_json_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2, ensure_ascii=False)
-
-            # Log results
-            original_size = backup_path.stat().st_size
-            new_size = personal_json_path.stat().st_size
-            reduction = ((original_size - new_size) / original_size) * 100
-
-            logger.info("Schema v2.0 cleanup complete")
-            logger.info("File size reduced from %d to %d bytes (%.1f%% reduction)", original_size, new_size, reduction)
-        else:
-            logger.info("No changes needed")
-
     async def _startup_integrity_check(self):
         """Verify all knowledge commits on startup."""
         from dpc_protocol.commit_integrity import verify_markdown_integrity
@@ -489,13 +330,6 @@ class CoreService:
 
         self._shutdown_event = asyncio.Event()
 
-        # Run schema cleanup (one-time migration to v2.0)
-        try:
-            await self._cleanup_schema_v2()
-        except Exception as e:
-            logger.error("Schema cleanup error: %s", e, exc_info=True)
-            # Don't fail startup
-
         # Run knowledge integrity check
         logger.info("Running knowledge integrity check")
         await self._startup_integrity_check()
@@ -523,6 +357,100 @@ class CoreService:
         p2p_port = self.settings.get_p2p_listen_port()
         self.connection_status.update_direct_tls_status(available=True, port=p2p_port)
         logger.info(f"Direct TLS server started on port {p2p_port}")
+
+        # Initialize Phase 6 managers (after P2PManager has created DHT Manager)
+        # DHT Manager is created and started by P2PManager.start_server()
+        dht_manager = self.p2p_manager.dht_manager
+        if dht_manager:
+            logger.info("DHT Manager available from P2PManager")
+            self.connection_status.update_dht_status(True)
+
+            # Hole Punch Manager (Phase 6 - UDP NAT traversal)
+            if self.settings.get_enable_hole_punching():
+                hole_punch_port = self.settings.get_hole_punch_port()
+                self.hole_punch_manager = HolePunchManager(
+                    dht_manager=dht_manager,
+                    punch_port=hole_punch_port,
+                    discovery_peers=3,
+                    punch_timeout=self.settings.get_hole_punch_timeout()
+                )
+                logger.info("Hole Punch Manager initialized on port %d", hole_punch_port)
+                self.connection_status.update_hole_punch_status(True)
+            else:
+                logger.info("Hole Punch Manager disabled (requires DTLS encryption in v0.11.0+)")
+                self.connection_status.update_hole_punch_status(False)
+
+            # Relay Manager (Phase 6 - Volunteer relay nodes)
+            relay_volunteer = self.settings.get_relay_volunteer()
+            self.relay_manager = RelayManager(
+                dht_manager=dht_manager,
+                p2p_manager=self.p2p_manager,
+                volunteer=relay_volunteer,
+                max_peers=self.settings.get_relay_max_peers(),
+                bandwidth_limit_mbps=self.settings.get_relay_bandwidth_limit(),
+                region="global"
+            )
+            logger.info("Relay Manager initialized (volunteer=%s)", relay_volunteer)
+            self.connection_status.update_relay_status(True)
+
+            # Gossip Manager (Phase 6 - Store-and-forward messaging)
+            self.gossip_manager = GossipManager(
+                p2p_manager=self.p2p_manager,
+                node_id=self.p2p_manager.node_id,
+                fanout=self.settings.get_gossip_fanout(),
+                max_hops=self.settings.get_gossip_max_hops(),
+                ttl_seconds=self.settings.get_gossip_ttl(),
+                sync_interval=self.settings.get_gossip_sync_interval()
+            )
+            logger.info("Gossip Manager initialized")
+            self.connection_status.update_gossip_status(True)
+
+            # Connection Orchestrator (Phase 6 - 6-tier connection fallback)
+            self.connection_orchestrator = ConnectionOrchestrator(
+                p2p_manager=self.p2p_manager,
+                dht_manager=dht_manager,
+                hub_client=self.hub_client,
+                hole_punch_manager=self.hole_punch_manager,
+                relay_manager=self.relay_manager,
+                gossip_manager=self.gossip_manager
+            )
+            logger.info("Connection Orchestrator initialized with 6-tier fallback")
+        else:
+            logger.warning("DHT Manager not available - Phase 6 features disabled")
+            self.connection_status.update_dht_status(False)
+            self.connection_status.update_hole_punch_status(False)
+            self.connection_status.update_relay_status(False)
+            self.connection_status.update_gossip_status(False)
+
+        # Start Hole Punch Manager (if enabled)
+        if self.hole_punch_manager:
+            logger.info("Starting Hole Punch Manager...")
+            hole_punch_task = asyncio.create_task(self.hole_punch_manager.start())
+            hole_punch_task.set_name("hole_punch_manager")
+            self._background_tasks.add(hole_punch_task)
+
+        # Start Relay Manager (if available)
+        if self.relay_manager:
+            logger.info("Starting Relay Manager...")
+            # Relay manager doesn't have a start() method, it's on-demand
+            if self.relay_manager.volunteer:
+                # Announce relay availability after DHT bootstrap
+                await asyncio.sleep(1.0)  # Wait for DHT bootstrap
+                relay_announce_task = asyncio.create_task(self.relay_manager.announce_relay_availability())
+                relay_announce_task.set_name("relay_announce")
+                self._background_tasks.add(relay_announce_task)
+
+        # Start Gossip Manager (if available)
+        if self.gossip_manager:
+            logger.info("Starting Gossip Manager...")
+            gossip_task = asyncio.create_task(self.gossip_manager.start())
+            gossip_task.set_name("gossip_manager")
+            self._background_tasks.add(gossip_task)
+
+        if dht_manager:
+            logger.info("Phase 6 managers started (DHT, Hole Punch, Relay, Gossip)")
+        else:
+            logger.warning("Phase 6 managers unavailable (DHT not initialized)")
 
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
@@ -600,6 +528,21 @@ class CoreService:
         """Performs a clean shutdown of all components."""
         self._is_running = False
         logger.info("Shutting down components")
+
+        # Shutdown Phase 6 managers
+        if hasattr(self, 'dht_manager'):
+            logger.info("Stopping DHT Manager...")
+            await self.dht_manager.stop()
+
+        if hasattr(self, 'hole_punch_manager') and self.hole_punch_manager:
+            logger.info("Stopping Hole Punch Manager...")
+            await self.hole_punch_manager.stop()
+
+        if hasattr(self, 'gossip_manager') and self.gossip_manager:
+            logger.info("Stopping Gossip Manager...")
+            await self.gossip_manager.stop()
+
+        # Shutdown core components
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()
         await self.hub_client.close()
@@ -627,6 +570,9 @@ class CoreService:
                 self._external_ip = external_ip
                 logger.info("External IP discovered: %s", external_ip)
 
+                # Update DHT to announce with external IP (for internet-wide discovery)
+                await self.p2p_manager.update_dht_ip(external_ip)
+
                 # Notify UI of status update (to refresh external URIs)
                 await self.local_api.broadcast_event("status_update", await self.get_status())
             else:
@@ -645,6 +591,9 @@ class CoreService:
                         logger.info("External IP changed: %s -> %s",
                                   self._external_ip or "(none)", external_ip)
                         self._external_ip = external_ip
+
+                        # Update DHT with new external IP
+                        await self.p2p_manager.update_dht_ip(external_ip)
 
                         # Notify UI
                         await self.local_api.broadcast_event("status_update", await self.get_status())
@@ -1037,10 +986,11 @@ class CoreService:
 
         # Get peer info with names
         peer_info = []
-        for peer_id in self.p2p_manager.peers.keys():
+        for peer_id, peer_conn in self.p2p_manager.peers.items():
             peer_data = {
                 "node_id": peer_id,
-                "name": self.peer_metadata.get(peer_id, {}).get("name", None)
+                "name": self.peer_metadata.get(peer_id, {}).get("name", None),
+                "strategy_used": getattr(peer_conn, 'strategy_used', None)
             }
             peer_info.append(peer_data)
 
@@ -2068,6 +2018,58 @@ class CoreService:
         Uses WebRTC with NAT traversal.
         """
         await self.p2p_coordinator.connect_via_hub(node_id)
+
+    async def connect_via_dht(self, node_id: str) -> dict:
+        """
+        Connect to a peer using DHT-first strategy.
+
+        Tries discovery methods in order:
+        1. DHT lookup (finds peer's current IP/port)
+        2. Peer cache (last known connection)
+        3. Hub WebRTC (future - Phase 5)
+
+        Args:
+            node_id: Target peer's node identifier (e.g., dpc-node-abc123...)
+
+        Returns:
+            Dict with connection result:
+            - status: "success" or "error"
+            - method: Discovery method used ("dht", "cache", "hub", or None)
+            - message: Human-readable result message
+
+        Example:
+            result = await core_service.connect_via_dht("dpc-node-abc123...")
+            # {"status": "success", "method": "dht", "message": "Connected via DHT"}
+        """
+        try:
+            # Attempt connection using DHT-first strategy
+            success = await self.p2p_manager.connect_via_node_id(node_id)
+
+            if success:
+                # Determine which method was used
+                # Check if peer is now in connected peers
+                if node_id in self.p2p_manager.peers:
+                    # Try to determine discovery method from logs/state
+                    # For now, assume DHT if it succeeded
+                    return {
+                        "status": "success",
+                        "method": "dht",  # Could be "dht", "cache", or "hub"
+                        "message": f"Connected to {node_id}"
+                    }
+
+            return {
+                "status": "error",
+                "method": None,
+                "message": f"Failed to connect to {node_id} - peer not found via DHT, cache, or Hub"
+            }
+
+        except Exception as e:
+            logger.error("DHT connection error for %s: %s", node_id, e, exc_info=True)
+            return {
+                "status": "error",
+                "method": None,
+                "message": f"Connection error: {str(e)}"
+            }
 
     async def disconnect_from_peer(self, node_id: str):
         """Disconnect from a peer."""

@@ -106,6 +106,68 @@ class Settings:
             'collect_ai_models': 'false'         # Collect locally available AI models (opt-in for compute-sharing)
         }
 
+        self._config['dht'] = {
+            'enabled': 'true',  # Enable DHT peer discovery
+            'port': '8889',  # UDP port for DHT RPCs (TLS port + 1)
+            'k': '20',  # Kademlia k parameter (nodes per bucket)
+            'alpha': '3',  # Parallelism factor for iterative lookups
+            'bootstrap_timeout': '30',  # Bootstrap timeout in seconds
+            'lookup_timeout': '10',  # Lookup timeout in seconds
+            'bucket_refresh_interval': '3600',  # Bucket refresh interval (1 hour)
+            'announce_interval': '3600',  # Re-announce interval (1 hour)
+            'seed_nodes': ''  # Comma-separated list of seed nodes (ip:port)
+        }
+
+        self._config['connection'] = {
+            # Enable/disable individual connection strategies
+            'enable_ipv6': 'true',  # Try IPv6 direct connections (Priority 1)
+            'enable_ipv4': 'true',  # Try IPv4 direct connections (Priority 2)
+            'enable_hub_webrtc': 'true',  # Try Hub WebRTC with STUN/TURN (Priority 3)
+            'enable_hole_punching': 'false',  # Try DHT-coordinated UDP hole punching (Priority 4) - DISABLED: lacks DTLS encryption (v0.10.0)
+            'enable_relays': 'true',  # Try volunteer relay nodes (Priority 5)
+            'enable_gossip': 'true',  # Use gossip store-and-forward fallback (Priority 6)
+            # Timeouts per strategy (seconds) - increased for high-latency networks (mobile, CGNAT)
+            'ipv6_timeout': '60',  # Includes 30s pre-flight check + 30s SSL handshake
+            'ipv4_timeout': '60',  # Includes 30s pre-flight check + 30s SSL handshake
+            'webrtc_timeout': '30',
+            'hole_punch_timeout': '15',
+            'relay_timeout': '20',
+            'gossip_timeout': '5'  # How long to wait before falling back to gossip
+        }
+
+        self._config['hole_punch'] = {
+            'udp_punch_port': '8890',  # UDP port for hole punching
+            'nat_detection_enabled': 'true',  # Detect NAT type (cone vs symmetric)
+            'stun_timeout': '5',  # Endpoint discovery timeout (seconds)
+            'punch_attempts': '3',  # Number of punch attempts before giving up
+            # DTLS encryption settings (v0.10.1+)
+            'enable_dtls': 'true',  # Enable DTLS encryption for hole-punched connections
+            'dtls_handshake_timeout': '3',  # DTLS handshake timeout (seconds)
+            'dtls_version': '1.2'  # DTLS protocol version (1.2 or 1.3)
+        }
+
+        self._config['relay'] = {
+            # Client mode (use relays for outbound connections)
+            'enabled': 'true',  # Enable relay client mode
+            'prefer_region': 'global',  # Preferred region: us-west, eu-central, global, etc.
+            'cache_timeout': '300',  # Relay discovery cache timeout (5 minutes)
+            # Server mode (volunteer as relay for others)
+            'volunteer': 'false',  # Volunteer this node as relay (opt-in)
+            'max_peers': '10',  # Max concurrent relay sessions (server mode)
+            'bandwidth_limit_mbps': '10.0',  # Bandwidth limit for relaying
+            'region': 'global'  # Geographic region for relay announcements
+        }
+
+        self._config['gossip'] = {
+            'enabled': 'true',  # Enable gossip protocol
+            'max_hops': '5',  # Maximum hops for message forwarding
+            'fanout': '3',  # Number of random peers to forward to
+            'ttl_seconds': '86400',  # Message TTL (24 hours)
+            'sync_interval': '300',  # Anti-entropy sync interval (5 minutes)
+            'cleanup_interval': '600',  # Expired message cleanup interval (10 minutes)
+            'priority': 'normal'  # Default message priority: low, normal, high
+        }
+
         self._config['knowledge'] = {
             'token_warning_threshold': '0.8',  # Warn when context window reaches 80%
             'auto_extraction_enabled': 'true',  # Automatically suggest knowledge extraction
@@ -342,6 +404,186 @@ class Settings:
         # Save to file
         with open(self.config_file, 'w') as f:
             self._config.write(f)
+
+    def get_dht_enabled(self) -> bool:
+        """Check if DHT peer discovery is enabled."""
+        value = self.get('dht', 'enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dht_port(self) -> int:
+        """Get DHT UDP port."""
+        return int(self.get('dht', 'port', '8889'))
+
+    def get_dht_k(self) -> int:
+        """Get Kademlia k parameter (nodes per bucket)."""
+        return int(self.get('dht', 'k', '20'))
+
+    def get_dht_alpha(self) -> int:
+        """Get Kademlia alpha parameter (lookup parallelism)."""
+        return int(self.get('dht', 'alpha', '3'))
+
+    def get_dht_bootstrap_timeout(self) -> float:
+        """Get DHT bootstrap timeout in seconds."""
+        return float(self.get('dht', 'bootstrap_timeout', '30'))
+
+    def get_dht_lookup_timeout(self) -> float:
+        """Get DHT lookup timeout in seconds."""
+        return float(self.get('dht', 'lookup_timeout', '10'))
+
+    def get_dht_bucket_refresh_interval(self) -> float:
+        """Get DHT bucket refresh interval in seconds."""
+        return float(self.get('dht', 'bucket_refresh_interval', '3600'))
+
+    def get_dht_announce_interval(self) -> float:
+        """Get DHT announce interval in seconds."""
+        return float(self.get('dht', 'announce_interval', '3600'))
+
+    def get_dht_seed_nodes(self) -> list[tuple[str, int]]:
+        """
+        Get list of DHT seed nodes from configuration.
+
+        Returns:
+            List of (ip, port) tuples for seed nodes
+        """
+        try:
+            seeds_str = self.get('dht', 'seed_nodes', '')
+            if not seeds_str:
+                return []
+
+            seeds = []
+            for seed in seeds_str.split(','):
+                seed = seed.strip()
+                if ':' in seed:
+                    ip, port_str = seed.rsplit(':', 1)
+                    try:
+                        port = int(port_str)
+                        seeds.append((ip, port))
+                    except ValueError:
+                        print(f"[Warning] Invalid DHT seed node format: {seed}")
+            return seeds
+        except KeyError:
+            return []
+
+    # ===== Phase 6: Connection Strategy Configuration =====
+
+    def get_connection_strategy_enabled(self, strategy: str) -> bool:
+        """
+        Check if a connection strategy is enabled.
+
+        Args:
+            strategy: One of: ipv6, ipv4, hub_webrtc, hole_punching, relays, gossip
+        """
+        key = f'enable_{strategy}'
+        value = self.get('connection', key, 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_connection_timeout(self, strategy: str) -> float:
+        """
+        Get timeout for a connection strategy in seconds.
+
+        Args:
+            strategy: One of: ipv6, ipv4, webrtc, hole_punch, relay, gossip
+        """
+        key = f'{strategy}_timeout'
+        return float(self.get('connection', key, '30'))
+
+    def get_hole_punch_port(self) -> int:
+        """Get UDP port for hole punching."""
+        return int(self.get('hole_punch', 'udp_punch_port', '8890'))
+
+    def get_hole_punch_nat_detection_enabled(self) -> bool:
+        """Check if NAT type detection is enabled."""
+        value = self.get('hole_punch', 'nat_detection_enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_hole_punch_stun_timeout(self) -> float:
+        """Get STUN endpoint discovery timeout in seconds."""
+        return float(self.get('hole_punch', 'stun_timeout', '5'))
+
+    def get_hole_punch_attempts(self) -> int:
+        """Get number of hole punch attempts before giving up."""
+        return int(self.get('hole_punch', 'punch_attempts', '3'))
+
+    def get_hole_punch_dtls_enabled(self) -> bool:
+        """Check if DTLS encryption is enabled for hole-punched connections."""
+        value = self.get('hole_punch', 'enable_dtls', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_hole_punch_dtls_handshake_timeout(self) -> float:
+        """Get DTLS handshake timeout in seconds."""
+        return float(self.get('hole_punch', 'dtls_handshake_timeout', '3'))
+
+    def get_hole_punch_dtls_version(self) -> str:
+        """Get DTLS protocol version (1.2 or 1.3)."""
+        return self.get('hole_punch', 'dtls_version', '1.2')
+
+    def get_relay_enabled(self) -> bool:
+        """Check if relay client mode is enabled."""
+        value = self.get('relay', 'enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_relay_prefer_region(self) -> str:
+        """Get preferred relay region."""
+        return self.get('relay', 'prefer_region', 'global')
+
+    def get_relay_cache_timeout(self) -> int:
+        """Get relay discovery cache timeout in seconds."""
+        return int(self.get('relay', 'cache_timeout', '300'))
+
+    def get_relay_volunteer(self) -> bool:
+        """Check if this node volunteers as relay (server mode)."""
+        value = self.get('relay', 'volunteer', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_relay_max_peers(self) -> int:
+        """Get max concurrent relay sessions (server mode)."""
+        return int(self.get('relay', 'max_peers', '10'))
+
+    def get_relay_bandwidth_limit(self) -> float:
+        """Get bandwidth limit for relaying in Mbps."""
+        return float(self.get('relay', 'bandwidth_limit_mbps', '10.0'))
+
+    def get_relay_region(self) -> str:
+        """Get geographic region for relay announcements."""
+        return self.get('relay', 'region', 'global')
+
+    def get_gossip_enabled(self) -> bool:
+        """Check if gossip protocol is enabled."""
+        value = self.get('gossip', 'enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_gossip_max_hops(self) -> int:
+        """Get maximum hops for gossip message forwarding."""
+        return int(self.get('gossip', 'max_hops', '5'))
+
+    def get_gossip_fanout(self) -> int:
+        """Get number of random peers to forward gossip to."""
+        return int(self.get('gossip', 'fanout', '3'))
+
+    def get_gossip_ttl(self) -> int:
+        """Get gossip message TTL in seconds."""
+        return int(self.get('gossip', 'ttl_seconds', '86400'))
+
+    def get_gossip_sync_interval(self) -> int:
+        """Get anti-entropy sync interval in seconds."""
+        return int(self.get('gossip', 'sync_interval', '300'))
+
+    def get_gossip_cleanup_interval(self) -> int:
+        """Get expired message cleanup interval in seconds."""
+        return int(self.get('gossip', 'cleanup_interval', '600'))
+
+    def get_gossip_priority(self) -> str:
+        """Get default gossip message priority."""
+        return self.get('gossip', 'priority', 'normal')
+
+    # Convenience methods for connection strategies
+    def get_enable_hole_punching(self) -> bool:
+        """Get whether UDP hole punching is enabled."""
+        return self.get_connection_strategy_enabled('hole_punching')
+
+    def get_hole_punch_timeout(self) -> float:
+        """Get hole punch connection timeout."""
+        return self.get_connection_timeout('hole_punch')
 
     def reload(self):
         """Reload configuration from file."""

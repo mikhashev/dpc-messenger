@@ -54,7 +54,7 @@
 
   // Store AI chat metadata (chatId -> {name: string, provider: string})
   const aiChats = writable<Map<string, {name: string, provider: string}>>(
-    new Map([['local_ai', {name: 'Local AI Assistant', provider: ''}]])
+    new Map([['local_ai', {name: 'Local AI Chat', provider: ''}]])
   );
 
   // Track which chat each AI command belongs to (commandId -> chatId)
@@ -225,7 +225,43 @@
       selectedPeerContexts = selectedPeerContexts;
     }
   }
-  
+
+  // Helper: Group peers by connection strategy
+  function getPeersByStrategy(peerInfo: any[]) {
+    const strategyMap: Record<string, any[]> = {};
+
+    if (!peerInfo) return strategyMap;
+
+    for (const peer of peerInfo) {
+      if (peer.strategy_used) {
+        if (!strategyMap[peer.strategy_used]) {
+          strategyMap[peer.strategy_used] = [];
+        }
+        strategyMap[peer.strategy_used].push(peer);
+      }
+    }
+
+    return strategyMap;
+  }
+
+  // Helper: Format peer for tooltip display
+  function formatPeerForTooltip(peer: any): string {
+    let displayName = peer.name || 'Unknown';
+
+    // Trim display name to 20 characters
+    if (displayName.length > 20) {
+      displayName = displayName.substring(0, 17) + '...';
+    }
+
+    // Extract node ID suffix (remove "dpc-node-" prefix)
+    const nodeIdSuffix = peer.node_id.replace(/^dpc-node-/, '');
+
+    return `${displayName} (${nodeIdSuffix})`;
+  }
+
+  // Reactive statement to compute peer counts
+  $: peersByStrategy = getPeersByStrategy($nodeStatus?.peer_info);
+
   function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
     if (!element) return true;
     const { scrollTop, scrollHeight, clientHeight } = element;
@@ -405,24 +441,25 @@
   }
   
   // --- PEER CONNECTION FUNCTIONS ---
-  // FIXED: Proper detection of dpc:// URI vs node_id
+  // Connection strategy: Direct TLS (if dpc:// URI) or DHT-first (if node_id)
   function handleConnectPeer() {
     if (!peerInput.trim()) return;
-    
+
     const input = peerInput.trim();
     console.log("Connecting to peer:", input);
-    
-    // Detect if input is a dpc:// URI (Direct TLS) or just a node_id (WebRTC via Hub)
+
+    // Detect if input is a dpc:// URI (Direct TLS) or just a node_id (DHT-first)
     if (input.startsWith('dpc://')) {
-      // Direct TLS connection
+      // Direct TLS connection (manual IP/port)
       console.log("Using Direct TLS connection");
       sendCommand("connect_to_peer", { uri: input });
     } else {
-      // WebRTC connection via Hub (just node_id)
-      console.log("Using WebRTC connection via Hub");
-      sendCommand("connect_to_peer_by_id", { node_id: input });
+      // DHT-first connection (automatic discovery)
+      // Tries: DHT lookup → Peer cache → Hub WebRTC
+      console.log("Using DHT-first discovery strategy");
+      sendCommand("connect_via_dht", { node_id: input });
     }
-    
+
     peerInput = "";
   }
   
@@ -781,7 +818,7 @@
           <!-- Direct TLS Connection URIs (Local Network) -->
           {#if $nodeStatus.dpc_uris && $nodeStatus.dpc_uris.length > 0}
             <div class="dpc-uris-section">
-              <details class="uri-details" open>
+              <details class="uri-details">
                 <summary class="uri-summary">
                   <span class="uri-icon">🔗</span>
                   <span class="uri-title">Local Network ({$nodeStatus.dpc_uris.length})</span>
@@ -817,7 +854,7 @@
           <!-- External URIs (From STUN Servers) -->
           {#if $nodeStatus.external_uris && $nodeStatus.external_uris.length > 0}
             <div class="dpc-uris-section">
-              <details class="uri-details" open>
+              <details class="uri-details">
                 <summary class="uri-summary">
                   <span class="uri-icon">🌐</span>
                   <span class="uri-title">External (Internet) ({$nodeStatus.external_uris.length})</span>
@@ -872,8 +909,19 @@
                   <summary>Available Features</summary>
                   <ul class="features-list">
                     {#each Object.entries($nodeStatus.available_features) as [feature, available]}
-                      <li class:feature-available={available} class:feature-unavailable={!available}>
+                      {@const peerCount = peersByStrategy[feature]?.length || 0}
+                      {@const tooltip = peersByStrategy[feature]
+                        ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
+                        : ''}
+                      <li
+                        class:feature-available={available}
+                        class:feature-unavailable={!available}
+                        title={peerCount > 0 ? tooltip : ''}
+                      >
                         {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
+                        {#if peerCount > 0}
+                          <span class="peer-count">({peerCount})</span>
+                        {/if}
                       </li>
                     {/each}
                   </ul>
@@ -914,19 +962,19 @@
         <!-- Personal Context Button (Knowledge Architecture) -->
         <div class="context-section">
           <button class="btn-context" on:click={loadPersonalContext}>
-            📚 View Personal Context
+            View Personal Context
           </button>
 
           <button class="btn-context" on:click={openInstructionsEditor}>
-            ⚙️ AI Instructions
+            AI Instructions
           </button>
 
           <button class="btn-context" on:click={openFirewallEditor}>
-            🛡️ Firewall Rules
+            Firewall and Privacy Rules
           </button>
 
           <button class="btn-context" on:click={openProvidersEditor}>
-            🤖 AI Providers
+            AI Providers
           </button>
 
           <!-- Auto Knowledge Detection Toggle -->
@@ -964,14 +1012,26 @@
             on:keydown={(e) => e.key === 'Enter' && handleConnectPeer()}
           />
           <button on:click={handleConnectPeer}>Connect</button>
-          <div class="connection-help">
-            <p class="small"><strong>Connection Methods:</strong></p>
-            <p class="small">
-              🌐 <strong>WebRTC (via Hub):</strong> <code>dpc-node-abc123...</code><br/>
-              🏠 <strong>Local Network:</strong> <code>dpc://192.168.1.100:8888?node_id=dpc-node-abc123...</code><br/>
-              🌍 <strong>External IP:</strong> <code>dpc://203.0.113.5:8888?node_id=dpc-node-abc123...</code>
-            </p>
-          </div>
+
+          <!-- Connection Methods Help (Collapsible) -->
+          <details class="connection-methods-details">
+            <summary class="connection-methods-summary">
+              <span class="uri-icon">ℹ️</span>
+              <span class="uri-title">Connection Methods</span>
+            </summary>
+            <div class="connection-help-content">
+              <p class="small">
+                🔍 <strong>Auto-Discovery (DHT):</strong> <code>dpc-node-abc123...</code><br/>
+                <span class="small-detail">Tries: DHT → Cache → Hub</span>
+              </p>
+              <p class="small">
+                🏠 <strong>Direct TLS (Local):</strong> <code>dpc://192.168.1.100:8888?node_id=...</code>
+              </p>
+              <p class="small">
+                🌍 <strong>Direct TLS (External):</strong> <code>dpc://203.0.113.5:8888?node_id=...</code>
+              </p>
+            </div>
+          </details>
         </div>
 
         <!-- Chat List -->
@@ -997,7 +1057,7 @@
                   on:click={() => activeChatId = chatId}
                   title={chatInfo.provider ? `Provider: ${chatInfo.provider}` : 'Default AI Assistant'}
                 >
-                  🤖 {chatInfo.name}
+                  {chatInfo.name}
                 </button>
                 {#if chatId !== 'local_ai'}
                   <button
@@ -1064,9 +1124,9 @@
         <div class="chat-title-section">
           <h2>
             {#if $aiChats.has(activeChatId)}
-              🤖 {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
+              {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
             {:else}
-              👤 Chat with {getPeerDisplayName(activeChatId)}
+              Chat with {getPeerDisplayName(activeChatId)}
             {/if}
           </h2>
 
@@ -1091,16 +1151,12 @@
                   </option>
                 {/each}
               </select>
-              {#if $availableProviders.providers.length === 1}
-                <span class="provider-hint">(Configure more in ~/.dpc/providers.toml)</span>
-              {/if}
             </div>
           {/if}
         </div>
 
         {#if $aiChats.has(activeChatId) && currentTokenUsage.limit > 0}
           <div class="token-counter">
-            <span class="token-label">Context:</span>
             <span class="token-value">
               {currentTokenUsage.used.toLocaleString()} / {currentTokenUsage.limit.toLocaleString()} tokens
             </span>
@@ -1112,10 +1168,10 @@
 
         <div class="chat-actions">
           <button class="btn-new-chat" on:click={() => handleNewChat(activeChatId)}>
-            🔄 New Chat
+            New Session
           </button>
           <button class="btn-end-session" on:click={() => handleEndSession(activeChatId)}>
-            📚 End Session & Save Knowledge
+            End Session & Save Knowledge
           </button>
           {#if $aiChats.has(activeChatId)}
             <button
@@ -1124,7 +1180,7 @@
               on:click={() => enableMarkdown = !enableMarkdown}
               title={enableMarkdown ? 'Disable markdown rendering' : 'Enable markdown rendering'}
             >
-              {enableMarkdown ? '📝 Markdown' : '📄 Plain Text'}
+              {enableMarkdown ? 'Markdown' : 'Text'}
             </button>
           {/if}
         </div>
@@ -1172,7 +1228,7 @@
                 bind:checked={includePersonalContext}
               />
               <span>
-                📚 Include Personal Context (profile, instructions, device info)
+                Include Personal Context (profile, instructions, device info)
                 {#if localContextUpdated}
                   <span class="status-badge updated">Updated</span>
                 {/if}
@@ -1187,7 +1243,7 @@
           {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
             <div class="peer-context-selector">
               <div class="peer-context-header">
-                <span class="peer-context-label">🧠 Include Peer Context:</span>
+                <span class="peer-context-label">Include Peer Context:</span>
                 <span class="peer-context-hint">
                   ({selectedPeerContexts.size} selected)
                 </span>
@@ -1482,7 +1538,7 @@
     flex-direction: column;
     gap: 1rem;
     overflow-y: auto;
-    max-height: 100vh;
+    max-height: calc(100vh - 8rem);
     padding-right: 0.5rem;
   }
 
@@ -1520,7 +1576,51 @@
     border-bottom: 1px solid #eee;
     padding-bottom: 0.5rem;
   }
-  
+
+  /* Connection Methods Collapsible Section */
+  .connection-methods-details {
+    margin-top: 0.75rem;
+    background: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 0;
+    overflow: hidden;
+  }
+
+  .connection-methods-details[open] {
+    border-color: #007bff;
+  }
+
+  .connection-methods-summary {
+    padding: 0.75rem 1rem;
+    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    color: #333;
+    transition: background 0.2s;
+  }
+
+  .connection-methods-summary:hover {
+    background: linear-gradient(135deg, #e9ecef 0%, #dee2e6 100%);
+  }
+
+  .connection-methods-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .connection-help-content {
+    padding: 1rem;
+    background: #ffffff;
+  }
+
+  .connection-help-content p {
+    margin: 0.5rem 0;
+  }
+
   .node-id {
     font-family: monospace;
     font-size: 0.85rem;
@@ -1784,28 +1884,6 @@
     box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   }
 
-  /* Connection Help Styles */
-  .connection-help {
-    margin-top: 0.75rem;
-    padding: 0.75rem;
-    background: #f8f9fa;
-    border-radius: 6px;
-    border: 1px solid #dee2e6;
-  }
-
-  .connection-help code {
-    background: #e9ecef;
-    padding: 0.1rem 0.3rem;
-    border-radius: 3px;
-    font-family: 'Courier New', monospace;
-    font-size: 0.85rem;
-  }
-
-  .connection-help .small {
-    margin: 0.25rem 0;
-    line-height: 1.6;
-  }
-
   .chat-list ul {
     list-style: none;
     padding: 0;
@@ -1955,13 +2033,6 @@
     opacity: 0.7;
   }
 
-  .provider-hint {
-    font-size: 0.75rem;
-    color: #888;
-    font-style: italic;
-    margin-left: 0.5rem;
-  }
-
   .token-counter {
     display: flex;
     align-items: center;
@@ -1971,11 +2042,6 @@
     background: #f8f9fa;
     border-radius: 6px;
     border: 1px solid #e0e0e0;
-  }
-
-  .token-label {
-    color: #666;
-    font-weight: 500;
   }
 
   .token-value {
@@ -2476,6 +2542,12 @@
     color: #dc3545;
     text-decoration: line-through;
     opacity: 0.6;
+  }
+
+  .peer-count {
+    color: #888;
+    font-size: 0.9em;
+    margin-left: 0.25rem;
   }
 
   .cached-info {

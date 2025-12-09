@@ -7,6 +7,10 @@ This guide will help you set up D-PC Messenger for the first time. Choose your s
 - **Option A:** Local network testing (no Hub needed)
 - **Option B:** Internet-wide connections (requires Hub)
 
+> **NEW in v0.10.0:** Automatic 6-tier connection fallback! The system tries IPv6 → IPv4 → WebRTC → Hole Punch → Relay → Gossip until one succeeds. Connections "just work" regardless of network conditions.
+
+> **NEW in v0.10.0:** Hub is now **optional**! Direct DHT-based connections work without Hub for true decentralization and censorship resistance.
+
 ---
 
 ## Prerequisites
@@ -38,6 +42,8 @@ docker --version   # Should show docker version (if using Hub)
 ## Option A: Local Network Testing (Fastest)
 
 **Use this if:** You want to test between computers on the same network.
+
+**NEW in v0.10.0:** Direct connections now support 6-tier fallback hierarchy (IPv6 → IPv4 → WebRTC → UDP hole punching → Volunteer relays → Gossip) for near-universal connectivity!
 
 ### Step 1: Clone the Repository
 
@@ -99,6 +105,8 @@ Repeat Step 2 on another computer on the same network.
 ## Option B: Internet-Wide Connections (Recommended)
 
 **Use this if:** You want to connect to anyone, anywhere.
+
+**NEW in v0.10.0:** Hub is now **optional**! The system can establish connections without Hub using DHT-based hole punching and volunteer relay nodes.
 
 ### Step 1: Clone the Repository
 

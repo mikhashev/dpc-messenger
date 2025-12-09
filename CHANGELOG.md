@@ -7,6 +7,521 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- (No unreleased features yet)
+
+---
+
+## [0.10.1] - 2025-12-09
+
+### Added
+- **DTLS Encryption for UDP Hole Punching** (Priority 4 connection strategy)
+  - DTLS 1.2 end-to-end encryption for UDP-based NAT traversal
+  - Certificate-based authentication using existing node certificates
+  - Comprehensive unit test suite for DTLS implementation
+  - UDP Hole Punching now production-ready (was disabled in v0.10.0)
+  - Files: [connection_strategies/udp_hole_punch.py](dpc-client/core/dpc_client_core/connection_strategies/udp_hole_punch.py), [managers/hole_punch_manager.py](dpc-client/core/dpc_client_core/managers/hole_punch_manager.py)
+- **UI Connection Strategy Visibility**
+  - Available Features menu shows peer counts per connection strategy
+  - Display format: "ipv4_direct (2 peers)", "relay (3 peers)", etc.
+  - Helps users understand which connection strategies are active
+- **Comprehensive Manual Testing Guide**
+  - New documentation: [docs/MANUAL_TESTING_GUIDE.md](docs/MANUAL_TESTING_GUIDE.md)
+  - Step-by-step testing for all 6 connection strategies
+  - Wireshark verification procedures for DTLS encryption
+  - NAT simulation scenarios for UDP Hole Punching
+  - Relay and gossip protocol testing
+
+### Fixed
+- **Connection Timeouts for High-Latency Networks**
+  - Pre-flight timeout: 5s → 30s (improved DHT/Hub query reliability)
+  - IPv4/IPv6 Direct timeout: 10s → 60s (better mobile/CGNAT support)
+  - Improves reliability on mobile, CGNAT, satellite, and rural networks
+- **Strategy Metadata for All Connection Types**
+  - All P2P connections now set `strategy_used` field
+  - Required for UI peer count display feature
+  - Ensures accurate connection strategy tracking
+
+### Changed
+- **UDP Hole Punching Default:** Now **enabled by default** (was disabled in v0.10.0)
+  - Safe to enable due to DTLS encryption
+  - Configuration: `[hole_punch] enabled = true` (default)
+
+### Documentation
+- Added [docs/RELEASE_NOTES_V0_10_1.md](docs/RELEASE_NOTES_V0_10_1.md)
+- Added [docs/MANUAL_TESTING_GUIDE.md](docs/MANUAL_TESTING_GUIDE.md)
+- Updated CLAUDE.md with DTLS implementation notes
+- Updated README.md version to 0.10.1
+
+### Security
+- **All 6 connection strategies now have end-to-end encryption**
+  - v0.10.0: UDP Hole Punching was cleartext (disabled)
+  - v0.10.1: UDP Hole Punching now encrypted with DTLS 1.2
+  - Cipher suite: TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 (preferred)
+  - Perfect Forward Secrecy enabled
+
+---
+
+## [0.10.0] - 2025-12-07
+
+### Added
+
+**Phase 6: Fallback Logic & Hybrid Mode - 6-Tier Connection Hierarchy - COMPLETE**
+
+This release implements a comprehensive 6-tier connection fallback hierarchy for near-universal P2P connectivity, making the Hub completely optional. The system now gracefully falls back through multiple connection strategies, from direct IPv6 connections down to multi-hop gossip routing in disaster scenarios.
+
+**Week 1: DHT Schema Enhancement & Connection Orchestrator**
+
+- **Enhanced DHT Storage Schema** - Unified schema for all connection metadata
+  - IPv4 endpoints (local, external, NAT type)
+  - IPv6 global addresses
+  - Relay node support flags
+  - Hole punching capability indicators
+  - Backward compatibility with legacy string format
+  - File modified: [dht/manager.py](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **ConnectionOrchestrator** - Intelligent connection strategy coordinator
+  - Tries 6 connection strategies in priority order until one succeeds
+  - Per-strategy timeout configuration
+  - Connection statistics tracking (success rate, strategy usage)
+  - Dynamic strategy enable/disable
+  - File created: [coordinators/connection_orchestrator.py](dpc-client/core/dpc_client_core/coordinators/connection_orchestrator.py)
+
+- **ConnectionStrategy Pattern** - Pluggable connection strategy interface
+  - Base class with `is_applicable()`, `connect()` methods
+  - Per-strategy priority, timeout, name
+  - Files created:
+    - [connection_strategies/base.py](dpc-client/core/dpc_client_core/connection_strategies/base.py)
+    - [connection_strategies/ipv6_direct.py](dpc-client/core/dpc_client_core/connection_strategies/ipv6_direct.py)
+    - [connection_strategies/ipv4_direct.py](dpc-client/core/dpc_client_core/connection_strategies/ipv4_direct.py)
+    - [connection_strategies/hub_webrtc.py](dpc-client/core/dpc_client_core/connection_strategies/hub_webrtc.py)
+
+- **PeerEndpoint Model** - Enhanced endpoint metadata
+  - IPv4 (local, external, NAT type)
+  - IPv6 (global address)
+  - Relay support, hole punching capability
+  - File created: [models/peer_endpoint.py](dpc-client/core/dpc_client_core/models/peer_endpoint.py)
+
+**Week 2: UDP Hole Punching (Priority 4 - DHT-Coordinated)**
+
+- **HolePunchManager** - STUN-like endpoint discovery via DHT
+  - `discover_external_endpoint()` - Query 3 random DHT peers for reflexive address
+  - `_detect_nat_type()` - Detect cone vs symmetric NAT
+  - `punch_hole()` - Coordinated simultaneous UDP send (birthday paradox)
+  - Success rate: 60-70% for cone NAT (fails gracefully for symmetric NAT)
+  - File created: [managers/hole_punch_manager.py](dpc-client/core/dpc_client_core/managers/hole_punch_manager.py)
+
+- **UDPHolePunchStrategy** - Priority 4 connection strategy
+  - DHT-coordinated hole punching (no STUN servers required)
+  - Hub-independent NAT traversal
+  - File created: [connection_strategies/udp_hole_punch.py](dpc-client/core/dpc_client_core/connection_strategies/udp_hole_punch.py)
+
+- **DISCOVER_ENDPOINT RPC** - DHT protocol extension for endpoint discovery
+  - Peers report reflexive IP:port to requester
+  - File modified: [dht/rpc.py](dpc-client/core/dpc_client_core/dht/rpc.py)
+
+**Week 3: Volunteer Relay Nodes (Priority 5 - 100% NAT Coverage)**
+
+- **RelayManager** - Client and server modes for volunteer relays
+  - Client mode:
+    - `find_relay()` - Query DHT for available relays
+    - Relay quality scoring: uptime (50%), capacity (30%), latency (20%)
+    - Regional preference support
+    - 5-minute relay discovery cache
+  - Server mode:
+    - `announce_relay_availability()` - Advertise relay in DHT
+    - `handle_relay_register()` - Create relay session when both peers register
+    - `handle_relay_message()` - Forward encrypted messages
+    - Rate limiting (100 messages/second per peer)
+    - Bandwidth limits, capacity management
+  - File created: [managers/relay_manager.py](dpc-client/core/dpc_client_core/managers/relay_manager.py)
+
+- **RelayedPeerConnection** - Relayed connection wrapper
+  - Provides same API as direct PeerConnection
+  - End-to-end encryption maintained (relay sees only encrypted payloads)
+  - RELAY_MESSAGE, RELAY_REGISTER, RELAY_DISCONNECT protocol
+  - File created: [transports/relayed_connection.py](dpc-client/core/dpc_client_core/transports/relayed_connection.py)
+
+- **VolunteerRelayStrategy** - Priority 5 connection strategy
+  - 100% NAT coverage (works for symmetric NAT, CGNAT, restrictive firewalls)
+  - Hub-independent alternative to TURN servers
+  - File created: [connection_strategies/volunteer_relay.py](dpc-client/core/dpc_client_core/connection_strategies/volunteer_relay.py)
+
+- **RelayNode Model** - Relay metadata and quality scoring
+  - Quality score algorithm (uptime, capacity, latency)
+  - Relay session tracking
+  - File created: [models/relay_node.py](dpc-client/core/dpc_client_core/models/relay_node.py)
+
+**Week 4: Gossip Store-and-Forward (Priority 6 - Disaster Fallback)**
+
+- **VectorClock** - Lamport timestamps for distributed causality tracking
+  - `increment()`, `merge()` - Local events and knowledge propagation
+  - `happens_before()`, `concurrent_with()` - Causal relationship detection
+  - Used for conflict detection and message ordering
+  - File created: [models/vector_clock.py](dpc-client/core/dpc_client_core/models/vector_clock.py)
+
+- **GossipMessage** - Multi-hop message structure
+  - TTL (24 hours default), hop limits (5 max)
+  - Already-forwarded tracking for loop prevention
+  - Vector clock embedding for causality
+  - Priority levels (low, normal, high)
+  - File created: [models/gossip_message.py](dpc-client/core/dpc_client_core/models/gossip_message.py)
+
+- **GossipManager** - Epidemic spreading protocol
+  - `send_gossip()` - Create and send gossip message
+  - `handle_gossip_message()` - Deliver or forward
+  - `_forward_message()` - Epidemic fanout (3 random peers, excludes already_forwarded)
+  - `_anti_entropy_loop()` - Periodic vector clock sync (5-minute interval)
+    - Exchange vector clocks with random peer
+    - Request missing messages
+    - Send messages peer is missing
+  - `_cleanup_loop()` - Expired message removal (10-minute interval)
+  - Message deduplication (seen_messages set)
+  - Statistics: messages sent, delivered, forwarded, dropped, sync cycles
+  - File created: [managers/gossip_manager.py](dpc-client/core/dpc_client_core/managers/gossip_manager.py)
+
+- **GossipStoreForwardStrategy** - Priority 6 connection strategy
+  - Always applicable (last resort)
+  - Returns virtual connection (eventual delivery, not real-time)
+  - Use cases: offline messaging, disaster scenarios, infrastructure outages
+  - File created: [connection_strategies/gossip_store_forward.py](dpc-client/core/dpc_client_core/connection_strategies/gossip_store_forward.py)
+
+**6-Tier Connection Hierarchy:**
+1. **Priority 1: IPv6 Direct** - No NAT (40%+ networks) → 10s timeout
+2. **Priority 2: IPv4 Direct** - Local network / port forward → 10s timeout
+3. **Priority 3: Hub WebRTC** - STUN/TURN via Hub (when Hub available) → 30s timeout
+4. **Priority 4: UDP Hole Punch** - DHT-coordinated (60-70% NAT, Hub-independent) → 15s timeout
+5. **Priority 5: Volunteer Relay** - 100% NAT coverage (Hub-independent) → 20s timeout
+6. **Priority 6: Gossip Store-and-Forward** - Disaster fallback (eventual delivery) → 5s timeout
+
+**Configuration:**
+- 4 new config sections: `[connection]`, `[hole_punch]`, `[relay]`, `[gossip]`
+- 23 new getter methods in Settings class
+- Per-strategy enable/disable toggles
+- Relay volunteering opt-in (`relay.volunteer = false` by default)
+- File modified: [settings.py](dpc-client/core/dpc_client_core/settings.py)
+
+**Key Benefits:**
+- **Hub becomes optional** - System works without Hub using direct, DHT, relay, gossip fallback
+- **Near-universal connectivity** - 6 fallback layers from IPv6 down to gossip
+- **Disaster resilience** - Gossip protocol ensures eventual delivery during infrastructure outages
+- **Privacy-preserving** - Relays forward encrypted payloads, cannot read message content
+- **No infrastructure cost** - Volunteer relays replace expensive TURN servers
+
+---
+
+## [0.9.5] - 2025-12-06
+
+### Added
+
+**Phase 2.1: DHT-Based Peer Discovery - COMPLETE**
+
+This release implements a full Kademlia DHT for decentralized peer discovery, eliminating the Hub as a single point of failure. Users can now discover and connect to peers using only their node IDs, with automatic NAT traversal and internet-wide connectivity.
+
+**Phase 1 - Core Data Structures:**
+
+- **XOR Distance Utilities** - Foundation for Kademlia DHT distance metric
+  - `parse_node_id()` - Parse node ID strings to 128-bit integers
+  - `xor_distance()` - Compute XOR distance between node IDs
+  - `bucket_index()` - Determine k-bucket index from distance (O(1))
+  - `sort_by_distance()` - Sort nodes by proximity to target
+  - `generate_random_node_id_in_bucket()` - Random ID generation for testing
+  - File created: [dht_distance.py](dpc-client/core/dpc_client_core/dht_distance.py) (~250 lines)
+
+- **Kademlia Routing Table** - 128 k-buckets for O(log n) peer lookups
+  - `DHTNode` dataclass - Represents known DHT peer with IP, port, last_seen, failed_pings
+  - `KBucket` class - Single k-bucket with LRU eviction policy
+    - Max k nodes per bucket (default k=20)
+    - Replacement cache for overflow nodes
+    - Stale node detection (15-minute timeout)
+    - **Security: Subnet diversity enforcement** (max 2 nodes per /24 subnet)
+  - `RoutingTable` class - Main routing table with 128 k-buckets
+    - `add_node()` - Add peer to appropriate bucket based on XOR distance
+    - `remove_node()` - Remove unresponsive peer
+    - `find_closest_nodes()` - O(log n) lookup for k closest nodes to target
+    - `get_bucket_stats()` - Routing table statistics (node count, full buckets)
+    - `get_buckets_needing_refresh()` - Periodic refresh detection
+  - File created: [dht_routing.py](dpc-client/core/dpc_client_core/dht_routing.py) (~450 lines)
+
+- **Comprehensive Unit Tests** - 32 tests validating DHT core algorithms
+  - XOR distance correctness (10 tests)
+  - K-bucket operations: add, remove, eviction, replacement cache (13 tests)
+  - Routing table operations: find_closest_nodes, bucket management (9 tests)
+  - All tests passing (32/32) with ~95% code coverage
+  - File created: [test_dht_routing.py](dpc-client/core/tests/test_dht_routing.py) (~530 lines)
+
+**Key Features:**
+- 128-bit node ID space (compatible with existing `dpc-node-*` format)
+- Symmetric XOR distance metric: d(A, B) = d(B, A)
+- Logarithmic overlay topology for efficient O(log n) lookups
+- LRU eviction policy with ping verification (Kademlia standard)
+- Security: Subnet diversity prevents eclipse attacks
+- Foundation for Phase 2: UDP RPC Layer
+
+**Roadmap Alignment:**
+- Part of Phase 2.1: Foundations + Decentralized Infrastructure (Month 1-3)
+- Implements ROADMAP.md Feature #5 (DHT-Based Peer Discovery, High complexity, 3 weeks)
+- Critical infrastructure for eliminating Hub as single point of failure
+- Target: 95%+ DHT lookup success rate, 80%+ Hub-independent connections
+
+**Phase 2.1: DHT-Based Peer Discovery (Phase 2 - UDP RPC Layer)**
+
+- **UDP-Based RPC Handler** - Kademlia RPC protocol over UDP
+  - `DHTRPCHandler` class - Main RPC orchestration (~550 lines)
+    - `ping()` / `_handle_ping()` - Node liveness checks (PING/PONG)
+    - `find_node()` / `_handle_find_node()` - Find k closest nodes to target (iterative lookup)
+    - `store()` / `_handle_store()` - Store key-value pairs (node_id → ip:port)
+    - `find_value()` / `_handle_find_value()` - Find stored value or return k closest nodes
+  - `DHTProtocol` class - asyncio.DatagramProtocol for UDP communication
+  - `RPCConfig` dataclass - Configurable RPC parameters
+    - timeout: 2.0s (configurable)
+    - max_retries: 3 (configurable)
+    - max_packet_size: 8KB
+    - rate_limit_per_ip: 100 RPCs/minute
+  - File created: [dht_rpc.py](dpc-client/core/dpc_client_core/dht_rpc.py) (~550 lines)
+
+- **RPC Protocol Features**
+  - JSON over UDP message format (10-byte header compatibility planned)
+  - Request-response matching via rpc_id (UUID)
+  - Timeout and retry logic with exponential backoff
+  - Rate limiting (100 RPCs/minute per IP - security)
+  - Statistics tracking (rpcs_sent, rpcs_received, timeouts, errors)
+  - Automatic routing table updates on successful RPCs
+
+- **Security Features**
+  - Rate limiting prevents DDoS attacks (100 RPCs/min per IP)
+  - Subnet diversity enforcement (inherited from routing table)
+  - Message size limits (8KB max packet size)
+  - Invalid JSON handling (graceful error recovery)
+  - UDP amplification prevention
+
+- **Comprehensive RPC Tests** - 20 tests validating UDP RPC operations
+  - PING/PONG exchange (2 tests)
+  - FIND_NODE requests (2 tests)
+  - STORE/STORED operations (2 tests)
+  - FIND_VALUE (found and not found) (2 tests)
+  - Timeout and retry logic (2 tests)
+  - Rate limiting enforcement (2 tests)
+  - Statistics tracking (1 test)
+  - Error handling (invalid JSON, missing fields) (2 tests)
+  - Protocol layer tests (2 tests)
+  - Full RPC integration test (1 test)
+  - All tests passing (20/20) with async fixtures
+  - File created: [test_dht_rpc.py](dpc-client/core/tests/test_dht_rpc.py) (~540 lines)
+
+**Key Features:**
+- Asynchronous UDP communication via asyncio.DatagramProtocol
+- Kademlia RPC: PING, FIND_NODE, STORE, FIND_VALUE
+- Timeout/retry with exponential backoff (2s timeout, 3 retries)
+- Rate limiting for security (100 RPCs/min per IP)
+- JSON message serialization (future: binary protocol)
+- Foundation for Phase 3: DHT Manager Core
+
+**Roadmap Alignment:**
+- Completes Phase 2.1 UDP RPC Layer (Week 2 of Month 1)
+- Enables P2P DHT communication without Hub dependency
+- Next: Phase 3 - DHT Manager (bootstrap, iterative lookup, announce)
+
+**Phase 2.1: DHT-Based Peer Discovery (Phase 3 - DHT Manager Core)**
+
+- **DHT Manager Orchestration** - High-level Kademlia DHT operations
+  - `DHTManager` class - Main DHT coordinator (~630 lines)
+    - `bootstrap()` - Initialize routing table from seed nodes
+      - PING all seed nodes to populate initial routing table
+      - Perform self-lookup to discover nearby peers
+      - Refresh all k-buckets asynchronously
+      - Returns True if at least one seed responsive
+    - `find_node()` - Iterative FIND_NODE lookup (Kademlia's core algorithm)
+      - O(log n) complexity with alpha parallelism (default alpha=3)
+      - Start with k closest nodes from local routing table
+      - Send parallel FIND_NODE RPCs to alpha closest unqueried nodes
+      - Converge when no closer nodes found or k nodes responded
+      - Returns list of k closest nodes to target (sorted by XOR distance)
+    - `announce()` - Advertise node presence via DHT STORE operations
+      - Find k closest nodes to self
+      - Store contact info (ip:port) on all k nodes
+      - Returns count of successful STORE operations
+    - `find_peer()` - Discover specific peer's contact information
+      - Perform iterative lookup for target_node_id
+      - Try FIND_VALUE on closest nodes to retrieve stored contact info
+      - Returns (ip, port) tuple if found, None otherwise
+    - `_maintenance_loop()` - Background maintenance tasks
+      - Refresh stale k-buckets (every hour by default)
+      - Re-announce node presence (every hour by default)
+      - Runs continuously while DHT is active
+  - `DHTConfig` dataclass - Configuration parameters
+    - k: 20 (bucket size)
+    - alpha: 3 (parallelism factor for iterative lookup)
+    - subnet_diversity_limit: 2 (max nodes per /24 subnet)
+    - bootstrap_timeout: 30s
+    - lookup_timeout: 10s
+    - bucket_refresh_interval: 3600s (1 hour)
+    - announce_interval: 3600s (1 hour)
+  - File created: [dht_manager.py](dpc-client/core/dpc_client_core/dht_manager.py) (~630 lines)
+
+- **Iterative Lookup Algorithm** - Core Kademlia peer discovery
+  - Parallel FIND_NODE RPCs to alpha closest nodes (default alpha=3)
+  - Convergence detection: stop when no closer nodes found for 2 rounds
+  - Timeout protection: 10s default lookup timeout
+  - Handles partial failures gracefully (some nodes unresponsive)
+  - Returns up to k closest nodes found (default k=20)
+
+- **Bootstrap Algorithm** - DHT network initialization
+  - Contact all seed nodes in parallel with PING RPCs
+  - Populate routing table with responsive seeds
+  - Perform self-lookup to discover nearby peers (Kademlia standard)
+  - Asynchronously refresh all buckets for better coverage
+  - Succeeds if at least one seed node responds
+
+- **Node Announcement** - DHT presence advertisement
+  - Find k closest nodes to self via iterative lookup
+  - STORE own contact info (node_id → ip:port) on all k nodes
+  - Enables other peers to find us via FIND_VALUE(node_id)
+  - Re-announce periodically (default: every hour)
+
+- **Periodic Maintenance** - Background DHT health tasks
+  - Bucket refresh: generate random ID in stale bucket's range, perform lookup
+  - Re-announce: periodically re-advertise node presence
+  - Runs in background asyncio task (every minute check)
+  - Configurable intervals (default: 1 hour for all operations)
+
+- **Comprehensive Manager Tests** - 21 tests validating DHT orchestration
+  - Initialization and lifecycle (start/stop, double start) (3 tests)
+  - Bootstrap (empty seeds, unreachable seeds, success, partial failure) (4 tests)
+  - Iterative lookup (empty table, in network, self-lookup, convergence) (4 tests)
+  - Node announcement (empty table, in network) (2 tests)
+  - Peer discovery (not found, success) (2 tests)
+  - Maintenance (loop starts, bucket refresh) (2 tests)
+  - Statistics and diagnostics (get_stats, get_known_peers) (2 tests)
+  - Integration tests (full workflow, concurrent lookups) (2 tests)
+  - All tests passing (21/21) with async fixtures
+  - File created: [test_dht_manager.py](dpc-client/core/tests/test_dht_manager.py) (~580 lines)
+
+**Key Features:**
+- Complete Kademlia DHT implementation (bootstrap → lookup → announce)
+- O(log n) iterative lookup with parallel RPCs (alpha=3)
+- Automatic routing table population and maintenance
+- Periodic bucket refresh and re-announcement
+- Resilient to partial failures (some seeds/peers unresponsive)
+- Configurable timeouts and intervals
+- Background maintenance tasks via asyncio
+- Foundation for Phase 4: P2P Integration
+
+**Roadmap Alignment:**
+- Completes Phase 2.1 DHT Manager Core (Week 3 of Month 1)
+- Provides complete decentralized peer discovery without Hub
+- Next: Phase 4 - P2P Integration (integrate into p2p_manager, service, settings)
+- Target: 95%+ DHT lookup success rate, 80%+ Hub-independent connections
+
+**Phase 4 - P2P Integration:**
+
+- **DHT Integration into P2PManager** - Seamless integration with existing P2P infrastructure
+  - `announce_to_dht()` - Announce node presence after bootstrap
+  - `find_peer_via_dht()` - Lookup peer contact info by node_id
+  - `update_dht_ip()` - Update announced IP when external IP discovered
+  - Dynamic IP announcement: starts with local IP, updates to external IP after STUN
+  - Bootstrap retry: automatically retries every 5 minutes if routing table empty
+  - Files modified: [p2p_manager.py](dpc-client/core/dpc_client_core/p2p_manager.py) (~150 lines added)
+
+- **WebSocket API for DHT Connections** - UI can initiate DHT-based peer connections
+  - `connect_via_dht` command - Connect to peer using only node_id (no IP/port needed)
+  - Connection strategy: DHT-first → Peer cache → Hub WebRTC fallback
+  - UI updated: Text field accepts node_id or dpc:// URI automatically
+  - Files modified: [service.py:2717-2748](dpc-client/core/dpc_client_core/service.py), [+page.svelte:407-428](dpc-client/ui/src/routes/+page.svelte)
+
+- **Configuration System** - DHT settings in config.ini
+  - `[dht]` section with 8 configurable parameters
+  - enabled, port, k, alpha, bootstrap_timeout, lookup_timeout
+  - bucket_refresh_interval, announce_interval, seed_nodes
+  - Files modified: [settings.py:109-119,346-403](dpc-client/core/dpc_client_core/settings.py)
+
+- **Code Organization** - Refactored to dht/ subfolder
+  - Moved distance.py, routing.py, rpc.py, manager.py to dht/ package
+  - Cleaner import structure: `from dpc_client_core.dht import DHTManager`
+  - Easier to navigate and maintain
+  - Files reorganized: [dht/](dpc-client/core/dpc_client_core/dht/)
+
+### Fixed
+
+**Critical Bug Fixes:**
+
+- **NAT Hairpinning - Skip self in DHT announce** - Fixed STORE RPC timeouts
+  - Root cause: Nodes tried to STORE to their own external IP (NAT hairpinning not supported by routers)
+  - Fix: Filter out self.node_id from announce target list
+  - Result: Announce now succeeds 100% (1/1 nodes) instead of timing out (1/2 nodes)
+  - Files modified: [dht/manager.py:460-482](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **Node ID Length Mismatch** - Fixed 16→32 hex character node IDs
+  - Root cause: 128-bit IDs require 32 hex chars, not 16
+  - Impact: k-bucket XOR distance calculations failed
+  - Fix: Updated all node ID slicing to use [:20] for 20-character display
+  - Files modified: [dht/routing.py](dpc-client/core/dpc_client_core/dht/routing.py), [dht/manager.py](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **Tuple Unpacking Error** - Fixed find_peer() return type handling
+  - Root cause: `find_peer()` returns `Tuple[str, int]` but code treated it as object with .ip/.port
+  - Error: `'str' object has no attribute 'ip'`
+  - Fix: Changed from `peer.ip, peer.port` to `ip, port = result`
+  - Files modified: [p2p_manager.py:277-291](dpc-client/core/dpc_client_core/p2p_manager.py)
+
+- **RPC Timeout Too Short** - Increased timeout for internet-wide DHT
+  - Root cause: 2-second timeout too short for international network latency
+  - Evidence: Lookups completing in 10-11 seconds but failing with 6s total timeout (2s × 3 retries)
+  - Fix: Increased RPC timeout from 2.0s to 5.0s (total timeout now 15s)
+  - Files modified: [dht/rpc.py:38](dpc-client/core/dpc_client_core/dht/rpc.py), [dht/manager.py:48](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **Bootstrap Retry Missing** - Added automatic bootstrap retry when isolated
+  - Root cause: If peer starts before seed nodes, bootstrap failed and never retried
+  - Fix: Maintenance loop retries bootstrap every 5 minutes when routing table empty
+  - Result: Peers can now find each other within 5 minutes even if started out of order
+  - Files modified: [dht/manager.py:248-259,538-560](dpc-client/core/dpc_client_core/dht/manager.py)
+
+- **Wrong Port in Announce** - Fixed announcing DHT UDP port instead of P2P TLS port
+  - Root cause: Announced UDP port 8889 instead of TCP port 8888 for connections
+  - Fix: Use `get_p2p_listen_port()` instead of `get_dht_port()` for announcements
+  - Files modified: [p2p_manager.py:231-246](dpc-client/core/dpc_client_core/p2p_manager.py)
+
+- **Announcing with 0.0.0.0** - Fixed local IP detection for DHT
+  - Root cause: DHT announced bind address (0.0.0.0) instead of actual routable IP
+  - Fix: Detect primary local IP using UDP socket trick, update to external IP after STUN
+  - Result: DHT now announces 192.168.x.x on LAN, then updates to external IP
+  - Files modified: [p2p_manager.py:908-951](dpc-client/core/dpc_client_core/p2p_manager.py)
+
+**Debug Improvements:**
+
+- **Comprehensive STORE RPC Logging** - Added verbose debug logging for STORE operations
+  - Logs STORE RPC creation (rpc_id, key, value)
+  - Logs UDP packet transmission (type, size, destination)
+  - Logs STORE handler execution and storage operations
+  - Logs STORED response generation and sending
+  - Helped diagnose NAT hairpinning issue
+  - Files modified: [dht/rpc.py:219-230,295-311,382-405,437-448,524-525](dpc-client/core/dpc-client_core/dht/rpc.py)
+
+### Testing
+
+**Internet-Wide DHT Validation:**
+- ✅ Bootstrap successful across international network connections
+- ✅ PING/PONG working over internet with external IPs
+- ✅ FIND_NODE completing successfully (10-11 second lookups)
+- ✅ STORE/STORED working between remote peers
+- ✅ Auto-announce after bootstrap (1/1 nodes, no timeouts)
+- ✅ Local network DHT: 0.09s bootstrap (vs 11-17s over internet)
+
+**Known Limitations:**
+- 2-node DHT has mathematical limitation: peer lookups fail because nodes don't store their own info (by design to avoid NAT hairpinning)
+- Requires 3+ nodes for full peer discovery functionality
+- Direct TLS connections still work perfectly as fallback
+
+**Test Coverage:**
+- 32 tests for distance/routing (100% passing)
+- 20 tests for UDP RPC (100% passing)
+- 21 tests for DHT manager (100% passing)
+- Total: 73 DHT tests, all passing
+
+**Roadmap Status:**
+- ✅ Phase 2.1 Feature #5: DHT-Based Peer Discovery (COMPLETE)
+- ⏭️ Phase 2.1 Feature #6-7: Pluggable Transport Framework (DEFERRED to Phase 2.2)
+- 🎯 Target: 95%+ DHT lookup success rate, 80%+ Hub-independent connections
+
 ---
 
 ## [0.9.4] - 2025-12-05
