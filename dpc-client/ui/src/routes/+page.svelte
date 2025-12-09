@@ -225,7 +225,43 @@
       selectedPeerContexts = selectedPeerContexts;
     }
   }
-  
+
+  // Helper: Group peers by connection strategy
+  function getPeersByStrategy(peerInfo: any[]) {
+    const strategyMap: Record<string, any[]> = {};
+
+    if (!peerInfo) return strategyMap;
+
+    for (const peer of peerInfo) {
+      if (peer.strategy_used) {
+        if (!strategyMap[peer.strategy_used]) {
+          strategyMap[peer.strategy_used] = [];
+        }
+        strategyMap[peer.strategy_used].push(peer);
+      }
+    }
+
+    return strategyMap;
+  }
+
+  // Helper: Format peer for tooltip display
+  function formatPeerForTooltip(peer: any): string {
+    let displayName = peer.name || 'Unknown';
+
+    // Trim display name to 20 characters
+    if (displayName.length > 20) {
+      displayName = displayName.substring(0, 17) + '...';
+    }
+
+    // Extract node ID suffix (remove "dpc-node-" prefix)
+    const nodeIdSuffix = peer.node_id.replace(/^dpc-node-/, '');
+
+    return `${displayName} (${nodeIdSuffix})`;
+  }
+
+  // Reactive statement to compute peer counts
+  $: peersByStrategy = getPeersByStrategy($nodeStatus?.peer_info);
+
   function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
     if (!element) return true;
     const { scrollTop, scrollHeight, clientHeight } = element;
@@ -873,8 +909,19 @@
                   <summary>Available Features</summary>
                   <ul class="features-list">
                     {#each Object.entries($nodeStatus.available_features) as [feature, available]}
-                      <li class:feature-available={available} class:feature-unavailable={!available}>
+                      {@const peerCount = peersByStrategy[feature]?.length || 0}
+                      {@const tooltip = peersByStrategy[feature]
+                        ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
+                        : ''}
+                      <li
+                        class:feature-available={available}
+                        class:feature-unavailable={!available}
+                        title={peerCount > 0 ? tooltip : ''}
+                      >
                         {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
+                        {#if peerCount > 0}
+                          <span class="peer-count">({peerCount})</span>
+                        {/if}
                       </li>
                     {/each}
                   </ul>
@@ -2495,6 +2542,12 @@
     color: #dc3545;
     text-decoration: line-through;
     opacity: 0.6;
+  }
+
+  .peer-count {
+    color: #888;
+    font-size: 0.9em;
+    margin-left: 0.25rem;
   }
 
   .cached-info {

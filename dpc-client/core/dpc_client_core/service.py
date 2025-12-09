@@ -986,10 +986,11 @@ class CoreService:
 
         # Get peer info with names
         peer_info = []
-        for peer_id in self.p2p_manager.peers.keys():
+        for peer_id, peer_conn in self.p2p_manager.peers.items():
             peer_data = {
                 "node_id": peer_id,
-                "name": self.peer_metadata.get(peer_id, {}).get("name", None)
+                "name": self.peer_metadata.get(peer_id, {}).get("name", None),
+                "strategy_used": getattr(peer_conn, 'strategy_used', None)
             }
             peer_info.append(peer_data)
 
