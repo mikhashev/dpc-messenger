@@ -1,1 +1,4 @@
 0.10.0
+# Note: Hub version intentionally lags client version
+# v0.10.1 contains only client-side changes (DTLS, UI improvements, timeouts)
+# Hub will be updated to 0.10.1 when Hub-specific changes are made

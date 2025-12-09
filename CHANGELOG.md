@@ -12,6 +12,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.10.1] - 2025-12-09
+
+### Added
+- **DTLS Encryption for UDP Hole Punching** (Priority 4 connection strategy)
+  - DTLS 1.2 end-to-end encryption for UDP-based NAT traversal
+  - Certificate-based authentication using existing node certificates
+  - Comprehensive unit test suite for DTLS implementation
+  - UDP Hole Punching now production-ready (was disabled in v0.10.0)
+  - Files: [connection_strategies/udp_hole_punch.py](dpc-client/core/dpc_client_core/connection_strategies/udp_hole_punch.py), [managers/hole_punch_manager.py](dpc-client/core/dpc_client_core/managers/hole_punch_manager.py)
+- **UI Connection Strategy Visibility**
+  - Available Features menu shows peer counts per connection strategy
+  - Display format: "ipv4_direct (2 peers)", "relay (3 peers)", etc.
+  - Helps users understand which connection strategies are active
+- **Comprehensive Manual Testing Guide**
+  - New documentation: [docs/MANUAL_TESTING_GUIDE.md](docs/MANUAL_TESTING_GUIDE.md)
+  - Step-by-step testing for all 6 connection strategies
+  - Wireshark verification procedures for DTLS encryption
+  - NAT simulation scenarios for UDP Hole Punching
+  - Relay and gossip protocol testing
+
+### Fixed
+- **Connection Timeouts for High-Latency Networks**
+  - Pre-flight timeout: 5s → 30s (improved DHT/Hub query reliability)
+  - IPv4/IPv6 Direct timeout: 10s → 60s (better mobile/CGNAT support)
+  - Improves reliability on mobile, CGNAT, satellite, and rural networks
+- **Strategy Metadata for All Connection Types**
+  - All P2P connections now set `strategy_used` field
+  - Required for UI peer count display feature
+  - Ensures accurate connection strategy tracking
+
+### Changed
+- **UDP Hole Punching Default:** Now **enabled by default** (was disabled in v0.10.0)
+  - Safe to enable due to DTLS encryption
+  - Configuration: `[hole_punch] enabled = true` (default)
+
+### Documentation
+- Added [docs/RELEASE_NOTES_V0_10_1.md](docs/RELEASE_NOTES_V0_10_1.md)
+- Added [docs/MANUAL_TESTING_GUIDE.md](docs/MANUAL_TESTING_GUIDE.md)
+- Updated CLAUDE.md with DTLS implementation notes
+- Updated README.md version to 0.10.1
+
+### Security
+- **All 6 connection strategies now have end-to-end encryption**
+  - v0.10.0: UDP Hole Punching was cleartext (disabled)
+  - v0.10.1: UDP Hole Punching now encrypted with DTLS 1.2
+  - Cipher suite: TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 (preferred)
+  - Perfect Forward Secrecy enabled
+
+---
+
 ## [0.10.0] - 2025-12-07
 
 ### Added

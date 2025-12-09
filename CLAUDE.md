@@ -164,7 +164,7 @@ See [docs/GITHUB_AUTH_SETUP.md](docs/GITHUB_AUTH_SETUP.md) for detailed GitHub s
 
 ## Architecture Overview
 
-### Connection Types (6-Tier Fallback Hierarchy - v0.10.0)
+### Connection Types (6-Tier Fallback Hierarchy - v0.10.1)
 
 D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near-universal P2P connectivity. The ConnectionOrchestrator tries each strategy in priority order until one succeeds, making the Hub completely optional.
 
@@ -173,7 +173,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
    - Lowest latency, best performance
    - Server listens on port 8888 (default)
    - **IPv6 URIs**: Use bracket notation: `dpc://[2001:db8::1]:8888?node_id=...`
-   - Timeout: 10s
+   - Timeout: 60s (increased in v0.10.1 for mobile/CGNAT support)
    - Location: `connection_strategies/ipv6_direct.py`
 
 **Priority 2: IPv4 Direct** (Local network / port forward)
@@ -184,7 +184,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
      - `dual` (default) - Listens on both IPv4 and IPv6
      - `0.0.0.0` - IPv4 only
      - `::` - IPv6 only
-   - Timeout: 10s
+   - Timeout: 60s (increased in v0.10.1 for mobile/CGNAT support)
    - Location: `connection_strategies/ipv4_direct.py`, `p2p_manager.py`
 
 **Priority 3: Hub WebRTC** (When Hub available)
@@ -196,11 +196,14 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 
 **Priority 4: UDP Hole Punching** (60-70% NAT, Hub-independent)
    - DHT-coordinated simultaneous UDP send (birthday paradox)
+   - **DTLS 1.2 encryption** (v0.10.1+) - End-to-end encrypted UDP transport
    - STUN-like endpoint discovery via DHT peers
    - NAT type detection (cone vs symmetric)
    - Success rate: 60-70% for cone NAT (fails gracefully for symmetric NAT)
    - Timeout: 15s
+   - **Status**: Production-ready with DTLS encryption (enabled by default in v0.10.1)
    - Location: `connection_strategies/udp_hole_punch.py`, `managers/hole_punch_manager.py`
+   - Testing: See `docs/MANUAL_TESTING_GUIDE.md`
 
 **Priority 5: Volunteer Relay** (100% NAT coverage, Hub-independent)
    - Relay discovery via DHT quality scoring (uptime 50%, capacity 30%, latency 20%)
