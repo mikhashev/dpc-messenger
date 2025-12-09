@@ -389,6 +389,18 @@ class P2PManager:
             await write_message(writer, ack)
 
             peer = PeerConnection(node_id=peer_node_id, reader=reader, writer=writer)
+
+            # Set strategy_used for incoming connections (for UI display)
+            sock = writer.get_extra_info('socket')
+            if sock:
+                import socket as socket_module
+                if sock.family == socket_module.AF_INET6:
+                    peer.strategy_used = "ipv6_direct"
+                else:
+                    peer.strategy_used = "ipv4_direct"
+            else:
+                peer.strategy_used = "ipv4_direct"  # Default fallback
+
             self.peers[peer_node_id] = peer
             await self._notify_peer_change()
             logger.info("Direct TLS connection established with %s", peer_node_id)
@@ -522,6 +534,18 @@ class P2PManager:
                     self._core_service_ref.set_peer_metadata(target_node_id, name=peer_name)
 
             peer = PeerConnection(node_id=target_node_id, reader=reader, writer=writer)
+
+            # Set strategy_used for outgoing direct connections (for UI display)
+            sock = writer.get_extra_info('socket')
+            if sock:
+                import socket as socket_module
+                if sock.family == socket_module.AF_INET6:
+                    peer.strategy_used = "ipv6_direct"
+                else:
+                    peer.strategy_used = "ipv4_direct"
+            else:
+                peer.strategy_used = "ipv4_direct"  # Default fallback
+
             self.peers[target_node_id] = peer
             await self._notify_peer_change()
             logger.info("Direct connection established with %s", target_node_id)
@@ -853,6 +877,10 @@ class P2PManager:
 
             # Move from pending to active peers
             self._pending_webrtc.pop(node_id, None)
+
+            # Set strategy_used for WebRTC connections (for UI display)
+            webrtc_peer.strategy_used = "hub_webrtc"
+
             self.peers[node_id] = webrtc_peer
 
             await self._notify_peer_change()
