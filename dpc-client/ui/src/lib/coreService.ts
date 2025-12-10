@@ -29,6 +29,15 @@ export const peerProviders = writable<Map<string, any[]>>(new Map());
 export const contextUpdated = writable<any>(null);
 export const peerContextUpdated = writable<any>(null);
 
+// Firewall rules update store (for AI scope reload)
+// IMPORTANT: If you add new UI-reactive fields from privacy_rules.json (like node_groups,
+// compute settings, device_sharing, etc.), follow this pattern:
+// 1. Create a writable store here (e.g., export const computeSettingsUpdated = writable<any>(null))
+// 2. Add event handler below for 'firewall_rules_updated' event
+// 3. In +page.svelte (or relevant component), add reactive statement to reload data
+// This ensures UI updates immediately when firewall rules are saved via the editor.
+export const firewallRulesUpdated = writable<any>(null);
+
 // Unread message counter (v0.9.3)
 export const unreadMessageCounts = writable<Map<string, number>>(new Map());
 
@@ -245,6 +254,16 @@ export function connectToCoreService() {
                         newMap.set(message.payload.node_id, message.payload.providers);
                         return newMap;
                     });
+                }
+                // Handle firewall_rules_updated event
+                // NOTE: This event is triggered when user saves firewall rules via FirewallEditor.
+                // It allows UI components to reload data from privacy_rules.json without page refresh.
+                // Example: AI scopes dropdown reloads when ai_scopes section is modified.
+                // If you add more UI-reactive fields (compute settings, node groups, etc.),
+                // update the corresponding store here (see pattern in store declarations above).
+                else if (message.event === "firewall_rules_updated") {
+                    console.log("Firewall rules updated, triggering AI scope reload");
+                    firewallRulesUpdated.set(message.payload);
                 }
             } catch (error) {
                 console.error("Error parsing message:", error);
