@@ -2602,7 +2602,7 @@ class CoreService:
 
     # --- AI Query Methods ---
 
-    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, **kwargs):
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
 
@@ -2614,12 +2614,14 @@ class CoreService:
             model: Optional model name to use
             provider: Optional provider alias to use
             include_context: If True, includes personal context, device context, and AI instructions (default: True)
+            ai_scope: Optional AI scope name for filtering what the AI can access (None = no filtering)
             **kwargs: Additional arguments (including conversation_id)
         """
         logger.info("Orchestrating AI query for command_id %s: '%s...'", command_id, prompt[:50])
         logger.debug("Compute host: %s", compute_host or 'local')
         logger.debug("Model: %s", model or 'default')
         logger.debug("Include context: %s", include_context)
+        logger.debug("AI Scope: %s", ai_scope or 'None (full access)')
 
         # Phase 7: Get or create conversation monitor early for history tracking
         conversation_id = kwargs.get("conversation_id", "local_ai")
@@ -2645,7 +2647,20 @@ class CoreService:
 
         if include_context:
             logger.debug("Including contexts (checkbox enabled)")
-            aggregated_contexts = {'local': self.p2p_manager.local_context}
+            local_context = self.p2p_manager.local_context
+
+            # Apply AI Scope filtering if specified
+            if ai_scope:
+                logger.info("Applying AI Scope filtering: %s", ai_scope)
+                try:
+                    local_context = self.firewall.filter_personal_context_for_ai_scope(local_context, ai_scope)
+                    logger.debug("AI Scope filtering applied successfully")
+                except Exception as e:
+                    logger.error("Error applying AI Scope filtering: %s", e, exc_info=True)
+                    # Fall back to unfiltered context if filtering fails
+                    logger.warning("Falling back to unfiltered context due to filtering error")
+
+            aggregated_contexts = {'local': local_context}
 
             # Always include device context when checkbox is checked
             if self.device_context:

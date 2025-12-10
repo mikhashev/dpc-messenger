@@ -28,7 +28,7 @@
   };
 
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'compute' | 'peers' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'peers' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -271,6 +271,124 @@
     if (!editedRules || !editedRules.groups) return;
     delete editedRules.groups[groupName][path];
   }
+
+  // File Groups Management Functions
+  function addFileGroup() {
+    if (!editedRules) return;
+    const groupName = prompt('Enter file group name (e.g., "work", "personal"):');
+    if (groupName) {
+      if (!editedRules.file_groups) editedRules.file_groups = {};
+      // Check for duplicates
+      if (editedRules.file_groups[groupName]) {
+        alert('This file group already exists');
+        return;
+      }
+      editedRules.file_groups[groupName] = [];
+    }
+  }
+
+  function removeFileGroup(groupName: string) {
+    if (!editedRules || !editedRules.file_groups) return;
+    delete editedRules.file_groups[groupName];
+  }
+
+  function addFilePatternToGroup(groupName: string) {
+    if (!editedRules || !editedRules.file_groups) return;
+    const pattern = prompt('Enter file pattern (e.g., "work_*.json", "personal.json"):');
+    if (pattern) {
+      // Check for duplicates
+      if (editedRules.file_groups[groupName].includes(pattern)) {
+        alert('This pattern already exists in the group');
+        return;
+      }
+      // Use immutable update to trigger Svelte reactivity
+      editedRules.file_groups[groupName] = [
+        ...editedRules.file_groups[groupName],
+        pattern
+      ];
+    }
+  }
+
+  function removeFilePatternFromGroup(groupName: string, pattern: string) {
+    if (!editedRules || !editedRules.file_groups) return;
+    editedRules.file_groups[groupName] = editedRules.file_groups[groupName].filter(p => p !== pattern);
+  }
+
+  // AI Scopes Management Functions
+  function addAIScope() {
+    if (!editedRules) return;
+    const scopeName = prompt('Enter AI scope name (e.g., "work", "personal"):');
+    if (scopeName) {
+      if (!editedRules.ai_scopes) editedRules.ai_scopes = {};
+      // Check for duplicates
+      if (editedRules.ai_scopes[scopeName]) {
+        alert('This AI scope already exists');
+        return;
+      }
+      editedRules.ai_scopes[scopeName] = {};
+    }
+  }
+
+  function removeAIScope(scopeName: string) {
+    if (!editedRules || !editedRules.ai_scopes) return;
+    delete editedRules.ai_scopes[scopeName];
+  }
+
+  function addRuleToAIScope(scopeName: string) {
+    if (!editedRules || !editedRules.ai_scopes) return;
+    const resourcePath = prompt('Enter resource path (e.g., @work:*, @personal:*, personal.json:*):', '@work:*');
+    if (resourcePath) {
+      // Check for duplicates
+      if (editedRules.ai_scopes[scopeName][resourcePath]) {
+        alert('This rule already exists for this AI scope');
+        return;
+      }
+      editedRules.ai_scopes[scopeName][resourcePath] = 'allow';
+    }
+  }
+
+  function removeRuleFromAIScope(scopeName: string, path: string) {
+    if (!editedRules || !editedRules.ai_scopes) return;
+    delete editedRules.ai_scopes[scopeName][path];
+  }
+
+  // Device Sharing Management Functions
+  function addDeviceSharingPreset() {
+    if (!editedRules) return;
+    const presetName = prompt('Enter device sharing preset name (e.g., "basic", "compute"):');
+    if (presetName) {
+      if (!editedRules.device_sharing) editedRules.device_sharing = {};
+      // Check for duplicates
+      if (editedRules.device_sharing[presetName]) {
+        alert('This device sharing preset already exists');
+        return;
+      }
+      editedRules.device_sharing[presetName] = {};
+    }
+  }
+
+  function removeDeviceSharingPreset(presetName: string) {
+    if (!editedRules || !editedRules.device_sharing) return;
+    delete editedRules.device_sharing[presetName];
+  }
+
+  function addRuleToDeviceSharingPreset(presetName: string) {
+    if (!editedRules || !editedRules.device_sharing) return;
+    const resourcePath = prompt('Enter resource path (e.g., device_context.json:hardware.gpu.*):','device_context.json:software.os.*');
+    if (resourcePath) {
+      // Check for duplicates
+      if (editedRules.device_sharing[presetName][resourcePath]) {
+        alert('This rule already exists for this preset');
+        return;
+      }
+      editedRules.device_sharing[presetName][resourcePath] = 'allow';
+    }
+  }
+
+  function removeRuleFromDeviceSharingPreset(presetName: string, path: string) {
+    if (!editedRules || !editedRules.device_sharing) return;
+    delete editedRules.device_sharing[presetName][path];
+  }
 </script>
 
 {#if open && rules}
@@ -315,6 +433,27 @@
           on:click={() => selectedTab = 'groups'}
         >
           Node Groups
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'file-groups'}
+          on:click={() => selectedTab = 'file-groups'}
+        >
+          File Groups
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'ai-scopes'}
+          on:click={() => selectedTab = 'ai-scopes'}
+        >
+          AI Scopes
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'device-sharing'}
+          on:click={() => selectedTab = 'device-sharing'}
+        >
+          Device Sharing
         </button>
         <button
           class="tab"
@@ -421,6 +560,66 @@
                 <p class="empty">No node groups defined yet.</p>
               {/if}
             </div>
+          </div>
+
+        {:else if selectedTab === 'file-groups'}
+          <div class="section">
+            <h3>File Groups</h3>
+            <p class="help-text">Define aliases for groups of context files for easier permission management.</p>
+
+            {#if editMode && editedRules}
+              <button class="btn btn-add" on:click={addFileGroup}>+ Add File Group</button>
+            {/if}
+
+            <div class="groups-list">
+              {#if displayRules?.file_groups}
+                {#each Object.entries(displayRules.file_groups) as [groupName, patternList]}
+                  {#if !groupName.startsWith('_')}
+                    <div class="group-card">
+                      <div class="group-header">
+                        <h4>{groupName}</h4>
+                        {#if editMode}
+                          <button class="btn-icon" on:click={() => removeFileGroup(groupName)}>
+                            🗑️
+                          </button>
+                        {/if}
+                      </div>
+
+                      <div class="node-list">
+                        {#each patternList as pattern}
+                          <div class="node-item">
+                            <code>{pattern}</code>
+                            {#if editMode}
+                              <button class="btn-icon-small" on:click={() => removeFilePatternFromGroup(groupName, pattern)}>
+                                ×
+                              </button>
+                            {/if}
+                          </div>
+                        {:else}
+                          <p class="empty-small">No file patterns in this group</p>
+                        {/each}
+
+                        {#if editMode}
+                          <button class="btn-small" on:click={() => addFilePatternToGroup(groupName)}>
+                            + Add Pattern
+                          </button>
+                        {/if}
+                      </div>
+                    </div>
+                  {/if}
+                {:else}
+                  <p class="empty">No file groups defined yet.</p>
+                {/each}
+              {:else}
+                <p class="empty">No file groups defined yet.</p>
+              {/if}
+            </div>
+
+            {#if !editMode}
+              <div class="info-box">
+                <strong>Info:</strong> File groups allow you to reference multiple context files with a single alias (e.g., @work, @personal). Use wildcards like "work_*.json" to match multiple files.
+              </div>
+            {/if}
           </div>
 
         {:else if selectedTab === 'compute'}
@@ -539,6 +738,142 @@
               </div>
             {:else}
               <p class="empty">Compute sharing not configured.</p>
+            {/if}
+          </div>
+
+        {:else if selectedTab === 'ai-scopes'}
+          <div class="section">
+            <h3>AI Scopes</h3>
+            <p class="help-text">Control what your local AI can access in different modes (e.g., work mode vs personal mode).</p>
+
+            {#if editMode && editedRules}
+              <button class="btn btn-add" on:click={addAIScope}>+ Add AI Scope</button>
+            {/if}
+
+            {#if displayRules?.ai_scopes && Object.keys(displayRules.ai_scopes).length > 0}
+              {#each Object.entries(displayRules.ai_scopes) as [scopeName, rules]}
+                {#if !scopeName.startsWith('_')}
+                  <div class="peer-card">
+                    <div class="group-header">
+                      <h5>Scope: {scopeName}</h5>
+                      {#if editMode}
+                        <button class="btn-icon" on:click={() => removeAIScope(scopeName)} title="Delete scope">
+                          🗑️
+                        </button>
+                      {/if}
+                    </div>
+
+                    <div class="rule-list">
+                      {#each Object.entries(rules) as [path, action]}
+                        {#if !path.startsWith('_')}
+                          <div class="rule-row">
+                            <code class="rule-path">{path}</code>
+                            {#if editMode && editedRules && editedRules.ai_scopes && editedRules.ai_scopes[scopeName]}
+                              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                <select id="ai-scope-rule-{scopeName}-{path}" name="ai-scope-rule-{scopeName}-{path}" bind:value={editedRules.ai_scopes[scopeName][path]}>
+                                  <option value="allow">allow</option>
+                                  <option value="deny">deny</option>
+                                </select>
+                                <button class="btn-icon-small" on:click={() => removeRuleFromAIScope(scopeName, path)} title="Delete rule">
+                                  ×
+                                </button>
+                              </div>
+                            {:else}
+                              <span class="action-badge" class:allow={action === 'allow'} class:deny={action === 'deny'}>
+                                {action}
+                              </span>
+                            {/if}
+                          </div>
+                        {/if}
+                      {:else}
+                        <p class="empty-small">No rules defined for this scope</p>
+                      {/each}
+                    </div>
+
+                    {#if editMode}
+                      <button class="btn-small" on:click={() => addRuleToAIScope(scopeName)} style="margin-top: 0.5rem;">
+                        + Add Rule
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
+              {/each}
+            {:else}
+              <p class="empty">No AI scopes defined.</p>
+            {/if}
+
+            {#if !editMode}
+              <div class="info-box">
+                <strong>Info:</strong> AI scopes allow you to restrict what context your local AI can access in different modes. Use @file_group:* notation (e.g., @work:*, @personal:*) to reference file groups.
+              </div>
+            {/if}
+          </div>
+
+        {:else if selectedTab === 'device-sharing'}
+          <div class="section">
+            <h3>Device Sharing Presets</h3>
+            <p class="help-text">Define presets for sharing device context information (hardware, software, etc.).</p>
+
+            {#if editMode && editedRules}
+              <button class="btn btn-add" on:click={addDeviceSharingPreset}>+ Add Preset</button>
+            {/if}
+
+            {#if displayRules?.device_sharing && Object.keys(displayRules.device_sharing).length > 0}
+              {#each Object.entries(displayRules.device_sharing) as [presetName, rules]}
+                {#if !presetName.startsWith('_')}
+                  <div class="peer-card">
+                    <div class="group-header">
+                      <h5>Preset: {presetName}</h5>
+                      {#if editMode}
+                        <button class="btn-icon" on:click={() => removeDeviceSharingPreset(presetName)} title="Delete preset">
+                          🗑️
+                        </button>
+                      {/if}
+                    </div>
+
+                    <div class="rule-list">
+                      {#each Object.entries(rules) as [path, action]}
+                        {#if !path.startsWith('_')}
+                          <div class="rule-row">
+                            <code class="rule-path">{path}</code>
+                            {#if editMode && editedRules && editedRules.device_sharing && editedRules.device_sharing[presetName]}
+                              <div style="display: flex; gap: 0.5rem; align-items: center;">
+                                <select id="device-sharing-rule-{presetName}-{path}" name="device-sharing-rule-{presetName}-{path}" bind:value={editedRules.device_sharing[presetName][path]}>
+                                  <option value="allow">allow</option>
+                                  <option value="deny">deny</option>
+                                </select>
+                                <button class="btn-icon-small" on:click={() => removeRuleFromDeviceSharingPreset(presetName, path)} title="Delete rule">
+                                  ×
+                                </button>
+                              </div>
+                            {:else}
+                              <span class="action-badge" class:allow={action === 'allow'} class:deny={action === 'deny'}>
+                                {action}
+                              </span>
+                            {/if}
+                          </div>
+                        {/if}
+                      {:else}
+                        <p class="empty-small">No rules defined for this preset</p>
+                      {/each}
+                    </div>
+
+                    {#if editMode}
+                      <button class="btn-small" on:click={() => addRuleToDeviceSharingPreset(presetName)} style="margin-top: 0.5rem;">
+                        + Add Rule
+                      </button>
+                    {/if}
+                  </div>
+                {/if}
+              {/each}
+            {:else}
+              <p class="empty">No device sharing presets defined.</p>
+            {/if}
+
+            {#if !editMode}
+              <div class="info-box">
+                <strong>Info:</strong> Device sharing presets define what device context information can be shared. Use device_context.json:* paths (e.g., device_context.json:hardware.gpu.*, device_context.json:software.os.*).
+              </div>
             {/if}
           </div>
 

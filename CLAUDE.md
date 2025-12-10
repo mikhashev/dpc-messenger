@@ -419,6 +419,23 @@ USER: Which one is best for my RTX 3060?
 - **Checkbox unchecked**: Contexts never included (privacy/token-saving mode)
 - **Simple rule**: Checkbox state = Context inclusion (no hidden optimization)
 
+**What Gets Stored in Conversation History:**
+- **Conversation history stores**: Only USER messages (prompts) and ASSISTANT messages (AI responses)
+- **Context data is NOT stored**: Context data is sent as separate "CONTEXTUAL DATA" section, controlled by checkbox state
+- **Context is ephemeral**: Each message includes context fresh based on current checkbox state
+- **Why this design:**
+  - Gives users per-message control over token usage (context can be large)
+  - Allows privacy control (turn off context for sensitive questions)
+  - Context data can change over time, so it's always sent fresh rather than cached
+  - Conversation history remains lightweight (only prompts and responses)
+
+**Example:**
+- Message 1 (context ON): Sends context + conversation history → AI gets full context
+- Message 2 (context OFF): Sends only conversation history → AI only knows what was said before, not your personal data
+- Message 3 (context ON again): Sends context + conversation history → AI gets fresh context again
+
+This means if you enable context for one message and disable it for the next, the AI will "forget" your personal context details but still remember the conversation flow.
+
 **Backend Implementation:**
 - **ConversationMonitor** tracks:
   - `message_history` - full conversation (user/assistant messages)

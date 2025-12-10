@@ -202,6 +202,40 @@ class TestDeviceContextFiltering:
         # Metadata should NOT be present (no rule for it)
         assert "metadata" not in filtered or filtered["metadata"] == {}
 
+    def test_device_specific_deny_overrides_wildcard_allow(self, tmp_path, sample_device_context):
+        """Test that specific deny rule takes precedence over wildcard allow for device context."""
+        import json
+        rules_file = tmp_path / ".dpc_access.json"
+        rules_content = {
+            "nodes": {
+                "dpc-node-test-device": {
+                    "_comment": "Allow all software but deny OS info",
+                    "device_context.json:software.*": "allow",
+                    "device_context.json:software.os": "deny"
+                }
+            }
+        }
+        rules_file.write_text(json.dumps(rules_content, indent=2))
+        firewall = ContextFirewall(rules_file)
+
+        filtered = firewall.filter_device_context_for_peer(
+            sample_device_context,
+            "dpc-node-test-device"
+        )
+
+        # Should have software section
+        assert "software" in filtered
+
+        # Should have dev_tools (allowed by wildcard)
+        assert "dev_tools" in filtered["software"]
+        assert filtered["software"]["dev_tools"]["git"] == "2.47"
+
+        # Should have runtime (allowed by wildcard)
+        assert "runtime" in filtered["software"]
+
+        # Should NOT have os (specific deny overrides wildcard allow)
+        assert "os" not in filtered["software"]
+
 
 class TestContextFiltering:
     """Test personal context filtering (existing functionality)."""
@@ -220,11 +254,36 @@ class TestContextFiltering:
                 "dpc-node-friend-xyz": {
                     "personal.json:profile.*": "allow",
                     "personal.json:knowledge.*": "allow"
+                },
+                "dpc-node-test-peer": {
+                    "_comment": "Test peer with wildcard allow + specific deny",
+                    "personal.json:*": "allow",
+                    "personal.json:instruction": "deny"
                 }
             }
         }
         rules_file.write_text(json.dumps(rules_content, indent=2))
         return ContextFirewall(rules_file)
+
+    @pytest.fixture
+    def sample_personal_context_for_peer(self):
+        """Sample personal context for peer filtering tests."""
+        from dpc_protocol.pcm_core import PersonalContext, InstructionBlock, Profile, Topic
+
+        return PersonalContext(
+            version=1,
+            profile=Profile(
+                name="Test User",
+                description="A test user",
+                core_values=["testing"]
+            ),
+            instruction=InstructionBlock(
+                primary="You are a helpful assistant."
+            ),
+            knowledge={
+                "Python": Topic(summary="Python expert")
+            }
+        )
 
     def test_hub_access(self, firewall_with_context_rules):
         """Test that Hub can only access allowed profile fields."""
@@ -238,6 +297,25 @@ class TestContextFiltering:
         assert firewall_with_context_rules.can_access("dpc-node-friend-xyz", "personal.json:profile.name") == True
         assert firewall_with_context_rules.can_access("dpc-node-friend-xyz", "personal.json:profile.bio") == True
         assert firewall_with_context_rules.can_access("dpc-node-friend-xyz", "personal.json:knowledge.skills") == True
+
+    def test_peer_specific_deny_overrides_wildcard_allow(self, firewall_with_context_rules, sample_personal_context_for_peer):
+        """Test that specific deny rule takes precedence over wildcard allow for peer filtering."""
+        # Filter context for peer with wildcard allow + specific deny for instruction
+        filtered = firewall_with_context_rules.filter_context_for_peer(
+            sample_personal_context_for_peer,
+            "dpc-node-test-peer"
+        )
+
+        # Should have profile (allowed by wildcard)
+        assert filtered.profile is not None
+        assert filtered.profile.name == "Test User"
+
+        # Should have knowledge (allowed by wildcard)
+        assert filtered.knowledge is not None
+        assert len(filtered.knowledge) == 1
+
+        # Should NOT have instruction (specific deny overrides wildcard allow)
+        assert filtered.instruction is None or filtered.instruction == {}
 
 
 class TestComputeSharing:
@@ -507,6 +585,136 @@ class TestFirewallReload:
 
         # Original state should be preserved (firewall is re-initialized on reload, so this won't match exactly)
         # But at minimum, it shouldn't have the invalid section
+
+
+class TestAIScopeFiltering:
+    """Test AI scope filtering for local AI context access."""
+
+    @pytest.fixture
+    def sample_personal_context(self):
+        """Sample personal context for testing."""
+        from dpc_protocol.pcm_core import PersonalContext, InstructionBlock, Profile, Topic
+
+        return PersonalContext(
+            version=1,
+            profile=Profile(
+                name="Test User",
+                description="A test user for AI scope filtering",
+                core_values=["testing", "quality"]
+            ),
+            instruction=InstructionBlock(
+                primary="You are a helpful AI assistant.",
+                bias_mitigation={
+                    "multi_perspective_analysis": True,
+                    "challenge_status_quo": True,
+                    "cultural_sensitivity": True
+                }
+            ),
+            knowledge={
+                "Python Programming": Topic(
+                    summary="Expert in Python development"
+                )
+            }
+        )
+
+    @pytest.fixture
+    def firewall_with_ai_scope_rules(self, tmp_path):
+        """Create firewall with AI scope rules."""
+        import json
+        rules_file = tmp_path / ".dpc_access.json"
+        rules_content = {
+            "ai_scopes": {
+                "work": {
+                    "_comment": "Work mode - full access except instructions",
+                    "personal.json:*": "allow",
+                    "personal.json:instruction": "deny"
+                },
+                "personal": {
+                    "_comment": "Personal mode - only profile and knowledge",
+                    "personal.json:profile": "allow",
+                    "personal.json:knowledge": "allow",
+                    "personal.json:instruction": "deny"
+                },
+                "restricted": {
+                    "_comment": "Restricted mode - only profile",
+                    "personal.json:profile": "allow"
+                }
+            }
+        }
+        rules_file.write_text(json.dumps(rules_content, indent=2))
+        return ContextFirewall(rules_file)
+
+    def test_specific_deny_overrides_wildcard_allow(self, firewall_with_ai_scope_rules, sample_personal_context):
+        """Test that specific deny rule takes precedence over wildcard allow."""
+
+        # Filter context for 'work' scope (has wildcard allow + specific deny for instruction)
+        filtered = firewall_with_ai_scope_rules.filter_personal_context_for_ai_scope(
+            sample_personal_context,
+            "work"
+        )
+
+        # Should have profile (allowed by wildcard)
+        assert filtered.profile is not None
+        assert filtered.profile.name == "Test User"
+
+        # Should have knowledge (allowed by wildcard)
+        assert filtered.knowledge is not None
+        assert len(filtered.knowledge) == 1
+        assert "Python Programming" in filtered.knowledge
+
+        # Should NOT have instruction (specific deny overrides wildcard allow)
+        # The instruction field should be None or empty dict
+        assert filtered.instruction is None or filtered.instruction == {}
+
+    def test_specific_field_access_only(self, firewall_with_ai_scope_rules, sample_personal_context):
+        """Test that restricted mode only allows specific fields."""
+        filtered = firewall_with_ai_scope_rules.filter_personal_context_for_ai_scope(
+            sample_personal_context,
+            "restricted"
+        )
+
+        # Should have profile (entire profile object comes through)
+        assert filtered.profile is not None
+        assert filtered.profile.name == "Test User"
+
+        # Note: Current filtering works at top-level field granularity
+        # When profile is allowed, the entire Profile object is included
+
+        # Should NOT have knowledge (not in rules)
+        assert filtered.knowledge is None or filtered.knowledge == {}
+
+        # Should NOT have instruction (explicitly denied)
+        assert filtered.instruction is None or filtered.instruction == {}
+
+    def test_multiple_specific_allows(self, firewall_with_ai_scope_rules, sample_personal_context):
+        """Test personal scope with multiple specific allow rules."""
+        filtered = firewall_with_ai_scope_rules.filter_personal_context_for_ai_scope(
+            sample_personal_context,
+            "personal"
+        )
+
+        # Should have profile (explicitly allowed)
+        assert filtered.profile is not None
+        assert filtered.profile.name == "Test User"
+
+        # Should have knowledge (explicitly allowed)
+        assert filtered.knowledge is not None
+        assert len(filtered.knowledge) > 0
+
+        # Should NOT have instruction (specific deny)
+        assert filtered.instruction is None or filtered.instruction == {}
+
+    def test_unknown_scope_denies_all(self, firewall_with_ai_scope_rules, sample_personal_context):
+        """Test that unknown AI scope results in default deny."""
+        filtered = firewall_with_ai_scope_rules.filter_personal_context_for_ai_scope(
+            sample_personal_context,
+            "unknown_scope"
+        )
+
+        # All fields should be filtered out (default deny)
+        assert filtered.profile is None or filtered.profile == {}
+        assert filtered.knowledge is None or filtered.knowledge == {}
+        assert filtered.instruction is None or filtered.instruction == {}
 
 
 if __name__ == "__main__":
