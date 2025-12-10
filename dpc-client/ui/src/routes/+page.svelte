@@ -93,6 +93,10 @@
   // Personal context inclusion toggle
   let includePersonalContext: boolean = true;
 
+  // AI Scope selection (for filtering what local AI can access)
+  let selectedAIScope: string = ""; // Empty = no filtering (full context)
+  let availableAIScopes: string[] = []; // List of scope names from privacy rules
+
   // Markdown rendering toggle (with localStorage persistence)
   let enableMarkdown: boolean = (() => {
     const saved = localStorage.getItem('enableMarkdown');
@@ -397,7 +401,8 @@
       const payload: any = {
         prompt: text,
         include_context: includePersonalContext,  // Add context inclusion flag
-        conversation_id: activeChatId  // Phase 7: Pass conversation ID for history tracking
+        conversation_id: activeChatId,  // Phase 7: Pass conversation ID for history tracking
+        ai_scope: selectedAIScope || null  // AI Scope for filtering (null = no filtering)
       };
 
       // Add peer contexts if any are selected
@@ -488,6 +493,26 @@
 
   function openFirewallEditor() {
     showFirewallEditor = true;
+  }
+
+  async function loadAIScopes() {
+    try {
+      const result = await sendCommand("get_firewall_rules", {});
+      if (result.status === "success" && result.rules?.ai_scopes) {
+        // Extract scope names (excluding _comment fields)
+        availableAIScopes = Object.keys(result.rules.ai_scopes).filter(key => !key.startsWith('_'));
+      } else {
+        availableAIScopes = [];
+      }
+    } catch (error) {
+      console.error("Error loading AI scopes:", error);
+      availableAIScopes = [];
+    }
+  }
+
+  // Load AI scopes when WebSocket connects
+  $: if ($connectionStatus === "connected" && availableAIScopes.length === 0) {
+    loadAIScopes();
   }
 
   function openProvidersEditor() {
@@ -1236,6 +1261,28 @@
             </label>
             {#if !includePersonalContext}
               <span class="context-hint">⚠️ AI won't know your preferences or device specs</span>
+            {/if}
+
+            <!-- AI Scope Selector (only show when context is enabled) -->
+            {#if includePersonalContext && availableAIScopes.length > 0}
+              <div class="ai-scope-selector">
+                <label for="ai-scope-select">
+                  AI Context Mode:
+                </label>
+                <select id="ai-scope-select" bind:value={selectedAIScope}>
+                  <option value="">Full Access (no filtering)</option>
+                  {#each availableAIScopes as scopeName}
+                    <option value={scopeName}>{scopeName}</option>
+                  {/each}
+                </select>
+                <span class="context-hint">
+                  {#if selectedAIScope}
+                    🔒 AI can only access: {selectedAIScope} scope
+                  {:else}
+                    🔓 AI has full context access
+                  {/if}
+                </span>
+              </div>
             {/if}
           </div>
 
@@ -2294,6 +2341,41 @@
     background: white;
     border-radius: 6px;
     border-left: 3px solid #f59e0b;
+  }
+
+  .ai-scope-selector {
+    margin-top: 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid #ffd4a3;
+  }
+
+  .ai-scope-selector label {
+    display: block;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 0.4rem;
+  }
+
+  .ai-scope-selector select {
+    width: 100%;
+    padding: 0.5rem;
+    border: 1px solid #d1d5db;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    background: white;
+    cursor: pointer;
+    transition: border-color 0.2s;
+  }
+
+  .ai-scope-selector select:hover {
+    border-color: #f59e0b;
+  }
+
+  .ai-scope-selector select:focus {
+    outline: none;
+    border-color: #f59e0b;
+    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
   }
 
   /* Phase 7: Status Badge Styles (for context update indicators) */

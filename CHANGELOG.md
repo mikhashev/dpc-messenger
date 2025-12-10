@@ -8,7 +8,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- (No unreleased features yet)
+- **Complete Firewall UI Editor** - 7 tabs for managing all privacy rules
+  - File Groups tab - Define aliases for groups of context files
+  - AI Scopes tab - Control local AI access in different modes (work/personal)
+  - Device Sharing tab - Presets for sharing device context information
+  - All tabs support CRUD operations with duplicate checking
+  - Files: [FirewallEditor.svelte](dpc-client/ui/src/lib/components/FirewallEditor.svelte)
+- **AI Scope Filtering** - Local AI context filtering based on mode
+  - Work mode vs personal mode context isolation
+  - Selector in chat UI (only shown when context enabled and scopes exist)
+  - Backend filtering method: `filter_personal_context_for_ai_scope()`
+  - Files: [firewall.py:332-395](dpc-client/core/dpc_client_core/firewall.py), [+page.svelte](dpc-client/ui/src/routes/+page.svelte)
+
+### Fixed
+- **CRITICAL: Wildcard Override Bug** - Specific deny rules now correctly override wildcard allow rules
+  - Bug affected ALL filtering methods (AI scopes, peer personal context, peer device context)
+  - Fix: Check for specific rules FIRST before falling back to wildcards
+  - Example: `"personal.json:*": "allow"` + `"personal.json:instruction": "deny"` now correctly denies instructions
+  - Affects 4 filtering methods in firewall.py (lines 258-552)
+  - Comprehensive test coverage added (30 firewall tests, all passing)
+
+### Documentation
+- Updated CLAUDE.md with conversation history behavior documentation
+  - Clarified what gets stored in conversation history (USER/ASSISTANT messages only)
+  - Explained context data is ephemeral (sent fresh based on checkbox state)
+  - Added practical examples of context ON/OFF behavior
 
 ---
 

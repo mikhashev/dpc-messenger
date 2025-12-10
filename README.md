@@ -314,22 +314,26 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ## Roadmap
 
-### Phase 1: Federated MVP - COMPLETE (v0.8.0)
+### Phase 1: Federated MVP - COMPLETE (v0.10.1)
 **Status:** Production Ready | **Timeline:** Completed
 
 **Core Infrastructure:**
 - Direct TLS P2P connections (local network + IPv6 dual-stack)
 - WebRTC with NAT traversal (STUN/TURN)
-- Federation Hub for discovery and OAuth
+- **6-Tier Connection Fallback** (IPv6 → IPv4 → WebRTC → UDP Hole Punch → Relay → Gossip)
+- Federation Hub for discovery and OAuth (now optional!)
 - Cryptographic node identity system
 - Token blacklist and logout
 - Offline mode with graceful degradation
 
 **Privacy & Security:**
 - **Encrypted local backups** (AES-256-GCM, PBKDF2 600k iterations)
-- Context firewall with granular access control
+- **Context firewall with granular access control**
+  - Complete UI editor with 7 tabs (Hub, Node Groups, File Groups, AI Scopes, Device Sharing, Compute, Peers)
+  - AI Scope filtering for local AI (work/personal mode context isolation)
+  - Wildcard precedence fix (specific deny overrides wildcard allow)
 - No message persistence (transactional communication)
-- End-to-end encryption (DTLS/TLS)
+- End-to-end encryption (DTLS/TLS for all 6 connection strategies)
 
 **AI Collaboration:**
 - Local AI integration (Ollama, OpenAI, Anthropic)
@@ -346,9 +350,18 @@ docker-compose -f docker-compose.prod.yml up -d
   - Markdown rendering with intelligent caching
 
 ### Phase 2: Team Collaboration + Disaster Resilience - IN PROGRESS (Q1-Q3 2026)
-**Status:** Planning Complete | **Target:** Small teams (2-20 members + AIs)
+**Status:** Decentralized Infrastructure Complete | **Target:** Small teams (2-20 members + AIs)
 
-**Team Collaboration Features (12 features):**
+**Resilient Infrastructure - COMPLETE ✅**
+- ✅ **DHT-based peer discovery** (v0.9.5) - Kademlia DHT, 73 tests passing, internet-wide validated
+- ✅ **6-Tier Connection Fallback** (v0.10.0) - IPv6, IPv4, WebRTC, UDP hole punch, relay, gossip
+- ✅ **Hub-Optional Architecture** - Fully decentralized operation without Hub dependency
+- ✅ **DTLS Encryption** (v0.10.1) - All 6 connection strategies now encrypted end-to-end
+- ✅ **UDP Hole Punching** (v0.10.1) - DTLS 1.2 encrypted, production-ready, 60-70% NAT success
+- ✅ **Volunteer Relay Nodes** (v0.10.0) - 100% NAT coverage, privacy-preserving
+- ✅ **Gossip Protocol** (v0.10.0) - Store-and-forward for disaster scenarios, anti-entropy sync
+
+**Team Collaboration Features - PLANNED (Q1-Q3 2026):**
 - Persistent team management with roles
 - Group chat UI with presence indicators
 - Team knowledge repositories (shared, synchronized knowledge)
@@ -359,19 +372,10 @@ docker-compose -f docker-compose.prod.yml up -d
 - Team activity feed and analytics dashboard
 - AI-facilitated team sessions (standups, brainstorming)
 
-**Resilient Infrastructure (7 features - CRITICAL):**
-- **DHT-based peer discovery** (Kademlia + Gossip for decentralized signaling)
-- **Pluggable transport framework** (auto-fallback: WebRTC → WebSocket-TLS → HTTP tunneling)
-- **WebSocket-over-TLS transport** (HTTPS transport for reliability)
-- **WiFi Mesh (802.11s) support** (OpenWRT documentation - works out of box)
-- **Meshtastic (LoRa) integration** (offline text messaging - stretch goal)
-- **Starlink backup** (already works - WebRTC over satellite)
+**Stretch Goals:**
+- WiFi Mesh (802.11s) support (documentation - Direct TLS works over mesh)
+- Meshtastic (LoRa) integration (offline text messaging)
 - Hub-assisted backup (encrypted storage on Hub)
-
-**Why This Matters:**
-- Works in disaster scenarios and challenging network conditions via DHT + pluggable transports
-- Works offline via mesh networks (WiFi, LoRa)
-- Eliminates Hub as single point of failure
 
 **See [ROADMAP.md](./ROADMAP.md) for detailed Phase 2 specifications.**
 

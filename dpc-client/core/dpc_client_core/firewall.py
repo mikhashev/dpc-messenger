@@ -268,44 +268,131 @@ class ContextFirewall:
         Returns:
             Filtered PersonalContext with only allowed fields
         """
-        from dataclasses import asdict, fields
+        from dataclasses import fields
 
-        # Convert context to dict for manipulation
-        context_dict = asdict(context)
-        filtered_dict = {}
+        # Create a filtered copy by checking each field
+        filtered_kwargs = {}
 
         # Check each field against firewall rules
         for field in fields(context):
             field_name = field.name
-            field_value = context_dict.get(field_name)
+            field_value = getattr(context, field_name)
 
             # Skip if field is None or empty
             if field_value is None:
-                filtered_dict[field_name] = None
+                filtered_kwargs[field_name] = None
                 continue
 
             # Check if peer can access this field
             resource_path = f"personal.json:{field_name}"
 
-            if self.can_access(peer_id, resource_path):
-                # Peer has access to this field
-                filtered_dict[field_name] = deepcopy(field_value)
+            # Check for specific rule first (node > group)
+            specific_rule = None
+            # Try node-specific rule
+            if peer_id.startswith('dpc-node-'):
+                specific_rule = self._get_rule_for_resource('nodes', peer_id, resource_path)
+                # Try group rules if no node rule
+                if not specific_rule:
+                    groups = self._get_groups_for_node(peer_id)
+                    for group_name in groups:
+                        specific_rule = self._get_rule_for_resource('groups', group_name, resource_path)
+                        if specific_rule:
+                            break
+
+            # If there's a specific rule (allow or deny), use it - don't fall back to wildcard
+            if specific_rule:
+                if specific_rule.lower() == 'allow':
+                    filtered_kwargs[field_name] = deepcopy(field_value)
+                else:
+                    # Specific deny - set to None or empty value
+                    if isinstance(field_value, list):
+                        filtered_kwargs[field_name] = []
+                    elif isinstance(field_value, dict):
+                        filtered_kwargs[field_name] = {}
+                    else:
+                        filtered_kwargs[field_name] = None
             else:
-                # Check for wildcard access (e.g., personal.json:*)
+                # No specific rule - check for wildcard access
                 wildcard_path = "personal.json:*"
                 if self.can_access(peer_id, wildcard_path):
-                    filtered_dict[field_name] = deepcopy(field_value)
+                    filtered_kwargs[field_name] = deepcopy(field_value)
                 else:
                     # No access - set to None or empty value
                     if isinstance(field_value, list):
-                        filtered_dict[field_name] = []
+                        filtered_kwargs[field_name] = []
                     elif isinstance(field_value, dict):
-                        filtered_dict[field_name] = {}
+                        filtered_kwargs[field_name] = {}
                     else:
-                        filtered_dict[field_name] = None
+                        filtered_kwargs[field_name] = None
 
-        # Create new PersonalContext from filtered dict
-        return PersonalContext(**filtered_dict)
+        # Create new PersonalContext from filtered fields
+        # This preserves the original dataclass instances (InstructionBlock, etc.)
+        return PersonalContext(**filtered_kwargs)
+
+    def filter_personal_context_for_ai_scope(self, context: 'PersonalContext', scope_name: str) -> 'PersonalContext':
+        """
+        Filters personal context based on AI scope rules, removing fields that the AI scope cannot access.
+
+        Args:
+            context: The PersonalContext object to filter
+            scope_name: The AI scope name (e.g., "work", "personal")
+
+        Returns:
+            Filtered PersonalContext with only allowed fields
+        """
+        from dataclasses import fields
+
+        # Build the requester identity for AI scope
+        requester_identity = f"ai_scope:{scope_name}"
+
+        # Create a filtered copy by checking each field
+        filtered_kwargs = {}
+
+        # Check each field against firewall rules
+        for field in fields(context):
+            field_name = field.name
+            field_value = getattr(context, field_name)
+
+            # Skip if field is None or empty
+            if field_value is None:
+                filtered_kwargs[field_name] = None
+                continue
+
+            # Check if AI scope can access this field
+            resource_path = f"personal.json:{field_name}"
+
+            # Get the specific rule first (if it exists)
+            specific_rule = self._get_rule_for_resource('ai_scopes', scope_name, resource_path)
+
+            # If there's a specific rule (allow or deny), use it - don't fall back to wildcard
+            if specific_rule:
+                if specific_rule.lower() == 'allow':
+                    filtered_kwargs[field_name] = deepcopy(field_value)
+                else:
+                    # Specific deny - set to None or empty value
+                    if isinstance(field_value, list):
+                        filtered_kwargs[field_name] = []
+                    elif isinstance(field_value, dict):
+                        filtered_kwargs[field_name] = {}
+                    else:
+                        filtered_kwargs[field_name] = None
+            else:
+                # No specific rule - check for wildcard access
+                wildcard_path = "personal.json:*"
+                if self.can_access(requester_identity, wildcard_path):
+                    filtered_kwargs[field_name] = deepcopy(field_value)
+                else:
+                    # No access - set to None or empty value
+                    if isinstance(field_value, list):
+                        filtered_kwargs[field_name] = []
+                    elif isinstance(field_value, dict):
+                        filtered_kwargs[field_name] = {}
+                    else:
+                        filtered_kwargs[field_name] = None
+
+        # Create new PersonalContext from filtered fields
+        # This preserves the original dataclass instances (InstructionBlock, etc.)
+        return PersonalContext(**filtered_kwargs)
 
     def can_request_inference(self, requester_node_id: str, model: str = None) -> bool:
         """
@@ -384,19 +471,32 @@ class ContextFirewall:
                 current_path = f"{path_prefix}.{key}" if path_prefix else key
                 resource_path = f"device_context.json:{current_path}"
 
-                # Check if peer has access to this specific path
-                if self.can_access(peer_id, resource_path):
-                    if isinstance(value, dict):
-                        # Allow access - but still recursively filter in case there are deny rules below
-                        filtered[key] = filter_nested_dict(value, current_path)
-                        # If nothing was allowed in the subtree, use the whole value
-                        if not filtered[key] and value:
+                # Check for specific rule first (node > group)
+                specific_rule = None
+                if peer_id.startswith('dpc-node-'):
+                    specific_rule = self._get_rule_for_resource('nodes', peer_id, resource_path)
+                    if not specific_rule:
+                        groups = self._get_groups_for_node(peer_id)
+                        for group_name in groups:
+                            specific_rule = self._get_rule_for_resource('groups', group_name, resource_path)
+                            if specific_rule:
+                                break
+
+                # If there's a specific rule, use it - don't fall back to wildcard
+                if specific_rule:
+                    if specific_rule.lower() == 'allow':
+                        if isinstance(value, dict):
+                            # Allow access - but still recursively filter in case there are deny rules below
+                            filtered[key] = filter_nested_dict(value, current_path)
+                            # If nothing was allowed in the subtree, use the whole value
+                            if not filtered[key] and value:
+                                filtered[key] = deepcopy(value)
+                        else:
+                            # Leaf node - allow access
                             filtered[key] = deepcopy(value)
-                    else:
-                        # Leaf node - allow access
-                        filtered[key] = deepcopy(value)
+                    # else: specific deny - don't include this key
                 else:
-                    # Check for wildcard access (e.g., device_context.json:hardware.gpu.*)
+                    # No specific rule - check for wildcard access
                     wildcard_path = f"device_context.json:{current_path}.*"
                     if self.can_access(peer_id, wildcard_path):
                         # Allow access to all sub-fields
@@ -422,14 +522,36 @@ class ContextFirewall:
 
             resource_path = f"device_context.json:{section_name}"
 
-            # Check if peer has access to entire section
-            if self.can_access(peer_id, resource_path):
-                filtered_context[section_name] = deepcopy(section_data)
+            # Check for specific rule first (node > group)
+            specific_rule = None
+            if peer_id.startswith('dpc-node-'):
+                specific_rule = self._get_rule_for_resource('nodes', peer_id, resource_path)
+                if not specific_rule:
+                    groups = self._get_groups_for_node(peer_id)
+                    for group_name in groups:
+                        specific_rule = self._get_rule_for_resource('groups', group_name, resource_path)
+                        if specific_rule:
+                            break
+
+            # If there's a specific rule, use it - don't fall back to wildcard
+            if specific_rule:
+                if specific_rule.lower() == 'allow':
+                    # Specific allow for entire section - but still recurse to check for deny rules within
+                    filtered_section = filter_nested_dict(section_data, section_name)
+                    if filtered_section:
+                        filtered_context[section_name] = filtered_section
+                    elif section_data:
+                        # If recursion filtered everything out but section has data, respect that
+                        pass
+                # else: specific deny - don't include this section
             else:
-                # Check for wildcard access to section
+                # No specific rule - check for wildcard access to section
                 wildcard_path = f"device_context.json:{section_name}.*"
                 if self.can_access(peer_id, wildcard_path):
-                    filtered_context[section_name] = deepcopy(section_data)
+                    # Wildcard allows - but still recurse to check for specific deny rules within
+                    filtered_section = filter_nested_dict(section_data, section_name)
+                    if filtered_section:
+                        filtered_context[section_name] = filtered_section
                 else:
                     # Recursively filter section contents
                     filtered_section = filter_nested_dict(section_data, section_name)

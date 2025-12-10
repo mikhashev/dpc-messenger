@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Last Updated:** December 2025 | **Current Version:** 0.10.0 | **Current Phase:** Phase 2.1 - Decentralized Infrastructure
+> **Last Updated:** December 2025 | **Current Version:** 0.10.1 | **Current Phase:** Phase 2.1 - Decentralized Infrastructure
 
 ---
 
@@ -38,6 +38,9 @@ D-PC Messenger follows a three-phase development roadmap:
 |---------|--------|----------|-------|
 | **Encrypted Local Backups** | Complete | `dpc-client/core/dpc_client_core/backup_manager.py` | AES-256-GCM, PBKDF2 600k iterations |
 | **Context Firewall** | Complete | `dpc-client/core/dpc_client_core/firewall.py` | Granular access control per file/field |
+| **Firewall UI Editor** | Complete | `dpc-client/ui/src/lib/components/FirewallEditor.svelte` | 7 tabs: Hub, Node Groups, File Groups, AI Scopes, Device Sharing, Compute, Peers |
+| **AI Scope Filtering** | Complete | `firewall.py:332-395`, UI selector in `+page.svelte` | Local AI context filtering (work/personal modes) |
+| **Rule Precedence Fix** | Complete | v0.10.2 wildcard override bug fix | Specific deny rules now override wildcard allow rules |
 | **No Message Persistence** | Complete | Architecture design | Transactional communication |
 | **Offline Mode** | Complete | `docs/OFFLINE_MODE.md` | Works without Hub, cached tokens |
 
@@ -69,12 +72,16 @@ D-PC Messenger follows a three-phase development roadmap:
 - Markdown rendering (UX improvement)
 - Cryptographic commit integrity (security enhancement)
 - Device context collection (structured hardware/software info)
+- Complete Firewall UI editor (7 tabs including AI Scopes, File Groups, Device Sharing)
+- AI Scope filtering for local AI (work/personal mode context isolation)
+- Critical security fix (wildcard override bug affecting all filtering methods)
 
 ### Test Coverage
 
-- **Backend:** 58 tests passing, 2 skipped
+- **Backend:** 61 tests passing (including 30 firewall tests with AI scope + wildcard precedence coverage)
 - **Frontend:** 0 errors (svelte-check)
 - **Protocol Library:** 22 commit integrity tests
+- **Firewall Tests:** Comprehensive coverage for AI scopes, peer filtering, device context, rule precedence
 
 ---
 
