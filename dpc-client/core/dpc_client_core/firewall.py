@@ -72,6 +72,16 @@ class ContextFirewall:
 
             self.access_file_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # Default privacy_rules.json template
+            # IMPORTANT: If you add new sections here that need to be displayed in the UI,
+            # follow the pattern established for 'ai_scopes':
+            # 1. Add event broadcast in save_firewall_rules() (service.py) - already exists as 'firewall_rules_updated'
+            # 2. Create a writable store in coreService.ts (e.g., export const firewallRulesUpdated)
+            # 3. Add event handler in coreService.ts message listener to update the store
+            # 4. In UI component (+page.svelte or other), create load function with guard flag
+            # 5. Add reactive statement to reload data when $firewallRulesUpdated changes
+            # This ensures UI stays in sync with privacy_rules.json without requiring page refresh.
+            # Example: AI scopes dropdown reloads immediately after user saves firewall rules.
             default_rules = {
                 "_comment": "D-PC Access Control File - This file controls who can access your context data and compute resources. By default, all access is denied.",
                 "hub": {

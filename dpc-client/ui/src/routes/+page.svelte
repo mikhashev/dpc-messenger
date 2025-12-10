@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
@@ -96,6 +96,7 @@
   // AI Scope selection (for filtering what local AI can access)
   let selectedAIScope: string = ""; // Empty = no filtering (full context)
   let availableAIScopes: string[] = []; // List of scope names from privacy rules
+  let aiScopesLoaded: boolean = false; // Guard flag to prevent infinite loop
 
   // Markdown rendering toggle (with localStorage persistence)
   let enableMarkdown: boolean = (() => {
@@ -495,6 +496,14 @@
     showFirewallEditor = true;
   }
 
+  // Load AI scopes from firewall rules (privacy_rules.json)
+  // IMPORTANT PATTERN: If you add UI components that display data from privacy_rules.json
+  // (e.g., node_groups dropdown, compute settings toggle, device_sharing rules), follow this pattern:
+  // 1. Create a load function (like loadAIScopes below)
+  // 2. Add a guard flag (like aiScopesLoaded) to prevent infinite reactive loops
+  // 3. Add reactive statements to reload on connection and firewall rules updates
+  // 4. Subscribe to $firewallRulesUpdated store to trigger reload when user saves rules
+  // This ensures UI stays in sync with privacy_rules.json without requiring page refresh.
   async function loadAIScopes() {
     try {
       const result = await sendCommand("get_firewall_rules", {});
@@ -507,11 +516,29 @@
     } catch (error) {
       console.error("Error loading AI scopes:", error);
       availableAIScopes = [];
+    } finally {
+      // Mark as loaded regardless of success/failure to prevent infinite loop
+      aiScopesLoaded = true;
     }
   }
 
-  // Load AI scopes when WebSocket connects
-  $: if ($connectionStatus === "connected" && availableAIScopes.length === 0) {
+  // Load AI scopes when WebSocket connects (only once per connection)
+  $: if ($connectionStatus === "connected" && !aiScopesLoaded) {
+    loadAIScopes();
+  }
+
+  // Reset AI scopes loaded flag on disconnection (to reload on reconnect)
+  $: if ($connectionStatus === "disconnected" || $connectionStatus === "error") {
+    aiScopesLoaded = false;
+  }
+
+  // Reload AI scopes when firewall rules are updated (via FirewallEditor)
+  // IMPORTANT: This reactive statement ensures UI updates immediately after saving firewall rules.
+  // If you add more UI components that read from privacy_rules.json, add similar reactive
+  // statements here to reload their data when $firewallRulesUpdated changes.
+  // Example: if ($firewallRulesUpdated && $connectionStatus === "connected") { loadNodeGroups(); }
+  $: if ($firewallRulesUpdated && $connectionStatus === "connected") {
+    aiScopesLoaded = false;
     loadAIScopes();
   }
 

@@ -721,6 +721,16 @@ The client provides in-app editors for key configuration files, eliminating the 
 - No service restart required for configuration changes
 - WebSocket events notify UI of successful updates
 
+**UI Integration Pattern for New Firewall Fields:**
+When adding new UI components that display data from `privacy_rules.json` (e.g., node groups dropdown, compute settings toggle):
+1. Create a writable store in `coreService.ts` (e.g., `export const firewallRulesUpdated = writable<any>(null)`)
+2. Add event handler in `coreService.ts` for `firewall_rules_updated` event to update the store
+3. In UI component, create a load function with a guard flag (like `aiScopesLoaded`) to prevent infinite reactive loops
+4. Add reactive statement to reload data when `$firewallRulesUpdated` changes and connection is active
+5. This ensures UI stays in sync with `privacy_rules.json` without requiring page refresh
+- **Example**: AI scopes dropdown (`+page.svelte:499-543`) reloads immediately after user saves firewall rules
+- **Pattern documented in**: `firewall.py:75-84`, `coreService.ts:32-39`, `+page.svelte:499-543`
+
 **Example Workflow** (Firewall Rules):
 1. Click "🛡️ Firewall Rules" button
 2. Click "Edit" button in header
