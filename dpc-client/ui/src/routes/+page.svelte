@@ -96,6 +96,7 @@
   // AI Scope selection (for filtering what local AI can access)
   let selectedAIScope: string = ""; // Empty = no filtering (full context)
   let availableAIScopes: string[] = []; // List of scope names from privacy rules
+  let aiScopesLoaded: boolean = false; // Guard flag to prevent infinite loop
 
   // Markdown rendering toggle (with localStorage persistence)
   let enableMarkdown: boolean = (() => {
@@ -507,12 +508,20 @@
     } catch (error) {
       console.error("Error loading AI scopes:", error);
       availableAIScopes = [];
+    } finally {
+      // Mark as loaded regardless of success/failure to prevent infinite loop
+      aiScopesLoaded = true;
     }
   }
 
-  // Load AI scopes when WebSocket connects
-  $: if ($connectionStatus === "connected" && availableAIScopes.length === 0) {
+  // Load AI scopes when WebSocket connects (only once per connection)
+  $: if ($connectionStatus === "connected" && !aiScopesLoaded) {
     loadAIScopes();
+  }
+
+  // Reset AI scopes loaded flag on disconnection (to reload on reconnect)
+  $: if ($connectionStatus === "disconnected" || $connectionStatus === "error") {
+    aiScopesLoaded = false;
   }
 
   function openProvidersEditor() {
