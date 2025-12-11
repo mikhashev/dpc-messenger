@@ -22,5 +22,7 @@
   #app-root {
     width: 100%;
     height: 100vh;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    box-sizing: border-box;
   }
 </style>

@@ -18,6 +18,9 @@
   .markdown-content {
     line-height: 1.6;
     color: #333;
+    overflow-wrap: break-word; /* Break long words */
+    word-break: break-word; /* Break long unbreakable strings */
+    max-width: 100%; /* Constrain to parent width */
   }
 
   /* Typography */
@@ -53,6 +56,8 @@
 
   .markdown-content :global(p) {
     margin: 0.75rem 0;
+    overflow-wrap: break-word; /* Break long words */
+    word-break: break-word; /* Break long unbreakable strings */
   }
 
   .markdown-content :global(p:first-child) {

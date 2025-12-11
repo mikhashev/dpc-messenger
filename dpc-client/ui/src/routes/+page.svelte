@@ -1567,6 +1567,9 @@
     width: auto;
     margin: 0 auto;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100vw; /* Constrain to viewport width */
+    box-sizing: border-box;
   }
 
   .status-bar {
@@ -1601,6 +1604,8 @@
     display: grid;
     grid-template-columns: 380px 1fr;
     gap: 1.5rem;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100%; /* Constrain to parent width */
   }
   
   @media (max-width: 968px) {
@@ -2048,6 +2053,8 @@
     flex-direction: column;
     /* Height is set via inline style */
     min-height: 300px;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100%; /* Constrain to parent width */
   }
   
   .chat-header {
@@ -2220,7 +2227,9 @@
     flex: 1;
     padding: 1rem;
     overflow-y: auto;
+    overflow-x: hidden; /* Prevent horizontal overflow */
     background: #f9f9f9;
+    max-width: 100%; /* Constrain to parent width */
   }
 
   /* Resize Handle */
@@ -2276,6 +2285,8 @@
     border-radius: 12px;
     max-width: 80%;
     animation: slideIn 0.2s ease-out;
+    overflow-wrap: break-word; /* Break long words */
+    word-break: break-word; /* Break long unbreakable strings */
   }
   
   @keyframes slideIn {
@@ -2321,6 +2332,8 @@
     margin: 0;
     white-space: pre-wrap;
     word-wrap: break-word;
+    overflow-wrap: break-word; /* Break long words */
+    word-break: break-word; /* Break long unbreakable strings */
   }
   
   .chat-input {
@@ -2329,6 +2342,8 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100%; /* Constrain to parent width */
   }
 
   /* Personal Context Toggle Styles */
@@ -2555,6 +2570,8 @@
   .input-row {
     display: flex;
     gap: 0.5rem;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100%; /* Constrain to parent width */
   }
 
   .input-row textarea {
@@ -2562,6 +2579,9 @@
     min-height: 120px;
     max-height: 240px;
     resize: vertical;
+    overflow-wrap: break-word; /* Break long words */
+    word-break: break-word; /* Break long unbreakable strings */
+    overflow-x: auto; /* Allow horizontal scroll in textarea if needed */
   }
 
   .input-row button {
