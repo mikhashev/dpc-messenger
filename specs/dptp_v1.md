@@ -1,8 +1,8 @@
-# DPTP Specification: D-PC Transfer Protocol v1.0
+# DPTP Specification: D-PC Transfer Protocol v1.1
 
-**Version:** 1.0
-**Status:** Stable
-**Date:** November 29, 2025
+**Version:** 1.1
+**Status:** In Progress
+**Date:** December 2025
 **License:** CC0 1.0 Universal (Public Domain)
 
 ## 1. Overview
@@ -18,17 +18,26 @@ The **D-PC Transfer Protocol (DPTP)** is a binary-framed, JSON-based messaging p
 
 ### Transport Layers
 
-DPTP messages are transmitted over two supported transport mechanisms:
+DPTP messages are transmitted over three encrypted transport mechanisms, part of a 6-tier connection fallback architecture:
 
 1. **Direct TLS** - TCP connections secured with TLS 1.2+
-   - Local network and IPv6 connections
+   - **IPv6 Direct**: Internet-wide (40%+ networks, no NAT required)
+   - **IPv4 Direct**: Internet-wide with port-forwarding, or local network
    - Uses X.509 certificates for node identity
-   - Lowest latency, requires network visibility
+   - Lowest latency when direct connectivity available
 
 2. **WebRTC Data Channels** - Encrypted with DTLS
-   - Internet-wide connections with NAT traversal
-   - STUN/TURN servers for connection establishment
+   - Hub-assisted NAT traversal via STUN/TURN
+   - Internet-wide connections across firewalls
    - Hub provides signaling only (no message routing)
+
+3. **UDP DTLS** - DTLS 1.2 over UDP (v0.10.1+)
+   - DHT-coordinated hole punching (no Hub required)
+   - 60-70% NAT success rate for cone NAT
+   - Volunteer relay fallback for 100% coverage
+   - Gossip store-and-forward for disaster scenarios
+
+**Note:** Higher-level connection strategies (relay, gossip) use these base transports for message delivery.
 
 ## 2. Message Format
 
@@ -59,12 +68,12 @@ All DPTP messages follow a fixed binary framing format:
 
 For a HELLO message:
 ```json
-{"command":"HELLO","payload":{"node_id":"dpc-node-8b066c7f3d7eb627","name":"Alice"}}
+{"command":"HELLO","payload":{"node_id":"dpc-node-[32 hex characters]","name":"Alice"}}
 ```
 
-Wire representation (82 bytes total):
+Wire representation (example):
 ```
-0000000072{"command":"HELLO","payload":{"node_id":"dpc-node-8b066c7f3d7eb627","name":"Alice"}}
+0000000088{"command":"HELLO","payload":{"node_id":"dpc-node-[32 hex characters]","name":"Alice"}}
 ```
 
 ## 3. Message Types
@@ -80,14 +89,14 @@ Sent immediately after connection establishment to identify the remote peer.
 {
   "command": "HELLO",
   "payload": {
-    "node_id": "dpc-node-8b066c7f3d7eb627",
+    "node_id": "dpc-node-[32 hex characters]",
     "name": "Alice"  // Optional display name
   }
 }
 ```
 
 **Fields:**
-- `node_id` (string, required): Cryptographic node identifier
+- `node_id` (string, required): Cryptographic node identifier (format: `dpc-node-[32 hex characters]`)
 - `name` (string, optional): Human-readable display name
 
 **Response:** None (connection is bidirectional; both peers send HELLO)
@@ -119,29 +128,29 @@ Sends a text message to the peer.
 
 ### 3.3 Context Sharing
 
-#### GET_CONTEXT
+#### REQUEST_CONTEXT
 
 Requests the peer's personal context data (subject to firewall rules).
 
 **Format:**
 ```json
 {
-  "command": "GET_CONTEXT"
+  "command": "REQUEST_CONTEXT"
 }
 ```
 
-**Response:** CONTEXT_DATA message
+**Response:** CONTEXT_RESPONSE message
 
 ---
 
-#### CONTEXT_DATA
+#### CONTEXT_RESPONSE
 
-Sends personal context data in response to GET_CONTEXT or proactively.
+Sends personal context data in response to REQUEST_CONTEXT or proactively.
 
 **Format:**
 ```json
 {
-  "command": "CONTEXT_DATA",
+  "command": "CONTEXT_RESPONSE",
   "payload": {
     "profile": {
       "name": "Alice",
@@ -502,20 +511,151 @@ Notifies all participants of voting outcome after all votes are collected or the
 
 ---
 
+### 3.8 Device Context Messages
+
+#### REQUEST_DEVICE_CONTEXT
+
+Requests peer's device/hardware information (GPU, RAM, OS, dev tools).
+
+**Format:**
+```json
+{
+  "command": "REQUEST_DEVICE_CONTEXT"
+}
+```
+
+**Response:** DEVICE_CONTEXT_RESPONSE message
+
+**Use Case:** Enables environment-aware AI assistance and compute-sharing decisions based on peer hardware capabilities.
+
+---
+
+#### DEVICE_CONTEXT_RESPONSE
+
+Returns device context (subject to firewall rules).
+
+**Format:**
+```json
+{
+  "command": "DEVICE_CONTEXT_RESPONSE",
+  "payload": {
+    "hardware": {
+      "gpu": {"model": "RTX 3060", "vram_gb": 12},
+      "ram_gb": 24
+    },
+    "software": {
+      "os": {"family": "Windows", "version": "10"}
+    }
+  }
+}
+```
+
+**Fields:**
+- `payload` (object, required): Filtered device context (structure defined by device_context.json schema v1.1)
+
+**Note:** Privacy-sensitive. Firewall rules control which hardware/software details are shared.
+
+---
+
+### 3.9 Context Update Notifications
+
+#### CONTEXT_UPDATED
+
+Broadcasts when personal context changes, invalidates peer caches.
+
+**Format:**
+```json
+{
+  "command": "CONTEXT_UPDATED",
+  "payload": {
+    "node_id": "dpc-node-alice123",
+    "context_hash": "a1b2c3d4...",
+    "timestamp": "2025-12-11T10:30:00Z"
+  }
+}
+```
+
+**Fields:**
+- `node_id` (string, required): Node that updated their context
+- `context_hash` (string, required): SHA256 hash of new context for cache invalidation
+- `timestamp` (string, required): ISO 8601 timestamp of update
+
+**Use Case:** Phase 7 peer cache invalidation - notifies peers when context changes so they can refresh cached data.
+
+---
+
+### 3.10 Gossip Protocol Messages
+
+#### GOSSIP_MESSAGE
+
+Multi-hop epidemic routing for eventual message delivery.
+
+**Format:**
+```json
+{
+  "command": "GOSSIP_MESSAGE",
+  "payload": {
+    "message_id": "msg-uuid",
+    "destination": "dpc-node-bob456",
+    "ttl": 24,
+    "hops": 2,
+    "vector_clock": {...},
+    "data": {...}
+  }
+}
+```
+
+**Fields:**
+- `message_id` (string, required): Unique message identifier
+- `destination` (string, required): Target node ID
+- `ttl` (integer, required): Time-to-live in hours
+- `hops` (integer, required): Current hop count
+- `vector_clock` (object, required): Causality tracking
+- `data` (object, required): Encrypted message payload
+
+**Use Case:** Disaster-resilient messaging when direct connections fail. Store-and-forward with eventual delivery guarantee.
+
+---
+
+#### GOSSIP_SYNC
+
+Anti-entropy synchronization for message reconciliation.
+
+**Format:**
+```json
+{
+  "command": "GOSSIP_SYNC",
+  "payload": {
+    "node_id": "dpc-node-alice123",
+    "vector_clock": {...},
+    "known_messages": ["msg-1", "msg-2"]
+  }
+}
+```
+
+**Fields:**
+- `node_id` (string, required): Requesting node
+- `vector_clock` (object, required): Sender's vector clock state
+- `known_messages` (array, required): Message IDs sender already has
+
+**Use Case:** Periodic sync (5-minute interval) to ensure all nodes eventually receive all messages. Identifies missing messages for forwarding.
+
+---
+
 ## 4. Node Identity System
 
 ### Node ID Format
 
-Node IDs follow the format: `dpc-node-[16 hex characters]`
+Node IDs follow the format: `dpc-node-[32 hex characters]`
 
-**Example:** `dpc-node-8b066c7f3d7eb627`
+**Example:** `dpc-node-a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6`
 
 ### Identity Generation
 
 1. Generate RSA-2048 key pair
 2. Create self-signed X.509 certificate with node_id as Common Name
 3. Compute SHA256 hash of public key (PEM format)
-4. Take first 16 hex characters of hash
+4. Take first 32 hex characters of hash (128 bits for Kademlia DHT compatibility)
 5. Prepend `dpc-node-` prefix
 
 **Implementation:** See `dpc-protocol/dpc_protocol/crypto.py`
@@ -545,14 +685,14 @@ Per-node identity files stored in `~/.dpc/`:
 │  Alice  │                              │   Bob   │
 └────┬────┘                              └────┬────┘
      │                                        │
-     │  1. TCP + TLS Handshake               │
-     │  (Verify cert CN matches node_id)     │
+     │  1. TCP + TLS Handshake                │
+     │  (Verify cert CN matches node_id)      │
      ├───────────────────────────────────────>│
-     │<──────────────────────────────────────┤
+     │<───────────────────────────────────────┤
      │                                        │
      │  2. HELLO                              │
      ├───────────────────────────────────────>│
-     │<──────────────────────────────────────┤
+     │<───────────────────────────────────────┤
      │  3. HELLO                              │
      │                                        │
      │  Connection established                │
@@ -565,9 +705,9 @@ Per-node identity files stored in `~/.dpc/`:
 ### WebRTC Connection
 
 ```
-┌─────────┐         ┌─────────┐         ┌─────────┐
-│  Alice  │         │   Hub   │         │   Bob   │
-└────┬────┘         └────┬────┘         └────┬────┘
+┌─────────┐         ┌─────────┐          ┌─────────┐
+│  Alice  │         │   Hub   │          │   Bob   │
+└────┬────┘         └────┬────┘          └────┬────┘
      │                   │                    │
      │  1. WebSocket     │                    │
      │  /ws/signal       │  2. WebSocket      │
@@ -598,18 +738,68 @@ Per-node identity files stored in `~/.dpc/`:
 
 **Note:** Hub only facilitates signaling (steps 1-7). All DPTP messages flow directly peer-to-peer (steps 9-11).
 
+### UDP Hole Punch Connection (DTLS)
+
+```
+┌─────────┐         ┌─────────┐         ┌─────────┐
+│  Alice  │         │DHT Peers│         │   Bob   │
+└────┬────┘         └────┬────┘         └────┬────┘
+     │                   │                   │
+     │  1. Query DHT for Bob's node_id       │
+     ├──────────────────>│                   │
+     │  2. Bob's endpoints                   │
+     │<──────────────────┤                   │
+     │                   │                   │
+     │  3. Send reflexive address to Alice   │
+     │<──────────────────┤                   │
+     │                   │  4. Query DHT for Alice's node_id
+     │                   │<──────────────────┤
+     │                   │  5. Alice's endpoints
+     │                   ├──────────────────>│
+     │                   │  6. Send reflexive address to Bob
+     │                   ├──────────────────>│
+     │                   │                   │
+     │  7. Simultaneous UDP send (hole punch)│
+     ├──────────────────────────────────────>│
+     │<──────────────────────────────────────┤
+     │                   │                   │
+     │  8. DTLS 1.2 handshake over UDP       │
+     ├──────────────────────────────────────>│
+     │<──────────────────────────────────────┤
+     │                   │                   │
+     │  9. HELLO (over DTLS)                 │
+     ├──────────────────────────────────────>│
+     │<──────────────────────────────────────┤
+     │  10. HELLO                            │
+     │                   │                   │
+     │  11. DPTP messages over DTLS          │
+     │<─────────────────────────────────────>│
+     │                                       │
+```
+
+**Note:** DHT-coordinated hole punching uses birthday paradox (simultaneous send from both sides). Works for cone NAT (60-70% success rate), gracefully falls back to relay for symmetric NAT. No Hub involvement - completely decentralized.
+
 ## 6. Security Considerations
 
 ### Encryption
 
 - **Direct TLS**: All traffic encrypted with TLS 1.2+ (AES-256-GCM recommended)
 - **WebRTC**: Data channels encrypted with DTLS (derived from SRTP)
+- **UDP DTLS**: DHT-coordinated hole punch connections encrypted with DTLS 1.2 (v0.10.1+)
 
 ### Authentication
 
-- Nodes authenticate via X.509 certificates (Direct TLS)
-- Certificate CN must match `node_id` in HELLO message
-- No centralized PKI - trust established out-of-band
+- **Direct TLS**: Nodes authenticate via X.509 certificates
+  - Certificate CN must match `node_id` in HELLO message
+  - No centralized PKI - trust established out-of-band (TOFU)
+
+- **WebRTC DTLS**: Certificate fingerprints exchanged via Hub signaling
+  - Hub verifies node identity before relaying fingerprints
+  - DTLS handshake validates certificates match signaled fingerprints
+
+- **UDP DTLS**: X.509 certificate-based authentication (same as Direct TLS)
+  - Certificate verification during DTLS handshake
+  - Node ID validation against certificate CN
 
 ### Privacy & Firewall
 
@@ -638,6 +828,14 @@ Per-node identity files stored in `~/.dpc/`:
 - **Message Flooding**: Implementations should rate-limit incoming messages
 - **Resource Exhaustion**: Limit maximum payload size, enforce timeouts
 - **MITM Attacks**: Certificate pinning on first connection (TOFU - Trust On First Use)
+- **Gossip Attacks**:
+  - Message replay prevention via vector clocks and message IDs
+  - TTL enforcement (24h max) prevents infinite propagation
+  - Max hop count (5) limits amplification attacks
+- **DHT Security**:
+  - Peer verification via X.509 certificates
+  - Bootstrap seed configuration prevents malicious DHT injection
+  - Rate limiting on DHT queries
 
 ## 7. Implementation Notes
 
@@ -694,9 +892,23 @@ DPTP is designed to be extensible. New commands can be added by:
 
 - **Hub API v1.0**: WebRTC signaling, OAuth, discovery - [hub_api_v1.md](./hub_api_v1.md)
 - **Personal Context Model v2.0**: Structure of context data - See `dpc-protocol/dpc_protocol/pcm_core.py`
+- **Device Context Schema v1.1**: Hardware/software context structure - [docs/DEVICE_CONTEXT_SPEC.md](../docs/DEVICE_CONTEXT_SPEC.md)
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.1 (December 2025) - IN PROGRESS
+- **Node ID format updated**: 32 hex characters (was 16) for DHT compatibility
+- **Renamed commands**: GET_CONTEXT → REQUEST_CONTEXT, CONTEXT_DATA → CONTEXT_RESPONSE
+- **New message types**: REQUEST_DEVICE_CONTEXT, DEVICE_CONTEXT_RESPONSE (hardware/software context sharing)
+- **New message types**: CONTEXT_UPDATED (peer cache invalidation)
+- **New message types**: GOSSIP_MESSAGE (epidemic routing), GOSSIP_SYNC (anti-entropy sync)
+- **Transport Layers section updated**: Added UDP DTLS, clarified IPv4 Direct is internet-wide, documented 6-tier fallback architecture
+- **Connection Flow section updated**: Added UDP DTLS hole punch connection flow diagram
+- **Security Considerations expanded**:
+  - Authentication now covers Direct TLS, WebRTC DTLS, and UDP DTLS
+  - Attack Mitigation includes Gossip attacks (replay, TTL, hop limits) and DHT security
+- **Related Specifications updated**: Added Device Context Schema v1.1 reference
 
 ### v1.0 (November 29, 2025)
 - Initial stable release

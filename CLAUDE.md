@@ -266,6 +266,9 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
   - ProposeKnowledgeCommitHandler - PROPOSE_KNOWLEDGE_COMMIT
   - VoteKnowledgeCommitHandler - VOTE_KNOWLEDGE_COMMIT
   - KnowledgeCommitResultHandler - KNOWLEDGE_COMMIT_RESULT
+- `message_handlers/gossip_handler.py` - Gossip protocol handlers
+  - GossipSyncHandler - GOSSIP_SYNC anti-entropy reconciliation
+  - GossipMessageHandler - GOSSIP_MESSAGE epidemic routing (v0.10.2 target)
 
 **Coordinators (v0.10.0+):**
 - `connection_orchestrator.py` - 6-tier connection fallback coordinator (v0.10.0)

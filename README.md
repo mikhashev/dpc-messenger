@@ -71,13 +71,14 @@ If this vision resonates with you, let's connect:
 - **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - **Local-First** - Your data stays on your device
 - **Universal Connectivity** - Intelligent 6-tier connection orchestrator ensures connectivity in nearly any network condition (IPv6, IPv4, WebRTC, UDP hole punching, volunteer relays, gossip)
-- **Hub-Optional Architecture** - Works seamlessly offline with direct connections, DHT-based hole punching, and volunteer relay nodes
+- **Hub-Optional Architecture** - Works with DHT bootstrap (pre-configured seeds or initial Hub connection), then fully autonomous via direct connections, hole punching, and relay nodes
 - **Resilient Messaging** - Gossip store-and-forward protocol ensures message delivery even during infrastructure outages
 - **Cryptographic Identity** - Self-sovereign node IDs based on public keys
 - **Context Firewall** - Granular control over what data you share
 
 ### For Developers
 - **Open Protocol** - Extensible [DPTP (D-PC Transfer Protocol)](./specs/dptp_v1.md)
+  - **Note:** DPTP spec (v1.0) is currently being updated to v1.1 to document new message types (REQUEST_DEVICE_CONTEXT, CONTEXT_UPDATED, GOSSIP_MESSAGE, GOSSIP_SYNC) and correct node ID format (32 hex chars).
 - **Modular Design** - Clear separation of concerns
 - **Knowledge Architecture** - Git-like knowledge commits with cognitive bias mitigation ([architecture doc](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude)
@@ -88,46 +89,57 @@ If this vision resonates with you, let's connect:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│              Human-AI Collaborative Intelligence                │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│                  Human-AI Collaborative Intelligence                     │
+│          P2P Encrypted Communication (Text • Voice • Video • Files)      │
+└──────────────────────────────────────────────────────────────────────────┘
 
-┌───────────────────┐                        ┌───────────────────┐
-│    Human A        │                        │    Human B        │
-│  ┌─────────────┐  │                        │  ┌─────────────┐  │
-│  │ AI Assistant│  │  P2P Encrypted Context │  │ AI Assistant│  │
-│  │  (GPT/Llama)│  │◄───── Sharing ────────►│  │  (Claude)   │  │
-│  └─────────────┘  │                        │  └─────────────┘  │
-│   • Chat History  │                        │   • Chat History  │
-│   • Documents     │                        │   • Documents     │
-│   • Context Store │                        │   • Context Store │
-│   • Firewall      │                        │   • Firewall      │
-└────────┬──────────┘                        └────────┬──────────┘
-         │                                            │
-         │            ┌─────────────────┐             │
-         └────────────►  Federation Hub  ◄────────────┘
-                      │  (Optional)     │
-                      │  • Discovery    │
-                      │  • Signaling    │
-                      │  • OAuth        │
-                      │  • NO Messages  │
-                      │  • NO Context   │
-                      └─────────────────┘
+┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
+│    Human A      │         │    Human B      │         │    Human C      │
+│  ┌───────────┐  │         │  ┌───────────┐  │         │  ┌───────────┐  │
+│  │ Local AI  │  │         │  │ Remote AI │  │         │  │ Vendor AI │  │
+│  │ (Ollama)  │──┼────────►│  │  (GPU)    │  │         │  │ (OpenAI)  │  │
+│  └───────────┘  │ Compute │  └───────────┘  │         │  └───────────┘  │
+│   • Context     │ Sharing │   • Context     │         │   • Context     │
+│   • Messages    │         │   • Messages    │◄───────►│   • Messages    │
+│   • Privacy     │         │   • Privacy     │  Group  │   • Privacy     │
+│     Rules       │         │     Rules       │  Chat   │     Rules       │
+└────────┬────────┘         └────────┬────────┘         └────────┬────────┘
+         │                           │                           │
+         │                  ┌────────▼──────────┐                │
+         └─────────────────►│  Federation Hub   │◄───────────────┘
+                            │    (Optional)     │
+                            │  • Discovery      │
+                            │  • WebRTC Signal  │
+                            │  • OAuth          │
+                            │  • NO Messages    │
+                            │  • NO Context     │
+                            └───────────────────┘
+
+                   6-Tier P2P Connection Fallback:
+         IPv6 → IPv4 → WebRTC → UDP Hole Punch → Relay → Gossip
 ```
 
-### Two Connection Methods
+### Six-Tier Connection Fallback Architecture (v0.10.1)
 
-1. **Direct TLS** (Local Network)
-   - Fastest, lowest latency
-   - Requires network visibility
-   - Uses cryptographic node certificates
-   - **No Hub required** - Fully peer-to-peer
+D-PC Messenger uses intelligent fallback for near-universal P2P connectivity:
 
-2. **WebRTC** (Internet-Wide)
-   - Works across NAT/firewalls
-   - Automatic NAT traversal via STUN/TURN
-   - Hub only for initial signaling
-   - **Messages never pass through Hub** - Direct P2P connection
+**Internet-Wide Strategies (No Hub Required):**
+1. **IPv6 Direct** - Direct TLS over IPv6 (40%+ networks, no NAT, lowest latency)
+2. **IPv4 Direct** - Direct TLS over IPv4 (works locally or internet-wide with port-forwarding)
+
+**Hub-Assisted Fallback:**
+3. **WebRTC** - STUN/TURN NAT traversal via Hub signaling (when direct methods fail)
+
+**DHT-Based Fallback (Hub-Independent):**
+4. **UDP Hole Punch** - DHT-coordinated, DTLS encrypted (60-70% NAT success)
+5. **Volunteer Relay** - Privacy-preserving relay nodes (100% NAT coverage)
+6. **Gossip Store-Forward** - Eventual delivery for disaster scenarios (in progress)
+
+**Key Benefits:**
+- Hub completely optional for Priorities 1-2, 4-6
+- Automatic fallback ensures connectivity in nearly any network condition
+- DTLS encryption for all 6 strategies
 
 ### Important: True Peer-to-Peer Architecture
 
@@ -320,7 +332,8 @@ docker-compose -f docker-compose.prod.yml up -d
 **Core Infrastructure:**
 - Direct TLS P2P connections (local network + IPv6 dual-stack)
 - WebRTC with NAT traversal (STUN/TURN)
-- **6-Tier Connection Fallback** (IPv6 → IPv4 → WebRTC → UDP Hole Punch → Relay → Gossip)
+- **5-Tier Connection Fallback** (IPv6, IPv4, WebRTC, UDP Hole Punch, Volunteer Relay - all production-ready)
+  - **Note:** Gossip (Priority 6) framework complete, transport wrapper in Phase 2.2
 - Federation Hub for discovery and OAuth (now optional!)
 - Cryptographic node identity system
 - Token blacklist and logout
@@ -350,7 +363,7 @@ docker-compose -f docker-compose.prod.yml up -d
   - Markdown rendering with intelligent caching
 
 ### Phase 2: Team Collaboration + Disaster Resilience - IN PROGRESS (Q1-Q3 2026)
-**Status:** Decentralized Infrastructure Complete | **Target:** Small teams (2-20 members + AIs)
+**Status:** Decentralized Infrastructure 95% Complete (5 of 6 strategies production-ready, Gossip transport pending) | **Target:** Small teams (2-20 members + AIs)
 
 **Resilient Infrastructure - COMPLETE ✅**
 - ✅ **DHT-based peer discovery** (v0.9.5) - Kademlia DHT, 73 tests passing, internet-wide validated
@@ -359,7 +372,7 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ **DTLS Encryption** (v0.10.1) - All 6 connection strategies now encrypted end-to-end
 - ✅ **UDP Hole Punching** (v0.10.1) - DTLS 1.2 encrypted, production-ready, 60-70% NAT success
 - ✅ **Volunteer Relay Nodes** (v0.10.0) - 100% NAT coverage, privacy-preserving
-- ✅ **Gossip Protocol** (v0.10.0) - Store-and-forward for disaster scenarios, anti-entropy sync
+- ⚠️ **Gossip Protocol** (v0.10.0) - Protocol manager complete, transport wrapper pending (v0.10.2 target)
 
 **Team Collaboration Features - PLANNED (Q1-Q3 2026):**
 - Persistent team management with roles
@@ -485,24 +498,6 @@ D-PC Messenger builds on the shoulders of giants:
 - **[Ollama](https://ollama.ai/)** - Local AI inference
 
 Special thanks to all contributors and early testers!
-
----
-
-## Project Status
-
-| Metric | Status |
-|--------|--------|
-| **Architecture** | Stable |
-| **Core Protocol** | v1.0 |
-| **WebRTC** | Working |
-| **Direct TLS** | Working |
-| **Hub Server** | Production Ready |
-| **Crypto Identity** | v0.5.0 |
-| **Knowledge Architecture** | v2.0 (Phase 4.2 Complete) |
-| **Desktop Client** | Beta (v0.9.4) |
-| **Mobile Clients** | Planned (Phase 2) |
-| **Test Coverage** | In Progress |
-| **Documentation** | Good |
 
 ---
 
