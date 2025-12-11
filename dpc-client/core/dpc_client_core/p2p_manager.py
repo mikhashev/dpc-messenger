@@ -41,10 +41,13 @@ class PeerConnection:
         return await read_message(self.reader)
 
     async def close(self):
-        """Closes the TLS connection."""
+        """Closes the TLS connection with timeout protection."""
         if not self.writer.is_closing():
             self.writer.close()
-            await self.writer.wait_closed()
+            try:
+                await asyncio.wait_for(self.writer.wait_closed(), timeout=2.0)
+            except asyncio.TimeoutError:
+                logger.warning("SSL shutdown timed out for peer %s", self.node_id)
 
 
 class P2PManager:
@@ -63,6 +66,9 @@ class P2PManager:
         # Auto-reconnect tracking
         self._intentional_disconnects: set = set()  # Track user-initiated disconnects
         self._hub_client_refs: Dict[str, HubClient] = {}  # Store hub_client for reconnection
+
+        # Background task tracking for graceful shutdown
+        self._peer_listener_tasks: Dict[str, asyncio.Task] = {}  # Track _listen_to_peer tasks
 
         # DHT (Distributed Hash Table) for decentralized peer discovery
         self.dht_manager: DHTManager | None = None  # Initialized in start_server()
@@ -408,7 +414,9 @@ class P2PManager:
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())
 
-            asyncio.create_task(self._listen_to_peer(peer))
+            # Start listener task and track it for graceful shutdown
+            task = asyncio.create_task(self._listen_to_peer(peer))
+            self._peer_listener_tasks[peer_node_id] = task
 
         except Exception as e:
             logger.error("Error handling direct connection: %s", e, exc_info=True)
@@ -553,7 +561,9 @@ class P2PManager:
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())
 
-            asyncio.create_task(self._listen_to_peer(peer))
+            # Start listener task and track it for graceful shutdown
+            task = asyncio.create_task(self._listen_to_peer(peer))
+            self._peer_listener_tasks[target_node_id] = task
 
             # Auto-discover peer's available AI providers
             from dpc_protocol.protocol import create_get_providers_message
@@ -597,15 +607,24 @@ class P2PManager:
                 message = await peer.read()
                 if message is None:
                     break
-                
+
                 if self.on_message_received:
                     asyncio.create_task(self.on_message_received(peer.node_id, message))
 
+        except asyncio.CancelledError:
+            # Graceful cancellation during shutdown
+            logger.debug("Listener task for peer %s cancelled during shutdown", peer.node_id)
+            raise  # Re-raise to properly exit the task
         except (asyncio.IncompleteReadError, ConnectionResetError):
             pass
         finally:
-            logger.info("Connection with peer %s was lost", peer.node_id)
-            await self.shutdown_peer_connection(peer.node_id)
+            # Clean up task tracking
+            self._peer_listener_tasks.pop(peer.node_id, None)
+
+            # Only trigger shutdown if not already shutting down
+            if peer.node_id in self.peers:
+                logger.info("Connection with peer %s was lost", peer.node_id)
+                await self.shutdown_peer_connection(peer.node_id)
 
     # --- WebRTC Connection Methods (NEW) ---
 
@@ -1018,9 +1037,21 @@ class P2PManager:
         for peer_id in list(self._pending_webrtc.keys()):
             self._intentional_disconnects.add(peer_id)
 
+        # Step 1: Cancel server task
         if self._server_task:
             self._server_task.cancel()
 
+        # Step 2: Cancel all listener tasks BEFORE closing connections
+        logger.debug("Cancelling %d listener tasks", len(self._peer_listener_tasks))
+        for task in self._peer_listener_tasks.values():
+            task.cancel()
+
+        # Wait for all listener tasks to finish (with exceptions suppressed)
+        if self._peer_listener_tasks:
+            await asyncio.gather(*self._peer_listener_tasks.values(), return_exceptions=True)
+        self._peer_listener_tasks.clear()
+
+        # Step 3: Now safely close peer connections
         for peer_id in list(self.peers.keys()):
             peer = self.peers.pop(peer_id)
             await peer.close()

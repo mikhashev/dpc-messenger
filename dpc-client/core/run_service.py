@@ -63,15 +63,22 @@ async def main():
     # Get event loop and set up exception handler to suppress aioice warnings
     loop = asyncio.get_running_loop()
 
-    # Custom exception handler to suppress known aioice InvalidStateError warnings
+    # Custom exception handler to suppress known warnings during shutdown
     def exception_handler(loop, context):
         exception = context.get('exception')
+
+        # Suppress CancelledError during shutdown (expected behavior)
+        if isinstance(exception, asyncio.CancelledError):
+            # This is normal during shutdown - tasks are cancelled
+            return
+
         # Suppress aioice STUN transaction InvalidStateError (known bug in aioice)
         if isinstance(exception, asyncio.exceptions.InvalidStateError):
             message = context.get('message', '')
             if 'Transaction.__retry' in message or 'stun.py' in str(context.get('source_traceback', '')):
                 # Silently ignore this known aioice race condition
                 return
+
         # For all other exceptions, use default behavior
         loop.default_exception_handler(context)
 

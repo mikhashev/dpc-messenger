@@ -533,6 +533,17 @@ class CoreService:
         self._is_running = False
         logger.info("Shutting down components")
 
+        # Cancel all background tasks first
+        logger.debug("Cancelling %d background tasks", len(self._background_tasks))
+        for task in self._background_tasks:
+            if not task.done():
+                task.cancel()
+
+        # Wait for all background tasks to finish
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
+
         # Shutdown Phase 6 managers
         if hasattr(self, 'dht_manager'):
             logger.info("Stopping DHT Manager...")
