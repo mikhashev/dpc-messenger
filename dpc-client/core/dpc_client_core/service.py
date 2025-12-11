@@ -49,7 +49,7 @@ from .message_handlers.knowledge_handler import (
     ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler,
     KnowledgeCommitResultHandler
 )
-from .message_handlers.gossip_handler import GossipSyncHandler
+from .message_handlers.gossip_handler import GossipSyncHandler, GossipMessageHandler
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
     load_instructions, save_instructions, migrate_instructions_from_personal_context
@@ -240,8 +240,9 @@ class CoreService:
         # Peer handshake
         self.message_router.register_handler(HelloHandler(self))
 
-        # Gossip protocol (anti-entropy synchronization)
-        self.message_router.register_handler(GossipSyncHandler(self))
+        # Gossip protocol handlers
+        self.message_router.register_handler(GossipSyncHandler(self))  # Anti-entropy sync
+        self.message_router.register_handler(GossipMessageHandler(self))  # Epidemic routing
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 

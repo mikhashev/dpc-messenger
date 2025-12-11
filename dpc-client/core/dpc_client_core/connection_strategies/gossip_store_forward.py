@@ -130,15 +130,22 @@ class GossipStoreForwardStrategy(ConnectionStrategy):
                 logger.warning("No connected peers for gossip forwarding")
                 raise ConnectionError("No peers available for gossip routing")
 
+        # Import here to avoid circular dependency
+        from ..transports.gossip_connection import GossipConnection
+
+        # Create virtual gossip connection
+        connection = GossipConnection(
+            peer_id=node_id,
+            gossip_manager=orchestrator.gossip_manager,
+            orchestrator=orchestrator
+        )
+
+        # Start receiving (registers callback with gossip manager)
+        await connection.start()
+
         logger.info(
-            "Gossip connection established to %s (virtual connection, eventual delivery)",
+            "Gossip connection established to %s (virtual, eventual delivery)",
             node_id[:20]
         )
 
-        # Return virtual gossip connection
-        # TODO: Implement GossipConnection wrapper
-        # For now, raise NotImplementedError to signal this is framework-complete
-        raise NotImplementedError(
-            "Gossip connection transport not yet implemented - "
-            "gossip protocol functional but connection wrapper pending"
-        )
+        return connection

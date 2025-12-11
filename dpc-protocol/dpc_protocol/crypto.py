@@ -89,6 +89,65 @@ def generate_identity():
 def load_identity() -> Tuple[str, Path, Path]:
     if not all([DPC_HOME_DIR.exists(), KEY_FILE.exists(), CERT_FILE.exists(), NODE_ID_FILE.exists()]):
         raise FileNotFoundError("Identity not found. Please run 'dpc init' first.")
-    
+
     node_id = NODE_ID_FILE.read_text().strip()
     return node_id, KEY_FILE, CERT_FILE
+
+
+def encrypt_with_public_key(data: bytes, public_key) -> bytes:
+    """
+    Encrypt data with RSA public key using OAEP padding.
+
+    Args:
+        data: Plaintext bytes to encrypt
+        public_key: RSA public key from certificate
+
+    Returns:
+        Encrypted ciphertext bytes
+
+    Note:
+        Used for end-to-end encryption in gossip protocol.
+        Maximum data size limited by RSA key size (2048 bits = 190 bytes with OAEP).
+        For larger payloads, consider hybrid encryption (RSA for key, AES for data).
+    """
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    ciphertext = public_key.encrypt(
+        data,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return ciphertext
+
+
+def decrypt_with_private_key(ciphertext: bytes, private_key) -> bytes:
+    """
+    Decrypt data with RSA private key using OAEP padding.
+
+    Args:
+        ciphertext: Encrypted bytes to decrypt
+        private_key: RSA private key from node.key file
+
+    Returns:
+        Decrypted plaintext bytes
+
+    Raises:
+        ValueError: If decryption fails (wrong key, corrupted data, etc.)
+
+    Note:
+        Used for end-to-end encryption in gossip protocol.
+    """
+    from cryptography.hazmat.primitives.asymmetric import padding
+
+    plaintext = private_key.decrypt(
+        ciphertext,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return plaintext
