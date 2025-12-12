@@ -458,9 +458,32 @@ class FileTransferManager:
         Returns:
             True if allowed, False otherwise
         """
-        # Check firewall rule: file_transfer.allow
-        rule_key = "file_transfer.allow"
-        allowed = await self.firewall.check_permission(node_id, rule_key)
+        # Get file transfer rules from firewall
+        file_transfer_rules = self.firewall.rules.get('file_transfer', {})
+
+        # Check node-specific rules first
+        node_rules = file_transfer_rules.get('nodes', {}).get(node_id, {})
+        if node_rules:
+            allowed = node_rules.get('file_transfer.allow', 'deny') == 'allow'
+            max_size_mb = node_rules.get('file_transfer.max_size_mb')
+            allowed_types = node_rules.get('file_transfer.allowed_mime_types', ['*'])
+        else:
+            # Check group rules
+            allowed = False
+            max_size_mb = None
+            allowed_types = ['*']
+
+            groups = self.firewall._get_groups_for_node(node_id)
+            group_rules = file_transfer_rules.get('groups', {})
+
+            for group_name in groups:
+                if group_name in group_rules:
+                    group_rule = group_rules[group_name]
+                    if group_rule.get('file_transfer.allow') == 'allow':
+                        allowed = True
+                        max_size_mb = group_rule.get('file_transfer.max_size_mb', max_size_mb)
+                        allowed_types = group_rule.get('file_transfer.allowed_mime_types', allowed_types)
+                        break  # Use first matching group
 
         if not allowed:
             logger.warning(f"File transfer denied by firewall for {node_id}")
@@ -481,13 +504,11 @@ class FileTransferManager:
                 mime_type = "application/octet-stream"
 
         # Check per-peer size limit (optional)
-        max_size_mb = await self.firewall.get_setting(node_id, "file_transfer.max_size_mb")
         if max_size_mb and size_mb > max_size_mb:
             logger.warning(f"File too large ({size_mb:.1f} MB > {max_size_mb} MB limit) for {node_id}")
             return False
 
         # Check MIME type restrictions (optional)
-        allowed_types = await self.firewall.get_setting(node_id, "file_transfer.allowed_mime_types")
         if allowed_types and "*" not in allowed_types:
             if not any(self._mime_match(mime_type, pattern) for pattern in allowed_types):
                 logger.warning(f"MIME type {mime_type} not allowed for {node_id}")
