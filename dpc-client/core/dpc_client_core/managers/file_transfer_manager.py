@@ -158,16 +158,15 @@ class FileTransferManager:
         self.active_transfers: Dict[str, FileTransfer] = {}
 
         # Configuration (from settings)
-        self.chunk_size = settings.get_int("file_transfer", "chunk_size", 65536)  # 64KB
-        self.background_threshold_mb = settings.get_int("file_transfer", "background_threshold_mb", 50)
-        self.direct_tls_threshold_mb = settings.get_int("file_transfer", "direct_tls_only_threshold_mb", 100)
-        self.max_concurrent_transfers = settings.get_int("file_transfer", "max_concurrent_transfers", 3)
-        self.verify_hash = settings.get_bool("file_transfer", "verify_hash", True)
+        self.chunk_size = int(settings.get("file_transfer", "chunk_size", "65536"))  # 64KB
+        self.background_threshold_mb = int(settings.get("file_transfer", "background_threshold_mb", "50"))
+        self.direct_tls_threshold_mb = int(settings.get("file_transfer", "direct_tls_only_threshold_mb", "100"))
+        self.max_concurrent_transfers = int(settings.get("file_transfer", "max_concurrent_transfers", "3"))
+        self.verify_hash = settings.get("file_transfer", "verify_hash", "true").lower() in ("true", "1", "yes")
 
         # Storage path: ~/.dpc/conversations/{peer_id}/files/
         if storage_base_path is None:
-            from ..utils import get_config_dir
-            storage_base_path = Path(get_config_dir())
+            storage_base_path = Path.home() / ".dpc"
         self.storage_base_path = storage_base_path / "conversations"
         self.storage_base_path.mkdir(parents=True, exist_ok=True)
 
