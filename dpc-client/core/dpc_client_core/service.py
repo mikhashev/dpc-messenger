@@ -50,6 +50,12 @@ from .message_handlers.knowledge_handler import (
     KnowledgeCommitResultHandler
 )
 from .message_handlers.gossip_handler import GossipSyncHandler, GossipMessageHandler
+from .message_handlers.file_offer_handler import FileOfferHandler
+from .message_handlers.file_accept_handler import FileAcceptHandler
+from .message_handlers.file_chunk_handler import FileChunkHandler
+from .message_handlers.file_complete_handler import FileCompleteHandler
+from .message_handlers.file_cancel_handler import FileCancelHandler
+from .managers.file_transfer_manager import FileTransferManager
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
     load_instructions, save_instructions, migrate_instructions_from_personal_context
@@ -178,6 +184,13 @@ class CoreService:
         # P2P coordinator (coordinates P2P connection lifecycle)
         self.p2p_coordinator = P2PCoordinator(self)
 
+        # File transfer manager (handles P2P file transfers)
+        self.file_transfer_manager = FileTransferManager(
+            p2p_manager=self.p2p_manager,
+            firewall=self.firewall,
+            settings=self.settings
+        )
+
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
@@ -243,6 +256,13 @@ class CoreService:
         # Gossip protocol handlers
         self.message_router.register_handler(GossipSyncHandler(self))  # Anti-entropy sync
         self.message_router.register_handler(GossipMessageHandler(self))  # Epidemic routing
+
+        # File transfer handlers
+        self.message_router.register_handler(FileOfferHandler(self))
+        self.message_router.register_handler(FileAcceptHandler(self))
+        self.message_router.register_handler(FileChunkHandler(self))
+        self.message_router.register_handler(FileCompleteHandler(self))
+        self.message_router.register_handler(FileCancelHandler(self))
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 
@@ -2122,6 +2142,81 @@ class CoreService:
             await monitor.on_message(outgoing_message)
         except Exception as e:
             logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
+
+    async def send_file(self, node_id: str, file_path: str):
+        """
+        Send a file to a peer via P2P file transfer.
+
+        Args:
+            node_id: Target peer's node ID
+            file_path: Absolute path to file to send
+
+        Returns:
+            Dict with transfer_id and status
+        """
+        from pathlib import Path
+
+        file = Path(file_path)
+        if not file.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Initiate file transfer (sends FILE_OFFER to peer)
+        transfer_id = await self.file_transfer_manager.send_file(node_id, file)
+
+        return {
+            "transfer_id": transfer_id,
+            "status": "pending",
+            "filename": file.name,
+            "size_bytes": file.stat().st_size
+        }
+
+    async def accept_file_transfer(self, transfer_id: str):
+        """
+        Accept an incoming file transfer offer.
+
+        Args:
+            transfer_id: Transfer ID from FILE_OFFER
+
+        Returns:
+            Dict with transfer_id and status
+        """
+        transfer = self.file_transfer_manager.active_transfers.get(transfer_id)
+        if not transfer:
+            raise ValueError(f"Unknown transfer: {transfer_id}")
+
+        if transfer.direction != "download":
+            raise ValueError(f"Transfer {transfer_id} is not a download")
+
+        # Send FILE_ACCEPT to peer
+        await self.p2p_coordinator.send_command(
+            transfer.peer_node_id,
+            "FILE_ACCEPT",
+            {"transfer_id": transfer_id}
+        )
+
+        return {
+            "transfer_id": transfer_id,
+            "status": "accepted"
+        }
+
+    async def cancel_file_transfer(self, transfer_id: str, reason: str = "user_cancelled"):
+        """
+        Cancel an active file transfer.
+
+        Args:
+            transfer_id: Transfer ID to cancel
+            reason: Cancellation reason
+
+        Returns:
+            Dict with transfer_id and status
+        """
+        await self.file_transfer_manager.cancel_transfer(transfer_id, reason)
+
+        return {
+            "transfer_id": transfer_id,
+            "status": "cancelled",
+            "reason": reason
+        }
 
     async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None):
         """
