@@ -78,7 +78,7 @@ If this vision resonates with you, let's connect:
 
 ### For Developers
 - **Open Protocol** - Extensible [DPTP (D-PC Transfer Protocol)](./specs/dptp_v1.md)
-  - **Note:** DPTP spec (v1.0) is currently being updated to v1.1 to document new message types (REQUEST_DEVICE_CONTEXT, CONTEXT_UPDATED, GOSSIP_MESSAGE, GOSSIP_SYNC) and correct node ID format (32 hex chars).
+  - **Note:** DPTP spec updated to v1.1 with full documentation for GOSSIP_MESSAGE, GOSSIP_SYNC, and corrected node ID format (32 hex chars).
 - **Modular Design** - Clear separation of concerns
 - **Knowledge Architecture** - Git-like knowledge commits with cognitive bias mitigation ([architecture doc](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude)
@@ -332,8 +332,8 @@ docker-compose -f docker-compose.prod.yml up -d
 **Core Infrastructure:**
 - Direct TLS P2P connections (local network + IPv6 dual-stack)
 - WebRTC with NAT traversal (STUN/TURN)
-- **5-Tier Connection Fallback** (IPv6, IPv4, WebRTC, UDP Hole Punch, Volunteer Relay - all production-ready)
-  - **Note:** Gossip (Priority 6) framework complete, transport wrapper in Phase 2.2
+- **6-Tier Connection Fallback** (IPv6, IPv4, WebRTC, UDP Hole Punch, Volunteer Relay, Gossip - all production-ready)
+  - **Note:** All 6 connection strategies production-ready as of v0.10.2
 - Federation Hub for discovery and OAuth (now optional!)
 - Cryptographic node identity system
 - Token blacklist and logout
@@ -363,7 +363,7 @@ docker-compose -f docker-compose.prod.yml up -d
   - Markdown rendering with intelligent caching
 
 ### Phase 2: Team Collaboration + Disaster Resilience - IN PROGRESS (Q1-Q3 2026)
-**Status:** Decentralized Infrastructure 95% Complete (5 of 6 strategies production-ready, Gossip transport pending) | **Target:** Small teams (2-20 members + AIs)
+**Status:** Decentralized Infrastructure COMPLETE ✅ (All 6 connection strategies production-ready) | **Target:** Small teams (2-20 members + AIs)
 
 **Resilient Infrastructure - COMPLETE ✅**
 - ✅ **DHT-based peer discovery** (v0.9.5) - Kademlia DHT, 73 tests passing, internet-wide validated
@@ -372,10 +372,10 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ **DTLS Encryption** (v0.10.1) - All 6 connection strategies now encrypted end-to-end
 - ✅ **UDP Hole Punching** (v0.10.1) - DTLS 1.2 encrypted, production-ready, 60-70% NAT success
 - ✅ **Volunteer Relay Nodes** (v0.10.0) - 100% NAT coverage, privacy-preserving
-- 🔄 **Gossip Protocol** (v0.10.2-dev) - Enhanced encryption and DHT certificate discovery
+- ✅ **Gossip Protocol** (v0.10.2) - Enhanced encryption and DHT certificate discovery
   - ✅ Hybrid encryption (AES-GCM + RSA-OAEP) - No payload size limit
   - ✅ DHT certificate discovery - Decentralized PKI for gossip
-  - ⚠️ Transport wrapper pending (GossipConnection integration)
+  - ✅ Transport wrapper (GossipConnection) - Virtual connection interface
 
 **Team Collaboration Features - PLANNED (Q1-Q3 2026):**
 - Persistent team management with roles
