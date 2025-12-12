@@ -246,7 +246,7 @@ class FileTransferManager:
         self.active_transfers[transfer_id] = transfer
 
         # Send FILE_OFFER
-        await self.p2p_manager.send_message(node_id, {
+        await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_OFFER",
             "payload": {
                 "transfer_id": transfer_id,
@@ -286,7 +286,7 @@ class FileTransferManager:
                     chunk_base64 = base64.b64encode(chunk_data).decode('utf-8')
 
                     # Send FILE_CHUNK
-                    await self.p2p_manager.send_message(node_id, {
+                    await self.p2p_manager.send_message_to_peer(node_id, {
                         "command": "FILE_CHUNK",
                         "payload": {
                             "transfer_id": transfer_id,
@@ -369,7 +369,7 @@ class FileTransferManager:
         logger.info(f"File saved: {file_path}")
 
         # Send FILE_COMPLETE
-        await self.p2p_manager.send_message(node_id, {
+        await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_COMPLETE",
             "payload": {
                 "transfer_id": transfer.transfer_id,
@@ -420,7 +420,7 @@ class FileTransferManager:
 
     async def _send_file_cancel(self, node_id: str, transfer_id: str, reason: str):
         """Send FILE_CANCEL message to peer."""
-        await self.p2p_manager.send_message(node_id, {
+        await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_CANCEL",
             "payload": {
                 "transfer_id": transfer_id,

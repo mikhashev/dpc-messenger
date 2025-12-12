@@ -121,6 +121,10 @@
   let fileOfferToastMessage: string = "";
   let showFileOfferToast: boolean = false;
 
+  // Send file confirmation dialog
+  let showSendFileDialog: boolean = false;
+  let pendingFileSend: { filePath: string, fileName: string, recipientId: string, recipientName: string } | null = null;
+
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $: setActiveChat(activeChatId);
 
@@ -775,13 +779,23 @@
       }
 
       const filePath = selected as string;
-      console.log(`Sending file: ${filePath} to ${activeChatId}`);
+      console.log(`Selected file: ${filePath}`);
 
-      await sendFile(activeChatId, filePath);
+      // Get file name from path
+      const fileName = filePath.split(/[\\/]/).pop() || filePath;
 
-      fileOfferToastMessage = `Sending file...`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 3000);
+      // Get recipient name from peer info
+      const peer = $nodeStatus.peer_info.find((p: any) => p.node_id === activeChatId);
+      const recipientName = peer?.name || activeChatId.slice(0, 20) + '...';
+
+      // Store pending file send and show confirmation dialog
+      pendingFileSend = {
+        filePath,
+        fileName,
+        recipientId: activeChatId,
+        recipientName
+      };
+      showSendFileDialog = true;
     } catch (error) {
       console.error('Error sending file:', error);
       fileOfferToastMessage = `Failed to send file: ${error}`;
@@ -817,6 +831,33 @@
     } catch (error) {
       console.error('Error rejecting file:', error);
     }
+  }
+
+  async function handleConfirmSendFile() {
+    if (!pendingFileSend) return;
+
+    try {
+      console.log(`Sending file: ${pendingFileSend.filePath} to ${pendingFileSend.recipientId}`);
+      await sendFile(pendingFileSend.recipientId, pendingFileSend.filePath);
+
+      showSendFileDialog = false;
+      pendingFileSend = null;
+
+      fileOfferToastMessage = `Sending file...`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 3000);
+    } catch (error) {
+      console.error('Error sending file:', error);
+      fileOfferToastMessage = `Failed to send file: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  function handleCancelSendFile() {
+    showSendFileDialog = false;
+    pendingFileSend = null;
+    console.log('File send cancelled by user');
   }
 
   // --- HANDLE INCOMING MESSAGES ---
@@ -1634,6 +1675,21 @@
       <div class="modal-buttons">
         <button class="accept-button" on:click={handleAcceptFile}>Accept</button>
         <button class="reject-button" on:click={handleRejectFile}>Reject</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Send File Confirmation Dialog -->
+{#if showSendFileDialog && pendingFileSend}
+  <div class="modal-overlay" role="presentation" on:click={handleCancelSendFile} on:keydown={(e) => e.key === 'Escape' && handleCancelSendFile()}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+      <h3>📤 Send File</h3>
+      <p><strong>File:</strong> {pendingFileSend.fileName}</p>
+      <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
+      <div class="modal-buttons">
+        <button class="accept-button" on:click={handleConfirmSendFile}>Send</button>
+        <button class="reject-button" on:click={handleCancelSendFile}>Cancel</button>
       </div>
     </div>
   </div>

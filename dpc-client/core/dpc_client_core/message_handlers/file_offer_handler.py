@@ -42,7 +42,7 @@ class FileOfferHandler(MessageHandler):
         if not allowed:
             self.logger.warning(f"File transfer denied by firewall from {sender_node_id}")
             # Send FILE_CANCEL (rejected)
-            await self.service.p2p_manager.send_message(sender_node_id, {
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "FILE_CANCEL",
                 "payload": {
                     "transfer_id": transfer_id,
