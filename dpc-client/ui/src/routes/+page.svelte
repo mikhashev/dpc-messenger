@@ -808,10 +808,11 @@
     if (!currentFileOffer) return;
 
     try {
+      const filename = currentFileOffer.filename;
       await acceptFileTransfer(currentFileOffer.transfer_id);
       showFileOfferDialog = false;
       currentFileOffer = null;
-      console.log(`Accepted file transfer: ${currentFileOffer.filename}`);
+      console.log(`Accepted file transfer: ${filename}`);
     } catch (error) {
       console.error('Error accepting file:', error);
       fileOfferToastMessage = `Failed to accept file: ${error}`;
@@ -824,10 +825,11 @@
     if (!currentFileOffer) return;
 
     try {
-      await cancelFileTransfer(currentFileOffer.transfer_id, "firewall_denied");
+      const filename = currentFileOffer.filename;
+      await cancelFileTransfer(currentFileOffer.transfer_id, "user_rejected");
       showFileOfferDialog = false;
       currentFileOffer = null;
-      console.log(`Rejected file transfer: ${currentFileOffer.filename}`);
+      console.log(`Rejected file transfer: ${filename}`);
     } catch (error) {
       console.error('Error rejecting file:', error);
     }

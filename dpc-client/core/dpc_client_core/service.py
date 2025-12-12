@@ -2189,11 +2189,10 @@ class CoreService:
             raise ValueError(f"Transfer {transfer_id} is not a download")
 
         # Send FILE_ACCEPT to peer
-        await self.p2p_coordinator.send_command(
-            transfer.peer_node_id,
-            "FILE_ACCEPT",
-            {"transfer_id": transfer_id}
-        )
+        await self.p2p_manager.send_message_to_peer(transfer.node_id, {
+            "command": "FILE_ACCEPT",
+            "payload": {"transfer_id": transfer_id}
+        })
 
         return {
             "transfer_id": transfer_id,
