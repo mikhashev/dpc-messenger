@@ -80,5 +80,33 @@
     "allow_nodes": ["dpc-node-alice-123"],
     "allow_groups": ["trusted_developers"],
     "allowed_models": ["llama3.1:8b", "llama3:70b"]
+  },
+
+  "file_transfer": {
+    "_comment": "File Transfer Permissions - Controls who can send/receive files with you",
+    "groups": {
+      "friends": {
+        "file_transfer.allow": "allow",
+        "file_transfer.max_size_mb": 100,
+        "file_transfer.allowed_mime_types": ["*"]
+      },
+      "colleagues": {
+        "file_transfer.allow": "allow",
+        "file_transfer.max_size_mb": 50,
+        "file_transfer.allowed_mime_types": ["image/*", "application/pdf", "text/*"]
+      }
+    },
+    "nodes": {
+      "dpc-node-alice-123": {
+        "file_transfer.allow": "allow",
+        "file_transfer.max_size_mb": 500,
+        "file_transfer.allowed_mime_types": ["*"]
+      },
+      "dpc-node-bob-456": {
+        "file_transfer.allow": "allow",
+        "file_transfer.max_size_mb": 10,
+        "file_transfer.allowed_mime_types": ["image/*", "application/pdf"]
+      }
+    }
   }
 }
