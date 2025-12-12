@@ -1715,9 +1715,9 @@
 
 <!-- File Offer Dialog -->
 {#if showFileOfferDialog && currentFileOffer}
-  <div class="modal-overlay" role="presentation" on:click={() => showFileOfferDialog = false} on:keydown={(e) => e.key === 'Escape' && (showFileOfferDialog = false)}>
+  <div class="modal-overlay" role="presentation" on:click={handleRejectFile} on:keydown={(e) => e.key === 'Escape' && handleRejectFile()}>
     <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
-      <h3>📁 Incoming File</h3>
+      <h3>Incoming File</h3>
       <p><strong>File:</strong> {currentFileOffer.filename}</p>
       <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
       <p><strong>From:</strong> {currentFileOffer.node_id.slice(0, 20)}...</p>
@@ -1733,7 +1733,7 @@
 {#if showSendFileDialog && pendingFileSend}
   <div class="modal-overlay" role="presentation" on:click={handleCancelSendFile} on:keydown={(e) => e.key === 'Escape' && handleCancelSendFile()}>
     <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
-      <h3>📤 Send File</h3>
+      <h3>Send File</h3>
       <p><strong>File:</strong> {pendingFileSend.fileName}</p>
       <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
       <div class="modal-buttons">
