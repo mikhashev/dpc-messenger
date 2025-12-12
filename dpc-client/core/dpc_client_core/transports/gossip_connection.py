@@ -32,7 +32,7 @@ from typing import Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..managers.gossip_manager import GossipManager
-    from ..connection_orchestrator import ConnectionOrchestrator
+    from ..coordinators.connection_orchestrator import ConnectionOrchestrator
 
 logger = logging.getLogger(__name__)
 

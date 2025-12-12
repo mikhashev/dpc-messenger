@@ -586,37 +586,6 @@ Broadcasts when personal context changes, invalidates peer caches.
 
 ### 3.10 Gossip Protocol Messages
 
-#### GOSSIP_MESSAGE
-
-Multi-hop epidemic routing for eventual message delivery.
-
-**Format:**
-```json
-{
-  "command": "GOSSIP_MESSAGE",
-  "payload": {
-    "message_id": "msg-uuid",
-    "destination": "dpc-node-bob456",
-    "ttl": 24,
-    "hops": 2,
-    "vector_clock": {...},
-    "data": {...}
-  }
-}
-```
-
-**Fields:**
-- `message_id` (string, required): Unique message identifier
-- `destination` (string, required): Target node ID
-- `ttl` (integer, required): Time-to-live in hours
-- `hops` (integer, required): Current hop count
-- `vector_clock` (object, required): Causality tracking
-- `data` (object, required): Encrypted message payload
-
-**Use Case:** Disaster-resilient messaging when direct connections fail. Store-and-forward with eventual delivery guarantee.
-
----
-
 #### GOSSIP_SYNC
 
 Anti-entropy synchronization for message reconciliation.
@@ -626,17 +595,21 @@ Anti-entropy synchronization for message reconciliation.
 {
   "command": "GOSSIP_SYNC",
   "payload": {
-    "node_id": "dpc-node-alice123",
-    "vector_clock": {...},
-    "known_messages": ["msg-1", "msg-2"]
+    "vector_clock": {"dpc-node-alice123": 42, "dpc-node-bob456": 17},
+    "message_ids": ["msg-abc123...", "msg-def456..."]
   }
 }
 ```
 
 **Fields:**
-- `node_id` (string, required): Requesting node
-- `vector_clock` (object, required): Sender's vector clock state
-- `known_messages` (array, required): Message IDs sender already has
+- `vector_clock` (object, required): Sender's vector clock state (node_id → counter)
+- `message_ids` (array, required): Message IDs sender already has
+
+**Behavior:**
+1. Receiver compares sender's `message_ids` with own message store
+2. Identifies messages receiver has that sender doesn't
+3. Sends missing messages via GOSSIP_MESSAGE commands
+4. Merges sender's vector clock with own clock
 
 **Use Case:** Periodic sync (5-minute interval) to ensure all nodes eventually receive all messages. Identifies missing messages for forwarding.
 
