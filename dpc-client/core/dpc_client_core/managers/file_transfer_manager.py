@@ -397,7 +397,7 @@ class FileTransferManager:
             await self.local_api.broadcast_event("new_p2p_message", {
                 "sender_node_id": node_id,
                 "sender_name": sender_name,
-                "text": f"📎 {transfer.filename} ({size_mb} MB)",
+                "text": f"{transfer.filename} ({size_mb} MB)",
                 "message_id": message_id,
                 "attachments": [{
                     "type": "file",

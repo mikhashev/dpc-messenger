@@ -1413,10 +1413,13 @@
                 </strong>
                 <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
               </div>
-              {#if msg.sender === 'ai' && enableMarkdown}
-                <MarkdownMessage content={msg.text} />
-              {:else}
-                <p>{msg.text}</p>
+              <!-- Only show text if no attachments (avoid duplication) -->
+              {#if !msg.attachments || msg.attachments.length === 0}
+                {#if msg.sender === 'ai' && enableMarkdown}
+                  <MarkdownMessage content={msg.text} />
+                {:else}
+                  <p>{msg.text}</p>
+                {/if}
               {/if}
 
               <!-- File attachments (Week 1) -->
@@ -1424,7 +1427,6 @@
                 <div class="message-attachments">
                   {#each msg.attachments as attachment}
                     <div class="file-attachment">
-                      <div class="file-icon">📎</div>
                       <div class="file-details">
                         <div class="file-name">{attachment.filename}</div>
                         <div class="file-meta">
@@ -3399,11 +3401,6 @@
 
   .file-attachment:hover {
     background: rgba(255, 255, 255, 0.08);
-  }
-
-  .file-icon {
-    font-size: 32px;
-    line-height: 1;
   }
 
   .file-details {

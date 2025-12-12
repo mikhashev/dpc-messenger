@@ -2195,7 +2195,7 @@ class CoreService:
         await self.local_api.broadcast_event("new_p2p_message", {
             "sender_node_id": "user",
             "sender_name": "You",
-            "text": f"📎 {file.name} ({size_mb} MB)",
+            "text": f"{file.name} ({size_mb} MB)",
             "message_id": message_id,
             "attachments": attachments
         })
