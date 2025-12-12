@@ -36,14 +36,19 @@ class FileCancelHandler(MessageHandler):
 
         self.logger.info(f"FILE_CANCEL from {sender_node_id} for transfer {transfer_id} (reason: {reason})")
 
-        # Delegate to FileTransferManager
+        # Get transfer info BEFORE deletion (for UI notification)
         file_transfer_manager = self.service.file_transfer_manager
+        transfer = file_transfer_manager.active_transfers.get(transfer_id)
+
+        # Delegate to FileTransferManager (this will delete the transfer)
         await file_transfer_manager.handle_file_cancel(sender_node_id, payload)
 
-        # Notify UI
+        # Broadcast cancellation event to UI
         await self.service.local_api.broadcast_event("file_transfer_cancelled", {
             "transfer_id": transfer_id,
             "node_id": sender_node_id,
+            "filename": transfer.filename if transfer else "unknown",
+            "direction": transfer.direction if transfer else "unknown",
             "reason": reason,
             "status": "cancelled"
         })

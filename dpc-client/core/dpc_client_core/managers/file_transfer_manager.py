@@ -136,6 +136,7 @@ class FileTransferManager:
         p2p_manager: "P2PManager",
         firewall: "ContextFirewall",
         settings: "Settings",
+        local_api=None,
         storage_base_path: Optional[Path] = None
     ):
         """
@@ -145,11 +146,13 @@ class FileTransferManager:
             p2p_manager: P2P manager for sending messages
             firewall: Firewall for permission checks
             settings: Settings for configuration
+            local_api: LocalApiServer for broadcasting events to UI (optional)
             storage_base_path: Base path for file storage (default: ~/.dpc)
         """
         self.p2p_manager = p2p_manager
         self.firewall = firewall
         self.settings = settings
+        self.local_api = local_api
 
         # Active transfers: transfer_id -> FileTransfer
         self.active_transfers: Dict[str, FileTransfer] = {}

@@ -53,9 +53,9 @@ class FileOfferHandler(MessageHandler):
 
         # Notify UI (prompt user)
         sender_name = self.service.peer_metadata.get(sender_node_id, {}).get("name") or sender_node_id
-        await self.service.local_api.broadcast_event("file_offer", {
+        await self.service.local_api.broadcast_event("file_transfer_offered", {
             "transfer_id": transfer_id,
-            "sender_node_id": sender_node_id,
+            "node_id": sender_node_id,
             "sender_name": sender_name,
             "filename": filename,
             "size_bytes": size_bytes,

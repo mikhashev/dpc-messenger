@@ -188,7 +188,8 @@ class CoreService:
         self.file_transfer_manager = FileTransferManager(
             p2p_manager=self.p2p_manager,
             firewall=self.firewall,
-            settings=self.settings
+            settings=self.settings,
+            local_api=self.local_api
         )
 
         # Conversation monitors (per conversation/peer for knowledge extraction)

@@ -40,13 +40,16 @@ class FileCompleteHandler(MessageHandler):
             self.logger.warning(f"FILE_COMPLETE for unknown transfer: {transfer_id}")
             return None
 
-        # Notify UI
+        # Broadcast completion event to UI
         await self.service.local_api.broadcast_event("file_transfer_complete", {
             "transfer_id": transfer_id,
             "node_id": sender_node_id,
             "filename": transfer.filename,
             "size_bytes": transfer.size_bytes,
+            "size_mb": round(transfer.size_bytes / (1024 * 1024), 2),
             "direction": transfer.direction,
+            "hash": transfer.hash,
+            "mime_type": transfer.mime_type,
             "status": "completed"
         })
 
