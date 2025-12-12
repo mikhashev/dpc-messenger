@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
@@ -12,7 +12,7 @@
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import Toast from "$lib/components/Toast.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
-  import { ask } from '@tauri-apps/plugin-dialog';
+  import { ask, open } from '@tauri-apps/plugin-dialog';
 
   console.log("Full D-PC Messenger loading...");
   
@@ -115,6 +115,12 @@
   let peerContextHashes: Map<string, string> = new Map();  // Per-peer: current hash from backend
   let lastSentPeerHashes: Map<string, Map<string, string>> = new Map();  // Per-conversation, per-peer: last hash sent
 
+  // File transfer UI state (Week 1)
+  let showFileOfferDialog: boolean = false;
+  let currentFileOffer: any = null;
+  let fileOfferToastMessage: string = "";
+  let showFileOfferToast: boolean = false;
+
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $: setActiveChat(activeChatId);
 
@@ -191,6 +197,30 @@
       peerContextHashes.set(node_id, context_hash);
       console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
     }
+  }
+
+  // File transfer event handlers (Week 1)
+  $: if ($fileTransferOffer) {
+    const { node_id, filename, size_bytes, transfer_id } = $fileTransferOffer;
+    currentFileOffer = $fileTransferOffer;
+    showFileOfferDialog = true;
+    console.log(`File offer received: ${filename} (${(size_bytes / 1024).toFixed(1)} KB) from ${node_id.slice(0, 15)}...`);
+  }
+
+  $: if ($fileTransferComplete) {
+    const { filename, node_id, direction } = $fileTransferComplete;
+    fileOfferToastMessage = direction === "download"
+      ? `✓ File downloaded: ${filename}`
+      : `✓ File sent: ${filename}`;
+    showFileOfferToast = true;
+    setTimeout(() => showFileOfferToast = false, 5000);
+  }
+
+  $: if ($fileTransferCancelled) {
+    const { filename, reason } = $fileTransferCancelled;
+    fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
+    showFileOfferToast = true;
+    setTimeout(() => showFileOfferToast = false, 5000);
   }
 
   // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)
@@ -723,6 +753,70 @@
     }
 
     console.log('AI chat deleted successfully');
+  }
+
+  // File transfer handlers (Week 1)
+  async function handleSendFile() {
+    // Only allow file transfer to P2P chats (not local_ai or ai_xxx chats)
+    if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
+      await ask("File transfer is only available in P2P chats.", { title: "D-PC Messenger", kind: "info" });
+      return;
+    }
+
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false
+      });
+
+      if (!selected) {
+        console.log('File selection cancelled');
+        return;
+      }
+
+      const filePath = typeof selected === 'string' ? selected : selected.path;
+      console.log(`Sending file: ${filePath} to ${activeChatId}`);
+
+      await sendFile(activeChatId, filePath);
+
+      fileOfferToastMessage = `Sending file...`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 3000);
+    } catch (error) {
+      console.error('Error sending file:', error);
+      fileOfferToastMessage = `Failed to send file: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  async function handleAcceptFile() {
+    if (!currentFileOffer) return;
+
+    try {
+      await acceptFileTransfer(currentFileOffer.transfer_id);
+      showFileOfferDialog = false;
+      currentFileOffer = null;
+      console.log(`Accepted file transfer: ${currentFileOffer.filename}`);
+    } catch (error) {
+      console.error('Error accepting file:', error);
+      fileOfferToastMessage = `Failed to accept file: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  async function handleRejectFile() {
+    if (!currentFileOffer) return;
+
+    try {
+      await cancelFileTransfer(currentFileOffer.transfer_id, "firewall_denied");
+      showFileOfferDialog = false;
+      currentFileOffer = null;
+      console.log(`Rejected file transfer: ${currentFileOffer.filename}`);
+    } catch (error) {
+      console.error('Error rejecting file:', error);
+    }
   }
 
   // --- HANDLE INCOMING MESSAGES ---
@@ -1412,6 +1506,14 @@
             }}
           ></textarea>
           <button
+            class="file-button"
+            on:click={handleSendFile}
+            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
+            title="Send file (P2P chat only)"
+          >
+            📎
+          </button>
+          <button
             on:click={handleSendMessage}
             disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim() || isContextWindowFull}
           >
@@ -1518,6 +1620,56 @@
     showVoteResultDialog = false;
   }}
 />
+
+<!-- File Transfer UI Components (Week 1) -->
+
+<!-- File Offer Dialog -->
+{#if showFileOfferDialog && currentFileOffer}
+  <div class="modal-overlay" on:click={() => showFileOfferDialog = false}>
+    <div class="modal-dialog" on:click|stopPropagation>
+      <h3>📁 Incoming File</h3>
+      <p><strong>File:</strong> {currentFileOffer.filename}</p>
+      <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
+      <p><strong>From:</strong> {currentFileOffer.node_id.slice(0, 20)}...</p>
+      <div class="modal-buttons">
+        <button class="accept-button" on:click={handleAcceptFile}>Accept</button>
+        <button class="reject-button" on:click={handleRejectFile}>Reject</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- File Transfer Toast -->
+{#if showFileOfferToast}
+  <Toast
+    message={fileOfferToastMessage}
+    type="info"
+    duration={5000}
+    dismissible={true}
+    onDismiss={() => showFileOfferToast = false}
+  />
+{/if}
+
+<!-- Active File Transfers Progress -->
+{#if $activeFileTransfers.size > 0}
+  <div class="active-transfers-panel">
+    <h4>Active Transfers</h4>
+    {#each Array.from($activeFileTransfers.values()) as transfer}
+      <div class="transfer-item">
+        <div class="transfer-info">
+          <span class="transfer-filename">{transfer.filename}</span>
+          <span class="transfer-status">{transfer.direction === 'upload' ? '↑' : '↓'} {transfer.status}</span>
+        </div>
+        {#if transfer.progress !== undefined}
+          <div class="progress-bar">
+            <div class="progress-fill" style="width: {transfer.progress}%"></div>
+          </div>
+          <span class="progress-text">{transfer.progress}%</span>
+        {/if}
+      </div>
+    {/each}
+  </div>
+{/if}
 
 <!-- Add AI Chat Dialog -->
 {#if showAddAIChatDialog}
@@ -2961,5 +3113,167 @@
   :global(body.resizing) {
     cursor: ns-resize !important;
     user-select: none !important;
+  }
+
+  /* File Transfer UI Styles (Week 1) */
+  .file-button {
+    min-width: 45px;
+    padding: 8px 12px;
+    font-size: 18px;
+    margin-right: 8px;
+    cursor: pointer;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    border-radius: 4px;
+    transition: all 0.2s;
+  }
+
+  .file-button:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  .file-button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal-dialog {
+    background: #2a2a2a;
+    padding: 24px;
+    border-radius: 8px;
+    max-width: 500px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  }
+
+  .modal-dialog h3 {
+    margin-top: 0;
+    color: #e0e0e0;
+  }
+
+  .modal-dialog p {
+    margin: 8px 0;
+    color: #b0b0b0;
+  }
+
+  .modal-buttons {
+    display: flex;
+    gap: 12px;
+    margin-top: 20px;
+  }
+
+  .accept-button {
+    flex: 1;
+    padding: 10px;
+    background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+  }
+
+  .accept-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  .reject-button {
+    flex: 1;
+    padding: 10px;
+    background: linear-gradient(135deg, #f44336 0%, #d32f2f 100%);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+  }
+
+  .reject-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  .active-transfers-panel {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: #2a2a2a;
+    padding: 16px;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    min-width: 300px;
+    z-index: 999;
+  }
+
+  .active-transfers-panel h4 {
+    margin: 0 0 12px 0;
+    color: #e0e0e0;
+    font-size: 14px;
+  }
+
+  .transfer-item {
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #444;
+  }
+
+  .transfer-item:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+
+  .transfer-info {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+
+  .transfer-filename {
+    color: #b0b0b0;
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 200px;
+  }
+
+  .transfer-status {
+    color: #888;
+    font-size: 12px;
+  }
+
+  .progress-bar {
+    width: 100%;
+    height: 6px;
+    background: #444;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 4px;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    transition: width 0.3s ease;
+  }
+
+  .progress-text {
+    font-size: 11px;
+    color: #888;
   }
 </style>
