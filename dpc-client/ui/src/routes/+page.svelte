@@ -774,7 +774,7 @@
         return;
       }
 
-      const filePath = typeof selected === 'string' ? selected : selected.path;
+      const filePath = selected as string;
       console.log(`Sending file: ${filePath} to ${activeChatId}`);
 
       await sendFile(activeChatId, filePath);
@@ -1626,7 +1626,7 @@
 <!-- File Offer Dialog -->
 {#if showFileOfferDialog && currentFileOffer}
   <div class="modal-overlay" role="presentation" on:click={() => showFileOfferDialog = false} on:keydown={(e) => e.key === 'Escape' && (showFileOfferDialog = false)}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
+    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
       <h3>📁 Incoming File</h3>
       <p><strong>File:</strong> {currentFileOffer.filename}</p>
       <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
