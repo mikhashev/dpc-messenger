@@ -372,12 +372,15 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ **DTLS Encryption** (v0.10.1) - All 6 connection strategies now encrypted end-to-end
 - ✅ **UDP Hole Punching** (v0.10.1) - DTLS 1.2 encrypted, production-ready, 60-70% NAT success
 - ✅ **Volunteer Relay Nodes** (v0.10.0) - 100% NAT coverage, privacy-preserving
-- ⚠️ **Gossip Protocol** (v0.10.0) - Protocol manager complete, transport wrapper pending (v0.10.2 target)
+- 🔄 **Gossip Protocol** (v0.10.2-dev) - Enhanced encryption and DHT certificate discovery
+  - ✅ Hybrid encryption (AES-GCM + RSA-OAEP) - No payload size limit
+  - ✅ DHT certificate discovery - Decentralized PKI for gossip
+  - ⚠️ Transport wrapper pending (GossipConnection integration)
 
 **Team Collaboration Features - PLANNED (Q1-Q3 2026):**
 - Persistent team management with roles
 - Group chat UI with presence indicators
-- Team knowledge repositories (shared, synchronized knowledge)
+- Team knowledge repositories (shared, synchronized knowledge)fect
 - Team AI assistants (access to collective team knowledge)
 - Collaborative context editing (PR-like approval workflow)
 - Team compute pools (auto-discovery and load balancing)

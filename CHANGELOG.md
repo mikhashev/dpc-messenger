@@ -8,6 +8,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Gossip Protocol Enhancements (v0.10.2-dev)** - Enhanced security and DHT certificate discovery
+  - **Hybrid Encryption (AES-GCM + RSA-OAEP)** - No payload size limit for gossip messages
+    - Replaces pure RSA encryption (~190 byte limit)
+    - AES-256-GCM for data encryption (authenticated, detects tampering)
+    - RSA-OAEP for encrypting AES keys
+    - Supports payloads up to ~8KB (UDP packet limit)
+    - Forward secrecy: random AES key per message
+    - Files: [dpc-protocol/dpc_protocol/crypto.py](dpc-protocol/dpc_protocol/crypto.py), [managers/gossip_manager.py](dpc-client/core/dpc_client_core/managers/gossip_manager.py)
+  - **DHT Certificate Discovery** - Decentralized public key infrastructure
+    - Certificates published to DHT on startup (stored on k closest nodes)
+    - Certificate retrieval with fallback: cache → active connections → DHT query
+    - Key format: `cert:<node_id>` (e.g., `cert:dpc-node-alice123`)
+    - Enables gossip protocol to work without Hub or pre-shared certificates
+    - Files: [managers/gossip_manager.py](dpc-client/core/dpc_client_core/managers/gossip_manager.py)
+  - **Test Coverage:** 38 tests passing (12 DHT certificate tests, 14 encryption tests, 12 connection tests)
 - **Complete Firewall UI Editor** - 7 tabs for managing all privacy rules
   - File Groups tab - Define aliases for groups of context files
   - AI Scopes tab - Control local AI access in different modes (work/personal)

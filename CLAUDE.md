@@ -215,12 +215,22 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 
 **Priority 6: Gossip Store-and-Forward** (Disaster fallback, eventual delivery)
    - Multi-hop epidemic routing (fanout=3 random peers)
+   - **End-to-end hybrid encryption (AES-GCM + RSA-OAEP)** (v0.10.2-dev)
+     - No payload size limit (replaces ~190 byte RSA limit)
+     - AES-256-GCM for data encryption (authenticated, detects tampering)
+     - RSA-OAEP for encrypting AES keys
+     - Forward secrecy: random AES key per message
+   - **DHT certificate discovery** (v0.10.2-dev)
+     - Certificates published to DHT on startup
+     - Fallback: cache → active connections → DHT query
+     - Key format: `cert:<node_id>`
    - Vector clocks for distributed causality tracking
    - Anti-entropy sync (5-minute interval for message reconciliation)
    - TTL: 24 hours, max hops: 5
    - Use cases: offline messaging, infrastructure outages, disaster scenarios
    - Not real-time (eventual delivery guarantee)
    - Timeout: 5s (before falling back to gossip)
+   - **Status**: Encryption and DHT complete, transport wrapper in progress (v0.10.2 target)
    - Location: `connection_strategies/gossip_store_forward.py`, `managers/gossip_manager.py`
 
 **Key Benefits:**
