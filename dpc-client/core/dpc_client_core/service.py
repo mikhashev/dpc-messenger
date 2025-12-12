@@ -2164,6 +2164,24 @@ class CoreService:
         # Initiate file transfer (sends FILE_OFFER to peer)
         transfer_id = await self.file_transfer_manager.send_file(node_id, file)
 
+        # Add to conversation history as user message with attachment
+        conversation_monitor = self.conversation_monitors.get(node_id)
+        if conversation_monitor:
+            size_bytes = file.stat().st_size
+            size_mb = round(size_bytes / (1024 * 1024), 2)
+            message_content = f"Sent file: {file.name} ({size_mb} MB)"
+
+            attachments = [{
+                "type": "file",
+                "filename": file.name,
+                "size_bytes": size_bytes,
+                "transfer_id": transfer_id,
+                "status": "sending"
+            }]
+
+            conversation_monitor.add_message("user", message_content, attachments)
+            logger.debug(f"Added file attachment to conversation history: {file.name}")
+
         return {
             "transfer_id": transfer_id,
             "status": "pending",

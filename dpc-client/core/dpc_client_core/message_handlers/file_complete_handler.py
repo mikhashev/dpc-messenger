@@ -53,8 +53,23 @@ class FileCompleteHandler(MessageHandler):
             "status": "completed"
         })
 
-        # TODO: Update conversation history with attachment metadata
-        # This will be done when we integrate with conversation_monitor.py
-        # to support the new attachments[] field in message history
+        # Add to conversation history with attachment metadata
+        conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
+        if conversation_monitor:
+            size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
+            message_content = f"Received file: {transfer.filename} ({size_mb} MB)"
+
+            attachments = [{
+                "type": "file",
+                "filename": transfer.filename,
+                "size_bytes": transfer.size_bytes,
+                "hash": transfer.hash,
+                "mime_type": transfer.mime_type,
+                "transfer_id": transfer_id,
+                "status": "completed"
+            }]
+
+            conversation_monitor.add_message("assistant", message_content, attachments)
+            self.logger.debug(f"Added file attachment to conversation history: {transfer.filename}")
 
         return None
