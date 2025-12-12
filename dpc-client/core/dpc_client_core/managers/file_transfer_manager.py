@@ -412,6 +412,19 @@ class FileTransferManager:
             })
             logger.debug(f"Broadcasted file received message to UI: {transfer.filename}")
 
+            # Broadcast completion event to hide active transfer panel
+            await self.local_api.broadcast_event("file_transfer_complete", {
+                "transfer_id": transfer.transfer_id,
+                "node_id": node_id,
+                "filename": transfer.filename,
+                "size_bytes": transfer.size_bytes,
+                "size_mb": size_mb,
+                "direction": "download",
+                "hash": transfer.hash,
+                "mime_type": transfer.mime_type,
+                "status": "completed"
+            })
+
         # Cleanup
         transfer.file_data = None  # Free memory
 

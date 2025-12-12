@@ -2189,7 +2189,7 @@ class CoreService:
         import hashlib
         import time
         message_id = hashlib.sha256(
-            f"{self.node_id}:file-send:{transfer_id}:{int(time.time() * 1000)}".encode()
+            f"{self.p2p_manager.node_id}:file-send:{transfer_id}:{int(time.time() * 1000)}".encode()
         ).hexdigest()[:16]
 
         await self.local_api.broadcast_event("new_p2p_message", {
