@@ -1625,8 +1625,8 @@
 
 <!-- File Offer Dialog -->
 {#if showFileOfferDialog && currentFileOffer}
-  <div class="modal-overlay" on:click={() => showFileOfferDialog = false}>
-    <div class="modal-dialog" on:click|stopPropagation>
+  <div class="modal-overlay" role="presentation" on:click={() => showFileOfferDialog = false} on:keydown={(e) => e.key === 'Escape' && (showFileOfferDialog = false)}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown|stopPropagation>
       <h3>📁 Incoming File</h3>
       <p><strong>File:</strong> {currentFileOffer.filename}</p>
       <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
