@@ -137,7 +137,8 @@ class FileTransferManager:
         firewall: "ContextFirewall",
         settings: "Settings",
         local_api=None,
-        storage_base_path: Optional[Path] = None
+        storage_base_path: Optional[Path] = None,
+        service=None
     ):
         """
         Initialize file transfer manager.
@@ -148,11 +149,13 @@ class FileTransferManager:
             settings: Settings for configuration
             local_api: LocalApiServer for broadcasting events to UI (optional)
             storage_base_path: Base path for file storage (default: ~/.dpc)
+            service: CoreService instance for accessing peer_metadata (optional)
         """
         self.p2p_manager = p2p_manager
         self.firewall = firewall
         self.settings = settings
         self.local_api = local_api
+        self.service = service
 
         # Active transfers: transfer_id -> FileTransfer
         self.active_transfers: Dict[str, FileTransfer] = {}
@@ -376,6 +379,38 @@ class FileTransferManager:
                 "hash": hashlib.sha256(transfer.file_data).hexdigest()
             }
         })
+
+        # Broadcast to UI as chat message (receiver side)
+        if self.local_api:
+            import time
+            message_id = hashlib.sha256(
+                f"{node_id}:file-received:{transfer.transfer_id}:{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
+
+            # Get sender name from peer metadata
+            sender_name = node_id
+            if self.service and hasattr(self.service, 'peer_metadata'):
+                sender_name = self.service.peer_metadata.get(node_id, {}).get("name") or node_id
+
+            size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
+
+            await self.local_api.broadcast_event("new_p2p_message", {
+                "sender_node_id": node_id,
+                "sender_name": sender_name,
+                "text": f"📎 {transfer.filename} ({size_mb} MB)",
+                "message_id": message_id,
+                "attachments": [{
+                    "type": "file",
+                    "filename": transfer.filename,
+                    "size_bytes": transfer.size_bytes,
+                    "size_mb": size_mb,
+                    "hash": transfer.hash,
+                    "mime_type": transfer.mime_type,
+                    "transfer_id": transfer.transfer_id,
+                    "status": "completed"
+                }]
+            })
+            logger.debug(f"Broadcasted file received message to UI: {transfer.filename}")
 
         # Cleanup
         transfer.file_data = None  # Free memory

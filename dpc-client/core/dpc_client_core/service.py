@@ -189,7 +189,8 @@ class CoreService:
             p2p_manager=self.p2p_manager,
             firewall=self.firewall,
             settings=self.settings,
-            local_api=self.local_api
+            local_api=self.local_api,
+            service=self
         )
 
         # Conversation monitors (per conversation/peer for knowledge extraction)
@@ -2164,39 +2165,40 @@ class CoreService:
         # Initiate file transfer (sends FILE_OFFER to peer)
         transfer_id = await self.file_transfer_manager.send_file(node_id, file)
 
-        # Add to conversation history as user message with attachment
+        # Prepare file metadata
+        size_bytes = file.stat().st_size
+        size_mb = round(size_bytes / (1024 * 1024), 2)
+        message_content = f"Sent file: {file.name} ({size_mb} MB)"
+
+        attachments = [{
+            "type": "file",
+            "filename": file.name,
+            "size_bytes": size_bytes,
+            "size_mb": size_mb,
+            "transfer_id": transfer_id,
+            "status": "sending"
+        }]
+
+        # Add to conversation history (if monitor exists)
         conversation_monitor = self.conversation_monitors.get(node_id)
         if conversation_monitor:
-            size_bytes = file.stat().st_size
-            size_mb = round(size_bytes / (1024 * 1024), 2)
-            message_content = f"Sent file: {file.name} ({size_mb} MB)"
-
-            attachments = [{
-                "type": "file",
-                "filename": file.name,
-                "size_bytes": size_bytes,
-                "size_mb": size_mb,
-                "transfer_id": transfer_id,
-                "status": "sending"
-            }]
-
             conversation_monitor.add_message("user", message_content, attachments)
             logger.debug(f"Added file attachment to conversation history: {file.name}")
 
-            # Broadcast to UI as chat message
-            import hashlib
-            import time
-            message_id = hashlib.sha256(
-                f"{self.node_id}:file-send:{transfer_id}:{int(time.time() * 1000)}".encode()
-            ).hexdigest()[:16]
+        # Always broadcast to UI as chat message
+        import hashlib
+        import time
+        message_id = hashlib.sha256(
+            f"{self.node_id}:file-send:{transfer_id}:{int(time.time() * 1000)}".encode()
+        ).hexdigest()[:16]
 
-            await self.local_api.broadcast_event("new_p2p_message", {
-                "sender_node_id": "user",
-                "sender_name": "You",
-                "text": f"📎 {file.name} ({size_mb} MB)",
-                "message_id": message_id,
-                "attachments": attachments
-            })
+        await self.local_api.broadcast_event("new_p2p_message", {
+            "sender_node_id": "user",
+            "sender_name": "You",
+            "text": f"📎 {file.name} ({size_mb} MB)",
+            "message_id": message_id,
+            "attachments": attachments
+        })
 
         return {
             "transfer_id": transfer_id,
