@@ -25,6 +25,16 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
+    attachments?: Array<{  // File attachments (Week 1)
+      type: string;
+      filename: string;
+      size_bytes: number;
+      size_mb?: number;
+      hash?: string;
+      mime_type?: string;
+      transfer_id?: string;
+      status?: string;
+    }>;
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
     ['local_ai', []]
@@ -932,29 +942,41 @@
   $: if ($p2pMessages) {
     const msg = $p2pMessages;
     const messageId = msg.message_id || `${msg.sender_node_id}-${msg.text}`;
-    
+
     if (!processedMessageIds.has(messageId)) {
       processedMessageIds.add(messageId);
-      
+
       const wasNearBottom = isNearBottom(chatWindow);
-      
+
       chatHistories.update(h => {
         const newMap = new Map(h);
-        const hist = newMap.get(msg.sender_node_id) || [];
-        newMap.set(msg.sender_node_id, [...hist, {
+
+        // For user's own messages (file sends), store in activeChatId
+        // For peer messages, store in sender's node_id
+        const chatId = msg.sender_node_id === "user" ? activeChatId : msg.sender_node_id;
+        const hist = newMap.get(chatId) || [];
+
+        const messageData: any = {
           id: crypto.randomUUID(),
           sender: msg.sender_node_id,
           senderName: msg.sender_name,
           text: msg.text,
           timestamp: Date.now()
-        }]);
+        };
+
+        // Include attachments if present (file transfers)
+        if (msg.attachments && msg.attachments.length > 0) {
+          messageData.attachments = msg.attachments;
+        }
+
+        newMap.set(chatId, [...hist, messageData]);
         return newMap;
       });
-      
-      if (wasNearBottom || activeChatId === msg.sender_node_id) {
+
+      if (wasNearBottom || activeChatId === msg.sender_node_id || msg.sender_node_id === "user") {
         autoScroll();
       }
-      
+
       if (processedMessageIds.size > 100) {
         const firstId = processedMessageIds.values().next().value;
         if (firstId) {
@@ -1395,6 +1417,29 @@
                 <MarkdownMessage content={msg.text} />
               {:else}
                 <p>{msg.text}</p>
+              {/if}
+
+              <!-- File attachments (Week 1) -->
+              {#if msg.attachments && msg.attachments.length > 0}
+                <div class="message-attachments">
+                  {#each msg.attachments as attachment}
+                    <div class="file-attachment">
+                      <div class="file-icon">📎</div>
+                      <div class="file-details">
+                        <div class="file-name">{attachment.filename}</div>
+                        <div class="file-meta">
+                          {attachment.size_mb ? `${attachment.size_mb} MB` : `${(attachment.size_bytes / (1024 * 1024)).toFixed(2)} MB`}
+                          {#if attachment.mime_type}
+                            • {attachment.mime_type}
+                          {/if}
+                          {#if attachment.status}
+                            • {attachment.status}
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
               {/if}
             </div>
           {/each}
@@ -3333,5 +3378,51 @@
   .progress-text {
     font-size: 11px;
     color: #888;
+  }
+
+  /* File attachment display (Week 1) */
+  .message-attachments {
+    margin-top: 8px;
+  }
+
+  .file-attachment {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    margin-top: 8px;
+    transition: background 0.2s ease;
+  }
+
+  .file-attachment:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .file-icon {
+    font-size: 32px;
+    line-height: 1;
+  }
+
+  .file-details {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .file-name {
+    color: #e0e0e0;
+    font-weight: 500;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .file-meta {
+    color: #b0b0b0;
+    font-size: 12px;
+    margin-top: 4px;
   }
 </style>

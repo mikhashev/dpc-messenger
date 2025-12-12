@@ -72,4 +72,31 @@ class FileCompleteHandler(MessageHandler):
             conversation_monitor.add_message("assistant", message_content, attachments)
             self.logger.debug(f"Added file attachment to conversation history: {transfer.filename}")
 
+        # Broadcast to UI as chat message
+        import hashlib
+        import time
+        message_id = hashlib.sha256(
+            f"{sender_node_id}:file:{transfer_id}:{int(time.time() * 1000)}".encode()
+        ).hexdigest()[:16]
+
+        sender_name = self.service.peer_metadata.get(sender_node_id, {}).get("name") or sender_node_id
+        size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
+
+        await self.service.local_api.broadcast_event("new_p2p_message", {
+            "sender_node_id": sender_node_id,
+            "sender_name": sender_name,
+            "text": f"📎 {transfer.filename} ({size_mb} MB)",
+            "message_id": message_id,
+            "attachments": [{
+                "type": "file",
+                "filename": transfer.filename,
+                "size_bytes": transfer.size_bytes,
+                "size_mb": size_mb,
+                "hash": transfer.hash,
+                "mime_type": transfer.mime_type,
+                "transfer_id": transfer_id,
+                "status": "completed"
+            }]
+        })
+
         return None

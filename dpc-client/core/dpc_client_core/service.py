@@ -2175,12 +2175,28 @@ class CoreService:
                 "type": "file",
                 "filename": file.name,
                 "size_bytes": size_bytes,
+                "size_mb": size_mb,
                 "transfer_id": transfer_id,
                 "status": "sending"
             }]
 
             conversation_monitor.add_message("user", message_content, attachments)
             logger.debug(f"Added file attachment to conversation history: {file.name}")
+
+            # Broadcast to UI as chat message
+            import hashlib
+            import time
+            message_id = hashlib.sha256(
+                f"{self.node_id}:file-send:{transfer_id}:{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
+
+            await self.local_api.broadcast_event("new_p2p_message", {
+                "sender_node_id": "user",
+                "sender_name": "You",
+                "text": f"📎 {file.name} ({size_mb} MB)",
+                "message_id": message_id,
+                "attachments": attachments
+            })
 
         return {
             "transfer_id": transfer_id,
