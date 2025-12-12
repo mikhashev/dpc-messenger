@@ -377,6 +377,17 @@ class FileTransferManager:
             }
         })
 
+        # Send chat message notification (so file appears in conversation)
+        size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
+        file_message = f"Received file: {transfer.filename} ({size_mb} MB)"
+
+        await self.p2p_manager.send_message_to_peer(node_id, {
+            "command": "SEND_TEXT",
+            "payload": {
+                "text": file_message
+            }
+        })
+
         # Cleanup
         transfer.file_data = None  # Free memory
 
