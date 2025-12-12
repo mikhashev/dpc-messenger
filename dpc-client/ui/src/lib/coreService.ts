@@ -41,6 +41,15 @@ export const firewallRulesUpdated = writable<any>(null);
 // Unread message counter (v0.9.3)
 export const unreadMessageCounts = writable<Map<string, number>>(new Map());
 
+// File transfer stores (Week 1)
+export const fileTransferOffer = writable<any>(null);  // Incoming file offer notifications
+export const fileTransferProgress = writable<any>(null);  // Progress updates
+export const fileTransferComplete = writable<any>(null);  // Completed transfers
+export const fileTransferCancelled = writable<any>(null);  // Cancelled transfers
+
+// Track active file transfers (transfer_id -> {node_id, filename, direction, progress, status})
+export const activeFileTransfers = writable<Map<string, any>>(new Map());
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -265,6 +274,58 @@ export function connectToCoreService() {
                     console.log("Firewall rules updated, triggering AI scope reload");
                     firewallRulesUpdated.set(message.payload);
                 }
+                // File transfer event handlers (Week 1)
+                else if (message.event === "file_transfer_offered") {
+                    console.log("File transfer offer received:", message.payload);
+                    fileTransferOffer.set(message.payload);
+                    // Add to active transfers
+                    activeFileTransfers.update(map => {
+                        const newMap = new Map(map);
+                        newMap.set(message.payload.transfer_id, {
+                            ...message.payload,
+                            status: "pending",
+                            progress: 0
+                        });
+                        return newMap;
+                    });
+                }
+                else if (message.event === "file_transfer_progress") {
+                    fileTransferProgress.set(message.payload);
+                    // Update progress in active transfers
+                    activeFileTransfers.update(map => {
+                        const newMap = new Map(map);
+                        const transfer = newMap.get(message.payload.transfer_id);
+                        if (transfer) {
+                            newMap.set(message.payload.transfer_id, {
+                                ...transfer,
+                                ...message.payload
+                            });
+                        }
+                        return newMap;
+                    });
+                }
+                else if (message.event === "file_transfer_complete") {
+                    console.log("File transfer completed:", message.payload);
+                    fileTransferComplete.set(message.payload);
+                    // Remove from active transfers after a delay
+                    setTimeout(() => {
+                        activeFileTransfers.update(map => {
+                            const newMap = new Map(map);
+                            newMap.delete(message.payload.transfer_id);
+                            return newMap;
+                        });
+                    }, 3000);
+                }
+                else if (message.event === "file_transfer_cancelled") {
+                    console.log("File transfer cancelled:", message.payload);
+                    fileTransferCancelled.set(message.payload);
+                    // Remove from active transfers
+                    activeFileTransfers.update(map => {
+                        const newMap = new Map(map);
+                        newMap.delete(message.payload.transfer_id);
+                        return newMap;
+                    });
+                }
             } catch (error) {
                 console.error("Error parsing message:", error);
             }
@@ -346,7 +407,10 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_providers_config',
             'save_providers_config',
             'query_ollama_model_info',
-            'toggle_auto_knowledge_detection'
+            'toggle_auto_knowledge_detection',
+            'send_file',
+            'accept_file_transfer',
+            'cancel_file_transfer'
         ].includes(command);
 
         if (expectsResponse) {
@@ -379,6 +443,27 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
 // Helper function to set the currently active chat (prevents unread badges on open chats)
 export function setActiveChat(chatId: string | null) {
     activeChat = chatId;
+}
+
+// File transfer helper functions (Week 1)
+export async function sendFile(nodeId: string, filePath: string): Promise<any> {
+    return sendCommand('send_file', {
+        node_id: nodeId,
+        file_path: filePath
+    });
+}
+
+export async function acceptFileTransfer(transferId: string): Promise<any> {
+    return sendCommand('accept_file_transfer', {
+        transfer_id: transferId
+    });
+}
+
+export async function cancelFileTransfer(transferId: string, reason: string = "user_cancelled"): Promise<any> {
+    return sendCommand('cancel_file_transfer', {
+        transfer_id: transferId,
+        reason: reason
+    });
 }
 
 // Helper function to reset unread count when chat becomes active (v0.9.3)
