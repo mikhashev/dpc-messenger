@@ -2179,26 +2179,9 @@ class CoreService:
             "status": "sending"
         }]
 
-        # Add to conversation history (if monitor exists)
-        conversation_monitor = self.conversation_monitors.get(node_id)
-        if conversation_monitor:
-            conversation_monitor.add_message("user", message_content, attachments)
-            logger.debug(f"Added file attachment to conversation history: {file.name}")
-
-        # Always broadcast to UI as chat message
-        import hashlib
-        import time
-        message_id = hashlib.sha256(
-            f"{self.p2p_manager.node_id}:file-send:{transfer_id}:{int(time.time() * 1000)}".encode()
-        ).hexdigest()[:16]
-
-        await self.local_api.broadcast_event("new_p2p_message", {
-            "sender_node_id": "user",
-            "sender_name": "You",
-            "text": f"{file.name} ({size_mb} MB)",
-            "message_id": message_id,
-            "attachments": attachments
-        })
+        # Note: Don't add to conversation history or broadcast message yet
+        # We'll do that when FILE_COMPLETE is received (in file_complete_handler.py)
+        # This prevents phantom messages if the receiver rejects the transfer
 
         return {
             "transfer_id": transfer_id,
@@ -2246,7 +2229,22 @@ class CoreService:
         Returns:
             Dict with transfer_id and status
         """
+        # Get transfer info BEFORE deletion (for UI notification)
+        transfer = self.file_transfer_manager.active_transfers.get(transfer_id)
+
+        # Cancel the transfer (sends FILE_CANCEL to peer and deletes locally)
         await self.file_transfer_manager.cancel_transfer(transfer_id, reason)
+
+        # Broadcast cancellation event to local UI (so Active Transfers panel updates)
+        if transfer:
+            await self.local_api.broadcast_event("file_transfer_cancelled", {
+                "transfer_id": transfer_id,
+                "node_id": transfer.node_id,
+                "filename": transfer.filename,
+                "direction": transfer.direction,
+                "reason": reason,
+                "status": "cancelled"
+            })
 
         return {
             "transfer_id": transfer_id,

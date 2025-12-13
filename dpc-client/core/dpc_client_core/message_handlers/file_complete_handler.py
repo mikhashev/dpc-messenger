@@ -53,28 +53,45 @@ class FileCompleteHandler(MessageHandler):
             "status": "completed"
         })
 
-        # Add to conversation history with attachment metadata
-        conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
-        if conversation_monitor:
-            size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
-            message_content = f"Received file: {transfer.filename} ({size_mb} MB)"
+        # Add to conversation history and broadcast chat message
+        # For sender (upload): Show "You sent file X" now that transfer succeeded
+        # For receiver (download): Already handled in file_transfer_manager._finalize_download()
 
+        if transfer.direction == "upload":
+            # Sender side: Broadcast "You sent file X" message now that receiver accepted and completed
+            import hashlib
+            import time
+            message_id = hashlib.sha256(
+                f"{self.service.p2p_manager.node_id}:file-send:{transfer_id}:{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
+
+            size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
             attachments = [{
                 "type": "file",
                 "filename": transfer.filename,
                 "size_bytes": transfer.size_bytes,
+                "size_mb": size_mb,
                 "hash": transfer.hash,
                 "mime_type": transfer.mime_type,
                 "transfer_id": transfer_id,
                 "status": "completed"
             }]
 
-            conversation_monitor.add_message("assistant", message_content, attachments)
-            self.logger.debug(f"Added file attachment to conversation history: {transfer.filename}")
+            await self.service.local_api.broadcast_event("new_p2p_message", {
+                "sender_node_id": "user",
+                "sender_name": "You",
+                "text": f"{transfer.filename} ({size_mb} MB)",
+                "message_id": message_id,
+                "attachments": attachments
+            })
 
-        # Note: No UI broadcast here on sender side
-        # The sender already got a "You sent file X" message from service.py send_file()
-        # The receiver gets "Peer sent file X" message from file_transfer_manager._finalize_download()
+            # Add to conversation history
+            conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
+            if conversation_monitor:
+                message_content = f"Sent file: {transfer.filename} ({size_mb} MB)"
+                conversation_monitor.add_message("user", message_content, attachments)
+                self.logger.debug(f"Added file attachment to conversation history: {transfer.filename}")
+
         self.logger.debug(f"FILE_COMPLETE processed, transfer marked as completed: {transfer.filename}")
 
         return None
