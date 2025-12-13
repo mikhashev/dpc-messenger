@@ -547,6 +547,8 @@ class FileTransferManager:
 
         # Cleanup
         transfer.file_data = None  # Free memory
+        del self.active_transfers[transfer.transfer_id]  # Remove from active transfers
+        logger.debug(f"Cleaned up completed download transfer: {transfer.transfer_id}")
 
     async def handle_file_complete(self, node_id: str, payload: dict):
         """
@@ -575,6 +577,10 @@ class FileTransferManager:
                 "direction": "upload",
                 "status": "completed"
             })
+
+        # Cleanup
+        del self.active_transfers[transfer_id]  # Remove from active transfers
+        logger.debug(f"Cleaned up completed upload transfer: {transfer_id}")
 
     async def cancel_transfer(self, transfer_id: str, reason: str = "user_cancelled"):
         """

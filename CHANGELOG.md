@@ -68,6 +68,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Fix:** Map `progress_percent` to `progress` in file_transfer_progress handler
   - **Result:** Progress bar now updates correctly during transfer (0% → 100%)
   - Files: [coreService.ts:305-319](dpc-client/ui/src/lib/coreService.ts)
+- **CRITICAL: Completed Transfers Not Cleaned Up** - Fixed "Max concurrent transfers exceeded" error
+  - **Bug:** After 3 successful transfers, new transfers fail with "Max concurrent transfers (3) exceeded"
+  - **Root Cause:** Completed transfers marked as COMPLETED but never removed from active_transfers dict
+  - **Impact:** Transfers accumulate until limit reached, blocking all future transfers
+  - **Fix:** Delete from active_transfers on both sender side (handle_file_complete) and receiver side (_finalize_download)
+  - **Result:** Transfers properly cleaned up after completion, no more limit errors
+  - Files: [managers/file_transfer_manager.py:550,582](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
 - **FILE_CANCEL Reasons** - Added `chunk_verification_failed` and `missing_chunks` reasons
   - `chunk_verification_failed` - Chunk failed verification after max retries
   - `missing_chunks` - Expected chunk missing during finalization
