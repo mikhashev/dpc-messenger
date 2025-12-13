@@ -278,12 +278,25 @@ export function connectToCoreService() {
                 else if (message.event === "file_transfer_offered") {
                     console.log("File transfer offer received:", message.payload);
                     fileTransferOffer.set(message.payload);
-                    // Add to active transfers
+                    // Add to active transfers (receiver side)
                     activeFileTransfers.update(map => {
                         const newMap = new Map(map);
                         newMap.set(message.payload.transfer_id, {
                             ...message.payload,
                             status: "pending",
+                            progress: 0
+                        });
+                        return newMap;
+                    });
+                }
+                else if (message.event === "file_transfer_started") {
+                    console.log("File transfer started:", message.payload);
+                    // Add to active transfers (sender side - v0.11.1)
+                    activeFileTransfers.update(map => {
+                        const newMap = new Map(map);
+                        newMap.set(message.payload.transfer_id, {
+                            ...message.payload,
+                            status: "transferring",
                             progress: 0
                         });
                         return newMap;

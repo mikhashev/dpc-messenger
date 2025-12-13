@@ -40,6 +40,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Sends FILE_CHUNK_RETRY on verification failure
   - Tracks retry attempts and fails after max retries
   - Files: [managers/file_transfer_manager.py:378-447](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+- **Configurable Chunk Delay** - Made inter-chunk delay configurable for transfer speed tuning
+  - New setting: `file_transfer.chunk_delay` (default: 0.001 = 1ms, was hardcoded 0.01 = 10ms)
+  - **10x faster default** - Changed from 10ms to 1ms delay between chunks
+  - With 1024KB chunks: theoretical max speed increased from ~10 MB/s to ~100 MB/s
+  - Set to 0 for maximum speed (no delay), or increase for bandwidth throttling
+  - Files: [managers/file_transfer_manager.py:176](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
 
 ### Fixed
 - **CRITICAL: Out-of-Order Chunk Assembly** - Fixed file corruption bug
@@ -50,6 +56,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Fix:** Store chunks in dict indexed by chunk_index, assemble in order during finalization
   - **Result:** Guarantees correct file assembly regardless of network packet ordering
   - Files: [managers/file_transfer_manager.py:399-453](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+- **Active Transfers Panel Missing on Sender Side** - Fixed UI not showing uploads in progress
+  - **Bug:** Active Transfers panel only showed on receiver side, not sender side
+  - **Root Cause:** UI missing handler for `file_transfer_started` event (only had `file_transfer_offered`)
+  - **Fix:** Added handler to add sender-side transfers to activeFileTransfers store
+  - **Result:** Active Transfers panel now shows on both sender and receiver
+  - Files: [coreService.ts:292-303](dpc-client/ui/src/lib/coreService.ts)
 - **FILE_CANCEL Reasons** - Added `chunk_verification_failed` and `missing_chunks` reasons
   - `chunk_verification_failed` - Chunk failed verification after max retries
   - `missing_chunks` - Expected chunk missing during finalization

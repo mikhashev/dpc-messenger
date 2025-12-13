@@ -124,7 +124,8 @@ class FileTransferManager:
         firewall: Firewall for permission checks
         settings: Settings for configuration
         active_transfers: Dict of active transfer sessions
-        chunk_size: Default chunk size in bytes
+        chunk_size: Default chunk size in bytes (default: 65536 = 64KB)
+        chunk_delay: Delay between chunks in seconds (default: 0.001 = 1ms)
         background_threshold_mb: Threshold for background transfers
         direct_tls_threshold_mb: Threshold for direct TLS requirement
         max_concurrent_transfers: Maximum concurrent transfers
@@ -173,6 +174,7 @@ class FileTransferManager:
 
         # Configuration (from settings)
         self.chunk_size = int(settings.get("file_transfer", "chunk_size", "65536"))  # 64KB
+        self.chunk_delay = float(settings.get("file_transfer", "chunk_delay", "0.001"))  # 1ms (v0.11.1)
         self.background_threshold_mb = int(settings.get("file_transfer", "background_threshold_mb", "50"))
         self.direct_tls_threshold_mb = int(settings.get("file_transfer", "direct_tls_only_threshold_mb", "100"))
         self.max_concurrent_transfers = int(settings.get("file_transfer", "max_concurrent_transfers", "3"))
@@ -184,7 +186,7 @@ class FileTransferManager:
         self.storage_base_path = storage_base_path / "conversations"
         self.storage_base_path.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"FileTransferManager initialized (chunk_size={self.chunk_size}, max_concurrent={self.max_concurrent_transfers})")
+        logger.info(f"FileTransferManager initialized (chunk_size={self.chunk_size}, chunk_delay={self.chunk_delay}s, max_concurrent={self.max_concurrent_transfers})")
 
     def _get_peer_storage_path(self, node_id: str, subdir: str = "files") -> Path:
         """Get storage path for peer's files."""
@@ -367,8 +369,8 @@ class FileTransferManager:
                             "progress_percent": int(((chunk_index + 1) / transfer.total_chunks) * 100)
                         })
 
-                    # Small delay to avoid overwhelming receiver
-                    await asyncio.sleep(0.01)
+                    # Configurable delay to control transfer speed (v0.11.1)
+                    await asyncio.sleep(self.chunk_delay)
 
             logger.info(f"All chunks sent for {transfer.filename}")
 
