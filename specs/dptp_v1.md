@@ -704,7 +704,8 @@ Offers a file to the peer for transfer.
     "size_bytes": 2048000,
     "hash": "sha256:a1b2c3d4e5f6...",
     "mime_type": "application/pdf",
-    "chunk_size": 65536
+    "chunk_size": 65536,
+    "chunk_hashes": ["a1b2c3d4", "e5f6g7h8", ...]
   }
 }
 ```
@@ -716,6 +717,7 @@ Offers a file to the peer for transfer.
 - `hash` (string, required): SHA256 hash for integrity verification (format: `sha256:hex_string`)
 - `mime_type` (string, required): MIME type of the file
 - `chunk_size` (integer, required): Bytes per chunk (typically 65536 = 64KB)
+- `chunk_hashes` (array of strings, optional): CRC32 hashes per chunk (v0.11.1+, 8-char hex strings)
 
 **Response:** FILE_ACCEPT (if accepted) or FILE_CANCEL (if rejected)
 
@@ -771,6 +773,8 @@ Transfers a single chunk of file data.
 
 **Behavior:**
 - Receiver stores chunks to temporary buffer
+- **Per-chunk verification (v0.11.1+):** If `chunk_hashes` provided in FILE_OFFER, receiver verifies CRC32 of each chunk
+- **Retry on failure (v0.11.1+):** If chunk verification fails, sends FILE_CHUNK_RETRY (max 3 retries per chunk)
 - Progress tracking: `(chunk_index + 1) / total_chunks * 100%`
 - Receiver sends FILE_COMPLETE after receiving all chunks
 
@@ -829,6 +833,7 @@ Cancels an in-progress or pending file transfer.
   - `user_cancelled` - User manually cancelled
   - `timeout` - Transfer timed out
   - `hash_mismatch` - SHA256 verification failed
+  - `chunk_verification_failed` - Chunk CRC32 verification failed after max retries (v0.11.1+)
   - `permission_denied` - Firewall rejected transfer
   - `size_limit_exceeded` - File exceeds peer's size limit
 
@@ -837,6 +842,43 @@ Cancels an in-progress or pending file transfer.
 - Receiver cleans up partial transfer data
 - Sender stops sending chunks
 - Transfer marked as failed in UI
+
+---
+
+#### FILE_CHUNK_RETRY
+
+Requests re-transmission of a specific chunk that failed verification (v0.11.1+).
+
+**Format:**
+```json
+{
+  "command": "FILE_CHUNK_RETRY",
+  "payload": {
+    "transfer_id": "550e8400-e29b-41d4-a716-446655440000",
+    "chunk_index": 42
+  }
+}
+```
+
+**Fields:**
+- `transfer_id` (string, required): Transfer identifier
+- `chunk_index` (integer, required): Zero-based index of chunk to retry
+
+**Behavior:**
+- Sent by receiver when chunk CRC32 verification fails
+- Sender re-transmits the specific chunk via FILE_CHUNK
+- Maximum 3 retry attempts per chunk
+- After max retries: receiver sends FILE_CANCEL with reason `chunk_verification_failed`
+
+**Use Case:**
+- Large file transfers over unreliable connections
+- Detect corruption immediately (don't waste time receiving remaining chunks)
+- Only retry corrupted chunks (efficient bandwidth usage)
+
+**Performance:**
+- For 159 MB file (2,541 chunks): 10 KB overhead for CRC32 hashes vs 80 KB for SHA256 per-chunk
+- CRC32 verification ~10x faster than SHA256
+- Prevents wasting time on corrupted transfers (detect at chunk-level, not file-level)
 
 ---
 

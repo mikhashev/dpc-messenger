@@ -32,6 +32,7 @@ class FileOfferHandler(MessageHandler):
         hash_value = payload.get("hash")
         mime_type = payload.get("mime_type")
         chunk_size = payload.get("chunk_size")
+        chunk_hashes = payload.get("chunk_hashes")  # v0.11.1: CRC32 hashes per chunk
 
         self.logger.info(f"FILE_OFFER from {sender_node_id}: {filename} ({size_bytes} bytes)")
 
@@ -79,7 +80,10 @@ class FileOfferHandler(MessageHandler):
             direction="download",
             status=TransferStatus.PENDING,
             chunks_received=set(),
-            total_chunks=total_chunks
+            total_chunks=total_chunks,
+            chunk_hashes=chunk_hashes,  # v0.11.1: Store for per-chunk verification
+            chunks_failed=set(),  # v0.11.1: Track failed chunks for retry
+            retry_count={}  # v0.11.1: Track retry attempts per chunk
         )
         file_transfer_manager.active_transfers[transfer_id] = transfer
 

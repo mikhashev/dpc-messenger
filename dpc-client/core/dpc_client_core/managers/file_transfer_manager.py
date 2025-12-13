@@ -36,9 +36,10 @@ import logging
 import hashlib
 import base64
 import uuid
+import zlib  # For CRC32 checksums
 from pathlib import Path
-from typing import Optional, Dict, Callable, TYPE_CHECKING
-from dataclasses import dataclass
+from typing import Optional, Dict, Callable, List, TYPE_CHECKING
+from dataclasses import dataclass, field
 from enum import Enum
 
 if TYPE_CHECKING:
@@ -78,6 +79,10 @@ class FileTransfer:
         file_data: Accumulated file data (for downloads)
         file_path: Path to file being sent (for uploads)
         progress_callback: Optional callback for progress updates
+        chunk_hashes: List of CRC32 hashes for each chunk (v0.11.1)
+        chunks_failed: Set of chunk indices that failed verification (v0.11.1)
+        retry_count: Dict mapping chunk index to retry attempt count (v0.11.1)
+        max_retries: Maximum retry attempts per chunk (default: 3)
     """
     transfer_id: str
     filename: str
@@ -93,6 +98,10 @@ class FileTransfer:
     file_data: Optional[bytearray] = None
     file_path: Optional[Path] = None
     progress_callback: Optional[Callable[[str, int, int], None]] = None
+    chunk_hashes: Optional[list] = None  # CRC32 hashes for integrity
+    chunks_failed: Optional[set] = None  # Failed chunk indices
+    retry_count: Optional[dict] = None   # Chunk index -> retry count
+    max_retries: int = 3                 # Max retries per chunk
 
 
 class FileTransferManager:
@@ -189,6 +198,27 @@ class FileTransferManager:
                 sha256.update(chunk)
         return sha256.hexdigest()
 
+    def _compute_chunk_hashes(self, file_path: Path) -> List[str]:
+        """
+        Compute CRC32 hash for each chunk (v0.11.1).
+
+        Returns list of CRC32 hashes in hex format (8 chars each).
+        This enables per-chunk integrity verification without waiting
+        for the entire file transfer to complete.
+
+        Args:
+            file_path: Path to file
+
+        Returns:
+            List of CRC32 hashes as hex strings (e.g., ["a1b2c3d4", "e5f6a7b8", ...])
+        """
+        chunk_hashes = []
+        with open(file_path, 'rb') as f:
+            while chunk := f.read(self.chunk_size):
+                crc = zlib.crc32(chunk) & 0xffffffff  # Ensure unsigned 32-bit
+                chunk_hashes.append(f"{crc:08x}")  # 8-char hex string
+        return chunk_hashes
+
     async def send_file(
         self,
         node_id: str,
@@ -230,8 +260,11 @@ class FileTransferManager:
         # Compute file metadata
         file_size = file_path.stat().st_size
         file_hash = self._compute_file_hash(file_path) if self.verify_hash else "none"
+        chunk_hashes = self._compute_chunk_hashes(file_path)  # v0.11.1: Per-chunk CRC32
         mime_type = self._detect_mime_type(file_path)
         total_chunks = (file_size + self.chunk_size - 1) // self.chunk_size
+
+        logger.info(f"Computed {len(chunk_hashes)} chunk hashes ({len(chunk_hashes) * 8} bytes) for {file_path.name}")
 
         # Create transfer session
         transfer_id = str(uuid.uuid4())
@@ -248,7 +281,8 @@ class FileTransferManager:
             chunks_received=set(),
             total_chunks=total_chunks,
             file_path=file_path,
-            progress_callback=progress_callback
+            progress_callback=progress_callback,
+            chunk_hashes=chunk_hashes  # v0.11.1: Store for retry requests
         )
         self.active_transfers[transfer_id] = transfer
 
@@ -261,7 +295,8 @@ class FileTransferManager:
                 "size_bytes": file_size,
                 "hash": file_hash,
                 "mime_type": mime_type,
-                "chunk_size": self.chunk_size
+                "chunk_size": self.chunk_size,
+                "chunk_hashes": chunk_hashes  # v0.11.1: CRC32 per chunk for integrity
             }
         })
 
@@ -344,6 +379,8 @@ class FileTransferManager:
         """
         Handle incoming FILE_CHUNK - reassemble file.
 
+        v0.11.1: Added per-chunk CRC32 verification with retry tracking.
+
         Args:
             node_id: Sender node ID
             payload: FILE_CHUNK payload
@@ -361,15 +398,55 @@ class FileTransferManager:
         if transfer.file_data is None:
             transfer.file_data = bytearray()
 
-        # Append chunk (assume in-order for now; TODO: handle out-of-order)
-        transfer.file_data.extend(chunk_data)
-        transfer.chunks_received.add(chunk_index)
+        # v0.11.1: Verify chunk CRC32 if hashes provided
+        chunk_verified = True
+        if transfer.chunk_hashes and chunk_index < len(transfer.chunk_hashes):
+            expected_hash = transfer.chunk_hashes[chunk_index]
+            computed_crc = zlib.crc32(chunk_data) & 0xffffffff
+            computed_hash = f"{computed_crc:08x}"
 
-        # Progress callback
-        if transfer.progress_callback:
-            transfer.progress_callback(transfer_id, len(transfer.chunks_received), transfer.total_chunks)
+            if computed_hash != expected_hash:
+                chunk_verified = False
+                transfer.chunks_failed.add(chunk_index)
 
-        # Check if complete
+                # Track retry count
+                if chunk_index not in transfer.retry_count:
+                    transfer.retry_count[chunk_index] = 0
+                transfer.retry_count[chunk_index] += 1
+
+                logger.warning(
+                    f"Chunk {chunk_index} CRC32 mismatch! "
+                    f"Expected {expected_hash}, got {computed_hash}. "
+                    f"Retry attempt {transfer.retry_count[chunk_index]}/{transfer.max_retries}"
+                )
+
+                # If max retries exceeded, fail transfer
+                if transfer.retry_count[chunk_index] >= transfer.max_retries:
+                    logger.error(f"Chunk {chunk_index} failed {transfer.max_retries} times, aborting transfer")
+                    transfer.status = TransferStatus.FAILED
+                    await self._send_file_cancel(node_id, transfer_id, "chunk_verification_failed")
+                    return
+                else:
+                    # Send retry request for this chunk
+                    await self._send_chunk_retry_request(node_id, transfer_id, chunk_index)
+                    return  # Don't process this chunk further, wait for retry
+            else:
+                # Chunk verified successfully - remove from failed set if it was retried
+                if chunk_index in transfer.chunks_failed:
+                    transfer.chunks_failed.discard(chunk_index)
+                    logger.info(f"Chunk {chunk_index} verified successfully on retry")
+
+        # Only append chunk if verified
+        if chunk_verified:
+            # Append chunk (assume in-order for now; TODO: handle out-of-order)
+            transfer.file_data.extend(chunk_data)
+            transfer.chunks_received.add(chunk_index)
+
+            # Progress callback
+            if transfer.progress_callback:
+                transfer.progress_callback(transfer_id, len(transfer.chunks_received), transfer.total_chunks)
+
+        # Check if complete (all chunks received and verified)
         if len(transfer.chunks_received) == transfer.total_chunks:
             await self._finalize_download(node_id, transfer)
 
@@ -512,6 +589,70 @@ class FileTransferManager:
                 "reason": reason
             }
         })
+
+    async def _send_chunk_retry_request(self, node_id: str, transfer_id: str, chunk_index: int):
+        """
+        Send FILE_CHUNK_RETRY request to sender (v0.11.1).
+
+        Args:
+            node_id: Sender node ID
+            transfer_id: Transfer identifier
+            chunk_index: Index of chunk to retry
+        """
+        logger.info(f"Requesting retry for chunk {chunk_index} of transfer {transfer_id}")
+        await self.p2p_manager.send_message_to_peer(node_id, {
+            "command": "FILE_CHUNK_RETRY",
+            "payload": {
+                "transfer_id": transfer_id,
+                "chunk_index": chunk_index
+            }
+        })
+
+    async def handle_file_chunk_retry(self, node_id: str, payload: dict):
+        """
+        Handle FILE_CHUNK_RETRY request - resend specific chunk (v0.11.1).
+
+        Args:
+            node_id: Receiver node ID requesting retry
+            payload: Contains transfer_id, chunk_index
+        """
+        transfer_id = payload["transfer_id"]
+        chunk_index = payload["chunk_index"]
+
+        transfer = self.active_transfers.get(transfer_id)
+        if not transfer or transfer.direction != "upload":
+            logger.warning(f"FILE_CHUNK_RETRY for unknown upload: {transfer_id}")
+            return
+
+        logger.info(f"Resending chunk {chunk_index} for transfer {transfer_id}")
+
+        try:
+            # Read and send the specific chunk
+            with open(transfer.file_path, 'rb') as f:
+                f.seek(chunk_index * transfer.chunk_size)
+                chunk = f.read(transfer.chunk_size)
+
+                if not chunk:
+                    logger.error(f"Failed to read chunk {chunk_index} from {transfer.file_path}")
+                    return
+
+                chunk_base64 = base64.b64encode(chunk).decode('utf-8')
+
+                # Send FILE_CHUNK
+                await self.p2p_manager.send_message_to_peer(node_id, {
+                    "command": "FILE_CHUNK",
+                    "payload": {
+                        "transfer_id": transfer_id,
+                        "chunk_index": chunk_index,
+                        "total_chunks": transfer.total_chunks,
+                        "data": chunk_base64
+                    }
+                })
+
+                logger.debug(f"Resent chunk {chunk_index}/{transfer.total_chunks} for {transfer.filename}")
+
+        except Exception as e:
+            logger.error(f"Error resending chunk {chunk_index}: {e}", exc_info=True)
 
     async def handle_file_cancel(self, node_id: str, payload: dict):
         """Handle FILE_CANCEL from peer."""

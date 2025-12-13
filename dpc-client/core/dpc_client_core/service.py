@@ -55,6 +55,7 @@ from .message_handlers.file_accept_handler import FileAcceptHandler
 from .message_handlers.file_chunk_handler import FileChunkHandler
 from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
+from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
 from .managers.file_transfer_manager import FileTransferManager
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
@@ -265,6 +266,7 @@ class CoreService:
         self.message_router.register_handler(FileChunkHandler(self))
         self.message_router.register_handler(FileCompleteHandler(self))
         self.message_router.register_handler(FileCancelHandler(self))
+        self.message_router.register_handler(FileChunkRetryHandler(self))  # v0.11.1
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 
