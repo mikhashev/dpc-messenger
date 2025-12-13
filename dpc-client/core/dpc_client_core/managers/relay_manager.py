@@ -104,6 +104,7 @@ class RelayManager:
         # Server mode state
         self.sessions: Dict[str, RelaySession] = {}  # session_id -> RelaySession
         self.peer_to_session: Dict[str, str] = {}  # node_id -> session_id
+        self.peer_connections: Dict[str, any] = {}  # node_id -> PeerConnection (for forwarding)
         self.rate_limits: Dict[str, List[float]] = defaultdict(list)  # node_id -> timestamps
 
         # Client mode cache
@@ -282,15 +283,93 @@ class RelayManager:
             peer_id[:20], relay_node.node_id[:20]
         )
 
-        # TODO: Implement relay connection logic
-        # 1. Connect to relay via P2P manager (TLS)
-        # 2. Send RELAY_REGISTER protocol message
-        # 3. Wait for RELAY_READY confirmation
-        # 4. Wrap connection in RelayedPeerConnection
+        if not self.p2p_manager:
+            raise ConnectionError("P2PManager not initialized")
 
-        self.stats["relay_connections"] += 1
+        try:
+            # Step 1: Connect to relay via P2P manager (TLS)
+            relay_connection = await asyncio.wait_for(
+                self.p2p_manager.connect_to_peer(
+                    relay_node.ip,
+                    relay_node.port,
+                    relay_node.node_id
+                ),
+                timeout=20.0  # Connection timeout
+            )
 
-        raise NotImplementedError("Relay connection transport not yet implemented")
+            logger.info("Connected to relay %s", relay_node.node_id[:20])
+
+            # Step 2: Send RELAY_REGISTER request
+            await relay_connection.send_message({
+                "command": "RELAY_REGISTER",
+                "payload": {
+                    "peer_id": peer_id,  # Target peer we want to connect to
+                    "timeout": 30.0
+                }
+            })
+
+            logger.debug("Sent RELAY_REGISTER to relay for peer %s", peer_id[:20])
+
+            # Step 3: Wait for RELAY_READY or RELAY_WAITING response
+            response = await asyncio.wait_for(
+                relay_connection.receive_message(),
+                timeout=30.0
+            )
+
+            if not response:
+                raise ConnectionError("No response from relay")
+
+            # Handle different responses
+            if response.get("command") == "RELAY_WAITING":
+                # Relay is waiting for other peer - keep waiting for RELAY_READY
+                logger.debug("Relay waiting for peer %s to register", peer_id[:20])
+                response = await asyncio.wait_for(
+                    relay_connection.receive_message(),
+                    timeout=30.0  # Wait for other peer to register
+                )
+
+            if not response or response.get("command") != "RELAY_READY":
+                logger.warning("Invalid relay response: %s", response)
+                raise ConnectionError(f"Relay did not confirm session: {response}")
+
+            session_id = response.get("payload", {}).get("session_id")
+            if not session_id:
+                raise ConnectionError("Relay did not provide session ID")
+
+            logger.info(
+                "Relay session established: %s (peer=%s, relay=%s)",
+                session_id, peer_id[:20], relay_node.node_id[:20]
+            )
+
+            # Step 4: Wrap connection in RelayedPeerConnection
+            from ..transports.relayed_connection import RelayedPeerConnection
+
+            relayed_conn = RelayedPeerConnection(
+                peer_id=peer_id,
+                relay_node=relay_node,
+                relay_connection=relay_connection,
+                session_id=session_id
+            )
+
+            await relayed_conn.start()
+
+            self.stats["relay_connections"] += 1
+
+            logger.info("Relay connection established to %s", peer_id[:20])
+            return relayed_conn
+
+        except asyncio.TimeoutError as e:
+            logger.warning(
+                "Relay connection timeout to %s via %s",
+                peer_id[:20], relay_node.node_id[:20]
+            )
+            raise ConnectionError(f"Relay timeout: {e}")
+        except Exception as e:
+            logger.error(
+                "Failed to connect via relay to %s: %s",
+                peer_id[:20], e
+            )
+            raise ConnectionError(f"Relay connection failed: {e}")
 
     # ===== Server Mode: Relay Volunteering =====
 
@@ -405,6 +484,9 @@ class RelayManager:
             requester_id[:20], target_id[:20]
         )
 
+        # Store connection reference for message forwarding
+        self.peer_connections[requester_id] = requester_connection
+
         # Check if target already registered
         if target_id in self.peer_to_session:
             # Both peers registered - create session
@@ -474,8 +556,46 @@ class RelayManager:
             logger.warning("Rate limit exceeded for peer %s", from_peer[:20])
             return False
 
-        # TODO: Forward message to destination peer via P2P connection
-        # (Requires protocol message type: RELAY_MESSAGE)
+        # Forward message to destination peer via P2P connection
+        if to_peer not in self.peer_connections:
+            logger.warning(
+                "Destination peer %s not connected to relay",
+                to_peer[:20]
+            )
+            return False
+
+        try:
+            # Get destination peer's connection
+            dest_connection = self.peer_connections[to_peer]
+
+            # Decode message bytes to dict for protocol
+            import json
+            message_dict = json.loads(message.decode('utf-8'))
+
+            # Wrap in RELAY_MESSAGE protocol and forward
+            relay_message = {
+                "command": "RELAY_MESSAGE",
+                "payload": {
+                    "from": from_peer,
+                    "to": to_peer,
+                    "session_id": session_id,
+                    "message": message_dict
+                }
+            }
+
+            await dest_connection.send_message(relay_message)
+
+            logger.debug(
+                "Forwarded RELAY_MESSAGE: %s → %s (%d bytes, session=%s)",
+                from_peer[:20], to_peer[:20], len(message), session_id
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to forward message to %s: %s",
+                to_peer[:20], e
+            )
+            return False
 
         # Update statistics
         session.messages_relayed += 1
@@ -484,11 +604,6 @@ class RelayManager:
 
         self.stats["messages_relayed"] += 1
         self.stats["bytes_relayed"] += len(message)
-
-        logger.debug(
-            "Relayed message: %s → %s (%d bytes, session=%s)",
-            from_peer[:20], to_peer[:20], len(message), session_id
-        )
 
         return True
 

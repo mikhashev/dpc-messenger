@@ -50,6 +50,9 @@ from .message_handlers.knowledge_handler import (
     KnowledgeCommitResultHandler
 )
 from .message_handlers.gossip_handler import GossipSyncHandler, GossipMessageHandler
+from .message_handlers.relay_register_handler import RelayRegisterHandler
+from .message_handlers.relay_message_handler import RelayMessageHandler
+from .message_handlers.relay_disconnect_handler import RelayDisconnectHandler
 from .message_handlers.file_offer_handler import FileOfferHandler
 from .message_handlers.file_accept_handler import FileAcceptHandler
 from .message_handlers.file_chunk_handler import FileChunkHandler
@@ -259,6 +262,11 @@ class CoreService:
         # Gossip protocol handlers
         self.message_router.register_handler(GossipSyncHandler(self))  # Anti-entropy sync
         self.message_router.register_handler(GossipMessageHandler(self))  # Epidemic routing
+
+        # Volunteer relay handlers (server mode)
+        self.message_router.register_handler(RelayRegisterHandler(self))  # Relay session registration
+        self.message_router.register_handler(RelayMessageHandler(self))  # Message forwarding
+        self.message_router.register_handler(RelayDisconnectHandler(self))  # Session cleanup
 
         # File transfer handlers
         self.message_router.register_handler(FileOfferHandler(self))

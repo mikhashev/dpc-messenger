@@ -8,7 +8,7 @@ Algorithm:
 1. Discover external endpoints via DHT peers (no STUN server)
 2. Detect NAT type (cone vs symmetric)
 3. Coordinate simultaneous UDP send via DHT (birthday paradox)
-4. Upgrade to DTLS for encryption (TODO)
+4. Upgrade to DTLS for encryption (v0.10.1)
 
 Requirements:
 - Peer must support hole punching (advertised in DHT)
@@ -93,7 +93,7 @@ class UDPHolePunchStrategy(ConnectionStrategy):
         2. Detect our NAT type (cone vs symmetric)
         3. Coordinate simultaneous UDP send with peer
         4. Create bidirectional NAT mapping (birthday paradox)
-        5. Upgrade to DTLS for encryption (TODO)
+        5. Upgrade to DTLS for encryption (v0.10.1)
 
         Args:
             node_id: Target node identifier
@@ -115,7 +115,7 @@ class UDPHolePunchStrategy(ConnectionStrategy):
             5. Both peers send at exact same time
             6. NAT creates bidirectional mapping
             7. Verify with ping/pong
-            8. Return socket (TODO: wrap in DTLS)
+            8. Upgrade to DTLS and return encrypted connection
         """
         if not self.is_applicable(endpoints):
             raise StrategyNotApplicableError(

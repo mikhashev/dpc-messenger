@@ -142,57 +142,11 @@ class VolunteerRelayStrategy(ConnectionStrategy):
                 relay_node.node_id[:20], relay_node.region, relay_node.quality_score()
             )
 
-            # Step 2: Connect to relay via P2P manager (TLS)
-            relay_connection = await asyncio.wait_for(
-                orchestrator.p2p_manager.connect_to_peer(
-                    relay_node.ip,
-                    relay_node.port,
-                    relay_node.node_id
-                ),
-                timeout=self.timeout
-            )
-
-            logger.info("Connected to relay %s", relay_node.node_id[:20])
-
-            # Step 3: Send RELAY_REGISTER request
-            await relay_connection.send_message({
-                "command": "RELAY_REGISTER",
-                "payload": {
-                    "peer_id": node_id,  # Target peer we want to connect to
-                    "timeout": 30.0
-                }
-            })
-
-            # Step 4: Wait for RELAY_READY response
-            response = await asyncio.wait_for(
-                relay_connection.receive_message(),
-                timeout=30.0
-            )
-
-            if not response or response.get("command") != "RELAY_READY":
-                logger.warning("Invalid relay response: %s", response)
-                raise ConnectionError("Relay did not confirm session")
-
-            session_id = response.get("payload", {}).get("session_id")
-            if not session_id:
-                raise ConnectionError("Relay did not provide session ID")
-
-            logger.info(
-                "Relay session established: %s (peer=%s, relay=%s)",
-                session_id, node_id[:20], relay_node.node_id[:20]
-            )
-
-            # Step 5: Wrap in RelayedPeerConnection
-            from ..transports.relayed_connection import RelayedPeerConnection
-
-            relayed_conn = RelayedPeerConnection(
+            # Step 2-5: Connect via relay manager (delegates connection logic)
+            relayed_conn = await orchestrator.relay_manager.connect_via_relay(
                 peer_id=node_id,
-                relay_node=relay_node,
-                relay_connection=relay_connection,
-                session_id=session_id
+                relay_node=relay_node
             )
-
-            await relayed_conn.start()
 
             logger.info("Relay connection established to %s", node_id[:20])
             return relayed_conn

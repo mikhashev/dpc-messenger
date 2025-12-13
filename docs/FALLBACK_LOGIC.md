@@ -256,40 +256,42 @@ servers = turn:your-turn-server.com:3478
 
 - **Fails for symmetric NAT** - Falls back to Priority 5
 - **Timing-sensitive** - Requires clock synchronization
-- **UDP only** - Needs DTLS upgrade for encryption (TODO)
+- **Transport protocol** - UDP + DTLS (encrypted, v0.10.1)
 
-### ⚠️ Security Warning: DTLS Encryption (v0.10.0)
+### ✅ Security: DTLS Encryption (v0.10.1)
 
-**Current Status:** UDP hole punching establishes **unencrypted** UDP connections.
+**Current Status:** UDP hole punching establishes **encrypted** UDP connections via DTLS 1.2.
 
-**DTLS (Datagram Transport Layer Security)** upgrade is deferred to **v0.11.0+**. Until then:
+**DTLS (Datagram Transport Layer Security)** provides:
+- End-to-end encryption for UDP packets
+- Mutual authentication via X.509 certificates
+- Replay protection and message integrity
+- Same security guarantees as TLS but for datagrams
 
-**Recommendation:**
+**Configuration:**
 ```ini
 [connection]
-enable_hole_punching = false  # Disable unencrypted UDP (recommended for v0.10.0)
+enable_hole_punching = true  # Enabled by default in v0.10.1+ (now encrypted)
 ```
 
-**Why is it disabled by default?**
-- **Privacy violation:** UDP connections lack encryption layer
-- **Better alternatives exist:**
-  - Priority 3 (Hub WebRTC) - Has built-in DTLS encryption
-  - Priority 5 (Volunteer Relays) - Uses TLS encryption
-- **Implementation complexity:** DTLS handshake adds 2-3 seconds to connection time
+**Implementation Details:**
+- **Transport:** UDP + DTLS 1.2 (Datagram Transport Layer Security)
+- **Handshake:** Automatic after successful hole punch (~2-3 seconds)
+- **Certificates:** Uses existing X.509 certificates from `~/.dpc/`
+- **Fallback:** Falls back to Priority 5 (relay) if DTLS handshake fails
 
-**When will DTLS be implemented?**
-- **v0.11.0 (Future):** Full DTLS upgrade
-- **Flow:**
-  1. Perform UDP hole punch (as before)
-  2. Exchange certificates over punched UDP hole
-  3. Perform DTLS handshake (similar to TLS)
-  4. Upgrade socket to DTLS wrapper
-  5. All subsequent messages encrypted via DTLS
+**Connection Flow:**
+1. Perform UDP hole punch (create bidirectional NAT mapping)
+2. Initiate DTLS handshake over punched UDP socket
+3. Exchange and verify X.509 certificates
+4. Establish encrypted UDP channel
+5. Return `UDPPeerConnection` (encrypted)
 
-**Current Workarounds:**
-1. **Disable hole punching** (recommended) - Use Priority 3 or 5 instead
-2. **Use only for testing** - Don't send sensitive data
-3. **Local network only** - Use UDP hole punching only on trusted networks
+**Benefits:**
+- **Hub-independent NAT traversal** - Works without centralized TURN servers
+- **End-to-end encryption** - Same security as TLS but for UDP
+- **60-70% success rate** - Covers most Cone NAT scenarios
+- **Privacy-preserving** - No third-party relay needed for most connections
 
 ### Configuration
 
