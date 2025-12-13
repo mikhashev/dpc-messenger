@@ -297,7 +297,7 @@ export function connectToCoreService() {
                         newMap.set(message.payload.transfer_id, {
                             ...message.payload,
                             status: "transferring",
-                            progress: 0
+                            progress: message.payload.progress_percent || 0  // Map progress_percent to progress for UI
                         });
                         return newMap;
                     });
@@ -311,7 +311,8 @@ export function connectToCoreService() {
                         if (transfer) {
                             newMap.set(message.payload.transfer_id, {
                                 ...transfer,
-                                ...message.payload
+                                ...message.payload,
+                                progress: message.payload.progress_percent  // Map progress_percent to progress for UI
                             });
                         }
                         return newMap;

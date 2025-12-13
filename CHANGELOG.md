@@ -62,6 +62,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Fix:** Added handler to add sender-side transfers to activeFileTransfers store
   - **Result:** Active Transfers panel now shows on both sender and receiver
   - Files: [coreService.ts:292-303](dpc-client/ui/src/lib/coreService.ts)
+- **Progress Bar Not Updating** - Fixed progress bar stuck at 0% during file transfer
+  - **Bug:** Progress bar appeared but stayed at 0% throughout transfer
+  - **Root Cause:** Backend sends `progress_percent` but UI expects `progress` field
+  - **Fix:** Map `progress_percent` to `progress` in file_transfer_progress handler
+  - **Result:** Progress bar now updates correctly during transfer (0% → 100%)
+  - Files: [coreService.ts:305-319](dpc-client/ui/src/lib/coreService.ts)
 - **FILE_CANCEL Reasons** - Added `chunk_verification_failed` and `missing_chunks` reasons
   - `chunk_verification_failed` - Chunk failed verification after max retries
   - `missing_chunks` - Expected chunk missing during finalization
