@@ -284,6 +284,17 @@ class FileTransferManager:
         transfer.status = TransferStatus.TRANSFERRING
         logger.info(f"FILE_ACCEPT received, starting chunk transfer: {transfer.filename}")
 
+        # Broadcast file transfer started event to UI
+        if self.local_api:
+            await self.local_api.broadcast_event("file_transfer_started", {
+                "transfer_id": transfer_id,
+                "node_id": node_id,
+                "filename": transfer.filename,
+                "size_bytes": transfer.file_path.stat().st_size,
+                "direction": "upload",
+                "total_chunks": transfer.total_chunks
+            })
+
         # Send chunks
         try:
             with open(transfer.file_path, 'rb') as f:
@@ -306,6 +317,18 @@ class FileTransferManager:
                     # Progress callback
                     if transfer.progress_callback:
                         transfer.progress_callback(transfer_id, chunk_index + 1, transfer.total_chunks)
+
+                    # Broadcast progress to UI (every 10 chunks to avoid spam)
+                    if self.local_api and (chunk_index % 10 == 0 or chunk_index == transfer.total_chunks - 1):
+                        await self.local_api.broadcast_event("file_transfer_progress", {
+                            "transfer_id": transfer_id,
+                            "node_id": node_id,
+                            "filename": transfer.filename,
+                            "direction": "upload",
+                            "chunks_sent": chunk_index + 1,
+                            "total_chunks": transfer.total_chunks,
+                            "progress_percent": int(((chunk_index + 1) / transfer.total_chunks) * 100)
+                        })
 
                     # Small delay to avoid overwhelming receiver
                     await asyncio.sleep(0.01)
@@ -449,6 +472,16 @@ class FileTransferManager:
 
         transfer.status = TransferStatus.COMPLETED
         logger.info(f"File transfer completed: {transfer.filename}")
+
+        # Broadcast completion to UI (sender side)
+        if self.local_api and transfer.direction == "upload":
+            await self.local_api.broadcast_event("file_transfer_complete", {
+                "transfer_id": transfer_id,
+                "node_id": node_id,
+                "filename": transfer.filename,
+                "direction": "upload",
+                "status": "completed"
+            })
 
     async def cancel_transfer(self, transfer_id: str, reason: str = "user_cancelled"):
         """
