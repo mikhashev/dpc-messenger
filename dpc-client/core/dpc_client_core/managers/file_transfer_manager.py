@@ -76,7 +76,8 @@ class FileTransfer:
         status: Current transfer status
         chunks_received: Set of received chunk indices
         total_chunks: Total number of chunks
-        file_data: Accumulated file data (for downloads)
+        file_data: DEPRECATED - Final assembled file data (for downloads, use chunk_data instead)
+        chunk_data: Dict[int, bytes] - Chunks indexed by chunk_index for out-of-order assembly (v0.11.1)
         file_path: Path to file being sent (for uploads)
         progress_callback: Optional callback for progress updates
         chunk_hashes: List of CRC32 hashes for each chunk (v0.11.1)
@@ -95,7 +96,8 @@ class FileTransfer:
     status: TransferStatus
     chunks_received: set
     total_chunks: int
-    file_data: Optional[bytearray] = None
+    file_data: Optional[bytearray] = None  # DEPRECATED: use chunk_data dict instead
+    chunk_data: Optional[dict] = None  # v0.11.1: Dict[int, bytes] - chunks indexed by chunk_index
     file_path: Optional[Path] = None
     progress_callback: Optional[Callable[[str, int, int], None]] = None
     chunk_hashes: Optional[list] = None  # CRC32 hashes for integrity
@@ -394,9 +396,9 @@ class FileTransferManager:
             logger.warning(f"FILE_CHUNK for unknown download: {transfer_id}")
             return
 
-        # Initialize file data buffer
-        if transfer.file_data is None:
-            transfer.file_data = bytearray()
+        # Initialize chunk data dict (v0.11.1: indexed storage for out-of-order assembly)
+        if transfer.chunk_data is None:
+            transfer.chunk_data = {}
 
         # v0.11.1: Verify chunk CRC32 if hashes provided
         chunk_verified = True
@@ -436,10 +438,10 @@ class FileTransferManager:
                     transfer.chunks_failed.discard(chunk_index)
                     logger.info(f"Chunk {chunk_index} verified successfully on retry")
 
-        # Only append chunk if verified
+        # Only store chunk if verified (v0.11.1: indexed storage for out-of-order)
         if chunk_verified:
-            # Append chunk (assume in-order for now; TODO: handle out-of-order)
-            transfer.file_data.extend(chunk_data)
+            # Store chunk by index (supports out-of-order arrival)
+            transfer.chunk_data[chunk_index] = chunk_data
             transfer.chunks_received.add(chunk_index)
 
             # Progress callback
@@ -451,8 +453,20 @@ class FileTransferManager:
             await self._finalize_download(node_id, transfer)
 
     async def _finalize_download(self, node_id: str, transfer: FileTransfer):
-        """Finalize download: verify hash and save file."""
+        """Finalize download: assemble chunks in order, verify hash, and save file."""
         logger.info(f"All chunks received for {transfer.filename}, finalizing...")
+
+        # v0.11.1: Assemble chunks in correct order (fix out-of-order bug)
+        transfer.file_data = bytearray()
+        for chunk_index in range(transfer.total_chunks):
+            if chunk_index not in transfer.chunk_data:
+                logger.error(f"Missing chunk {chunk_index} during finalization!")
+                transfer.status = TransferStatus.FAILED
+                await self._send_file_cancel(node_id, transfer.transfer_id, "missing_chunks")
+                return
+            transfer.file_data.extend(transfer.chunk_data[chunk_index])
+
+        logger.info(f"Assembled {len(transfer.file_data)} bytes from {transfer.total_chunks} chunks in correct order")
 
         # Verify hash
         if self.verify_hash and transfer.hash != "none":

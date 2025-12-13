@@ -42,8 +42,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Files: [managers/file_transfer_manager.py:378-447](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
 
 ### Fixed
-- **FILE_CANCEL Reasons** - Added `chunk_verification_failed` reason
-  - Indicates chunk failed verification after max retries
+- **CRITICAL: Out-of-Order Chunk Assembly** - Fixed file corruption bug
+  - **Bug:** Chunks were appended in arrival order, not correct order based on chunk_index
+  - **Impact:** File corruption when chunks arrive out of order (especially over WebRTC, relay, gossip)
+  - **Symptom:** Video files unplayable, media players fail to decode corrupted streams
+  - **Root Cause:** Used `extend()` to append chunks sequentially instead of indexed storage
+  - **Fix:** Store chunks in dict indexed by chunk_index, assemble in order during finalization
+  - **Result:** Guarantees correct file assembly regardless of network packet ordering
+  - Files: [managers/file_transfer_manager.py:399-453](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+- **FILE_CANCEL Reasons** - Added `chunk_verification_failed` and `missing_chunks` reasons
+  - `chunk_verification_failed` - Chunk failed verification after max retries
+  - `missing_chunks` - Expected chunk missing during finalization
   - Helps distinguish from hash_mismatch (final SHA256 verification)
   - Files: [specs/dptp_v1.md](specs/dptp_v1.md)
 
