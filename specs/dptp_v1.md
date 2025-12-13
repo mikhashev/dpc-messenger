@@ -686,6 +686,198 @@ Receiver performs these checks in order:
 
 ---
 
+### 3.11 File Transfer Messages (v0.11.0)
+
+Peer-to-peer file sharing with chunked transfers, progress tracking, and SHA256 verification.
+
+#### FILE_OFFER
+
+Offers a file to the peer for transfer.
+
+**Format:**
+```json
+{
+  "command": "FILE_OFFER",
+  "payload": {
+    "transfer_id": "550e8400-e29b-41d4-a716-446655440000",
+    "filename": "report.pdf",
+    "size_bytes": 2048000,
+    "hash": "sha256:a1b2c3d4e5f6...",
+    "mime_type": "application/pdf",
+    "chunk_size": 65536
+  }
+}
+```
+
+**Fields:**
+- `transfer_id` (string, required): UUID for transfer tracking
+- `filename` (string, required): Original filename
+- `size_bytes` (integer, required): Total file size in bytes
+- `hash` (string, required): SHA256 hash for integrity verification (format: `sha256:hex_string`)
+- `mime_type` (string, required): MIME type of the file
+- `chunk_size` (integer, required): Bytes per chunk (typically 65536 = 64KB)
+
+**Response:** FILE_ACCEPT (if accepted) or FILE_CANCEL (if rejected)
+
+**Security:** Peer may reject based on firewall rules (`privacy_rules.json` → `file_transfer.allow_nodes/allow_groups`)
+
+**UI Behavior:** Opens accept/reject dialog showing filename, size, sender, and hash for user approval
+
+---
+
+#### FILE_ACCEPT
+
+Accepts a file transfer offer.
+
+**Format:**
+```json
+{
+  "command": "FILE_ACCEPT",
+  "payload": {
+    "transfer_id": "550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+**Fields:**
+- `transfer_id` (string, required): Matches FILE_OFFER transfer ID
+
+**Response:** FILE_CHUNK messages (sender begins chunked transfer)
+
+---
+
+#### FILE_CHUNK
+
+Transfers a single chunk of file data.
+
+**Format:**
+```json
+{
+  "command": "FILE_CHUNK",
+  "payload": {
+    "transfer_id": "550e8400-e29b-41d4-a716-446655440000",
+    "chunk_index": 0,
+    "total_chunks": 32,
+    "data": "base64_encoded_chunk_data..."
+  }
+}
+```
+
+**Fields:**
+- `transfer_id` (string, required): Transfer identifier
+- `chunk_index` (integer, required): Zero-based chunk index
+- `total_chunks` (integer, required): Total number of chunks in transfer
+- `data` (string, required): Base64-encoded chunk data (typically 64KB when decoded)
+
+**Behavior:**
+- Receiver stores chunks to temporary buffer
+- Progress tracking: `(chunk_index + 1) / total_chunks * 100%`
+- Receiver sends FILE_COMPLETE after receiving all chunks
+
+---
+
+#### FILE_COMPLETE
+
+Signals successful file transfer completion with hash verification.
+
+**Format:**
+```json
+{
+  "command": "FILE_COMPLETE",
+  "payload": {
+    "transfer_id": "550e8400-e29b-41d4-a716-446655440000",
+    "hash": "sha256:a1b2c3d4e5f6..."
+  }
+}
+```
+
+**Fields:**
+- `transfer_id` (string, required): Transfer identifier
+- `hash` (string, required): SHA256 hash of complete file for verification
+
+**Behavior:**
+- Receiver verifies hash matches FILE_OFFER hash
+- If hash mismatch: sends FILE_CANCEL with reason `hash_mismatch`
+- If hash matches: saves file to `~/.dpc/conversations/{peer_id}/files/{filename}`
+- Adds file metadata to conversation history
+
+**Storage:**
+- Files stored per-peer: `~/.dpc/conversations/{peer_id}/files/`
+- Conversation history stores metadata only (filename, size, hash, MIME type)
+- Token usage: ~20 tokens per file (metadata-only reference)
+
+---
+
+#### FILE_CANCEL
+
+Cancels an in-progress or pending file transfer.
+
+**Format:**
+```json
+{
+  "command": "FILE_CANCEL",
+  "payload": {
+    "transfer_id": "550e8400-e29b-41d4-a716-446655440000",
+    "reason": "user_cancelled"
+  }
+}
+```
+
+**Fields:**
+- `transfer_id` (string, required): Transfer identifier
+- `reason` (string, required): Cancellation reason
+  - `user_cancelled` - User manually cancelled
+  - `timeout` - Transfer timed out
+  - `hash_mismatch` - SHA256 verification failed
+  - `permission_denied` - Firewall rejected transfer
+  - `size_limit_exceeded` - File exceeds peer's size limit
+
+**Behavior:**
+- Both sender and receiver can send FILE_CANCEL
+- Receiver cleans up partial transfer data
+- Sender stops sending chunks
+- Transfer marked as failed in UI
+
+---
+
+**File Transfer Configuration:**
+
+Firewall rules (`~/.dpc/privacy_rules.json`):
+```json
+{
+  "file_transfer": {
+    "allow_nodes": ["dpc-node-alice-123"],
+    "allow_groups": ["friends"],
+    "max_size_mb": 1000,
+    "allowed_mime_types": ["*"]
+  }
+}
+```
+
+Client configuration (`~/.dpc/config.ini`):
+```ini
+[file_transfer]
+enabled = true
+chunk_size = 65536
+background_threshold_mb = 50
+max_concurrent_transfers = 3
+verify_hash = true
+```
+
+**Security:**
+- All file transfers encrypted end-to-end (inherited from connection layer: TLS, DTLS, WebRTC)
+- SHA256 hash verification prevents tampering
+- Firewall rules required for transfer (default: deny)
+- Per-peer storage isolation
+- No server-side storage (pure P2P)
+
+**Large File Handling:**
+- Files >50MB use background transfer process
+- Files >100MB prefer Direct TLS connection (fallback to WebRTC/relay for smaller files)
+- Progress tracking with pause/resume support (future enhancement)
+
+---
+
 ## 4. Node Identity System
 
 ### Node ID Format
@@ -947,11 +1139,13 @@ DPTP is designed to be extensible. New commands can be added by:
 - **New message types**: REQUEST_DEVICE_CONTEXT, DEVICE_CONTEXT_RESPONSE (hardware/software context sharing)
 - **New message types**: CONTEXT_UPDATED (peer cache invalidation)
 - **New message types**: GOSSIP_MESSAGE (epidemic routing), GOSSIP_SYNC (anti-entropy sync)
+- **New message types**: FILE_OFFER, FILE_ACCEPT, FILE_CHUNK, FILE_COMPLETE, FILE_CANCEL (peer-to-peer file transfer with chunked delivery, v0.11.0)
 - **Transport Layers section updated**: Added UDP DTLS, clarified IPv4 Direct is internet-wide, documented 6-tier fallback architecture
 - **Connection Flow section updated**: Added UDP DTLS hole punch connection flow diagram
 - **Security Considerations expanded**:
   - Authentication now covers Direct TLS, WebRTC DTLS, and UDP DTLS
   - Attack Mitigation includes Gossip attacks (replay, TTL, hop limits) and DHT security
+  - File Transfer security (end-to-end encryption, SHA256 verification, firewall-gated)
 - **Related Specifications updated**: Added Device Context Schema v1.1 reference
 
 ### v1.0 (November 29, 2025)

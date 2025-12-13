@@ -7,8 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.11.0] - 2025-12-13
+
 ### Added
-- **Gossip Protocol Enhancements (v0.10.2-dev)** - Enhanced security and DHT certificate discovery
+- **File Transfer System (Week 1 Complete)** - Peer-to-peer file sharing with chunked transfers
+  - **Chunked File Transfer** - Send files of any size with progress tracking
+    - 64KB chunks for efficient transfer over all 6 connection strategies
+    - SHA256 hash verification for integrity
+    - Resume support for interrupted transfers
+    - Background process for large files (>50MB)
+    - Prefer Direct TLS for large files, fallback to WebRTC/relay
+    - Files: [managers/file_transfer_manager.py](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+  - **File Transfer Protocol** - New DPTP commands
+    - `FILE_OFFER`, `FILE_ACCEPT`, `FILE_CHUNK`, `FILE_COMPLETE`, `FILE_CANCEL`
+    - Per-transfer UUID tracking
+    - Metadata includes filename, size, MIME type, hash
+    - Files: [message_handlers/file_offer_handler.py](dpc-client/core/dpc_client_core/message_handlers/file_offer_handler.py) and related handlers
+  - **File Transfer UI** - User-friendly file sharing interface
+    - File picker button and drag-and-drop support
+    - Accept/reject dialog with file metadata display
+    - Active transfers panel with progress bars
+    - File attachments displayed in chat history
+    - Per-peer storage: `~/.dpc/conversations/{peer_id}/files/`
+    - Files: [+page.svelte](dpc-client/ui/src/routes/+page.svelte)
+  - **Firewall Permissions** - File transfer access control
+    - New `file_transfer.allow` permission (default: deny)
+    - Per-peer and per-group rules in `privacy_rules.json`
+    - File Groups tab in Firewall UI for managing permissions
+    - Configuration: `[file_transfer]` section in `config.ini`
+    - Files: [FirewallEditor.svelte](dpc-client/ui/src/lib/components/FirewallEditor.svelte)
+  - **Conversation History Integration** - Files tracked in message history
+    - File attachments stored with metadata (filename, size, hash, MIME type)
+    - Chat display shows file name, size, and download status
+    - Metadata-only references for token efficiency (~20 tokens per file)
+    - Files: [conversation_monitor.py](dpc-client/core/dpc_client_core/conversation_monitor.py)
+
+- **Gossip Protocol v0.10.2** - Enhanced security and DHT certificate discovery
   - **Hybrid Encryption (AES-GCM + RSA-OAEP)** - No payload size limit for gossip messages
     - Replaces pure RSA encryption (~190 byte limit)
     - AES-256-GCM for data encryption (authenticated, detects tampering)
@@ -22,13 +58,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - Key format: `cert:<node_id>` (e.g., `cert:dpc-node-alice123`)
     - Enables gossip protocol to work without Hub or pre-shared certificates
     - Files: [managers/gossip_manager.py](dpc-client/core/dpc_client_core/managers/gossip_manager.py)
+  - **Transport Wrapper** - Gossip protocol integrated with 6-tier connection fallback
+    - Gossip messages routed through GossipConnection wrapper
+    - Leverages existing encryption (TLS, DTLS, WebRTC) from underlying transport
+    - End-to-end encryption maintained through relay hops
+    - Files: [transports/gossip_connection.py](dpc-client/core/dpc_client_core/transports/gossip_connection.py)
   - **Test Coverage:** 38 tests passing (12 DHT certificate tests, 14 encryption tests, 12 connection tests)
+
 - **Complete Firewall UI Editor** - 7 tabs for managing all privacy rules
   - File Groups tab - Define aliases for groups of context files
   - AI Scopes tab - Control local AI access in different modes (work/personal)
   - Device Sharing tab - Presets for sharing device context information
+  - File Transfer tab - Manage file sharing permissions
   - All tabs support CRUD operations with duplicate checking
   - Files: [FirewallEditor.svelte](dpc-client/ui/src/lib/components/FirewallEditor.svelte)
+
 - **AI Scope Filtering** - Local AI context filtering based on mode
   - Work mode vs personal mode context isolation
   - Selector in chat UI (only shown when context enabled and scopes exist)
@@ -36,6 +80,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Files: [firewall.py:332-395](dpc-client/core/dpc_client_core/firewall.py), [+page.svelte](dpc-client/ui/src/routes/+page.svelte)
 
 ### Fixed
+- **File Transfer Bug Fixes** - Multiple issues resolved
+  - Prevent phantom messages on file rejection
+  - Fix Active Transfers panel state bugs on rejection
+  - Reject transfer when closing dialog without decision
+  - Improve file attachment text readability
+  - Hide duplicate text when attachments present
+  - Broadcast completion event on receiver side
+  - Ensure file messages always broadcast to UI
+  - Fix firewall permission checking
+  - Fix accept/reject dialog bugs
+  - Fix P2PManager API calls and add send confirmation
+  - Fix TypeScript and accessibility errors
+  - Add ARIA roles and keyboard handlers to file offer dialog
+
 - **CRITICAL: Wildcard Override Bug** - Specific deny rules now correctly override wildcard allow rules
   - Bug affected ALL filtering methods (AI scopes, peer personal context, peer device context)
   - Fix: Check for specific rules FIRST before falling back to wildcards
@@ -43,11 +101,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Affects 4 filtering methods in firewall.py (lines 258-552)
   - Comprehensive test coverage added (30 firewall tests, all passing)
 
+- **Graceful Shutdown** - Improved service shutdown behavior
+  - Proper task cancellation and cleanup
+  - Prevents resource leaks on exit
+  - Cleaner log output during shutdown
+  - Files: [run_service.py](dpc-client/core/run_service.py)
+
+- **UI Overflow** - Fixed horizontal scrolling from long unbreakable text
+  - Chat messages now properly wrap long text
+  - Files: [+page.svelte](dpc-client/ui/src/routes/+page.svelte)
+
 ### Documentation
 - Updated CLAUDE.md with conversation history behavior documentation
   - Clarified what gets stored in conversation history (USER/ASSISTANT messages only)
   - Explained context data is ephemeral (sent fresh based on checkbox state)
   - Added practical examples of context ON/OFF behavior
+- Updated CLAUDE.md with file transfer architecture documentation
+  - Detailed file transfer protocol specification
+  - Firewall permissions for file transfers
+  - Conversation history integration patterns
+- Updated specs/dptp_v1.md with file transfer protocol commands
+- Updated privacy_rules.example.json with file_transfer section
+
+### Security
+- **File Transfer Security** - Privacy-first design
+  - All file transfers encrypted end-to-end (inherited from connection layer)
+  - SHA256 hash verification prevents tampering
+  - Firewall rules required for file transfer (default: deny)
+  - Per-peer storage isolation
+  - No server-side storage (pure P2P)
 
 ---
 

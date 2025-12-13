@@ -220,8 +220,12 @@ class FileTransferManager:
             raise RuntimeError(f"Max concurrent transfers ({self.max_concurrent_transfers}) exceeded")
 
         # Check firewall permission
-        if not await self._check_file_transfer_permission(node_id, file_path):
-            raise PermissionError(f"Firewall denies file transfer to {node_id}")
+        allowed, error_msg = await self._check_file_transfer_permission(node_id, file_path)
+        if not allowed:
+            if error_msg:
+                raise PermissionError(error_msg)
+            else:
+                raise PermissionError(f"Firewall denies file transfer to {node_id}")
 
         # Compute file metadata
         file_size = file_path.stat().st_size
@@ -493,7 +497,7 @@ class FileTransferManager:
         file_path_or_name: any = None,
         size_bytes: int = None,
         mime_type: str = None
-    ) -> bool:
+    ) -> tuple:
         """
         Check if firewall allows file transfer with peer.
 
@@ -504,7 +508,9 @@ class FileTransferManager:
             mime_type: MIME type (optional, for downloads)
 
         Returns:
-            True if allowed, False otherwise
+            Tuple of (allowed: bool, error_message: str|None)
+            - (True, None) if allowed
+            - (False, error_msg) if denied with specific reason
         """
         # Get file transfer rules from firewall
         file_transfer_rules = self.firewall.rules.get('file_transfer', {})
@@ -534,8 +540,9 @@ class FileTransferManager:
                         break  # Use first matching group
 
         if not allowed:
-            logger.warning(f"File transfer denied by firewall for {node_id}")
-            return False
+            error_msg = "File transfer not permitted by firewall rules"
+            logger.warning(f"{error_msg} for {node_id}")
+            return (False, error_msg)
 
         # Get size and mime type
         if isinstance(file_path_or_name, Path):
@@ -553,16 +560,18 @@ class FileTransferManager:
 
         # Check per-peer size limit (optional)
         if max_size_mb and size_mb > max_size_mb:
-            logger.warning(f"File too large ({size_mb:.1f} MB > {max_size_mb} MB limit) for {node_id}")
-            return False
+            error_msg = f"File too large: {size_mb:.1f} MB exceeds {max_size_mb} MB limit"
+            logger.warning(f"{error_msg} for {node_id}")
+            return (False, error_msg)
 
         # Check MIME type restrictions (optional)
         if allowed_types and "*" not in allowed_types:
             if not any(self._mime_match(mime_type, pattern) for pattern in allowed_types):
-                logger.warning(f"MIME type {mime_type} not allowed for {node_id}")
-                return False
+                error_msg = f"File type '{mime_type}' not allowed (allowed: {', '.join(allowed_types)})"
+                logger.warning(f"{error_msg} for {node_id}")
+                return (False, error_msg)
 
-        return True
+        return (True, None)
 
     def _detect_mime_type(self, file_path: Path) -> str:
         """Detect MIME type from file extension."""
