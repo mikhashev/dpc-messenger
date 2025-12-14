@@ -32,60 +32,51 @@ class RelayDisconnectHandler(MessageHandler):
     Example:
         >>> # Peer A disconnects from relay session
         >>> handler.handle(
+        ...     "dpc-node-alice",
         ...     {
-        ...         "command": "RELAY_DISCONNECT",
-        ...         "payload": {
-        ...             "peer": "dpc-node-bob",
-        ...             "session_id": "...",
-        ...             "reason": "connection_closed"
-        ...         }
-        ...     },
-        ...     connection
+        ...         "peer": "dpc-node-bob",
+        ...         "session_id": "...",
+        ...         "reason": "connection_closed"
+        ...     }
         ... )
         >>> # Relay cleans up session and notifies Peer B
     """
 
-    command = "RELAY_DISCONNECT"
+    @property
+    def command_name(self) -> str:
+        return "RELAY_DISCONNECT"
 
-    def __init__(self, service: "CoreService"):
-        """
-        Initialize handler.
-
-        Args:
-            service: CoreService instance
-        """
-        self.service = service
-
-    async def handle(self, message: dict, connection) -> None:
+    async def handle(self, sender_node_id: str, payload: dict) -> None:
         """
         Handle RELAY_DISCONNECT request.
 
         Args:
-            message: Protocol message with RELAY_DISCONNECT command
-            connection: Connection from disconnecting peer
+            sender_node_id: Node ID of disconnecting peer
+            payload: Contains "peer", "session_id", and optional "reason"
 
         Protocol:
-            Request:
+            Request payload:
                 {
-                    "command": "RELAY_DISCONNECT",
-                    "payload": {
-                        "peer": "dpc-node-other-peer",
-                        "session_id": "...",
-                        "reason": "connection_closed|user_request|timeout"
-                    }
+                    "peer": "dpc-node-other-peer",
+                    "session_id": "...",
+                    "reason": "connection_closed|user_request|timeout"
                 }
 
             Response:
                 {"command": "RELAY_DISCONNECT_ACK", "payload": {"session_id": "..."}}
         """
-        payload = message.get("payload", {})
+        # Get connection from p2p_manager
+        connection = self.service.p2p_manager.peers.get(sender_node_id)
+        if not connection:
+            logger.warning("No connection found for sender %s", sender_node_id[:20])
+            return
+
         peer_id = payload.get("peer")
         session_id = payload.get("session_id")
         reason = payload.get("reason", "unknown")
-        requester_id = connection.node_id
 
         if not session_id:
-            logger.warning("RELAY_DISCONNECT missing session_id from %s", requester_id[:20])
+            logger.warning("RELAY_DISCONNECT missing session_id from %s", sender_node_id[:20])
             return
 
         # Check if relay_manager is initialized
@@ -95,7 +86,7 @@ class RelayDisconnectHandler(MessageHandler):
 
         logger.info(
             "Processing RELAY_DISCONNECT: session=%s, requester=%s, reason=%s",
-            session_id, requester_id[:20], reason
+            session_id, sender_node_id[:20], reason
         )
 
         # Find session
@@ -109,10 +100,10 @@ class RelayDisconnectHandler(MessageHandler):
             return
 
         # Verify requester is part of this session
-        if requester_id not in [session.peer_a_id, session.peer_b_id]:
+        if sender_node_id not in [session.peer_a_id, session.peer_b_id]:
             logger.warning(
                 "RELAY_DISCONNECT from non-participant: requester=%s, session=%s",
-                requester_id[:20], session_id
+                sender_node_id[:20], session_id
             )
             await connection.send_message({
                 "command": "ERROR",
@@ -124,17 +115,17 @@ class RelayDisconnectHandler(MessageHandler):
             return
 
         # Determine other peer
-        other_peer_id = session.peer_b_id if requester_id == session.peer_a_id else session.peer_a_id
+        other_peer_id = session.peer_b_id if sender_node_id == session.peer_a_id else session.peer_a_id
 
         logger.info(
             "Cleaning up relay session %s: %s disconnected (reason: %s)",
-            session_id, requester_id[:20], reason
+            session_id, sender_node_id[:20], reason
         )
 
         # Clean up session state
         del self.service.relay_manager.sessions[session_id]
-        if requester_id in self.service.relay_manager.peer_to_session:
-            del self.service.relay_manager.peer_to_session[requester_id]
+        if sender_node_id in self.service.relay_manager.peer_to_session:
+            del self.service.relay_manager.peer_to_session[sender_node_id]
         if other_peer_id in self.service.relay_manager.peer_to_session:
             del self.service.relay_manager.peer_to_session[other_peer_id]
 

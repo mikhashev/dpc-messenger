@@ -37,55 +37,46 @@ class RelayMessageHandler(MessageHandler):
     Example:
         >>> # Peer A sends message to Peer B via relay
         >>> handler.handle(
+        ...     "dpc-node-alice",
         ...     {
-        ...         "command": "RELAY_MESSAGE",
-        ...         "payload": {
-        ...             "from": "dpc-node-alice",
-        ...             "to": "dpc-node-bob",
-        ...             "session_id": "...",
-        ...             "message": {"command": "SEND_TEXT", "payload": {...}}  # Encrypted
-        ...         }
-        ...     },
-        ...     connection
+        ...         "from": "dpc-node-alice",
+        ...         "to": "dpc-node-bob",
+        ...         "session_id": "...",
+        ...         "message": {"command": "SEND_TEXT", "payload": {...}}  # Encrypted
+        ...     }
         ... )
         >>> # Relay forwards to Peer B's connection
     """
 
-    command = "RELAY_MESSAGE"
+    @property
+    def command_name(self) -> str:
+        return "RELAY_MESSAGE"
 
-    def __init__(self, service: "CoreService"):
-        """
-        Initialize handler.
-
-        Args:
-            service: CoreService instance
-        """
-        self.service = service
-
-    async def handle(self, message: dict, connection) -> None:
+    async def handle(self, sender_node_id: str, payload: dict) -> None:
         """
         Handle RELAY_MESSAGE forwarding.
 
         Args:
-            message: Protocol message with RELAY_MESSAGE command
-            connection: Connection from sender
+            sender_node_id: Node ID of message sender
+            payload: Contains "from", "to", "session_id", and "message" (encrypted)
 
         Protocol:
-            Request:
+            Request payload:
                 {
-                    "command": "RELAY_MESSAGE",
-                    "payload": {
-                        "from": "dpc-node-sender",
-                        "to": "dpc-node-receiver",
-                        "session_id": "...",
-                        "message": {...}  # Encrypted message
-                    }
+                    "from": "dpc-node-sender",
+                    "to": "dpc-node-receiver",
+                    "session_id": "...",
+                    "message": {...}  # Encrypted message
                 }
 
             Response (on error):
                 {"command": "ERROR", "payload": {"error": "...", "message": "..."}}
         """
-        payload = message.get("payload", {})
+        # Get connection from p2p_manager
+        connection = self.service.p2p_manager.peers.get(sender_node_id)
+        if not connection:
+            logger.warning("No connection found for sender %s", sender_node_id[:20])
+            return
         from_peer = payload.get("from")
         to_peer = payload.get("to")
         session_id = payload.get("session_id")
@@ -93,7 +84,7 @@ class RelayMessageHandler(MessageHandler):
 
         # Validate payload
         if not all([from_peer, to_peer, session_id, encrypted_message]):
-            logger.warning("Invalid RELAY_MESSAGE payload from %s", connection.node_id[:20])
+            logger.warning("Invalid RELAY_MESSAGE payload from %s", sender_node_id[:20])
             await connection.send_message({
                 "command": "ERROR",
                 "payload": {
@@ -104,10 +95,10 @@ class RelayMessageHandler(MessageHandler):
             return
 
         # Verify sender identity matches connection
-        if from_peer != connection.node_id:
+        if from_peer != sender_node_id:
             logger.warning(
                 "RELAY_MESSAGE from field mismatch: connection=%s, from=%s",
-                connection.node_id[:20], from_peer[:20]
+                sender_node_id[:20], from_peer[:20]
             )
             await connection.send_message({
                 "command": "ERROR",

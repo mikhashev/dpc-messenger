@@ -31,42 +31,29 @@ class RelayRegisterHandler(MessageHandler):
 
     Example:
         >>> # Peer A registers
-        >>> handler.handle(
-        ...     {"command": "RELAY_REGISTER", "payload": {"peer_id": "dpc-node-bob", "timeout": 30.0}},
-        ...     connection
-        ... )
+        >>> handler.handle("dpc-node-alice", {"peer_id": "dpc-node-bob", "timeout": 30.0})
         >>> # Returns None (waiting for peer B)
         >>>
         >>> # Peer B registers
-        >>> handler.handle(
-        ...     {"command": "RELAY_REGISTER", "payload": {"peer_id": "dpc-node-alice", "timeout": 30.0}},
-        ...     connection
-        ... )
+        >>> handler.handle("dpc-node-bob", {"peer_id": "dpc-node-alice", "timeout": 30.0})
         >>> # Returns session_id (both registered, session created)
     """
 
-    command = "RELAY_REGISTER"
+    @property
+    def command_name(self) -> str:
+        return "RELAY_REGISTER"
 
-    def __init__(self, service: "CoreService"):
-        """
-        Initialize handler.
-
-        Args:
-            service: CoreService instance
-        """
-        self.service = service
-
-    async def handle(self, message: dict, connection) -> None:
+    async def handle(self, sender_node_id: str, payload: dict) -> None:
         """
         Handle RELAY_REGISTER request.
 
         Args:
-            message: Protocol message with RELAY_REGISTER command
-            connection: Connection to requester
+            sender_node_id: Node ID of requester
+            payload: Contains "peer_id" (target peer) and optional "timeout"
 
         Protocol:
-            Request:
-                {"command": "RELAY_REGISTER", "payload": {"peer_id": "...", "timeout": 30.0}}
+            Request payload:
+                {"peer_id": "...", "timeout": 30.0}
 
             Response (if both peers registered):
                 {"command": "RELAY_READY", "payload": {"session_id": "..."}}
@@ -77,12 +64,16 @@ class RelayRegisterHandler(MessageHandler):
             Error response:
                 {"command": "ERROR", "payload": {"error": "...", "message": "..."}}
         """
-        payload = message.get("payload", {})
+        # Get connection from p2p_manager
+        connection = self.service.p2p_manager.peers.get(sender_node_id)
+        if not connection:
+            logger.warning("No connection found for sender %s", sender_node_id[:20])
+            return
+
         target_peer_id = payload.get("peer_id")
-        requester_id = connection.node_id
 
         if not target_peer_id:
-            logger.warning("RELAY_REGISTER missing peer_id from %s", requester_id[:20])
+            logger.warning("RELAY_REGISTER missing peer_id from %s", sender_node_id[:20])
             await connection.send_message({
                 "command": "ERROR",
                 "payload": {
@@ -94,7 +85,7 @@ class RelayRegisterHandler(MessageHandler):
 
         # Check if relay_manager is initialized and volunteering
         if not hasattr(self.service, 'relay_manager') or not self.service.relay_manager:
-            logger.warning("RelayManager not initialized - rejecting registration from %s", requester_id[:20])
+            logger.warning("RelayManager not initialized - rejecting registration from %s", sender_node_id[:20])
             await connection.send_message({
                 "command": "ERROR",
                 "payload": {
@@ -105,7 +96,7 @@ class RelayRegisterHandler(MessageHandler):
             return
 
         if not self.service.relay_manager.volunteer:
-            logger.warning("Not volunteering as relay - rejecting registration from %s", requester_id[:20])
+            logger.warning("Not volunteering as relay - rejecting registration from %s", sender_node_id[:20])
             await connection.send_message({
                 "command": "ERROR",
                 "payload": {
@@ -117,12 +108,12 @@ class RelayRegisterHandler(MessageHandler):
 
         logger.info(
             "Processing RELAY_REGISTER: requester=%s, target=%s",
-            requester_id[:20], target_peer_id[:20]
+            sender_node_id[:20], target_peer_id[:20]
         )
 
         # Handle registration via RelayManager
         session_id = await self.service.relay_manager.handle_relay_register(
-            requester_id=requester_id,
+            requester_id=sender_node_id,
             target_id=target_peer_id,
             requester_connection=connection
         )
@@ -131,7 +122,7 @@ class RelayRegisterHandler(MessageHandler):
             # Both peers registered - session created
             logger.info(
                 "Relay session created: %s (peers: %s, %s)",
-                session_id, requester_id[:20], target_peer_id[:20]
+                session_id, sender_node_id[:20], target_peer_id[:20]
             )
 
             # Send RELAY_READY to requester
