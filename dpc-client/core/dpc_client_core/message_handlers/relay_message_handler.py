@@ -19,7 +19,7 @@ Privacy:
 import logging
 from typing import TYPE_CHECKING
 
-from .base import MessageHandler
+from . import MessageHandler
 
 if TYPE_CHECKING:
     from ..service import CoreService
