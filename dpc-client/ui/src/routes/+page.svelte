@@ -134,6 +134,7 @@
   // Send file confirmation dialog
   let showSendFileDialog: boolean = false;
   let pendingFileSend: { filePath: string, fileName: string, recipientId: string, recipientName: string } | null = null;
+  let isSendingFile: boolean = false;  // Prevent double-click bug
 
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $: setActiveChat(activeChatId);
@@ -846,7 +847,9 @@
   }
 
   async function handleConfirmSendFile() {
-    if (!pendingFileSend) return;
+    if (!pendingFileSend || isSendingFile) return;  // Guard against double-click
+
+    isSendingFile = true;  // Set flag immediately to block subsequent clicks
 
     try {
       console.log(`Sending file: ${pendingFileSend.filePath} to ${pendingFileSend.recipientId}`);
@@ -863,6 +866,8 @@
       fileOfferToastMessage = `Failed to send file: ${error}`;
       showFileOfferToast = true;
       setTimeout(() => showFileOfferToast = false, 5000);
+    } finally {
+      isSendingFile = false;  // Reset flag after completion
     }
   }
 
@@ -1737,8 +1742,10 @@
       <p><strong>File:</strong> {pendingFileSend.fileName}</p>
       <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
       <div class="modal-buttons">
-        <button class="accept-button" on:click={handleConfirmSendFile}>Send</button>
-        <button class="reject-button" on:click={handleCancelSendFile}>Cancel</button>
+        <button class="accept-button" on:click={handleConfirmSendFile} disabled={isSendingFile}>
+          {isSendingFile ? 'Sending...' : 'Send'}
+        </button>
+        <button class="reject-button" on:click={handleCancelSendFile} disabled={isSendingFile}>Cancel</button>
       </div>
     </div>
   </div>

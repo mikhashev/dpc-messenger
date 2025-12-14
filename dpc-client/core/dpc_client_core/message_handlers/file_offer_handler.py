@@ -36,8 +36,21 @@ class FileOfferHandler(MessageHandler):
 
         self.logger.info(f"FILE_OFFER from {sender_node_id}: {filename} ({size_bytes} bytes)")
 
-        # Check firewall permission
+        # Deduplicate: Check if we already have a pending transfer for this exact file from this sender
         file_transfer_manager = self.service.file_transfer_manager
+        for existing_transfer_id, existing_transfer in file_transfer_manager.active_transfers.items():
+            if (existing_transfer.node_id == sender_node_id and
+                existing_transfer.filename == filename and
+                existing_transfer.size_bytes == size_bytes and
+                existing_transfer.direction == "download" and
+                existing_transfer.status.value == "pending"):
+                self.logger.warning(
+                    f"Ignoring duplicate FILE_OFFER from {sender_node_id} for {filename} "
+                    f"(already have pending transfer {existing_transfer_id}, new offer is {transfer_id})"
+                )
+                return None
+
+        # Check firewall permission
         allowed = await file_transfer_manager._check_file_transfer_permission(sender_node_id, filename, size_bytes, mime_type)
 
         if not allowed:
