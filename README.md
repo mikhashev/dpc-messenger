@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.11.0 (dev)
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.11.1
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
