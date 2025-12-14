@@ -136,6 +136,9 @@
   let pendingFileSend: { filePath: string, fileName: string, recipientId: string, recipientName: string } | null = null;
   let isSendingFile: boolean = false;  // Prevent double-click bug
 
+  // UI collapse states
+  let contextPanelCollapsed: boolean = false;  // Context toggle panel collapsible
+
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $: setActiveChat(activeChatId);
 
@@ -1478,6 +1481,18 @@
         {#if $aiChats.has(activeChatId)}
           <!-- Personal Context Toggle -->
           <div class="context-toggle">
+            <button
+              type="button"
+              class="context-toggle-header"
+              on:click={() => contextPanelCollapsed = !contextPanelCollapsed}
+              aria-expanded={!contextPanelCollapsed}
+            >
+              <span class="context-toggle-title">
+                {contextPanelCollapsed ? '▶' : '▼'} Context Settings
+              </span>
+            </button>
+
+            {#if !contextPanelCollapsed}
             <label class="context-checkbox">
               <input
                 id="include-personal-context"
@@ -1517,10 +1532,9 @@
                 </span>
               </div>
             {/if}
-          </div>
 
-          <!-- Peer Context Selector (show for all AI chats) -->
-          {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
+            <!-- Peer Context Selector (show for all AI chats) -->
+            {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
             <div class="peer-context-selector">
               <div class="peer-context-header">
                 <span class="peer-context-label">Include Peer Context:</span>
@@ -1552,7 +1566,9 @@
                 {/each}
               </div>
             </div>
-          {/if}
+            {/if}
+            {/if}
+          </div>
         {/if}
 
         {#if activeChatId === 'local_ai'}
@@ -2642,6 +2658,31 @@
     border-radius: 8px;
     border: 1px solid #ffd4a3;
     margin-bottom: 0.5rem;
+    position: relative;
+  }
+
+  .context-toggle-header {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+    padding: 0.5rem;
+    margin: -0.75rem -0.75rem 0.75rem -0.75rem;
+    background: rgba(255, 212, 163, 0.3);
+    border: none;
+    border-radius: 8px 8px 0 0;
+    border-bottom: 1px solid #ffd4a3;
+    transition: background 0.2s ease;
+  }
+
+  .context-toggle-header:hover {
+    background: rgba(255, 212, 163, 0.5);
+  }
+
+  .context-toggle-title {
+    font-weight: 600;
+    color: #c45500;
+    font-size: 0.95rem;
   }
 
   .context-checkbox {
