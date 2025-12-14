@@ -20,6 +20,8 @@ from .firewall import ContextFirewall
 from .hub_client import HubClient
 from .webrtc_peer import WebRTCPeerConnection
 from .dht import DHTManager, DHTConfig
+from .peer_cache import PeerCache
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +43,16 @@ class PeerConnection:
         return await read_message(self.reader)
 
     async def close(self):
-        """Closes the TLS connection."""
+        """Closes the TLS connection with timeout protection."""
         if not self.writer.is_closing():
             self.writer.close()
-            await self.writer.wait_closed()
+            try:
+                await asyncio.wait_for(self.writer.wait_closed(), timeout=2.0)
+            except asyncio.TimeoutError:
+                logger.warning("SSL shutdown timed out for peer %s", self.node_id)
+            except Exception as e:
+                # Gracefully handle SSL errors during shutdown (race conditions)
+                logger.debug("Error during SSL shutdown for peer %s: %s", self.node_id, e)
 
 
 class P2PManager:
@@ -64,8 +72,16 @@ class P2PManager:
         self._intentional_disconnects: set = set()  # Track user-initiated disconnects
         self._hub_client_refs: Dict[str, HubClient] = {}  # Store hub_client for reconnection
 
+        # Background task tracking for graceful shutdown
+        self._peer_listener_tasks: Dict[str, asyncio.Task] = {}  # Track _listen_to_peer tasks
+
         # DHT (Distributed Hash Table) for decentralized peer discovery
         self.dht_manager: DHTManager | None = None  # Initialized in start_server()
+
+        # Peer cache for faster reconnection (stores last known IP/port)
+        cache_file = Path.home() / ".dpc" / "peer_cache.json"
+        self.peer_cache = PeerCache(cache_file)
+        logger.info("Peer cache initialized with %d cached peers", len(self.peer_cache.get_all_peers()))
 
         try:
             self.node_id, self.key_file, self.cert_file = load_identity()
@@ -79,6 +95,7 @@ class P2PManager:
         self.local_context = PCMCore().load_context()
         self.on_peer_list_change: Callable | None = None
         self.on_message_received: Callable | None = None
+        self.on_peer_disconnected: Callable | None = None  # Callback for peer disconnection
         self._server_task = None
         logger.info("P2PManager initialized with WebRTC support")
 
@@ -87,7 +104,11 @@ class P2PManager:
 
     def set_on_message_received(self, callback: Callable):
         self.on_message_received = callback
-    
+
+    def set_on_peer_disconnected(self, callback: Callable):
+        """Set callback for peer disconnection events (for cleanup like file transfers)."""
+        self.on_peer_disconnected = callback
+
     def set_core_service_ref(self, core_service):
         """Set reference to CoreService for storing peer metadata."""
         self._core_service_ref = core_service
@@ -321,8 +342,9 @@ class P2PManager:
         Connect to a peer using just their node ID.
 
         Tries discovery methods in order:
-        1. DHT lookup (finds peer's current IP/port)
-        2. Hub WebRTC (Phase 5 - not yet implemented)
+        1. Peer cache (last known IP/port) - fastest, no network overhead
+        2. DHT lookup (finds peer's current IP/port)
+        3. Hub WebRTC (Phase 5 - not yet implemented)
 
         Args:
             target_node_id: Node ID to connect to
@@ -336,6 +358,34 @@ class P2PManager:
             logger.info("Already connected to %s", target_node_id)
             return True
 
+        # Try 0: Peer cache (fastest - no DHT lookup needed)
+        cached_peer = self.peer_cache.get_peer(target_node_id)
+        if cached_peer and cached_peer.last_direct_ip and cached_peer.is_recently_seen(hours=168):  # 7 days
+            logger.info(
+                "Attempting cached connection to %s at %s:%d (last seen %s)",
+                target_node_id[:20], cached_peer.last_direct_ip,
+                cached_peer.last_direct_port, cached_peer.last_seen
+            )
+            try:
+                await self.connect_directly(
+                    cached_peer.last_direct_ip,
+                    cached_peer.last_direct_port,
+                    target_node_id,
+                    timeout=5.0  # Quick timeout for cache attempt
+                )
+                logger.info("Connected to %s via peer cache (no DHT lookup needed)", target_node_id[:20])
+                # Update cache with successful connection
+                self.peer_cache.add_or_update_peer(
+                    node_id=target_node_id,
+                    direct_ip=cached_peer.last_direct_ip,
+                    direct_port=cached_peer.last_direct_port,
+                    supports_direct=True
+                )
+                return True
+            except Exception as e:
+                logger.debug("Cached connection failed, falling back to DHT: %s", e)
+                # Don't return False yet, try DHT next
+
         # Try 1: DHT lookup
         dht_result = await self.find_peer_via_dht(target_node_id)
         if dht_result:
@@ -343,6 +393,14 @@ class P2PManager:
             try:
                 await self.connect_directly(ip, port, target_node_id, timeout)
                 logger.info("Connected to %s via DHT", target_node_id)
+
+                # Update peer cache with successful DHT connection
+                self.peer_cache.add_or_update_peer(
+                    node_id=target_node_id,
+                    direct_ip=ip,
+                    direct_port=port,
+                    supports_direct=True
+                )
 
                 # Announce ourselves after successful connection
                 await self.announce_to_dht()
@@ -352,9 +410,8 @@ class P2PManager:
 
         # Try 2: Hub WebRTC (if available)
         # This will be implemented in Phase 5
-        # TODO: Implement peer_cache for last known IP/port (Phase 5)
 
-        logger.error("Failed to connect to %s - DHT lookup failed, Hub not available", target_node_id)
+        logger.error("Failed to connect to %s - All connection methods failed", target_node_id)
         return False
 
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -405,10 +462,25 @@ class P2PManager:
             await self._notify_peer_change()
             logger.info("Direct TLS connection established with %s", peer_node_id)
 
+            # Update peer cache with incoming connection info
+            peer_addr = writer.get_extra_info('peername')
+            if peer_addr:
+                peer_ip, peer_port = peer_addr[0], peer_addr[1]
+                self.peer_cache.add_or_update_peer(
+                    node_id=peer_node_id,
+                    display_name=peer_name,
+                    direct_ip=peer_ip,
+                    direct_port=8888,  # Default port (peer connects FROM random port but listens ON 8888)
+                    supports_direct=True
+                )
+                logger.debug("Cached peer %s at %s:8888", peer_node_id[:20], peer_ip)
+
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())
 
-            asyncio.create_task(self._listen_to_peer(peer))
+            # Start listener task and track it for graceful shutdown
+            task = asyncio.create_task(self._listen_to_peer(peer))
+            self._peer_listener_tasks[peer_node_id] = task
 
         except Exception as e:
             logger.error("Error handling direct connection: %s", e, exc_info=True)
@@ -553,7 +625,9 @@ class P2PManager:
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())
 
-            asyncio.create_task(self._listen_to_peer(peer))
+            # Start listener task and track it for graceful shutdown
+            task = asyncio.create_task(self._listen_to_peer(peer))
+            self._peer_listener_tasks[target_node_id] = task
 
             # Auto-discover peer's available AI providers
             from dpc_protocol.protocol import create_get_providers_message
@@ -597,15 +671,24 @@ class P2PManager:
                 message = await peer.read()
                 if message is None:
                     break
-                
+
                 if self.on_message_received:
                     asyncio.create_task(self.on_message_received(peer.node_id, message))
 
+        except asyncio.CancelledError:
+            # Graceful cancellation during shutdown
+            logger.debug("Listener task for peer %s cancelled during shutdown", peer.node_id)
+            raise  # Re-raise to properly exit the task
         except (asyncio.IncompleteReadError, ConnectionResetError):
             pass
         finally:
-            logger.info("Connection with peer %s was lost", peer.node_id)
-            await self.shutdown_peer_connection(peer.node_id)
+            # Clean up task tracking
+            self._peer_listener_tasks.pop(peer.node_id, None)
+
+            # Only trigger shutdown if not already shutting down
+            if peer.node_id in self.peers:
+                logger.info("Connection with peer %s was lost", peer.node_id)
+                await self.shutdown_peer_connection(peer.node_id)
 
     # --- WebRTC Connection Methods (NEW) ---
 
@@ -983,6 +1066,76 @@ class P2PManager:
         except Exception as e:
             logger.error("Failed to re-announce with new IP: %s", e)
 
+    async def restart_webrtc_connections(self):
+        """
+        Restart all active WebRTC connections (e.g., after network change).
+
+        This method disconnects all WebRTC connections and relies on
+        auto-reconnect to establish new connections via the 6-tier fallback
+        hierarchy. The reconnection may use a different strategy (direct, relay,
+        etc.) depending on network conditions.
+
+        Algorithm:
+            1. Identify all WebRTC connections (both active and pending)
+            2. Close them without marking as intentional disconnect
+            3. Auto-reconnect mechanism will trigger reconnection via ConnectionOrchestrator
+            4. ConnectionOrchestrator tries 6-tier fallback (may not use WebRTC again)
+
+        Use cases:
+            - External IP change detected (WiFi reconnect, VPN change, CGNAT rotation)
+            - Network switch (mobile → WiFi, WiFi → ethernet)
+            - ICE connection failure requiring fresh connection attempt
+        """
+        webrtc_peers_to_restart = []
+
+        # Collect WebRTC peers from active connections
+        for peer_id, peer in list(self.peers.items()):
+            if isinstance(peer, WebRTCPeerConnection):
+                webrtc_peers_to_restart.append(peer_id)
+
+        # Also collect from pending WebRTC connections
+        for peer_id in list(self._pending_webrtc.keys()):
+            if peer_id not in webrtc_peers_to_restart:
+                webrtc_peers_to_restart.append(peer_id)
+
+        if not webrtc_peers_to_restart:
+            logger.debug("No WebRTC connections to restart")
+            return
+
+        logger.info(
+            "Restarting %d WebRTC connection(s) due to network change",
+            len(webrtc_peers_to_restart)
+        )
+
+        # Close WebRTC connections (without marking as intentional disconnect)
+        # Auto-reconnect will trigger reconnection via 6-tier fallback
+        for peer_id in webrtc_peers_to_restart:
+            try:
+                # Remove from active peers
+                if peer_id in self.peers:
+                    peer = self.peers.pop(peer_id)
+                    await peer.close()
+                    logger.debug("Closed active WebRTC connection with %s", peer_id[:20])
+
+                # Remove from pending WebRTC
+                if peer_id in self._pending_webrtc:
+                    pending_peer = self._pending_webrtc.pop(peer_id)
+                    await pending_peer.close()
+                    logger.debug("Closed pending WebRTC connection with %s", peer_id[:20])
+
+                # Clean up ICE candidate buffer
+                self._ice_candidates_buffer.pop(peer_id, None)
+
+            except Exception as e:
+                logger.error("Error closing WebRTC connection with %s: %s", peer_id[:20], e)
+
+        # Notify UI of peer list change
+        await self._notify_peer_change()
+
+        logger.info(
+            "WebRTC restart complete - auto-reconnect will establish new connections"
+        )
+
     async def shutdown_peer_connection(self, peer_id: str):
         """Close connection with a peer (user-initiated)."""
         # Mark this as an intentional disconnect to prevent auto-reconnect
@@ -1006,6 +1159,13 @@ class P2PManager:
         # Clean up buffered ICE candidates
         self._ice_candidates_buffer.pop(peer_id, None)
 
+        # Notify about peer disconnection (for cleanup like file transfers)
+        if self.on_peer_disconnected:
+            try:
+                await self.on_peer_disconnected(peer_id)
+            except Exception as e:
+                logger.error(f"Error in on_peer_disconnected callback for {peer_id}: {e}", exc_info=True)
+
         # Note: hub_client_refs will be cleaned up in the close handler
 
     async def shutdown_all(self):
@@ -1018,9 +1178,21 @@ class P2PManager:
         for peer_id in list(self._pending_webrtc.keys()):
             self._intentional_disconnects.add(peer_id)
 
+        # Step 1: Cancel server task
         if self._server_task:
             self._server_task.cancel()
 
+        # Step 2: Cancel all listener tasks BEFORE closing connections
+        logger.debug("Cancelling %d listener tasks", len(self._peer_listener_tasks))
+        for task in self._peer_listener_tasks.values():
+            task.cancel()
+
+        # Wait for all listener tasks to finish (with exceptions suppressed)
+        if self._peer_listener_tasks:
+            await asyncio.gather(*self._peer_listener_tasks.values(), return_exceptions=True)
+        self._peer_listener_tasks.clear()
+
+        # Step 3: Now safely close peer connections
         for peer_id in list(self.peers.keys()):
             peer = self.peers.pop(peer_id)
             await peer.close()

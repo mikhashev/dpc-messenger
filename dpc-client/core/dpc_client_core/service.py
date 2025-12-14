@@ -49,7 +49,17 @@ from .message_handlers.knowledge_handler import (
     ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler,
     KnowledgeCommitResultHandler
 )
-from .message_handlers.gossip_handler import GossipSyncHandler
+from .message_handlers.gossip_handler import GossipSyncHandler, GossipMessageHandler
+from .message_handlers.relay_register_handler import RelayRegisterHandler
+from .message_handlers.relay_message_handler import RelayMessageHandler
+from .message_handlers.relay_disconnect_handler import RelayDisconnectHandler
+from .message_handlers.file_offer_handler import FileOfferHandler
+from .message_handlers.file_accept_handler import FileAcceptHandler
+from .message_handlers.file_chunk_handler import FileChunkHandler
+from .message_handlers.file_complete_handler import FileCompleteHandler
+from .message_handlers.file_cancel_handler import FileCancelHandler
+from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
+from .managers.file_transfer_manager import FileTransferManager
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
     load_instructions, save_instructions, migrate_instructions_from_personal_context
@@ -178,6 +188,15 @@ class CoreService:
         # P2P coordinator (coordinates P2P connection lifecycle)
         self.p2p_coordinator = P2PCoordinator(self)
 
+        # File transfer manager (handles P2P file transfers)
+        self.file_transfer_manager = FileTransferManager(
+            p2p_manager=self.p2p_manager,
+            firewall=self.firewall,
+            settings=self.settings,
+            local_api=self.local_api,
+            service=self
+        )
+
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
@@ -205,6 +224,7 @@ class CoreService:
         self.p2p_manager.set_core_service_ref(self)
         self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
+        self.p2p_manager.set_on_peer_disconnected(self._handle_peer_disconnected)
         self._processed_message_ids = set()  # Track processed messages
         self._max_processed_ids = 1000  # Limit set size
 
@@ -240,8 +260,22 @@ class CoreService:
         # Peer handshake
         self.message_router.register_handler(HelloHandler(self))
 
-        # Gossip protocol (anti-entropy synchronization)
-        self.message_router.register_handler(GossipSyncHandler(self))
+        # Gossip protocol handlers
+        self.message_router.register_handler(GossipSyncHandler(self))  # Anti-entropy sync
+        self.message_router.register_handler(GossipMessageHandler(self))  # Epidemic routing
+
+        # Volunteer relay handlers (server mode)
+        self.message_router.register_handler(RelayRegisterHandler(self))  # Relay session registration
+        self.message_router.register_handler(RelayMessageHandler(self))  # Message forwarding
+        self.message_router.register_handler(RelayDisconnectHandler(self))  # Session cleanup
+
+        # File transfer handlers
+        self.message_router.register_handler(FileOfferHandler(self))
+        self.message_router.register_handler(FileAcceptHandler(self))
+        self.message_router.register_handler(FileChunkHandler(self))
+        self.message_router.register_handler(FileCompleteHandler(self))
+        self.message_router.register_handler(FileCancelHandler(self))
+        self.message_router.register_handler(FileChunkRetryHandler(self))  # v0.11.1
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 
@@ -389,6 +423,7 @@ class CoreService:
             self.relay_manager = RelayManager(
                 dht_manager=dht_manager,
                 p2p_manager=self.p2p_manager,
+                hole_punch_manager=self.hole_punch_manager,
                 volunteer=relay_volunteer,
                 max_peers=self.settings.get_relay_max_peers(),
                 bandwidth_limit_mbps=self.settings.get_relay_bandwidth_limit(),
@@ -401,12 +436,13 @@ class CoreService:
             self.gossip_manager = GossipManager(
                 p2p_manager=self.p2p_manager,
                 node_id=self.p2p_manager.node_id,
+                message_router=self.message_router,
                 fanout=self.settings.get_gossip_fanout(),
                 max_hops=self.settings.get_gossip_max_hops(),
                 ttl_seconds=self.settings.get_gossip_ttl(),
                 sync_interval=self.settings.get_gossip_sync_interval()
             )
-            logger.info("Gossip Manager initialized")
+            logger.info("Gossip Manager initialized with message router integration")
             self.connection_status.update_gossip_status(True)
 
             # Connection Orchestrator (Phase 6 - 6-tier connection fallback)
@@ -532,6 +568,17 @@ class CoreService:
         """Performs a clean shutdown of all components."""
         self._is_running = False
         logger.info("Shutting down components")
+
+        # Cancel all background tasks first
+        logger.debug("Cancelling %d background tasks", len(self._background_tasks))
+        for task in self._background_tasks:
+            if not task.done():
+                task.cancel()
+
+        # Wait for all background tasks to finish
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        self._background_tasks.clear()
 
         # Shutdown Phase 6 managers
         if hasattr(self, 'dht_manager'):
@@ -787,6 +834,40 @@ class CoreService:
 
         # Route message to registered handler
         await self.message_router.route_message(sender_node_id, message)
+
+    async def _handle_peer_disconnected(self, peer_id: str):
+        """
+        Callback triggered when a peer disconnects (intentionally or connection lost).
+        Cleans up all active file transfers with the disconnected peer.
+        """
+        logger.info(f"Handling peer disconnection cleanup for {peer_id}")
+
+        # Find all active transfers with this peer
+        transfers_to_cancel = [
+            (transfer_id, transfer)
+            for transfer_id, transfer in self.file_transfer_manager.active_transfers.items()
+            if transfer.node_id == peer_id
+        ]
+
+        # Cancel each transfer and notify UI
+        for transfer_id, transfer in transfers_to_cancel:
+            logger.info(f"Cancelling transfer {transfer_id} due to peer disconnection")
+
+            # Delete transfer locally (don't send FILE_CANCEL since peer is already disconnected)
+            del self.file_transfer_manager.active_transfers[transfer_id]
+
+            # Broadcast cancellation event to UI
+            await self.local_api.broadcast_event("file_transfer_cancelled", {
+                "transfer_id": transfer_id,
+                "node_id": peer_id,
+                "filename": transfer.filename,
+                "direction": transfer.direction,
+                "reason": "peer_disconnected",
+                "status": "cancelled"
+            })
+
+        if transfers_to_cancel:
+            logger.info(f"Cancelled {len(transfers_to_cancel)} active transfer(s) with {peer_id}")
 
     # --- High-level methods (API for the UI) ---
 
@@ -1055,6 +1136,11 @@ class CoreService:
                 "ip_version": "IPv6" if ":" in ip else "IPv4"
             })
 
+        # Get connection orchestrator stats (if available)
+        orchestrator_stats = None
+        if self.connection_orchestrator:
+            orchestrator_stats = self.connection_orchestrator.get_stats()
+
         return {
             "node_id": self.p2p_manager.node_id,
             "hub_status": "Connected" if hub_connected else "Disconnected",
@@ -1072,6 +1158,8 @@ class CoreService:
             # External URIs (from STUN server discovery)
             "external_ips": external_ips,
             "external_uris": external_uris,
+            # Connection orchestrator stats (6-tier fallback metrics)
+            "orchestrator_stats": orchestrator_stats,
         }
     
     async def list_providers(self) -> Dict[str, Any]:
@@ -2110,6 +2198,113 @@ class CoreService:
             await monitor.on_message(outgoing_message)
         except Exception as e:
             logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
+
+    async def send_file(self, node_id: str, file_path: str):
+        """
+        Send a file to a peer via P2P file transfer.
+
+        Args:
+            node_id: Target peer's node ID
+            file_path: Absolute path to file to send
+
+        Returns:
+            Dict with transfer_id and status
+        """
+        from pathlib import Path
+
+        file = Path(file_path)
+        if not file.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        # Initiate file transfer (sends FILE_OFFER to peer)
+        transfer_id = await self.file_transfer_manager.send_file(node_id, file)
+
+        # Prepare file metadata
+        size_bytes = file.stat().st_size
+        size_mb = round(size_bytes / (1024 * 1024), 2)
+        message_content = f"Sent file: {file.name} ({size_mb} MB)"
+
+        attachments = [{
+            "type": "file",
+            "filename": file.name,
+            "size_bytes": size_bytes,
+            "size_mb": size_mb,
+            "transfer_id": transfer_id,
+            "status": "sending"
+        }]
+
+        # Note: Don't add to conversation history or broadcast message yet
+        # We'll do that when FILE_COMPLETE is received (in file_complete_handler.py)
+        # This prevents phantom messages if the receiver rejects the transfer
+
+        return {
+            "transfer_id": transfer_id,
+            "status": "pending",
+            "filename": file.name,
+            "size_bytes": file.stat().st_size
+        }
+
+    async def accept_file_transfer(self, transfer_id: str):
+        """
+        Accept an incoming file transfer offer.
+
+        Args:
+            transfer_id: Transfer ID from FILE_OFFER
+
+        Returns:
+            Dict with transfer_id and status
+        """
+        transfer = self.file_transfer_manager.active_transfers.get(transfer_id)
+        if not transfer:
+            raise ValueError(f"Unknown transfer: {transfer_id}")
+
+        if transfer.direction != "download":
+            raise ValueError(f"Transfer {transfer_id} is not a download")
+
+        # Send FILE_ACCEPT to peer
+        await self.p2p_manager.send_message_to_peer(transfer.node_id, {
+            "command": "FILE_ACCEPT",
+            "payload": {"transfer_id": transfer_id}
+        })
+
+        return {
+            "transfer_id": transfer_id,
+            "status": "accepted"
+        }
+
+    async def cancel_file_transfer(self, transfer_id: str, reason: str = "user_cancelled"):
+        """
+        Cancel an active file transfer.
+
+        Args:
+            transfer_id: Transfer ID to cancel
+            reason: Cancellation reason
+
+        Returns:
+            Dict with transfer_id and status
+        """
+        # Get transfer info BEFORE deletion (for UI notification)
+        transfer = self.file_transfer_manager.active_transfers.get(transfer_id)
+
+        # Cancel the transfer (sends FILE_CANCEL to peer and deletes locally)
+        await self.file_transfer_manager.cancel_transfer(transfer_id, reason)
+
+        # Broadcast cancellation event to local UI (so Active Transfers panel updates)
+        if transfer:
+            await self.local_api.broadcast_event("file_transfer_cancelled", {
+                "transfer_id": transfer_id,
+                "node_id": transfer.node_id,
+                "filename": transfer.filename,
+                "direction": transfer.direction,
+                "reason": reason,
+                "status": "cancelled"
+            })
+
+        return {
+            "transfer_id": transfer_id,
+            "status": "cancelled",
+            "reason": reason
+        }
 
     async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None):
         """

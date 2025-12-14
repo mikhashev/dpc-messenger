@@ -78,6 +78,7 @@ class RelayManager:
         self,
         dht_manager: "DHTManager",
         p2p_manager: Optional["P2PManager"] = None,
+        hole_punch_manager: Optional["HolePunchManager"] = None,
         volunteer: bool = False,
         max_peers: int = 10,
         bandwidth_limit_mbps: float = 10.0,
@@ -89,6 +90,7 @@ class RelayManager:
         Args:
             dht_manager: DHT manager for relay discovery
             p2p_manager: P2P manager for relay connections
+            hole_punch_manager: Hole punch manager for success rate reporting
             volunteer: Whether to volunteer as relay
             max_peers: Max concurrent relay sessions (server mode)
             bandwidth_limit_mbps: Bandwidth limit for relaying
@@ -96,6 +98,7 @@ class RelayManager:
         """
         self.dht_manager = dht_manager
         self.p2p_manager = p2p_manager
+        self.hole_punch_manager = hole_punch_manager
         self.volunteer = volunteer
         self.max_peers = max_peers
         self.bandwidth_limit_mbps = bandwidth_limit_mbps
@@ -104,6 +107,7 @@ class RelayManager:
         # Server mode state
         self.sessions: Dict[str, RelaySession] = {}  # session_id -> RelaySession
         self.peer_to_session: Dict[str, str] = {}  # node_id -> session_id
+        self.peer_connections: Dict[str, any] = {}  # node_id -> PeerConnection (for forwarding)
         self.rate_limits: Dict[str, List[float]] = defaultdict(list)  # node_id -> timestamps
 
         # Client mode cache
@@ -119,10 +123,49 @@ class RelayManager:
             "bytes_relayed": 0,
         }
 
+        # Uptime tracking (for relay volunteering)
+        self.start_time = time.time() if volunteer else None
+
         logger.info(
             "RelayManager initialized (volunteer=%s, max_peers=%d, region=%s)",
             volunteer, max_peers, region
         )
+
+    def _detect_region_from_ip(self, ip: str) -> str:
+        """
+        Detect geographic region from IP address.
+
+        Uses simple heuristics based on IP ranges. For production use,
+        consider integrating a proper GeoIP database (e.g., MaxMind GeoLite2).
+
+        Args:
+            ip: IP address to check
+
+        Returns:
+            Region string (e.g., "us-west", "eu-central", "asia-pacific", "global")
+        """
+        try:
+            # For now, return region from config or "global"
+            # TODO: Integrate proper GeoIP database for production
+            # Simple approach: check if we have a configured region
+            if self.region and self.region != "global":
+                return self.region
+
+            # Fallback: detect from IP (very basic)
+            # Private/local IPs -> global
+            if ip.startswith(("192.168.", "10.", "172.", "127.")):
+                return "global"
+
+            # For production: Use GeoIP2 library
+            # from geoip2 import database
+            # reader = database.Reader('/path/to/GeoLite2-City.mmdb')
+            # response = reader.city(ip)
+            # return response.continent.code  # or response.country.iso_code
+
+            return "global"  # Default fallback
+        except Exception as e:
+            logger.debug("Failed to detect region from IP %s: %s", ip, e)
+            return "global"
 
     # ===== Client Mode: Relay Discovery =====
 
@@ -282,15 +325,93 @@ class RelayManager:
             peer_id[:20], relay_node.node_id[:20]
         )
 
-        # TODO: Implement relay connection logic
-        # 1. Connect to relay via P2P manager (TLS)
-        # 2. Send RELAY_REGISTER protocol message
-        # 3. Wait for RELAY_READY confirmation
-        # 4. Wrap connection in RelayedPeerConnection
+        if not self.p2p_manager:
+            raise ConnectionError("P2PManager not initialized")
 
-        self.stats["relay_connections"] += 1
+        try:
+            # Step 1: Connect to relay via P2P manager (TLS)
+            relay_connection = await asyncio.wait_for(
+                self.p2p_manager.connect_to_peer(
+                    relay_node.ip,
+                    relay_node.port,
+                    relay_node.node_id
+                ),
+                timeout=20.0  # Connection timeout
+            )
 
-        raise NotImplementedError("Relay connection transport not yet implemented")
+            logger.info("Connected to relay %s", relay_node.node_id[:20])
+
+            # Step 2: Send RELAY_REGISTER request
+            await relay_connection.send_message({
+                "command": "RELAY_REGISTER",
+                "payload": {
+                    "peer_id": peer_id,  # Target peer we want to connect to
+                    "timeout": 30.0
+                }
+            })
+
+            logger.debug("Sent RELAY_REGISTER to relay for peer %s", peer_id[:20])
+
+            # Step 3: Wait for RELAY_READY or RELAY_WAITING response
+            response = await asyncio.wait_for(
+                relay_connection.receive_message(),
+                timeout=30.0
+            )
+
+            if not response:
+                raise ConnectionError("No response from relay")
+
+            # Handle different responses
+            if response.get("command") == "RELAY_WAITING":
+                # Relay is waiting for other peer - keep waiting for RELAY_READY
+                logger.debug("Relay waiting for peer %s to register", peer_id[:20])
+                response = await asyncio.wait_for(
+                    relay_connection.receive_message(),
+                    timeout=30.0  # Wait for other peer to register
+                )
+
+            if not response or response.get("command") != "RELAY_READY":
+                logger.warning("Invalid relay response: %s", response)
+                raise ConnectionError(f"Relay did not confirm session: {response}")
+
+            session_id = response.get("payload", {}).get("session_id")
+            if not session_id:
+                raise ConnectionError("Relay did not provide session ID")
+
+            logger.info(
+                "Relay session established: %s (peer=%s, relay=%s)",
+                session_id, peer_id[:20], relay_node.node_id[:20]
+            )
+
+            # Step 4: Wrap connection in RelayedPeerConnection
+            from ..transports.relayed_connection import RelayedPeerConnection
+
+            relayed_conn = RelayedPeerConnection(
+                peer_id=peer_id,
+                relay_node=relay_node,
+                relay_connection=relay_connection,
+                session_id=session_id
+            )
+
+            await relayed_conn.start()
+
+            self.stats["relay_connections"] += 1
+
+            logger.info("Relay connection established to %s", peer_id[:20])
+            return relayed_conn
+
+        except asyncio.TimeoutError as e:
+            logger.warning(
+                "Relay connection timeout to %s via %s",
+                peer_id[:20], relay_node.node_id[:20]
+            )
+            raise ConnectionError(f"Relay timeout: {e}")
+        except Exception as e:
+            logger.error(
+                "Failed to connect via relay to %s: %s",
+                peer_id[:20], e
+            )
+            raise ConnectionError(f"Relay connection failed: {e}")
 
     # ===== Server Mode: Relay Volunteering =====
 
@@ -314,44 +435,39 @@ class RelayManager:
 
         logger.info("Announcing relay availability in DHT")
 
-        # Create relay metadata
-        relay_data = {
-            "node_id": self.dht_manager.node_id,
-            "ip": self.dht_manager.ip,
-            "port": self.dht_manager.port,
-            "available": True,
-            "max_peers": self.max_peers,
-            "current_peers": len(self.sessions),
-            "region": self.region,
-            "uptime": 1.0,  # TODO: Calculate actual uptime
-            "latency_ms": 50.0,  # TODO: Measure actual latency
-            "bandwidth_mbps": self.bandwidth_limit_mbps,
-        }
+        # Calculate actual uptime (time since relay started / 24 hours, capped at 1.0)
+        uptime = 1.0
+        if self.start_time:
+            elapsed_hours = (time.time() - self.start_time) / 3600.0
+            uptime = min(1.0, elapsed_hours / 24.0)  # 0.0-1.0 (full uptime after 24 hours)
 
-        # Store in DHT
-        import json
-        relay_key = f"relay:{self.dht_manager.node_id}"
-        value = json.dumps(relay_data)
+        # Detect region from IP if not configured
+        detected_region = self._detect_region_from_ip(self.dht_manager.ip)
 
-        # Find closest nodes for this key
-        closest = await self.dht_manager.find_node(relay_key)
-        if not closest:
-            logger.warning("No DHT nodes available for relay announcement")
-            return 0
+        # Get hole punch success rate if available
+        punch_success_rate = 0.0
+        punch_supported = False
+        punch_port = None
+        if self.hole_punch_manager:
+            punch_success_rate = self.hole_punch_manager.get_success_rate()
+            punch_supported = True
+            punch_port = self.hole_punch_manager.local_port
 
-        # Store on k closest nodes
-        stored_count = 0
-        for node in closest[:3]:  # Store on 3 closest nodes
-            try:
-                success = await self.dht_manager.rpc_handler.store(
-                    node.ip, node.port, relay_key, value
-                )
-                if success:
-                    stored_count += 1
-            except Exception as e:
-                logger.debug("Failed to store relay announcement on %s: %s", node.node_id[:20], e)
+        # Announce via DHT's announce_full() method (uses PeerEndpoint schema)
+        stored_count = await self.dht_manager.announce_full(
+            relay_available=True,
+            relay_max_peers=self.max_peers,
+            relay_region=detected_region,
+            relay_uptime=uptime,
+            punch_supported=punch_supported,
+            punch_port=punch_port,
+            punch_success_rate=punch_success_rate
+        )
 
-        logger.info("Announced relay availability to %d DHT nodes", stored_count)
+        logger.info(
+            "Announced relay availability to %d DHT nodes (region=%s, uptime=%.2f)",
+            stored_count, detected_region, uptime
+        )
         return stored_count
 
     async def handle_relay_register(
@@ -404,6 +520,9 @@ class RelayManager:
             "Relay registration: %s → %s",
             requester_id[:20], target_id[:20]
         )
+
+        # Store connection reference for message forwarding
+        self.peer_connections[requester_id] = requester_connection
 
         # Check if target already registered
         if target_id in self.peer_to_session:
@@ -474,8 +593,46 @@ class RelayManager:
             logger.warning("Rate limit exceeded for peer %s", from_peer[:20])
             return False
 
-        # TODO: Forward message to destination peer via P2P connection
-        # (Requires protocol message type: RELAY_MESSAGE)
+        # Forward message to destination peer via P2P connection
+        if to_peer not in self.peer_connections:
+            logger.warning(
+                "Destination peer %s not connected to relay",
+                to_peer[:20]
+            )
+            return False
+
+        try:
+            # Get destination peer's connection
+            dest_connection = self.peer_connections[to_peer]
+
+            # Decode message bytes to dict for protocol
+            import json
+            message_dict = json.loads(message.decode('utf-8'))
+
+            # Wrap in RELAY_MESSAGE protocol and forward
+            relay_message = {
+                "command": "RELAY_MESSAGE",
+                "payload": {
+                    "from": from_peer,
+                    "to": to_peer,
+                    "session_id": session_id,
+                    "message": message_dict
+                }
+            }
+
+            await dest_connection.send_message(relay_message)
+
+            logger.debug(
+                "Forwarded RELAY_MESSAGE: %s → %s (%d bytes, session=%s)",
+                from_peer[:20], to_peer[:20], len(message), session_id
+            )
+
+        except Exception as e:
+            logger.error(
+                "Failed to forward message to %s: %s",
+                to_peer[:20], e
+            )
+            return False
 
         # Update statistics
         session.messages_relayed += 1
@@ -484,11 +641,6 @@ class RelayManager:
 
         self.stats["messages_relayed"] += 1
         self.stats["bytes_relayed"] += len(message)
-
-        logger.debug(
-            "Relayed message: %s → %s (%d bytes, session=%s)",
-            from_peer[:20], to_peer[:20], len(message), session_id
-        )
 
         return True
 
@@ -519,11 +671,32 @@ class RelayManager:
         return True
 
     def get_stats(self) -> Dict:
-        """Get relay manager statistics."""
+        """
+        Get relay manager statistics.
+
+        Returns:
+            Dict with relay statistics including uptime and latency
+        """
+        # Calculate actual uptime (if volunteering)
+        uptime = 1.0
+        if self.volunteer and self.start_time:
+            elapsed_hours = (time.time() - self.start_time) / 3600.0
+            uptime = min(1.0, elapsed_hours / 24.0)  # 0.0-1.0
+
+        # Calculate average latency from recent relay sessions
+        latency_ms = 0.0
+        if self.sessions:
+            # Estimate latency from message relay times
+            # For now, use a simple heuristic based on active sessions
+            # TODO: Track actual round-trip times for more accurate measurement
+            latency_ms = 50.0  # Default estimate for local relay
+
         return {
             **self.stats,
             "volunteer": self.volunteer,
             "active_sessions": len(self.sessions),
             "max_peers": self.max_peers,
             "region": self.region,
+            "uptime": uptime,
+            "latency_ms": latency_ms,
         }

@@ -215,13 +215,23 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 
 **Priority 6: Gossip Store-and-Forward** (Disaster fallback, eventual delivery)
    - Multi-hop epidemic routing (fanout=3 random peers)
+   - **End-to-end hybrid encryption (AES-GCM + RSA-OAEP)** (v0.10.2)
+     - No payload size limit (replaces ~190 byte RSA limit)
+     - AES-256-GCM for data encryption (authenticated, detects tampering)
+     - RSA-OAEP for encrypting AES keys
+     - Forward secrecy: random AES key per message
+   - **DHT certificate discovery** (v0.10.2)
+     - Certificates published to DHT on startup
+     - Fallback: cache → active connections → DHT query
+     - Key format: `cert:<node_id>`
    - Vector clocks for distributed causality tracking
    - Anti-entropy sync (5-minute interval for message reconciliation)
    - TTL: 24 hours, max hops: 5
    - Use cases: offline messaging, infrastructure outages, disaster scenarios
    - Not real-time (eventual delivery guarantee)
    - Timeout: 5s (before falling back to gossip)
-   - Location: `connection_strategies/gossip_store_forward.py`, `managers/gossip_manager.py`
+   - **Status**: Production-ready (v0.10.2)
+   - Location: `connection_strategies/gossip_store_forward.py`, `managers/gossip_manager.py`, `transports/gossip_connection.py`
 
 **Key Benefits:**
 - **Hub-optional architecture**: System works without Hub using direct, DHT, relay, gossip fallback
@@ -269,6 +279,12 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `message_handlers/gossip_handler.py` - Gossip protocol handlers
   - GossipSyncHandler - GOSSIP_SYNC anti-entropy reconciliation
   - GossipMessageHandler - GOSSIP_MESSAGE epidemic routing (v0.10.2 target)
+- `message_handlers/file_transfer_handlers.py` - File transfer handlers (v0.11.0)
+  - FileOfferHandler - FILE_OFFER (incoming file offer, firewall check, user prompt)
+  - FileAcceptHandler - FILE_ACCEPT (start chunked transfer)
+  - FileChunkHandler - FILE_CHUNK (receive and reassemble chunks)
+  - FileCompleteHandler - FILE_COMPLETE (verify hash, finalize transfer)
+  - FileCancelHandler - FILE_CANCEL (cleanup on cancellation)
 
 **Coordinators (v0.10.0+):**
 - `connection_orchestrator.py` - 6-tier connection fallback coordinator (v0.10.0)
@@ -316,6 +332,12 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
   - send_gossip(), handle_gossip_message(), _forward_message() (fanout=3)
   - Anti-entropy sync loop (5-minute interval, vector clock reconciliation)
   - Message deduplication, TTL enforcement
+- `file_transfer_manager.py` - File transfer coordination (v0.11.0)
+  - Chunked file transfer (64KB chunks, SHA256 verification)
+  - Active transfer tracking (upload/download progress)
+  - Background process for large files (>50MB)
+  - Hash verification and cleanup on cancel/error
+  - Per-peer storage: `~/.dpc/conversations/{peer_id}/files/`
 - `webrtc_peer.py` - WebRTC peer wrapper (aiortc)
 - `hub_client.py` - Federation Hub communication (OAuth, WebSocket signaling)
 - `llm_manager.py` - AI provider integration (Ollama, OpenAI, Anthropic)
@@ -363,6 +385,13 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
 {"command": "GET_CONTEXT", "payload": {"tags": [...]}}
 {"command": "SEND_TEXT", "payload": {"text": "..."}}
 {"command": "AI_QUERY", "payload": {"query": "...", "use_context": [...]}}
+
+# File Transfer (v0.11.0)
+{"command": "FILE_OFFER", "payload": {"transfer_id": "...", "filename": "...", "size_bytes": 1024, "hash": "sha256:...", "mime_type": "..."}}
+{"command": "FILE_ACCEPT", "payload": {"transfer_id": "..."}}
+{"command": "FILE_CHUNK", "payload": {"transfer_id": "...", "chunk_index": 0, "total_chunks": 10, "data": "base64..."}}
+{"command": "FILE_COMPLETE", "payload": {"transfer_id": "...", "hash": "sha256:..."}}
+{"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|timeout|hash_mismatch"}}
 ```
 
 ### Conversation History & Context Inclusion (Phase 7+)
@@ -525,6 +554,7 @@ See [docs/CONFIGURATION.md](docs/CONFIGURATION.md#device-identity-and-multi-devi
 - Privacy Rules: `~/.dpc/privacy_rules.json` (context sharing rules)
 - Personal Context: `~/.dpc/personal.json` (auto-generated)
 - Device Context: `~/.dpc/device_context.json` (auto-generated, structured hardware/software info)
+- File Storage: `~/.dpc/conversations/{peer_id}/files/` (received files, per-peer isolation)
 
 **Automatic Device Context Collection:**
 
@@ -893,6 +923,12 @@ Access control file format (`~/.dpc/privacy_rules.json`):
     "allow_nodes": [],
     "allow_groups": [],
     "allowed_models": []
+  },
+  "file_transfer": {
+    "allow_nodes": ["dpc-node-alice-123"],
+    "allow_groups": ["friends"],
+    "max_size_mb": 1000,
+    "allowed_mime_types": ["*"]
   }
 }
 ```

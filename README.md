@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.10.1 (dev)
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.11.1
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
@@ -66,9 +66,11 @@ If this vision resonates with you, let's connect:
 - **User Sovereignty** - You own your data, identity, and encryption keys ([read more](./docs/USER_SOVEREIGNTY.md))
 - **Encrypted Backups** - AES-256-GCM encrypted backups with no backdoors ([guide](./docs/BACKUP_RESTORE.md))
 - **Human-AI Collaboration** - Work with your AI assistant, then share contexts with trusted peers so their AIs can contribute too
+- **Compute Sharing** - Share your local AI models or API access with trusted peers, or borrow theirs when you need more power ([guide](./docs/REMOTE_INFERENCE.md))
 - **Conversation History** - Full conversational continuity with smart context optimization (60-80% token savings)
 - **Rich Markdown Rendering** - AI responses display with GitHub-style formatting, intelligent caching (50-200x faster)
 - **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
+- **File Transfer** - Secure peer-to-peer file sharing with chunked transfers, progress tracking, and SHA256 verification (v0.11.0)
 - **Local-First** - Your data stays on your device
 - **Universal Connectivity** - Intelligent 6-tier connection orchestrator ensures connectivity in nearly any network condition (IPv6, IPv4, WebRTC, UDP hole punching, volunteer relays, gossip)
 - **Hub-Optional Architecture** - Works with DHT bootstrap (pre-configured seeds or initial Hub connection), then fully autonomous via direct connections, hole punching, and relay nodes
@@ -78,7 +80,7 @@ If this vision resonates with you, let's connect:
 
 ### For Developers
 - **Open Protocol** - Extensible [DPTP (D-PC Transfer Protocol)](./specs/dptp_v1.md)
-  - **Note:** DPTP spec (v1.0) is currently being updated to v1.1 to document new message types (REQUEST_DEVICE_CONTEXT, CONTEXT_UPDATED, GOSSIP_MESSAGE, GOSSIP_SYNC) and correct node ID format (32 hex chars).
+  - **Note:** DPTP spec updated to v1.1 with full documentation for GOSSIP_MESSAGE, GOSSIP_SYNC, and corrected node ID format (32 hex chars).
 - **Modular Design** - Clear separation of concerns
 - **Knowledge Architecture** - Git-like knowledge commits with cognitive bias mitigation ([architecture doc](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude)
@@ -332,8 +334,8 @@ docker-compose -f docker-compose.prod.yml up -d
 **Core Infrastructure:**
 - Direct TLS P2P connections (local network + IPv6 dual-stack)
 - WebRTC with NAT traversal (STUN/TURN)
-- **5-Tier Connection Fallback** (IPv6, IPv4, WebRTC, UDP Hole Punch, Volunteer Relay - all production-ready)
-  - **Note:** Gossip (Priority 6) framework complete, transport wrapper in Phase 2.2
+- **6-Tier Connection Fallback** (IPv6, IPv4, WebRTC, UDP Hole Punch, Volunteer Relay, Gossip - all production-ready)
+  - **Note:** All 6 connection strategies production-ready as of v0.10.2
 - Federation Hub for discovery and OAuth (now optional!)
 - Cryptographic node identity system
 - Token blacklist and logout
@@ -363,7 +365,7 @@ docker-compose -f docker-compose.prod.yml up -d
   - Markdown rendering with intelligent caching
 
 ### Phase 2: Team Collaboration + Disaster Resilience - IN PROGRESS (Q1-Q3 2026)
-**Status:** Decentralized Infrastructure 95% Complete (5 of 6 strategies production-ready, Gossip transport pending) | **Target:** Small teams (2-20 members + AIs)
+**Status:** Decentralized Infrastructure COMPLETE ✅ (All 6 connection strategies production-ready) | **Target:** Small teams (2-20 members + AIs)
 
 **Resilient Infrastructure - COMPLETE ✅**
 - ✅ **DHT-based peer discovery** (v0.9.5) - Kademlia DHT, 73 tests passing, internet-wide validated
@@ -372,12 +374,21 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ **DTLS Encryption** (v0.10.1) - All 6 connection strategies now encrypted end-to-end
 - ✅ **UDP Hole Punching** (v0.10.1) - DTLS 1.2 encrypted, production-ready, 60-70% NAT success
 - ✅ **Volunteer Relay Nodes** (v0.10.0) - 100% NAT coverage, privacy-preserving
-- ⚠️ **Gossip Protocol** (v0.10.0) - Protocol manager complete, transport wrapper pending (v0.10.2 target)
+- ✅ **Gossip Protocol** (v0.10.2) - Enhanced encryption and DHT certificate discovery
+  - ✅ Hybrid encryption (AES-GCM + RSA-OAEP) - No payload size limit
+  - ✅ DHT certificate discovery - Decentralized PKI for gossip
+  - ✅ Transport wrapper (GossipConnection) - Virtual connection interface
+- ✅ **File Transfer System** (v0.11.0) - Peer-to-peer file sharing
+  - ✅ Chunked file transfer (64KB chunks, SHA256 verification)
+  - ✅ Firewall permissions (per-peer/per-group access control)
+  - ✅ Progress tracking with accept/reject dialog
+  - ✅ Per-peer storage isolation (`~/.dpc/conversations/{peer_id}/files/`)
+  - ✅ Conversation history integration (metadata-only for token efficiency)
 
 **Team Collaboration Features - PLANNED (Q1-Q3 2026):**
 - Persistent team management with roles
 - Group chat UI with presence indicators
-- Team knowledge repositories (shared, synchronized knowledge)
+- Team knowledge repositories (shared, synchronized knowledge)fect
 - Team AI assistants (access to collective team knowledge)
 - Collaborative context editing (PR-like approval workflow)
 - Team compute pools (auto-discovery and load balancing)

@@ -585,7 +585,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', '_comment']
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -707,6 +707,34 @@ class ContextFirewall:
                             for resource_path, action in rules.items():
                                 if action not in ['allow', 'deny']:
                                     errors.append(f"Invalid action for device sharing scope '{sharing_scope}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
+
+            # Validate file_transfer section
+            if 'file_transfer' in config_dict:
+                file_transfer = config_dict['file_transfer']
+                if not isinstance(file_transfer, dict):
+                    errors.append("'file_transfer' section must be a dictionary")
+                else:
+                    if 'allow_nodes' in file_transfer:
+                        if not isinstance(file_transfer['allow_nodes'], list):
+                            errors.append("'file_transfer.allow_nodes' must be a list")
+                        else:
+                            for node_id in file_transfer['allow_nodes']:
+                                if not node_id.startswith('dpc-node-'):
+                                    errors.append(f"Invalid node ID in file_transfer.allow_nodes: '{node_id}' (should start with 'dpc-node-')")
+
+                    if 'allow_groups' in file_transfer:
+                        if not isinstance(file_transfer['allow_groups'], list):
+                            errors.append("'file_transfer.allow_groups' must be a list")
+
+                    if 'max_size_mb' in file_transfer:
+                        if not isinstance(file_transfer['max_size_mb'], (int, float)):
+                            errors.append("'file_transfer.max_size_mb' must be a number")
+                        elif file_transfer['max_size_mb'] <= 0:
+                            errors.append("'file_transfer.max_size_mb' must be greater than 0")
+
+                    if 'allowed_mime_types' in file_transfer:
+                        if not isinstance(file_transfer['allowed_mime_types'], list):
+                            errors.append("'file_transfer.allowed_mime_types' must be a list")
 
         except Exception as e:
             errors.append(f"Validation error: {str(e)}")

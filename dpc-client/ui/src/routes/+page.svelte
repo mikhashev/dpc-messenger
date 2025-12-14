@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
@@ -12,7 +12,7 @@
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import Toast from "$lib/components/Toast.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
-  import { ask } from '@tauri-apps/plugin-dialog';
+  import { ask, open } from '@tauri-apps/plugin-dialog';
 
   console.log("Full D-PC Messenger loading...");
   
@@ -25,6 +25,16 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
+    attachments?: Array<{  // File attachments (Week 1)
+      type: string;
+      filename: string;
+      size_bytes: number;
+      size_mb?: number;
+      hash?: string;
+      mime_type?: string;
+      transfer_id?: string;
+      status?: string;
+    }>;
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
     ['local_ai', []]
@@ -115,6 +125,20 @@
   let peerContextHashes: Map<string, string> = new Map();  // Per-peer: current hash from backend
   let lastSentPeerHashes: Map<string, Map<string, string>> = new Map();  // Per-conversation, per-peer: last hash sent
 
+  // File transfer UI state (Week 1)
+  let showFileOfferDialog: boolean = false;
+  let currentFileOffer: any = null;
+  let fileOfferToastMessage: string = "";
+  let showFileOfferToast: boolean = false;
+
+  // Send file confirmation dialog
+  let showSendFileDialog: boolean = false;
+  let pendingFileSend: { filePath: string, fileName: string, recipientId: string, recipientName: string } | null = null;
+  let isSendingFile: boolean = false;  // Prevent double-click bug
+
+  // UI collapse states
+  let contextPanelCollapsed: boolean = false;  // Context toggle panel collapsible
+
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $: setActiveChat(activeChatId);
 
@@ -191,6 +215,30 @@
       peerContextHashes.set(node_id, context_hash);
       console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
     }
+  }
+
+  // File transfer event handlers (Week 1)
+  $: if ($fileTransferOffer) {
+    const { node_id, filename, size_bytes, transfer_id } = $fileTransferOffer;
+    currentFileOffer = $fileTransferOffer;
+    showFileOfferDialog = true;
+    console.log(`File offer received: ${filename} (${(size_bytes / 1024).toFixed(1)} KB) from ${node_id.slice(0, 15)}...`);
+  }
+
+  $: if ($fileTransferComplete) {
+    const { filename, node_id, direction } = $fileTransferComplete;
+    fileOfferToastMessage = direction === "download"
+      ? `✓ File downloaded: ${filename}`
+      : `✓ File sent: ${filename}`;
+    showFileOfferToast = true;
+    setTimeout(() => showFileOfferToast = false, 5000);
+  }
+
+  $: if ($fileTransferCancelled) {
+    const { filename, reason } = $fileTransferCancelled;
+    fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
+    showFileOfferToast = true;
+    setTimeout(() => showFileOfferToast = false, 5000);
   }
 
   // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)
@@ -725,6 +773,130 @@
     console.log('AI chat deleted successfully');
   }
 
+  // File transfer handlers (Week 1)
+  async function handleSendFile() {
+    // Only allow file transfer to P2P chats (not local_ai or ai_xxx chats)
+    if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
+      await ask("File transfer is only available in P2P chats.", { title: "D-PC Messenger", kind: "info" });
+      return;
+    }
+
+    try {
+      const selected = await open({
+        multiple: false,
+        directory: false
+      });
+
+      if (!selected) {
+        console.log('File selection cancelled');
+        return;
+      }
+
+      const filePath = selected as string;
+      console.log(`Selected file: ${filePath}`);
+
+      // Get file name from path
+      const fileName = filePath.split(/[\\/]/).pop() || filePath;
+
+      // Get recipient name from peer info
+      const peer = $nodeStatus.peer_info.find((p: any) => p.node_id === activeChatId);
+      const recipientName = peer?.name || activeChatId.slice(0, 20) + '...';
+
+      // Store pending file send and show confirmation dialog
+      pendingFileSend = {
+        filePath,
+        fileName,
+        recipientId: activeChatId,
+        recipientName
+      };
+      showSendFileDialog = true;
+    } catch (error) {
+      console.error('Error sending file:', error);
+      fileOfferToastMessage = `Failed to send file: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  async function handleAcceptFile() {
+    if (!currentFileOffer) return;
+
+    try {
+      const filename = currentFileOffer.filename;
+      await acceptFileTransfer(currentFileOffer.transfer_id);
+      showFileOfferDialog = false;
+      currentFileOffer = null;
+      console.log(`Accepted file transfer: ${filename}`);
+    } catch (error) {
+      console.error('Error accepting file:', error);
+      fileOfferToastMessage = `Failed to accept file: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  async function handleRejectFile() {
+    if (!currentFileOffer) return;
+
+    try {
+      const filename = currentFileOffer.filename;
+      await cancelFileTransfer(currentFileOffer.transfer_id, "user_rejected");
+      showFileOfferDialog = false;
+      currentFileOffer = null;
+      console.log(`Rejected file transfer: ${filename}`);
+    } catch (error) {
+      console.error('Error rejecting file:', error);
+    }
+  }
+
+  async function handleConfirmSendFile() {
+    if (!pendingFileSend || isSendingFile) return;  // Guard against double-click
+
+    isSendingFile = true;  // Set flag immediately to block subsequent clicks
+
+    try {
+      console.log(`Sending file: ${pendingFileSend.filePath} to ${pendingFileSend.recipientId}`);
+      await sendFile(pendingFileSend.recipientId, pendingFileSend.filePath);
+
+      showSendFileDialog = false;
+      pendingFileSend = null;
+
+      fileOfferToastMessage = `Sending file...`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 3000);
+    } catch (error) {
+      console.error('Error sending file:', error);
+      fileOfferToastMessage = `Failed to send file: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    } finally {
+      isSendingFile = false;  // Reset flag after completion
+    }
+  }
+
+  function handleCancelSendFile() {
+    showSendFileDialog = false;
+    pendingFileSend = null;
+    console.log('File send cancelled by user');
+  }
+
+  async function handleCancelTransfer(transferId: string, filename: string) {
+    try {
+      console.log(`Cancelling file transfer: ${transferId}`);
+      await cancelFileTransfer(transferId, 'user_cancelled');
+
+      // Show toast notification
+      fileOfferToastMessage = `Cancelled: ${filename}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 3000);
+    } catch (error) {
+      console.error('Error cancelling file transfer:', error);
+      fileOfferToastMessage = `Failed to cancel: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
   // --- HANDLE INCOMING MESSAGES ---
   $: if ($coreMessages?.id) {
     const message = $coreMessages;
@@ -795,29 +967,41 @@
   $: if ($p2pMessages) {
     const msg = $p2pMessages;
     const messageId = msg.message_id || `${msg.sender_node_id}-${msg.text}`;
-    
+
     if (!processedMessageIds.has(messageId)) {
       processedMessageIds.add(messageId);
-      
+
       const wasNearBottom = isNearBottom(chatWindow);
-      
+
       chatHistories.update(h => {
         const newMap = new Map(h);
-        const hist = newMap.get(msg.sender_node_id) || [];
-        newMap.set(msg.sender_node_id, [...hist, {
+
+        // For user's own messages (file sends), store in activeChatId
+        // For peer messages, store in sender's node_id
+        const chatId = msg.sender_node_id === "user" ? activeChatId : msg.sender_node_id;
+        const hist = newMap.get(chatId) || [];
+
+        const messageData: any = {
           id: crypto.randomUUID(),
           sender: msg.sender_node_id,
           senderName: msg.sender_name,
           text: msg.text,
           timestamp: Date.now()
-        }]);
+        };
+
+        // Include attachments if present (file transfers)
+        if (msg.attachments && msg.attachments.length > 0) {
+          messageData.attachments = msg.attachments;
+        }
+
+        newMap.set(chatId, [...hist, messageData]);
         return newMap;
       });
-      
-      if (wasNearBottom || activeChatId === msg.sender_node_id) {
+
+      if (wasNearBottom || activeChatId === msg.sender_node_id || msg.sender_node_id === "user") {
         autoScroll();
       }
-      
+
       if (processedMessageIds.size > 100) {
         const firstId = processedMessageIds.values().next().value;
         if (firstId) {
@@ -1254,10 +1438,35 @@
                 </strong>
                 <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
               </div>
-              {#if msg.sender === 'ai' && enableMarkdown}
-                <MarkdownMessage content={msg.text} />
-              {:else}
-                <p>{msg.text}</p>
+              <!-- Only show text if no attachments (avoid duplication) -->
+              {#if !msg.attachments || msg.attachments.length === 0}
+                {#if msg.sender === 'ai' && enableMarkdown}
+                  <MarkdownMessage content={msg.text} />
+                {:else}
+                  <p>{msg.text}</p>
+                {/if}
+              {/if}
+
+              <!-- File attachments (Week 1) -->
+              {#if msg.attachments && msg.attachments.length > 0}
+                <div class="message-attachments">
+                  {#each msg.attachments as attachment}
+                    <div class="file-attachment">
+                      <div class="file-details">
+                        <div class="file-name">{attachment.filename}</div>
+                        <div class="file-meta">
+                          {attachment.size_mb ? `${attachment.size_mb} MB` : `${(attachment.size_bytes / (1024 * 1024)).toFixed(2)} MB`}
+                          {#if attachment.mime_type}
+                            • {attachment.mime_type}
+                          {/if}
+                          {#if attachment.status}
+                            • {attachment.status}
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+                  {/each}
+                </div>
               {/if}
             </div>
           {/each}
@@ -1272,6 +1481,18 @@
         {#if $aiChats.has(activeChatId)}
           <!-- Personal Context Toggle -->
           <div class="context-toggle">
+            <button
+              type="button"
+              class="context-toggle-header"
+              on:click={() => contextPanelCollapsed = !contextPanelCollapsed}
+              aria-expanded={!contextPanelCollapsed}
+            >
+              <span class="context-toggle-title">
+                {contextPanelCollapsed ? '▶' : '▼'} Context Settings
+              </span>
+            </button>
+
+            {#if !contextPanelCollapsed}
             <label class="context-checkbox">
               <input
                 id="include-personal-context"
@@ -1311,10 +1532,9 @@
                 </span>
               </div>
             {/if}
-          </div>
 
-          <!-- Peer Context Selector (show for all AI chats) -->
-          {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
+            <!-- Peer Context Selector (show for all AI chats) -->
+            {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
             <div class="peer-context-selector">
               <div class="peer-context-header">
                 <span class="peer-context-label">Include Peer Context:</span>
@@ -1346,7 +1566,9 @@
                 {/each}
               </div>
             </div>
-          {/if}
+            {/if}
+            {/if}
+          </div>
         {/if}
 
         {#if activeChatId === 'local_ai'}
@@ -1411,6 +1633,14 @@
               }
             }}
           ></textarea>
+          <button
+            class="file-button"
+            on:click={handleSendFile}
+            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
+            title="Send file (P2P chat only)"
+          >
+            📎
+          </button>
           <button
             on:click={handleSendMessage}
             disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim() || isContextWindowFull}
@@ -1519,6 +1749,81 @@
   }}
 />
 
+<!-- File Transfer UI Components (Week 1) -->
+
+<!-- File Offer Dialog -->
+{#if showFileOfferDialog && currentFileOffer}
+  <div class="modal-overlay" role="presentation" on:click={handleRejectFile} on:keydown={(e) => e.key === 'Escape' && handleRejectFile()}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+      <h3>Incoming File</h3>
+      <p><strong>File:</strong> {currentFileOffer.filename}</p>
+      <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
+      <p><strong>From:</strong> {currentFileOffer.node_id.slice(0, 20)}...</p>
+      <div class="modal-buttons">
+        <button class="accept-button" on:click={handleAcceptFile}>Accept</button>
+        <button class="reject-button" on:click={handleRejectFile}>Reject</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Send File Confirmation Dialog -->
+{#if showSendFileDialog && pendingFileSend}
+  <div class="modal-overlay" role="presentation" on:click={handleCancelSendFile} on:keydown={(e) => e.key === 'Escape' && handleCancelSendFile()}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+      <h3>Send File</h3>
+      <p><strong>File:</strong> {pendingFileSend.fileName}</p>
+      <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
+      <div class="modal-buttons">
+        <button class="accept-button" on:click={handleConfirmSendFile} disabled={isSendingFile}>
+          {isSendingFile ? 'Sending...' : 'Send'}
+        </button>
+        <button class="reject-button" on:click={handleCancelSendFile} disabled={isSendingFile}>Cancel</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- File Transfer Toast -->
+{#if showFileOfferToast}
+  <Toast
+    message={fileOfferToastMessage}
+    type="info"
+    duration={5000}
+    dismissible={true}
+    onDismiss={() => showFileOfferToast = false}
+  />
+{/if}
+
+<!-- Active File Transfers Progress -->
+{#if $activeFileTransfers.size > 0}
+  <div class="active-transfers-panel">
+    <h4>Active Transfers</h4>
+    {#each Array.from($activeFileTransfers.values()) as transfer}
+      <div class="transfer-item">
+        <div class="transfer-info">
+          <span class="transfer-filename">{transfer.filename}</span>
+          <span class="transfer-status">{transfer.direction === 'upload' ? '↑' : '↓'} {transfer.status}</span>
+          <button
+            class="cancel-transfer-button"
+            on:click={() => handleCancelTransfer(transfer.transfer_id, transfer.filename)}
+            title="Cancel transfer"
+            aria-label="Cancel transfer"
+          >
+            ×
+          </button>
+        </div>
+        {#if transfer.progress !== undefined}
+          <div class="progress-bar">
+            <div class="progress-fill" style="width: {transfer.progress}%"></div>
+          </div>
+          <span class="progress-text">{transfer.progress}%</span>
+        {/if}
+      </div>
+    {/each}
+  </div>
+{/if}
+
 <!-- Add AI Chat Dialog -->
 {#if showAddAIChatDialog}
   <!-- svelte-ignore a11y-click-events-have-key-events -->
@@ -1567,6 +1872,9 @@
     width: auto;
     margin: 0 auto;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100vw; /* Constrain to viewport width */
+    box-sizing: border-box;
   }
 
   .status-bar {
@@ -1601,6 +1909,8 @@
     display: grid;
     grid-template-columns: 380px 1fr;
     gap: 1.5rem;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100%; /* Constrain to parent width */
   }
   
   @media (max-width: 968px) {
@@ -2048,6 +2358,8 @@
     flex-direction: column;
     /* Height is set via inline style */
     min-height: 300px;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100%; /* Constrain to parent width */
   }
   
   .chat-header {
@@ -2220,7 +2532,9 @@
     flex: 1;
     padding: 1rem;
     overflow-y: auto;
+    overflow-x: hidden; /* Prevent horizontal overflow */
     background: #f9f9f9;
+    max-width: 100%; /* Constrain to parent width */
   }
 
   /* Resize Handle */
@@ -2276,6 +2590,8 @@
     border-radius: 12px;
     max-width: 80%;
     animation: slideIn 0.2s ease-out;
+    overflow-wrap: break-word; /* Break long words */
+    word-break: break-word; /* Break long unbreakable strings */
   }
   
   @keyframes slideIn {
@@ -2321,6 +2637,8 @@
     margin: 0;
     white-space: pre-wrap;
     word-wrap: break-word;
+    overflow-wrap: break-word; /* Break long words */
+    word-break: break-word; /* Break long unbreakable strings */
   }
   
   .chat-input {
@@ -2329,6 +2647,8 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100%; /* Constrain to parent width */
   }
 
   /* Personal Context Toggle Styles */
@@ -2338,6 +2658,31 @@
     border-radius: 8px;
     border: 1px solid #ffd4a3;
     margin-bottom: 0.5rem;
+    position: relative;
+  }
+
+  .context-toggle-header {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    user-select: none;
+    padding: 0.5rem;
+    margin: -0.75rem -0.75rem 0.75rem -0.75rem;
+    background: rgba(255, 212, 163, 0.3);
+    border: none;
+    border-radius: 8px 8px 0 0;
+    border-bottom: 1px solid #ffd4a3;
+    transition: background 0.2s ease;
+  }
+
+  .context-toggle-header:hover {
+    background: rgba(255, 212, 163, 0.5);
+  }
+
+  .context-toggle-title {
+    font-weight: 600;
+    color: #c45500;
+    font-size: 0.95rem;
   }
 
   .context-checkbox {
@@ -2555,6 +2900,8 @@
   .input-row {
     display: flex;
     gap: 0.5rem;
+    overflow-x: hidden; /* Prevent horizontal overflow */
+    max-width: 100%; /* Constrain to parent width */
   }
 
   .input-row textarea {
@@ -2562,6 +2909,9 @@
     min-height: 120px;
     max-height: 240px;
     resize: vertical;
+    overflow-wrap: break-word; /* Break long words */
+    word-break: break-word; /* Break long unbreakable strings */
+    overflow-x: auto; /* Allow horizontal scroll in textarea if needed */
   }
 
   .input-row button {
@@ -2941,5 +3291,238 @@
   :global(body.resizing) {
     cursor: ns-resize !important;
     user-select: none !important;
+  }
+
+  /* File Transfer UI Styles (Week 1) */
+  .file-button {
+    min-width: 45px;
+    padding: 8px 12px;
+    font-size: 18px;
+    margin-right: 8px;
+    cursor: pointer;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border: none;
+    border-radius: 4px;
+    transition: all 0.2s;
+  }
+
+  .file-button:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  .file-button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+  }
+
+  .modal-dialog {
+    background: #2a2a2a;
+    padding: 24px;
+    border-radius: 8px;
+    max-width: 500px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  }
+
+  .modal-dialog h3 {
+    margin-top: 0;
+    color: #e0e0e0;
+  }
+
+  .modal-dialog p {
+    margin: 8px 0;
+    color: #b0b0b0;
+  }
+
+  .modal-buttons {
+    display: flex;
+    gap: 12px;
+    margin-top: 20px;
+  }
+
+  .accept-button {
+    flex: 1;
+    padding: 10px;
+    background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+  }
+
+  .accept-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  .reject-button {
+    flex: 1;
+    padding: 10px;
+    background: linear-gradient(135deg, #f44336 0%, #d32f2f 100%);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 500;
+  }
+
+  .reject-button:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+  }
+
+  .active-transfers-panel {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: #2a2a2a;
+    padding: 16px;
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+    min-width: 300px;
+    z-index: 999;
+  }
+
+  .active-transfers-panel h4 {
+    margin: 0 0 12px 0;
+    color: #e0e0e0;
+    font-size: 14px;
+  }
+
+  .transfer-item {
+    margin-bottom: 12px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid #444;
+  }
+
+  .transfer-item:last-child {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: none;
+  }
+
+  .transfer-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  .transfer-filename {
+    color: #b0b0b0;
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .transfer-status {
+    color: #888;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .cancel-transfer-button {
+    background: transparent;
+    border: none;
+    color: #888;
+    font-size: 20px;
+    line-height: 1;
+    padding: 0;
+    width: 24px;
+    height: 24px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+  }
+
+  .cancel-transfer-button:hover {
+    background: rgba(255, 68, 68, 0.2);
+    color: #ff4444;
+  }
+
+  .cancel-transfer-button:active {
+    transform: scale(0.95);
+  }
+
+  .progress-bar {
+    width: 100%;
+    height: 6px;
+    background: #444;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 4px;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    transition: width 0.3s ease;
+  }
+
+  .progress-text {
+    font-size: 11px;
+    color: #888;
+  }
+
+  /* File attachment display (Week 1) */
+  .message-attachments {
+    margin-top: 8px;
+  }
+
+  .file-attachment {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    margin-top: 8px;
+    transition: background 0.2s ease;
+  }
+
+  .file-attachment:hover {
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .file-details {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .file-name {
+    color: #1a1a1a;
+    font-weight: 600;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .file-meta {
+    color: #4a4a4a;
+    font-size: 12px;
+    margin-top: 4px;
   }
 </style>

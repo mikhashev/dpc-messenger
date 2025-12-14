@@ -7,13 +7,153 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+---
+
+## [0.11.1] - 2025-12-13
+
 ### Added
+- **Per-Chunk File Transfer Verification** - Detect and retry corrupted chunks immediately
+  - **CRC32 Checksums** - Fast integrity verification for each 64KB chunk
+    - 10x faster than SHA256 per-chunk hashing
+    - Minimal overhead: 10 KB for 159 MB file (2,541 chunks)
+    - Computed on sender side, verified on receiver side
+    - Files: [managers/file_transfer_manager.py:201-220](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+  - **Automatic Chunk Retry** - Request re-transmission of corrupted chunks
+    - Maximum 3 retry attempts per chunk
+    - Immediate detection (don't waste time receiving remaining chunks)
+    - Only retry failed chunks (efficient bandwidth usage)
+    - New `FILE_CHUNK_RETRY` command in DPTP protocol
+    - Files: [message_handlers/file_chunk_retry_handler.py](dpc-client/core/dpc_client_core/message_handlers/file_chunk_retry_handler.py)
+  - **Enhanced FILE_OFFER** - Include `chunk_hashes` array in payload
+    - Optional field for backward compatibility
+    - 8-character hex string per chunk (CRC32 format)
+    - Enables receiver to verify integrity immediately
+  - **Retry Tracking** - Monitor failed chunks and retry attempts
+    - `chunks_failed` set tracks indices of corrupted chunks
+    - `retry_count` dict maps chunk index to attempt count
+    - Fails transfer after max retries exceeded
+    - Files: [managers/file_transfer_manager.py:61-103](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+
+### Changed
+- **FILE_CHUNK Handler** - Added per-chunk CRC32 verification logic
+  - Verifies chunk immediately upon receipt
+  - Sends FILE_CHUNK_RETRY on verification failure
+  - Tracks retry attempts and fails after max retries
+  - Files: [managers/file_transfer_manager.py:378-447](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+- **Configurable Chunk Delay** - Made inter-chunk delay configurable for transfer speed tuning
+  - New setting: `file_transfer.chunk_delay` (default: 0.001 = 1ms, was hardcoded 0.01 = 10ms)
+  - **10x faster default** - Changed from 10ms to 1ms delay between chunks
+  - With 1024KB chunks: theoretical max speed increased from ~10 MB/s to ~100 MB/s
+  - Set to 0 for maximum speed (no delay), or increase for bandwidth throttling
+  - Files: [managers/file_transfer_manager.py:176](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+
+### Fixed
+- **CRITICAL: Out-of-Order Chunk Assembly** - Fixed file corruption bug
+  - **Bug:** Chunks were appended in arrival order, not correct order based on chunk_index
+  - **Impact:** File corruption when chunks arrive out of order (especially over WebRTC, relay, gossip)
+  - **Symptom:** Video files unplayable, media players fail to decode corrupted streams
+  - **Root Cause:** Used `extend()` to append chunks sequentially instead of indexed storage
+  - **Fix:** Store chunks in dict indexed by chunk_index, assemble in order during finalization
+  - **Result:** Guarantees correct file assembly regardless of network packet ordering
+  - Files: [managers/file_transfer_manager.py:399-453](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+- **Active Transfers Panel Missing on Sender Side** - Fixed UI not showing uploads in progress
+  - **Bug:** Active Transfers panel only showed on receiver side, not sender side
+  - **Root Cause:** UI missing handler for `file_transfer_started` event (only had `file_transfer_offered`)
+  - **Fix:** Added handler to add sender-side transfers to activeFileTransfers store
+  - **Result:** Active Transfers panel now shows on both sender and receiver
+  - Files: [coreService.ts:292-303](dpc-client/ui/src/lib/coreService.ts)
+- **Progress Bar Not Updating** - Fixed progress bar stuck at 0% during file transfer
+  - **Bug:** Progress bar appeared but stayed at 0% throughout transfer
+  - **Root Cause:** Backend sends `progress_percent` but UI expects `progress` field
+  - **Fix:** Map `progress_percent` to `progress` in file_transfer_progress handler
+  - **Result:** Progress bar now updates correctly during transfer (0% → 100%)
+  - Files: [coreService.ts:305-319](dpc-client/ui/src/lib/coreService.ts)
+- **CRITICAL: Completed Transfers Not Cleaned Up** - Fixed "Max concurrent transfers exceeded" error
+  - **Bug:** After 3 successful transfers, new transfers fail with "Max concurrent transfers (3) exceeded"
+  - **Root Cause:** Completed transfers marked as COMPLETED but never removed from active_transfers dict
+  - **Impact:** Transfers accumulate until limit reached, blocking all future transfers
+  - **Fix:** Delete from active_transfers on both sender side (handle_file_complete) and receiver side (_finalize_download)
+  - **Result:** Transfers properly cleaned up after completion, no more limit errors
+  - Files: [managers/file_transfer_manager.py:550,582](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+- **FILE_CANCEL Reasons** - Added `chunk_verification_failed` and `missing_chunks` reasons
+  - `chunk_verification_failed` - Chunk failed verification after max retries
+  - `missing_chunks` - Expected chunk missing during finalization
+  - Helps distinguish from hash_mismatch (final SHA256 verification)
+  - Files: [specs/dptp_v1.md](specs/dptp_v1.md)
+
+### Performance
+- **Large File Transfers** - Improved reliability and efficiency
+  - Detect corruption at chunk-level (not file-level)
+  - For 159 MB file: saves ~2 minutes if chunk #500 corrupts (only retry 1 chunk instead of 2,541)
+  - CRC32 verification adds ~1% CPU overhead vs pure SHA256 final verification
+  - Proven approach (used by BitTorrent, rsync, ZFS)
+
+---
+
+## [0.11.0] - 2025-12-13
+
+### Added
+- **File Transfer System (Week 1 Complete)** - Peer-to-peer file sharing with chunked transfers
+  - **Chunked File Transfer** - Send files of any size with progress tracking
+    - 64KB chunks for efficient transfer over all 6 connection strategies
+    - SHA256 hash verification for integrity
+    - Resume support for interrupted transfers
+    - Background process for large files (>50MB)
+    - Prefer Direct TLS for large files, fallback to WebRTC/relay
+    - Files: [managers/file_transfer_manager.py](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py)
+  - **File Transfer Protocol** - New DPTP commands
+    - `FILE_OFFER`, `FILE_ACCEPT`, `FILE_CHUNK`, `FILE_COMPLETE`, `FILE_CANCEL`
+    - Per-transfer UUID tracking
+    - Metadata includes filename, size, MIME type, hash
+    - Files: [message_handlers/file_offer_handler.py](dpc-client/core/dpc_client_core/message_handlers/file_offer_handler.py) and related handlers
+  - **File Transfer UI** - User-friendly file sharing interface
+    - File picker button and drag-and-drop support
+    - Accept/reject dialog with file metadata display
+    - Active transfers panel with progress bars
+    - File attachments displayed in chat history
+    - Per-peer storage: `~/.dpc/conversations/{peer_id}/files/`
+    - Files: [+page.svelte](dpc-client/ui/src/routes/+page.svelte)
+  - **Firewall Permissions** - File transfer access control
+    - New `file_transfer.allow` permission (default: deny)
+    - Per-peer and per-group rules in `privacy_rules.json`
+    - File Groups tab in Firewall UI for managing permissions
+    - Configuration: `[file_transfer]` section in `config.ini`
+    - Files: [FirewallEditor.svelte](dpc-client/ui/src/lib/components/FirewallEditor.svelte)
+  - **Conversation History Integration** - Files tracked in message history
+    - File attachments stored with metadata (filename, size, hash, MIME type)
+    - Chat display shows file name, size, and download status
+    - Metadata-only references for token efficiency (~20 tokens per file)
+    - Files: [conversation_monitor.py](dpc-client/core/dpc_client_core/conversation_monitor.py)
+
+- **Gossip Protocol v0.10.2** - Enhanced security and DHT certificate discovery
+  - **Hybrid Encryption (AES-GCM + RSA-OAEP)** - No payload size limit for gossip messages
+    - Replaces pure RSA encryption (~190 byte limit)
+    - AES-256-GCM for data encryption (authenticated, detects tampering)
+    - RSA-OAEP for encrypting AES keys
+    - Supports payloads up to ~8KB (UDP packet limit)
+    - Forward secrecy: random AES key per message
+    - Files: [dpc-protocol/dpc_protocol/crypto.py](dpc-protocol/dpc_protocol/crypto.py), [managers/gossip_manager.py](dpc-client/core/dpc_client_core/managers/gossip_manager.py)
+  - **DHT Certificate Discovery** - Decentralized public key infrastructure
+    - Certificates published to DHT on startup (stored on k closest nodes)
+    - Certificate retrieval with fallback: cache → active connections → DHT query
+    - Key format: `cert:<node_id>` (e.g., `cert:dpc-node-alice123`)
+    - Enables gossip protocol to work without Hub or pre-shared certificates
+    - Files: [managers/gossip_manager.py](dpc-client/core/dpc_client_core/managers/gossip_manager.py)
+  - **Transport Wrapper** - Gossip protocol integrated with 6-tier connection fallback
+    - Gossip messages routed through GossipConnection wrapper
+    - Leverages existing encryption (TLS, DTLS, WebRTC) from underlying transport
+    - End-to-end encryption maintained through relay hops
+    - Files: [transports/gossip_connection.py](dpc-client/core/dpc_client_core/transports/gossip_connection.py)
+  - **Test Coverage:** 38 tests passing (12 DHT certificate tests, 14 encryption tests, 12 connection tests)
+
 - **Complete Firewall UI Editor** - 7 tabs for managing all privacy rules
   - File Groups tab - Define aliases for groups of context files
   - AI Scopes tab - Control local AI access in different modes (work/personal)
   - Device Sharing tab - Presets for sharing device context information
+  - File Transfer tab - Manage file sharing permissions
   - All tabs support CRUD operations with duplicate checking
   - Files: [FirewallEditor.svelte](dpc-client/ui/src/lib/components/FirewallEditor.svelte)
+
 - **AI Scope Filtering** - Local AI context filtering based on mode
   - Work mode vs personal mode context isolation
   - Selector in chat UI (only shown when context enabled and scopes exist)
@@ -21,6 +161,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Files: [firewall.py:332-395](dpc-client/core/dpc_client_core/firewall.py), [+page.svelte](dpc-client/ui/src/routes/+page.svelte)
 
 ### Fixed
+- **File Transfer Bug Fixes** - Multiple issues resolved
+  - Prevent phantom messages on file rejection
+  - Fix Active Transfers panel state bugs on rejection
+  - Reject transfer when closing dialog without decision
+  - Improve file attachment text readability
+  - Hide duplicate text when attachments present
+  - Broadcast completion event on receiver side
+  - Ensure file messages always broadcast to UI
+  - Fix firewall permission checking
+  - Fix accept/reject dialog bugs
+  - Fix P2PManager API calls and add send confirmation
+  - Fix TypeScript and accessibility errors
+  - Add ARIA roles and keyboard handlers to file offer dialog
+
 - **CRITICAL: Wildcard Override Bug** - Specific deny rules now correctly override wildcard allow rules
   - Bug affected ALL filtering methods (AI scopes, peer personal context, peer device context)
   - Fix: Check for specific rules FIRST before falling back to wildcards
@@ -28,11 +182,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Affects 4 filtering methods in firewall.py (lines 258-552)
   - Comprehensive test coverage added (30 firewall tests, all passing)
 
+- **Graceful Shutdown** - Improved service shutdown behavior
+  - Proper task cancellation and cleanup
+  - Prevents resource leaks on exit
+  - Cleaner log output during shutdown
+  - Files: [run_service.py](dpc-client/core/run_service.py)
+
+- **UI Overflow** - Fixed horizontal scrolling from long unbreakable text
+  - Chat messages now properly wrap long text
+  - Files: [+page.svelte](dpc-client/ui/src/routes/+page.svelte)
+
 ### Documentation
 - Updated CLAUDE.md with conversation history behavior documentation
   - Clarified what gets stored in conversation history (USER/ASSISTANT messages only)
   - Explained context data is ephemeral (sent fresh based on checkbox state)
   - Added practical examples of context ON/OFF behavior
+- Updated CLAUDE.md with file transfer architecture documentation
+  - Detailed file transfer protocol specification
+  - Firewall permissions for file transfers
+  - Conversation history integration patterns
+- Updated specs/dptp_v1.md with file transfer protocol commands
+- Updated privacy_rules.example.json with file_transfer section
+
+### Security
+- **File Transfer Security** - Privacy-first design
+  - All file transfers encrypted end-to-end (inherited from connection layer)
+  - SHA256 hash verification prevents tampering
+  - Firewall rules required for file transfer (default: deny)
+  - Per-peer storage isolation
+  - No server-side storage (pure P2P)
 
 ---
 

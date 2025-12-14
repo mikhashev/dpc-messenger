@@ -101,6 +101,10 @@ class HolePunchManager:
         self.discovered_endpoint: Optional[ExternalEndpoint] = None
         self._running = False
 
+        # Success rate tracking
+        self.punch_attempts = 0
+        self.punch_successes = 0
+
         logger.info(
             "HolePunchManager initialized (port=%d, discovery_peers=%d)",
             punch_port, discovery_peers
@@ -372,6 +376,9 @@ class HolePunchManager:
             peer_node_id[:20], peer_endpoint[0], peer_endpoint[1]
         )
 
+        # Track attempt
+        self.punch_attempts += 1
+
         # Step 1: Coordinate timing via DHT
         sync_time = time.time() + 5.0  # 5 seconds from now
 
@@ -423,6 +430,8 @@ class HolePunchManager:
 
                 if data == b"PUNCH" and addr[0] == peer_endpoint[0]:
                     logger.info("Hole punch successful! Received response from %s:%d", addr[0], addr[1])
+                    # Track success
+                    self.punch_successes += 1
                     return self.punch_socket
                 else:
                     logger.warning("Received unexpected data from %s", addr)
@@ -436,12 +445,23 @@ class HolePunchManager:
             logger.error("Hole punch failed: %s", e)
             return None
 
+    def get_success_rate(self) -> float:
+        """
+        Calculate hole punch success rate.
+
+        Returns:
+            Success rate (0.0-1.0), or 0.0 if no attempts yet
+        """
+        if self.punch_attempts == 0:
+            return 0.0
+        return self.punch_successes / self.punch_attempts
+
     def get_stats(self) -> Dict:
         """
         Get hole punch manager statistics.
 
         Returns:
-            Dict with endpoint info and NAT type
+            Dict with endpoint info, NAT type, and success rate
         """
         return {
             "running": self._running,
@@ -452,4 +472,7 @@ class HolePunchManager:
                 "nat_type": self.discovered_endpoint.nat_type,
                 "confidence": self.discovered_endpoint.confidence,
             } if self.discovered_endpoint else None,
+            "punch_attempts": self.punch_attempts,
+            "punch_successes": self.punch_successes,
+            "success_rate": self.get_success_rate(),
         }

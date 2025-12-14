@@ -77,6 +77,7 @@ class GossipManager:
         self,
         p2p_manager: "P2PManager",
         node_id: str,
+        message_router: Optional["MessageRouter"] = None,
         fanout: int = 3,
         max_hops: int = 5,
         ttl_seconds: int = 86400,  # 24 hours
@@ -88,6 +89,7 @@ class GossipManager:
         Args:
             p2p_manager: P2P manager for peer connections
             node_id: This node's identifier
+            message_router: Message router for delivering decrypted messages (optional)
             fanout: Number of peers to forward to
             max_hops: Maximum hops allowed
             ttl_seconds: Message TTL
@@ -95,6 +97,7 @@ class GossipManager:
         """
         self.p2p_manager = p2p_manager
         self.node_id = node_id
+        self.message_router = message_router
         self.fanout = fanout
         self.max_hops = max_hops
         self.ttl_seconds = ttl_seconds
@@ -106,6 +109,9 @@ class GossipManager:
 
         # Vector clock for causality tracking
         self.vector_clock = VectorClock(node_id)
+
+        # Delivery callbacks for GossipConnection instances
+        self.delivery_callbacks: Dict[str, callable] = {}
 
         # Background tasks
         self._running = False
@@ -134,6 +140,9 @@ class GossipManager:
             return
 
         self._running = True
+
+        # Publish local certificate to DHT for peer discovery
+        await self._publish_certificate_to_dht()
 
         # Start anti-entropy sync loop
         self._sync_task = asyncio.create_task(self._anti_entropy_loop())
@@ -166,6 +175,292 @@ class GossipManager:
 
         logger.info("GossipManager stopped")
 
+    def register_delivery_callback(self, peer_id: str, callback: callable):
+        """
+        Register callback for when messages arrive from specific peer.
+
+        Args:
+            peer_id: Source peer node ID
+            callback: Async function to call when message arrives
+
+        Note:
+            Used by GossipConnection to receive messages.
+        """
+        self.delivery_callbacks[peer_id] = callback
+        logger.debug(f"Registered delivery callback for peer {peer_id[:20]}")
+
+    def unregister_delivery_callback(self, peer_id: str):
+        """
+        Unregister delivery callback.
+
+        Args:
+            peer_id: Source peer node ID
+        """
+        if peer_id in self.delivery_callbacks:
+            del self.delivery_callbacks[peer_id]
+            logger.debug(f"Unregistered delivery callback for peer {peer_id[:20]}")
+
+    async def _encrypt_payload(self, payload: Dict, destination_node_id: str) -> str:
+        """
+        Encrypt payload with recipient's public key (hybrid encryption).
+
+        Returns base64-encoded encrypted blob.
+        Only sender and recipient can decrypt.
+
+        Args:
+            payload: Message payload to encrypt
+            destination_node_id: Recipient's node ID
+
+        Returns:
+            Base64-encoded encrypted string
+
+        Raises:
+            ValueError: If recipient's certificate cannot be found
+            Exception: If encryption fails
+
+        Note:
+            Uses hybrid encryption (AES-GCM + RSA-OAEP) for unlimited payload sizes.
+            Provides both encryption and authentication (GCM mode).
+        """
+        import json
+        import base64
+        from dpc_protocol.crypto import encrypt_with_public_key_hybrid
+
+        try:
+            # Get recipient's public key from DHT or peer cache
+            recipient_cert = await self._get_peer_certificate(destination_node_id)
+            if not recipient_cert:
+                raise ValueError(f"Cannot find certificate for {destination_node_id}")
+
+            # Serialize payload to JSON
+            payload_json = json.dumps(payload)
+            logger.debug(f"Encrypting payload ({len(payload_json)} bytes) for {destination_node_id[:20]}...")
+
+            # Encrypt with hybrid encryption (AES-GCM + RSA-OAEP)
+            encrypted_bytes = encrypt_with_public_key_hybrid(
+                payload_json.encode('utf-8'),
+                recipient_cert.public_key()
+            )
+
+            # Return as base64 for JSON serialization
+            encrypted_b64 = base64.b64encode(encrypted_bytes).decode('utf-8')
+            logger.debug(f"Encrypted gossip payload for {destination_node_id[:20]}... ({len(encrypted_b64)} chars base64)")
+            return encrypted_b64
+
+        except Exception as e:
+            logger.error(f"Failed to encrypt gossip payload: {e}", exc_info=True)
+            raise
+
+    async def _decrypt_payload(self, encrypted_payload: str) -> Dict:
+        """
+        Decrypt payload with own private key (hybrid decryption).
+
+        Returns original payload dict.
+
+        Args:
+            encrypted_payload: Base64-encoded encrypted string
+
+        Returns:
+            Decrypted payload dictionary
+
+        Raises:
+            Exception: If decryption fails (wrong key, corrupted data, authentication failure)
+
+        Note:
+            Uses hybrid decryption (AES-GCM + RSA-OAEP) for unlimited payload sizes.
+            GCM mode provides authentication - decryption fails if data was tampered with.
+        """
+        import json
+        import base64
+        from pathlib import Path
+        import os
+        from cryptography.hazmat.primitives import serialization
+        from dpc_protocol.crypto import decrypt_with_private_key_hybrid
+
+        try:
+            # Decode from base64
+            encrypted_bytes = base64.b64decode(encrypted_payload.encode('utf-8'))
+            logger.debug(f"Decrypting payload ({len(encrypted_bytes)} bytes)")
+
+            # Load own private key
+            dpc_dir = Path(os.getenv("DPC_DIR", Path.home() / ".dpc"))
+            key_path = dpc_dir / "node.key"
+
+            with open(key_path, "rb") as f:
+                private_key = serialization.load_pem_private_key(
+                    f.read(),
+                    password=None
+                )
+
+            # Decrypt with hybrid decryption (AES-GCM + RSA-OAEP)
+            decrypted_bytes = decrypt_with_private_key_hybrid(encrypted_bytes, private_key)
+
+            # Parse JSON
+            payload_json = decrypted_bytes.decode('utf-8')
+            payload = json.loads(payload_json)
+            logger.debug(f"Successfully decrypted gossip payload ({len(payload_json)} bytes, authenticated)")
+            return payload
+
+        except Exception as e:
+            logger.error(f"Failed to decrypt gossip payload: {e}", exc_info=True)
+            raise
+
+    async def _publish_certificate_to_dht(self):
+        """
+        Publish local certificate to DHT for peer discovery.
+
+        Stores certificate in PEM format under key: "cert:<node_id>"
+        This allows peers to find our public key for E2E encryption.
+
+        Note:
+            Called on startup to ensure certificate is available in DHT.
+        """
+        dht_manager = getattr(self.p2p_manager, 'dht_manager', None)
+        if not dht_manager:
+            logger.warning("DHT manager not available, cannot publish certificate")
+            return
+
+        try:
+            # Load local certificate
+            from pathlib import Path
+            import os
+            from cryptography.hazmat.primitives import serialization
+
+            dpc_dir = Path(os.getenv("DPC_DIR", Path.home() / ".dpc"))
+            cert_path = dpc_dir / "node.crt"
+
+            if not cert_path.exists():
+                logger.warning(f"Certificate not found at {cert_path}")
+                return
+
+            # Read certificate PEM
+            with open(cert_path, "rb") as f:
+                cert_pem = f.read().decode('utf-8')
+
+            # Find k closest nodes to self
+            closest_nodes = await dht_manager.find_node(self.node_id)
+
+            if not closest_nodes:
+                logger.warning("No DHT nodes found to store certificate")
+                return
+
+            # Store certificate on k nodes with key "cert:<node_id>"
+            cert_key = f"cert:{self.node_id}"
+            store_tasks = [
+                dht_manager.rpc_handler.store(node.ip, node.port, cert_key, cert_pem)
+                for node in closest_nodes
+                if node.node_id != self.node_id  # Don't store on self
+            ]
+
+            results = await asyncio.gather(*store_tasks, return_exceptions=True)
+            success_count = sum(1 for r in results if r is True)
+
+            logger.info(
+                f"Published certificate to DHT: {success_count}/{len(store_tasks)} nodes"
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to publish certificate to DHT: {e}", exc_info=True)
+
+    async def _get_peer_certificate(self, node_id: str):
+        """
+        Retrieve peer's certificate from cache or DHT.
+
+        Returns X.509 certificate with public key.
+
+        Args:
+            node_id: Peer's node ID
+
+        Returns:
+            X.509 certificate or None if not found
+
+        Note:
+            First checks peer cache, then active connection, finally queries DHT.
+        """
+        # Check peer cache first
+        if hasattr(self.p2p_manager, 'peer_cache') and self.p2p_manager.peer_cache:
+            peer = self.p2p_manager.peer_cache.get_peer(node_id)
+            if peer and hasattr(peer, 'certificate'):
+                logger.debug(f"Found certificate for {node_id[:20]} in peer cache")
+                return peer.certificate
+
+        # Try to get from active connection
+        if hasattr(self.p2p_manager, 'peers') and node_id in self.p2p_manager.peers:
+            conn = self.p2p_manager.peers[node_id]
+            if hasattr(conn, 'peer_cert'):
+                logger.debug(f"Found certificate for {node_id[:20]} from active connection")
+                return conn.peer_cert
+
+        # Query DHT for certificate
+        logger.debug(f"Certificate not in cache, querying DHT for {node_id[:20]}")
+        return await self._query_dht_for_certificate(node_id)
+
+    async def _query_dht_for_certificate(self, node_id: str):
+        """
+        Query DHT for peer's certificate.
+
+        Args:
+            node_id: Peer's node ID
+
+        Returns:
+            X.509 certificate or None if not found
+
+        Note:
+            Queries k closest nodes to target for key "cert:<node_id>".
+        """
+        dht_manager = getattr(self.p2p_manager, 'dht_manager', None)
+        if not dht_manager:
+            logger.debug("DHT manager not available")
+            return None
+
+        try:
+            # Find k closest nodes to target
+            closest_nodes = await dht_manager.find_node(node_id)
+
+            if not closest_nodes:
+                logger.debug(f"No DHT nodes found to query for {node_id[:20]}")
+                return None
+
+            # Query each node for certificate
+            cert_key = f"cert:{node_id}"
+
+            for dht_node in closest_nodes:
+                try:
+                    result = await dht_manager.rpc_handler.find_value(
+                        dht_node.ip, dht_node.port, cert_key
+                    )
+
+                    if result and "value" in result:
+                        # Found certificate PEM
+                        cert_pem = result["value"]
+
+                        # Load certificate from PEM
+                        from cryptography import x509
+                        from cryptography.hazmat.primitives import serialization
+
+                        cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
+
+                        logger.info(
+                            f"Retrieved certificate for {node_id[:20]} from DHT "
+                            f"(via {dht_node.node_id[:20]})"
+                        )
+
+                        return cert
+
+                except Exception as e:
+                    logger.debug(
+                        f"Failed to query DHT node {dht_node.node_id[:20]} "
+                        f"for certificate: {e}"
+                    )
+                    continue
+
+            logger.warning(f"Certificate for {node_id[:20]} not found in DHT")
+            return None
+
+        except Exception as e:
+            logger.error(f"Error querying DHT for certificate: {e}", exc_info=True)
+            return None
+
     async def send_gossip(
         self,
         destination: str,
@@ -173,17 +468,22 @@ class GossipManager:
         priority: str = "normal"
     ) -> str:
         """
-        Send message via gossip protocol.
+        Send message via gossip protocol (with end-to-end encryption).
 
         Creates new gossip message and begins epidemic spreading.
+        Payload is encrypted with recipient's public key for privacy.
 
         Args:
             destination: Destination node ID
-            payload: Message payload
+            payload: Message payload (will be encrypted)
             priority: Message priority ("normal", "high", "low")
 
         Returns:
             Message ID
+
+        Raises:
+            ValueError: If recipient's certificate cannot be found
+            Exception: If encryption fails
 
         Example:
             >>> msg_id = await manager.send_gossip(
@@ -191,15 +491,26 @@ class GossipManager:
             ...     {"command": "HELLO"},
             ...     priority="high"
             ... )
+
+        Note:
+            Intermediate hops cannot decrypt the payload (end-to-end encryption).
         """
         # Increment vector clock
         self.vector_clock.increment()
 
-        # Create gossip message
+        # ENCRYPT PAYLOAD before creating gossip message
+        try:
+            encrypted_payload = await self._encrypt_payload(payload, destination)
+            logger.debug(f"Encrypted gossip payload for {destination}")
+        except Exception as e:
+            logger.error(f"Cannot encrypt gossip payload: {e}")
+            raise
+
+        # Create gossip message with encrypted payload
         msg = GossipMessage.create(
             source=self.node_id,
             destination=destination,
-            payload=payload,
+            payload={"encrypted": encrypted_payload},  # Encrypted blob (E2E)
             max_hops=self.max_hops,
             ttl=self.ttl_seconds,
             priority=priority,
@@ -338,21 +649,57 @@ class GossipManager:
 
     async def _deliver_message(self, msg: GossipMessage):
         """
-        Deliver message to local application.
+        Deliver message to local application (with decryption).
 
         Args:
-            msg: Message for this node
+            msg: Message for this node (with encrypted payload)
+
+        Note:
+            Decrypts payload before delivering to callback.
+            Only the intended recipient can decrypt (end-to-end encryption).
         """
         logger.info(
-            "Delivering gossip message %s from %s",
-            msg.id, msg.source[:20]
+            "Delivering gossip message %s from %s (hops: %d)",
+            msg.id, msg.source[:20], msg.hops
         )
-
-        # TODO: Integrate with message delivery system
-        # For now, just log and update stats
 
         self.stats["messages_delivered"] += 1
         self.seen_messages.add(msg.id)
+
+        # DECRYPT PAYLOAD before delivering
+        try:
+            encrypted_blob = msg.payload.get("encrypted")
+            if not encrypted_blob:
+                logger.error(f"Gossip message {msg.id} missing encrypted payload")
+                return
+
+            decrypted_payload = await self._decrypt_payload(encrypted_blob)
+            logger.debug(f"Decrypted gossip payload from {msg.source[:20]}")
+
+        except Exception as e:
+            logger.error(f"Failed to decrypt gossip message: {e}", exc_info=True)
+            return
+
+        # Notify GossipConnection if callback registered
+        source_peer = msg.source
+        if hasattr(self, 'delivery_callbacks') and source_peer in self.delivery_callbacks:
+            try:
+                callback = self.delivery_callbacks[source_peer]
+                await callback(decrypted_payload)  # Send decrypted payload
+                logger.debug(f"Notified callback for peer {source_peer[:20]}")
+            except Exception as e:
+                logger.error(f"Error in delivery callback: {e}", exc_info=True)
+        else:
+            # Route message through message router (if available)
+            if self.message_router:
+                try:
+                    await self.message_router.route_message(source_peer, decrypted_payload)
+                    logger.debug(f"Routed gossip message from {source_peer[:20]} to message router")
+                except Exception as e:
+                    logger.error(f"Error routing gossip message: {e}", exc_info=True)
+            else:
+                # No callback and no message router - just log
+                logger.info(f"No callback or router for {source_peer[:20]}, payload: {decrypted_payload}")
 
     async def _anti_entropy_loop(self):
         """
@@ -421,10 +768,30 @@ class GossipManager:
         missing_ids = our_message_ids - peer_message_ids_set
 
         if missing_ids:
-            logger.debug("Sending %d missing messages to %s", len(missing_ids), peer_id[:20])
+            logger.info(f"Sending {len(missing_ids)} missing messages to {peer_id[:20]}")
 
-            # TODO: Send missing messages to peer
-            # (Requires peer connection lookup)
+            # Look up connection to peer
+            if not hasattr(self.p2p_manager, 'peers') or peer_id not in self.p2p_manager.peers:
+                logger.warning(f"No connection to {peer_id[:20]}, cannot send missing messages")
+                return
+
+            connection = self.p2p_manager.peers[peer_id]
+
+            # Send each missing message
+            for msg_id in missing_ids:
+                if msg_id in self.messages:
+                    message = self.messages[msg_id]
+                    try:
+                        # Re-gossip the message (will use existing routing)
+                        await connection.send({
+                            "command": "GOSSIP_MESSAGE",
+                            "payload": {
+                                "gossip_message": message.to_dict()
+                            }
+                        })
+                        logger.debug(f"Sent missing message {msg_id[:8]}... to {peer_id[:20]}")
+                    except Exception as e:
+                        logger.error(f"Failed to send missing message {msg_id}: {e}")
 
     async def _cleanup_loop(self):
         """Remove expired messages periodically."""

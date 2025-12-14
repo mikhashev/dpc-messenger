@@ -21,6 +21,11 @@
       allow_groups: string[];
       allowed_models: string[];
     };
+    file_transfer?: {
+      _comment?: string;
+      groups?: Record<string, any>;
+      nodes?: Record<string, any>;
+    };
     nodes?: Record<string, Record<string, string>>;
     groups?: Record<string, Record<string, string>>;
     ai_scopes?: Record<string, Record<string, string>>;
@@ -28,7 +33,7 @@
   };
 
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'peers' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'peers' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -464,6 +469,13 @@
         </button>
         <button
           class="tab"
+          class:active={selectedTab === 'file-transfer'}
+          on:click={() => selectedTab = 'file-transfer'}
+        >
+          File Transfer
+        </button>
+        <button
+          class="tab"
           class:active={selectedTab === 'peers'}
           on:click={() => selectedTab = 'peers'}
         >
@@ -873,6 +885,160 @@
             {#if !editMode}
               <div class="info-box">
                 <strong>Info:</strong> Device sharing presets define what device context information can be shared. Use device_context.json:* paths (e.g., device_context.json:hardware.gpu.*, device_context.json:software.os.*).
+              </div>
+            {/if}
+          </div>
+
+        {:else if selectedTab === 'file-transfer'}
+          <div class="section">
+            <h3>File Transfer Permissions</h3>
+            <p class="help-text">Control who can send/receive files with you and set size/type limits.</p>
+
+            {#if displayRules?.file_transfer}
+              <!-- Group Permissions Section -->
+              {#if displayRules.file_transfer.groups && Object.keys(displayRules.file_transfer.groups).length > 0}
+                <h4>Group Permissions</h4>
+                {#each Object.entries(displayRules.file_transfer.groups) as [groupName, groupSettings]}
+                  {#if !groupName.startsWith('_')}
+                    <div class="peer-card">
+                      <div class="group-header">
+                        <h5>Group: {groupName}</h5>
+                      </div>
+                      <div class="subsection">
+                        <div class="setting-item">
+                          <span><strong>File Transfer Allowed:</strong></span>
+                          {#if editMode && editedRules?.file_transfer?.groups?.[groupName]}
+                            <select bind:value={editedRules.file_transfer.groups[groupName]['file_transfer.allow']}>
+                              <option value="allow">allow</option>
+                              <option value="deny">deny</option>
+                            </select>
+                          {:else}
+                            <span class="value">{groupSettings['file_transfer.allow'] || 'deny'}</span>
+                          {/if}
+                        </div>
+                        <div class="setting-item">
+                          <span><strong>Max File Size (MB):</strong></span>
+                          {#if editMode && editedRules?.file_transfer?.groups?.[groupName]}
+                            <input
+                              type="number"
+                              min="1"
+                              max="10000"
+                              bind:value={editedRules.file_transfer.groups[groupName]['file_transfer.max_size_mb']}
+                              placeholder="No limit"
+                            />
+                          {:else}
+                            <span class="value">{groupSettings['file_transfer.max_size_mb'] || 'No limit'} {groupSettings['file_transfer.max_size_mb'] ? 'MB' : ''}</span>
+                          {/if}
+                        </div>
+                        <div class="setting-item">
+                          <span><strong>Allowed File Types:</strong></span>
+                          {#if editMode && editedRules?.file_transfer?.groups?.[groupName]}
+                            <textarea
+                              class="edit-textarea"
+                              rows="3"
+                              placeholder="Enter MIME types (one per line, e.g., image/*, application/pdf) or * for all"
+                              value={Array.isArray(editedRules.file_transfer.groups[groupName]['file_transfer.allowed_mime_types']) ? editedRules.file_transfer.groups[groupName]['file_transfer.allowed_mime_types'].join('\n') : '*'}
+                              on:input={(e) => {
+                                if (editedRules?.file_transfer?.groups?.[groupName]) {
+                                  const target = e.currentTarget as HTMLTextAreaElement;
+                                  const types = target.value.split('\n').map((s: string) => s.trim()).filter((s: string) => s.length > 0);
+                                  editedRules.file_transfer.groups[groupName]['file_transfer.allowed_mime_types'] = types.length > 0 ? types : ['*'];
+                                }
+                              }}
+                            ></textarea>
+                          {:else}
+                            <div class="tags">
+                              {#if groupSettings['file_transfer.allowed_mime_types'] && Array.isArray(groupSettings['file_transfer.allowed_mime_types'])}
+                                {#each groupSettings['file_transfer.allowed_mime_types'] as mimeType}
+                                  <span class="tag">{mimeType}</span>
+                                {/each}
+                              {:else}
+                                <span class="tag">*</span>
+                              {/if}
+                            </div>
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+                  {/if}
+                {/each}
+              {/if}
+
+              <!-- Node Permissions Section -->
+              {#if displayRules.file_transfer.nodes && Object.keys(displayRules.file_transfer.nodes).length > 0}
+                <h4>Individual Node Permissions</h4>
+                {#each Object.entries(displayRules.file_transfer.nodes) as [nodeId, nodeSettings]}
+                  {#if !nodeId.startsWith('_')}
+                    <div class="peer-card">
+                      <div class="group-header">
+                        <h5>{nodeId}</h5>
+                      </div>
+                      <div class="subsection">
+                        <div class="setting-item">
+                          <span><strong>File Transfer Allowed:</strong></span>
+                          {#if editMode && editedRules?.file_transfer?.nodes?.[nodeId]}
+                            <select bind:value={editedRules.file_transfer.nodes[nodeId]['file_transfer.allow']}>
+                              <option value="allow">allow</option>
+                              <option value="deny">deny</option>
+                            </select>
+                          {:else}
+                            <span class="value">{nodeSettings['file_transfer.allow'] || 'deny'}</span>
+                          {/if}
+                        </div>
+                        <div class="setting-item">
+                          <span><strong>Max File Size (MB):</strong></span>
+                          {#if editMode && editedRules?.file_transfer?.nodes?.[nodeId]}
+                            <input
+                              type="number"
+                              min="1"
+                              max="10000"
+                              bind:value={editedRules.file_transfer.nodes[nodeId]['file_transfer.max_size_mb']}
+                              placeholder="No limit"
+                            />
+                          {:else}
+                            <span class="value">{nodeSettings['file_transfer.max_size_mb'] || 'No limit'} {nodeSettings['file_transfer.max_size_mb'] ? 'MB' : ''}</span>
+                          {/if}
+                        </div>
+                        <div class="setting-item">
+                          <span><strong>Allowed File Types:</strong></span>
+                          {#if editMode && editedRules?.file_transfer?.nodes?.[nodeId]}
+                            <textarea
+                              class="edit-textarea"
+                              rows="3"
+                              placeholder="Enter MIME types (one per line, e.g., image/*, application/pdf) or * for all"
+                              value={Array.isArray(editedRules.file_transfer.nodes[nodeId]['file_transfer.allowed_mime_types']) ? editedRules.file_transfer.nodes[nodeId]['file_transfer.allowed_mime_types'].join('\n') : '*'}
+                              on:input={(e) => {
+                                if (editedRules?.file_transfer?.nodes?.[nodeId]) {
+                                  const target = e.currentTarget as HTMLTextAreaElement;
+                                  const types = target.value.split('\n').map((s: string) => s.trim()).filter((s: string) => s.length > 0);
+                                  editedRules.file_transfer.nodes[nodeId]['file_transfer.allowed_mime_types'] = types.length > 0 ? types : ['*'];
+                                }
+                              }}
+                            ></textarea>
+                          {:else}
+                            <div class="tags">
+                              {#if nodeSettings['file_transfer.allowed_mime_types'] && Array.isArray(nodeSettings['file_transfer.allowed_mime_types'])}
+                                {#each nodeSettings['file_transfer.allowed_mime_types'] as mimeType}
+                                  <span class="tag">{mimeType}</span>
+                                {/each}
+                              {:else}
+                                <span class="tag">*</span>
+                              {/if}
+                            </div>
+                          {/if}
+                        </div>
+                      </div>
+                    </div>
+                  {/if}
+                {/each}
+              {/if}
+            {:else}
+              <p class="empty">No file transfer permissions configured.</p>
+            {/if}
+
+            {#if !editMode}
+              <div class="info-box">
+                <strong>Info:</strong> File transfer permissions control who can send you files and what types/sizes are allowed. Supports per-node and per-group settings with MIME type wildcards (e.g., "image/*", "application/pdf"). Use Edit mode to modify permissions.
               </div>
             {/if}
           </div>

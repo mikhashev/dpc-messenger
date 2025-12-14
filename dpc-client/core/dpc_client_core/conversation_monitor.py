@@ -934,14 +934,19 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
     # --- Conversation History Methods (Phase 7) ---
 
-    def add_message(self, role: str, content: str):
+    def add_message(self, role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None):
         """Add a message to the conversation history
 
         Args:
             role: 'user' or 'assistant'
             content: Message content
+            attachments: Optional list of attachment metadata dicts
+                Example: [{"type": "file", "filename": "...", "size_bytes": 123, ...}]
         """
-        self.message_history.append({"role": role, "content": content})
+        message = {"role": role, "content": content}
+        if attachments:
+            message["attachments"] = attachments
+        self.message_history.append(message)
 
     def get_message_history(self) -> List[Dict[str, str]]:
         """Get the full conversation history

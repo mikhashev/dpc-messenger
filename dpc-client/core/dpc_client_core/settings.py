@@ -174,6 +174,14 @@ class Settings:
             'cultural_perspectives_enabled': 'false'  # Include cultural perspective analysis in knowledge extraction
         }
 
+        self._config['file_transfer'] = {
+            'chunk_size': '65536',  # Chunk size in bytes (64KB)
+            'background_threshold_mb': '50',  # Background transfer threshold in MB
+            'direct_tls_only_threshold_mb': '100',  # Direct TLS preference threshold in MB
+            'max_concurrent_transfers': '3',  # Max concurrent file transfers
+            'verify_hash': 'true'  # Verify file hash after transfer (SHA256)
+        }
+
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
             'console': 'true',  # Enable console output
