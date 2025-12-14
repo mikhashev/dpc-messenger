@@ -607,14 +607,18 @@ class FileTransferManager:
         logger.info(f"Transfer cancelled: {transfer_id} (reason: {reason})")
 
     async def _send_file_cancel(self, node_id: str, transfer_id: str, reason: str):
-        """Send FILE_CANCEL message to peer."""
-        await self.p2p_manager.send_message_to_peer(node_id, {
-            "command": "FILE_CANCEL",
-            "payload": {
-                "transfer_id": transfer_id,
-                "reason": reason
-            }
-        })
+        """Send FILE_CANCEL message to peer (gracefully handles disconnected peer)."""
+        try:
+            await self.p2p_manager.send_message_to_peer(node_id, {
+                "command": "FILE_CANCEL",
+                "payload": {
+                    "transfer_id": transfer_id,
+                    "reason": reason
+                }
+            })
+        except ConnectionError:
+            # Peer already disconnected, no need to send FILE_CANCEL
+            logger.debug(f"Could not send FILE_CANCEL to {node_id} (already disconnected)")
 
     async def _send_chunk_retry_request(self, node_id: str, transfer_id: str, chunk_index: int):
         """
@@ -626,13 +630,17 @@ class FileTransferManager:
             chunk_index: Index of chunk to retry
         """
         logger.info(f"Requesting retry for chunk {chunk_index} of transfer {transfer_id}")
-        await self.p2p_manager.send_message_to_peer(node_id, {
-            "command": "FILE_CHUNK_RETRY",
-            "payload": {
-                "transfer_id": transfer_id,
-                "chunk_index": chunk_index
-            }
-        })
+        try:
+            await self.p2p_manager.send_message_to_peer(node_id, {
+                "command": "FILE_CHUNK_RETRY",
+                "payload": {
+                    "transfer_id": transfer_id,
+                    "chunk_index": chunk_index
+                }
+            })
+        except ConnectionError:
+            # Peer disconnected during transfer, retry request not needed
+            logger.debug(f"Could not send FILE_CHUNK_RETRY to {node_id} (already disconnected)")
 
     async def handle_file_chunk_retry(self, node_id: str, payload: dict):
         """

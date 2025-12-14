@@ -50,6 +50,9 @@ class PeerConnection:
                 await asyncio.wait_for(self.writer.wait_closed(), timeout=2.0)
             except asyncio.TimeoutError:
                 logger.warning("SSL shutdown timed out for peer %s", self.node_id)
+            except Exception as e:
+                # Gracefully handle SSL errors during shutdown (race conditions)
+                logger.debug("Error during SSL shutdown for peer %s: %s", self.node_id, e)
 
 
 class P2PManager:
