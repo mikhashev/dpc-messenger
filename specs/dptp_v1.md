@@ -920,6 +920,225 @@ verify_hash = true
 
 ---
 
+### 3.12 Relay Protocol Messages (v0.10.0)
+
+Server-side relay functionality enabling NAT traversal for 100% peer connectivity. Volunteer relay nodes forward encrypted messages between peers without decrypting content.
+
+**Privacy Note:** Relays see peer IDs, message sizes, and timing, but cannot decrypt message content (end-to-end encryption maintained).
+
+#### RELAY_REGISTER
+
+Client requests to establish a relay session through a volunteer relay node.
+
+**Format:**
+```json
+{
+  "command": "RELAY_REGISTER",
+  "payload": {
+    "peer_id": "dpc-node-target-peer-123",
+    "timeout": 30.0
+  }
+}
+```
+
+**Fields:**
+- `peer_id` (string, required): Node ID of target peer to connect through relay
+- `timeout` (float, optional): Registration timeout in seconds (default: 30.0)
+
+**Responses:**
+
+**RELAY_WAITING** (if waiting for other peer):
+```json
+{
+  "command": "RELAY_WAITING",
+  "payload": {
+    "message": "Waiting for peer dpc-node-target-pee to register",
+    "timeout": 30.0
+  }
+}
+```
+
+**RELAY_READY** (if both peers registered):
+```json
+{
+  "command": "RELAY_READY",
+  "payload": {
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "peer_id": "dpc-node-target-peer-123"
+  }
+}
+```
+
+**ERROR** (if relay not volunteering or invalid request):
+```json
+{
+  "command": "ERROR",
+  "payload": {
+    "error": "not_volunteering",
+    "message": "This node is not volunteering as a relay"
+  }
+}
+```
+
+**Protocol Flow:**
+1. Peer A sends RELAY_REGISTER(peer_id=Peer B)
+2. Relay responds with RELAY_WAITING (waiting for Peer B)
+3. Peer B sends RELAY_REGISTER(peer_id=Peer A)
+4. Relay creates session and sends RELAY_READY to both peers
+
+**Security:**
+- Only volunteering nodes accept RELAY_REGISTER requests
+- Session created only when both peers register for each other (mutual consent)
+
+---
+
+#### RELAY_MESSAGE
+
+Forwards an encrypted message through an established relay session.
+
+**Format:**
+```json
+{
+  "command": "RELAY_MESSAGE",
+  "payload": {
+    "from": "dpc-node-sender-123",
+    "to": "dpc-node-receiver-456",
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "message": {
+      "command": "SEND_TEXT",
+      "payload": {"text": "Hello via relay!"}
+    }
+  }
+}
+```
+
+**Fields:**
+- `from` (string, required): Sender node ID (must match connection identity)
+- `to` (string, required): Receiver node ID
+- `session_id` (string, required): Active relay session identifier
+- `message` (object, required): Encrypted DPTP message to forward (any command type)
+
+**Behavior:**
+- Relay verifies sender matches connection identity
+- Relay verifies session exists and sender is participant
+- Relay forwards message to receiver via P2P connection
+- Relay cannot decrypt message content (E2E encryption maintained)
+
+**Responses:**
+
+**ERROR** (on validation failure):
+```json
+{
+  "command": "ERROR",
+  "payload": {
+    "error": "forward_failed",
+    "message": "Failed to forward message (session not found or rate limited)"
+  }
+}
+```
+
+**Security:**
+- Relay cannot see message content (E2E encrypted payload)
+- Relay can see: peer IDs, message size, timing metadata
+- Sender identity verified against connection
+
+---
+
+#### RELAY_DISCONNECT
+
+Closes an active relay session and cleans up relay state.
+
+**Format:**
+```json
+{
+  "command": "RELAY_DISCONNECT",
+  "payload": {
+    "peer": "dpc-node-other-peer-456",
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "reason": "connection_closed"
+  }
+}
+```
+
+**Fields:**
+- `peer` (string, optional): Other peer node ID (for logging)
+- `session_id` (string, required): Session identifier to close
+- `reason` (string, optional): Disconnection reason
+  - `connection_closed` - Connection lost
+  - `user_request` - User manually disconnected
+  - `timeout` - Session timed out
+
+**Response:**
+
+**RELAY_DISCONNECT_ACK**:
+```json
+{
+  "command": "RELAY_DISCONNECT_ACK",
+  "payload": {
+    "session_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "cleaned_up"
+  }
+}
+```
+
+**Status Values:**
+- `cleaned_up` - Session successfully removed
+- `not_found` - Session already cleaned up or never existed
+
+**Behavior:**
+- Relay removes session from active sessions
+- Relay cleans up peer-to-session mappings
+- Both peers can reconnect or fall back to gossip protocol
+
+**Security:**
+- Only session participants can send RELAY_DISCONNECT
+- Non-participants receive ERROR response with `not_authorized`
+
+---
+
+**Relay Configuration:**
+
+Client configuration (`~/.dpc/config.ini`):
+```ini
+[relay]
+# CLIENT MODE: Use relays for outbound connections
+enabled = true
+prefer_region = global
+cache_timeout = 300
+
+# SERVER MODE: Volunteer as relay (opt-in)
+volunteer = false
+max_peers = 10
+bandwidth_limit_mbps = 10.0
+region = global
+```
+
+Firewall rules (automatic for relays):
+- Relays accept RELAY_REGISTER, RELAY_MESSAGE, RELAY_DISCONNECT from all peers
+- Relays enforce bandwidth limits and max concurrent sessions
+- Relays can be disabled by setting `relay.volunteer = false`
+
+**Quality Scoring (DHT):**
+
+Relays announce quality metrics to DHT:
+- **Geographic region**: `us-west`, `eu-central`, `ap-southeast`, `global`
+- **Uptime score**: 0.0 to 1.0 (calculated from start time)
+- **Latency**: Round-trip time in milliseconds
+- **Capacity**: Available bandwidth and concurrent sessions
+
+Clients select relays using weighted scoring:
+- Uptime: 50% weight
+- Capacity: 30% weight
+- Latency: 20% weight
+
+**Use Cases:**
+- Symmetric NAT traversal (when UDP hole punching fails)
+- Backup connection when Hub unavailable
+- Geographic proximity optimization (lower latency)
+- Community-driven infrastructure (no centralized TURN servers)
+
+---
+
 ## 4. Node Identity System
 
 ### Node ID Format
