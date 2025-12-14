@@ -432,13 +432,18 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                 // Store the promise callbacks
                 pendingCommands.set(id, { resolve, reject });
 
+                // Set timeout based on command type
+                // File operations need longer timeout for hash computation
+                const timeout = command === 'send_file' ? 60000 : 10000;  // 60s for file ops, 10s for others
+                const timeoutSeconds = timeout / 1000;
+
                 // Set timeout to reject if no response
                 setTimeout(() => {
                     if (pendingCommands.has(id)) {
                         pendingCommands.delete(id);
-                        reject(new Error(`Command '${command}' timed out after 10 seconds`));
+                        reject(new Error(`Command '${command}' timed out after ${timeoutSeconds} seconds`));
                     }
-                }, 10000);
+                }, timeout);
 
                 // Send the message
                 socket!.send(JSON.stringify(message));
