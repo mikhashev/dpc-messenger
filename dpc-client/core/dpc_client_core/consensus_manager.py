@@ -382,10 +382,11 @@ class ConsensusManager:
             context.last_commit_message = commit.summary
             context.last_commit_timestamp = commit.timestamp
 
-            # 6. Add to commit history with cryptographic fields
+            # 6. Add to commit history with cryptographic fields and parent tracking
             context.commit_history.append({
                 'commit_id': commit.commit_id,
                 'commit_hash': commit.commit_hash,
+                'parent_commit_id': commit.parent_commit_id,  # Track commit ancestry
                 'timestamp': commit.timestamp,
                 'message': commit.summary,
                 'participants': commit.participants,

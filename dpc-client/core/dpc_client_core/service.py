@@ -1101,6 +1101,11 @@ class CoreService:
                 "ip_version": "IPv6" if ":" in ip else "IPv4"
             })
 
+        # Get connection orchestrator stats (if available)
+        orchestrator_stats = None
+        if self.connection_orchestrator:
+            orchestrator_stats = self.connection_orchestrator.get_stats()
+
         return {
             "node_id": self.p2p_manager.node_id,
             "hub_status": "Connected" if hub_connected else "Disconnected",
@@ -1118,6 +1123,8 @@ class CoreService:
             # External URIs (from STUN server discovery)
             "external_ips": external_ips,
             "external_uris": external_uris,
+            # Connection orchestrator stats (6-tier fallback metrics)
+            "orchestrator_stats": orchestrator_stats,
         }
     
     async def list_providers(self) -> Dict[str, Any]:
