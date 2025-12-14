@@ -224,6 +224,7 @@ class CoreService:
         self.p2p_manager.set_core_service_ref(self)
         self.p2p_manager.set_on_peer_list_change(self.on_peer_list_change)
         self.p2p_manager.set_on_message_received(self.on_p2p_message_received)
+        self.p2p_manager.set_on_peer_disconnected(self._handle_peer_disconnected)
         self._processed_message_ids = set()  # Track processed messages
         self._max_processed_ids = 1000  # Limit set size
 
@@ -833,6 +834,40 @@ class CoreService:
 
         # Route message to registered handler
         await self.message_router.route_message(sender_node_id, message)
+
+    async def _handle_peer_disconnected(self, peer_id: str):
+        """
+        Callback triggered when a peer disconnects (intentionally or connection lost).
+        Cleans up all active file transfers with the disconnected peer.
+        """
+        logger.info(f"Handling peer disconnection cleanup for {peer_id}")
+
+        # Find all active transfers with this peer
+        transfers_to_cancel = [
+            (transfer_id, transfer)
+            for transfer_id, transfer in self.file_transfer_manager.active_transfers.items()
+            if transfer.node_id == peer_id
+        ]
+
+        # Cancel each transfer and notify UI
+        for transfer_id, transfer in transfers_to_cancel:
+            logger.info(f"Cancelling transfer {transfer_id} due to peer disconnection")
+
+            # Delete transfer locally (don't send FILE_CANCEL since peer is already disconnected)
+            del self.file_transfer_manager.active_transfers[transfer_id]
+
+            # Broadcast cancellation event to UI
+            await self.local_api.broadcast_event("file_transfer_cancelled", {
+                "transfer_id": transfer_id,
+                "node_id": peer_id,
+                "filename": transfer.filename,
+                "direction": transfer.direction,
+                "reason": "peer_disconnected",
+                "status": "cancelled"
+            })
+
+        if transfers_to_cancel:
+            logger.info(f"Cancelled {len(transfers_to_cancel)} active transfer(s) with {peer_id}")
 
     # --- High-level methods (API for the UI) ---
 

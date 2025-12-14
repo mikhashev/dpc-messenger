@@ -92,6 +92,7 @@ class P2PManager:
         self.local_context = PCMCore().load_context()
         self.on_peer_list_change: Callable | None = None
         self.on_message_received: Callable | None = None
+        self.on_peer_disconnected: Callable | None = None  # Callback for peer disconnection
         self._server_task = None
         logger.info("P2PManager initialized with WebRTC support")
 
@@ -100,7 +101,11 @@ class P2PManager:
 
     def set_on_message_received(self, callback: Callable):
         self.on_message_received = callback
-    
+
+    def set_on_peer_disconnected(self, callback: Callable):
+        """Set callback for peer disconnection events (for cleanup like file transfers)."""
+        self.on_peer_disconnected = callback
+
     def set_core_service_ref(self, core_service):
         """Set reference to CoreService for storing peer metadata."""
         self._core_service_ref = core_service
@@ -1150,6 +1155,13 @@ class P2PManager:
 
         # Clean up buffered ICE candidates
         self._ice_candidates_buffer.pop(peer_id, None)
+
+        # Notify about peer disconnection (for cleanup like file transfers)
+        if self.on_peer_disconnected:
+            try:
+                await self.on_peer_disconnected(peer_id)
+            except Exception as e:
+                logger.error(f"Error in on_peer_disconnected callback for {peer_id}: {e}", exc_info=True)
 
         # Note: hub_client_refs will be cleaned up in the close handler
 
