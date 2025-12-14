@@ -66,6 +66,7 @@ If this vision resonates with you, let's connect:
 - **User Sovereignty** - You own your data, identity, and encryption keys ([read more](./docs/USER_SOVEREIGNTY.md))
 - **Encrypted Backups** - AES-256-GCM encrypted backups with no backdoors ([guide](./docs/BACKUP_RESTORE.md))
 - **Human-AI Collaboration** - Work with your AI assistant, then share contexts with trusted peers so their AIs can contribute too
+- **Compute Sharing** - Share your local AI models or API access with trusted peers, or borrow theirs when you need more power ([guide](./docs/REMOTE_INFERENCE.md))
 - **Conversation History** - Full conversational continuity with smart context optimization (60-80% token savings)
 - **Rich Markdown Rendering** - AI responses display with GitHub-style formatting, intelligent caching (50-200x faster)
 - **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
