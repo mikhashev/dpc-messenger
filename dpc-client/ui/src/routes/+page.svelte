@@ -877,6 +877,23 @@
     console.log('File send cancelled by user');
   }
 
+  async function handleCancelTransfer(transferId: string, filename: string) {
+    try {
+      console.log(`Cancelling file transfer: ${transferId}`);
+      await cancelFileTransfer(transferId, 'user_cancelled');
+
+      // Show toast notification
+      fileOfferToastMessage = `Cancelled: ${filename}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 3000);
+    } catch (error) {
+      console.error('Error cancelling file transfer:', error);
+      fileOfferToastMessage = `Failed to cancel: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
   // --- HANDLE INCOMING MESSAGES ---
   $: if ($coreMessages?.id) {
     const message = $coreMessages;
@@ -1771,6 +1788,14 @@
         <div class="transfer-info">
           <span class="transfer-filename">{transfer.filename}</span>
           <span class="transfer-status">{transfer.direction === 'upload' ? '↑' : '↓'} {transfer.status}</span>
+          <button
+            class="cancel-transfer-button"
+            on:click={() => handleCancelTransfer(transfer.transfer_id, transfer.filename)}
+            title="Cancel transfer"
+            aria-label="Cancel transfer"
+          >
+            ×
+          </button>
         </div>
         {#if transfer.progress !== undefined}
           <div class="progress-bar">
@@ -3351,7 +3376,8 @@
 
   .transfer-info {
     display: flex;
-    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
     margin-bottom: 8px;
   }
 
@@ -3361,12 +3387,41 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    max-width: 200px;
+    flex: 1;
+    min-width: 0;
   }
 
   .transfer-status {
     color: #888;
     font-size: 12px;
+    white-space: nowrap;
+  }
+
+  .cancel-transfer-button {
+    background: transparent;
+    border: none;
+    color: #888;
+    font-size: 20px;
+    line-height: 1;
+    padding: 0;
+    width: 24px;
+    height: 24px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+  }
+
+  .cancel-transfer-button:hover {
+    background: rgba(255, 68, 68, 0.2);
+    color: #ff4444;
+  }
+
+  .cancel-transfer-button:active {
+    transform: scale(0.95);
   }
 
   .progress-bar {
