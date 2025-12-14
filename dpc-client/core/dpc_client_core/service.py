@@ -422,6 +422,7 @@ class CoreService:
             self.relay_manager = RelayManager(
                 dht_manager=dht_manager,
                 p2p_manager=self.p2p_manager,
+                hole_punch_manager=self.hole_punch_manager,
                 volunteer=relay_volunteer,
                 max_peers=self.settings.get_relay_max_peers(),
                 bandwidth_limit_mbps=self.settings.get_relay_bandwidth_limit(),
@@ -434,12 +435,13 @@ class CoreService:
             self.gossip_manager = GossipManager(
                 p2p_manager=self.p2p_manager,
                 node_id=self.p2p_manager.node_id,
+                message_router=self.message_router,
                 fanout=self.settings.get_gossip_fanout(),
                 max_hops=self.settings.get_gossip_max_hops(),
                 ttl_seconds=self.settings.get_gossip_ttl(),
                 sync_interval=self.settings.get_gossip_sync_interval()
             )
-            logger.info("Gossip Manager initialized")
+            logger.info("Gossip Manager initialized with message router integration")
             self.connection_status.update_gossip_status(True)
 
             # Connection Orchestrator (Phase 6 - 6-tier connection fallback)

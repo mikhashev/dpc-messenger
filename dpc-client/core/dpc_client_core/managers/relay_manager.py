@@ -78,6 +78,7 @@ class RelayManager:
         self,
         dht_manager: "DHTManager",
         p2p_manager: Optional["P2PManager"] = None,
+        hole_punch_manager: Optional["HolePunchManager"] = None,
         volunteer: bool = False,
         max_peers: int = 10,
         bandwidth_limit_mbps: float = 10.0,
@@ -89,6 +90,7 @@ class RelayManager:
         Args:
             dht_manager: DHT manager for relay discovery
             p2p_manager: P2P manager for relay connections
+            hole_punch_manager: Hole punch manager for success rate reporting
             volunteer: Whether to volunteer as relay
             max_peers: Max concurrent relay sessions (server mode)
             bandwidth_limit_mbps: Bandwidth limit for relaying
@@ -96,6 +98,7 @@ class RelayManager:
         """
         self.dht_manager = dht_manager
         self.p2p_manager = p2p_manager
+        self.hole_punch_manager = hole_punch_manager
         self.volunteer = volunteer
         self.max_peers = max_peers
         self.bandwidth_limit_mbps = bandwidth_limit_mbps
@@ -120,10 +123,49 @@ class RelayManager:
             "bytes_relayed": 0,
         }
 
+        # Uptime tracking (for relay volunteering)
+        self.start_time = time.time() if volunteer else None
+
         logger.info(
             "RelayManager initialized (volunteer=%s, max_peers=%d, region=%s)",
             volunteer, max_peers, region
         )
+
+    def _detect_region_from_ip(self, ip: str) -> str:
+        """
+        Detect geographic region from IP address.
+
+        Uses simple heuristics based on IP ranges. For production use,
+        consider integrating a proper GeoIP database (e.g., MaxMind GeoLite2).
+
+        Args:
+            ip: IP address to check
+
+        Returns:
+            Region string (e.g., "us-west", "eu-central", "asia-pacific", "global")
+        """
+        try:
+            # For now, return region from config or "global"
+            # TODO: Integrate proper GeoIP database for production
+            # Simple approach: check if we have a configured region
+            if self.region and self.region != "global":
+                return self.region
+
+            # Fallback: detect from IP (very basic)
+            # Private/local IPs -> global
+            if ip.startswith(("192.168.", "10.", "172.", "127.")):
+                return "global"
+
+            # For production: Use GeoIP2 library
+            # from geoip2 import database
+            # reader = database.Reader('/path/to/GeoLite2-City.mmdb')
+            # response = reader.city(ip)
+            # return response.continent.code  # or response.country.iso_code
+
+            return "global"  # Default fallback
+        except Exception as e:
+            logger.debug("Failed to detect region from IP %s: %s", ip, e)
+            return "global"
 
     # ===== Client Mode: Relay Discovery =====
 
@@ -393,44 +435,39 @@ class RelayManager:
 
         logger.info("Announcing relay availability in DHT")
 
-        # Create relay metadata
-        relay_data = {
-            "node_id": self.dht_manager.node_id,
-            "ip": self.dht_manager.ip,
-            "port": self.dht_manager.port,
-            "available": True,
-            "max_peers": self.max_peers,
-            "current_peers": len(self.sessions),
-            "region": self.region,
-            "uptime": 1.0,  # TODO: Calculate actual uptime
-            "latency_ms": 50.0,  # TODO: Measure actual latency
-            "bandwidth_mbps": self.bandwidth_limit_mbps,
-        }
+        # Calculate actual uptime (time since relay started / 24 hours, capped at 1.0)
+        uptime = 1.0
+        if self.start_time:
+            elapsed_hours = (time.time() - self.start_time) / 3600.0
+            uptime = min(1.0, elapsed_hours / 24.0)  # 0.0-1.0 (full uptime after 24 hours)
 
-        # Store in DHT
-        import json
-        relay_key = f"relay:{self.dht_manager.node_id}"
-        value = json.dumps(relay_data)
+        # Detect region from IP if not configured
+        detected_region = self._detect_region_from_ip(self.dht_manager.ip)
 
-        # Find closest nodes for this key
-        closest = await self.dht_manager.find_node(relay_key)
-        if not closest:
-            logger.warning("No DHT nodes available for relay announcement")
-            return 0
+        # Get hole punch success rate if available
+        punch_success_rate = 0.0
+        punch_supported = False
+        punch_port = None
+        if self.hole_punch_manager:
+            punch_success_rate = self.hole_punch_manager.get_success_rate()
+            punch_supported = True
+            punch_port = self.hole_punch_manager.local_port
 
-        # Store on k closest nodes
-        stored_count = 0
-        for node in closest[:3]:  # Store on 3 closest nodes
-            try:
-                success = await self.dht_manager.rpc_handler.store(
-                    node.ip, node.port, relay_key, value
-                )
-                if success:
-                    stored_count += 1
-            except Exception as e:
-                logger.debug("Failed to store relay announcement on %s: %s", node.node_id[:20], e)
+        # Announce via DHT's announce_full() method (uses PeerEndpoint schema)
+        stored_count = await self.dht_manager.announce_full(
+            relay_available=True,
+            relay_max_peers=self.max_peers,
+            relay_region=detected_region,
+            relay_uptime=uptime,
+            punch_supported=punch_supported,
+            punch_port=punch_port,
+            punch_success_rate=punch_success_rate
+        )
 
-        logger.info("Announced relay availability to %d DHT nodes", stored_count)
+        logger.info(
+            "Announced relay availability to %d DHT nodes (region=%s, uptime=%.2f)",
+            stored_count, detected_region, uptime
+        )
         return stored_count
 
     async def handle_relay_register(

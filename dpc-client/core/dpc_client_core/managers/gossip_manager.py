@@ -77,6 +77,7 @@ class GossipManager:
         self,
         p2p_manager: "P2PManager",
         node_id: str,
+        message_router: Optional["MessageRouter"] = None,
         fanout: int = 3,
         max_hops: int = 5,
         ttl_seconds: int = 86400,  # 24 hours
@@ -88,6 +89,7 @@ class GossipManager:
         Args:
             p2p_manager: P2P manager for peer connections
             node_id: This node's identifier
+            message_router: Message router for delivering decrypted messages (optional)
             fanout: Number of peers to forward to
             max_hops: Maximum hops allowed
             ttl_seconds: Message TTL
@@ -95,6 +97,7 @@ class GossipManager:
         """
         self.p2p_manager = p2p_manager
         self.node_id = node_id
+        self.message_router = message_router
         self.fanout = fanout
         self.max_hops = max_hops
         self.ttl_seconds = ttl_seconds
@@ -687,9 +690,16 @@ class GossipManager:
             except Exception as e:
                 logger.error(f"Error in delivery callback: {e}", exc_info=True)
         else:
-            # TODO: Integrate with message delivery system
-            # For now, just log decrypted payload
-            logger.info(f"No callback registered for {source_peer[:20]}, payload: {decrypted_payload}")
+            # Route message through message router (if available)
+            if self.message_router:
+                try:
+                    await self.message_router.route_message(source_peer, decrypted_payload)
+                    logger.debug(f"Routed gossip message from {source_peer[:20]} to message router")
+                except Exception as e:
+                    logger.error(f"Error routing gossip message: {e}", exc_info=True)
+            else:
+                # No callback and no message router - just log
+                logger.info(f"No callback or router for {source_peer[:20]}, payload: {decrypted_payload}")
 
     async def _anti_entropy_loop(self):
         """

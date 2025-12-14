@@ -317,7 +317,13 @@ async def start_periodic_stun_discovery(service, interval: int = 300):
                         logger.info("External IP changed: %s → %s",
                                   service._last_external_ip or "(none)", external_ip)
                         service._last_external_ip = external_ip
-                        # TODO: Trigger WebRTC ICE restart if needed
+
+                        # Restart WebRTC connections on IP change (network switch, VPN, etc.)
+                        # This disconnects WebRTC connections and relies on auto-reconnect
+                        # to establish new connections via the 6-tier fallback hierarchy
+                        if hasattr(service, 'p2p_manager') and service.p2p_manager:
+                            logger.info("Triggering WebRTC connection restart due to IP change")
+                            asyncio.create_task(service.p2p_manager.restart_webrtc_connections())
                 else:
                     # First discovery
                     service._last_external_ip = external_ip

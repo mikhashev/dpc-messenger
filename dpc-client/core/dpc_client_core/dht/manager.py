@@ -591,8 +591,11 @@ class DHTManager:
         self,
         relay_available: bool = False,
         relay_max_peers: int = 0,
+        relay_region: str = "global",
+        relay_uptime: float = 0.99,
         punch_supported: bool = False,
-        punch_port: Optional[int] = None
+        punch_port: Optional[int] = None,
+        punch_success_rate: float = 0.0
     ) -> int:
         """
         Announce node presence with full Phase 6 endpoint information.
@@ -603,8 +606,11 @@ class DHTManager:
         Args:
             relay_available: Whether this node volunteers as a relay
             relay_max_peers: Max concurrent relayed connections
+            relay_region: Geographic region for relay (e.g., "us-west", "eu-central")
+            relay_uptime: Relay uptime score (0.0-1.0)
             punch_supported: Whether this node supports UDP hole punching
             punch_port: UDP port for hole punching (usually TLS port + 1)
+            punch_success_rate: Hole punch success rate (0.0-1.0)
 
         Returns:
             Number of successful STORE operations
@@ -613,8 +619,11 @@ class DHTManager:
             >>> await dht.announce_full(
             ...     relay_available=True,
             ...     relay_max_peers=10,
+            ...     relay_region="us-west",
+            ...     relay_uptime=0.95,
             ...     punch_supported=True,
-            ...     punch_port=8889
+            ...     punch_port=8889,
+            ...     punch_success_rate=0.65
             ... )
             15
         """
@@ -650,8 +659,8 @@ class DHTManager:
             relay = RelayInfo(
                 available=True,
                 max_peers=relay_max_peers,
-                region="global",  # TODO: Detect from IP geolocation
-                uptime=0.99  # TODO: Track actual uptime
+                region=relay_region,  # Geographic region (passed from RelayManager)
+                uptime=relay_uptime  # Actual uptime score (passed from RelayManager)
             )
 
         # Hole punching info (if supported)
@@ -660,7 +669,7 @@ class DHTManager:
             punch = PunchInfo(
                 supported=True,
                 stun_port=punch_port,
-                success_rate=0.0  # TODO: Track actual success rate
+                success_rate=punch_success_rate  # Actual success rate (passed from HolePunchManager)
             )
 
         # Create PeerEndpoint
