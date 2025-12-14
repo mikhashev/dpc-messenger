@@ -76,7 +76,6 @@ class FileTransfer:
         status: Current transfer status
         chunks_received: Set of received chunk indices
         total_chunks: Total number of chunks
-        file_data: DEPRECATED - Final assembled file data (for downloads, use chunk_data instead)
         chunk_data: Dict[int, bytes] - Chunks indexed by chunk_index for out-of-order assembly (v0.11.1)
         file_path: Path to file being sent (for uploads)
         progress_callback: Optional callback for progress updates
@@ -96,7 +95,6 @@ class FileTransfer:
     status: TransferStatus
     chunks_received: set
     total_chunks: int
-    file_data: Optional[bytearray] = None  # DEPRECATED: use chunk_data dict instead
     chunk_data: Optional[dict] = None  # v0.11.1: Dict[int, bytes] - chunks indexed by chunk_index
     file_path: Optional[Path] = None
     progress_callback: Optional[Callable[[str, int, int], None]] = None
@@ -458,26 +456,33 @@ class FileTransferManager:
         """Finalize download: assemble chunks in order, verify hash, and save file."""
         logger.info(f"All chunks received for {transfer.filename}, finalizing...")
 
-        # v0.11.1: Assemble chunks in correct order (fix out-of-order bug)
-        transfer.file_data = bytearray()
+        # v0.11.1: Verify all chunks are present before assembly
         for chunk_index in range(transfer.total_chunks):
             if chunk_index not in transfer.chunk_data:
                 logger.error(f"Missing chunk {chunk_index} during finalization!")
                 transfer.status = TransferStatus.FAILED
                 await self._send_file_cancel(node_id, transfer.transfer_id, "missing_chunks")
                 return
-            transfer.file_data.extend(transfer.chunk_data[chunk_index])
 
-        logger.info(f"Assembled {len(transfer.file_data)} bytes from {transfer.total_chunks} chunks in correct order")
+        # Assemble chunks in correct order for hash verification
+        assembled_data = bytearray()
+        for chunk_index in range(transfer.total_chunks):
+            assembled_data.extend(transfer.chunk_data[chunk_index])
+
+        logger.info(f"Assembled {len(assembled_data)} bytes from {transfer.total_chunks} chunks in correct order")
 
         # Verify hash
+        computed_hash = None
         if self.verify_hash and transfer.hash != "none":
-            computed_hash = hashlib.sha256(transfer.file_data).hexdigest()
+            computed_hash = hashlib.sha256(assembled_data).hexdigest()
             if computed_hash != transfer.hash:
                 logger.error(f"Hash mismatch! Expected {transfer.hash}, got {computed_hash}")
                 transfer.status = TransferStatus.FAILED
                 await self._send_file_cancel(node_id, transfer.transfer_id, "hash_mismatch")
                 return
+        else:
+            # Compute hash for FILE_COMPLETE even if verification disabled
+            computed_hash = hashlib.sha256(assembled_data).hexdigest()
 
         # Save file
         storage_path = self._get_peer_storage_path(node_id, "files")
@@ -486,7 +491,7 @@ class FileTransferManager:
         file_path = storage_path / safe_filename
 
         with open(file_path, 'wb') as f:
-            f.write(transfer.file_data)
+            f.write(assembled_data)
 
         transfer.status = TransferStatus.COMPLETED
         logger.info(f"File saved: {file_path}")
@@ -496,7 +501,7 @@ class FileTransferManager:
             "command": "FILE_COMPLETE",
             "payload": {
                 "transfer_id": transfer.transfer_id,
-                "hash": hashlib.sha256(transfer.file_data).hexdigest()
+                "hash": computed_hash
             }
         })
 
@@ -545,8 +550,7 @@ class FileTransferManager:
                 "status": "completed"
             })
 
-        # Cleanup
-        transfer.file_data = None  # Free memory
+        # Cleanup (chunk_data will be freed when transfer is deleted)
         del self.active_transfers[transfer.transfer_id]  # Remove from active transfers
         logger.debug(f"Cleaned up completed download transfer: {transfer.transfer_id}")
 
