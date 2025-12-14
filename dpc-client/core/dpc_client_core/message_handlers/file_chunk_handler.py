@@ -49,7 +49,7 @@ class FileChunkHandler(MessageHandler):
                     "filename": transfer.filename,
                     "node_id": sender_node_id,
                     "direction": transfer.direction,
-                    "progress": round(progress, 1),
+                    "progress_percent": round(progress, 1),  # Match upload side field name
                     "chunks_received": len(transfer.chunks_received),
                     "total_chunks": transfer.total_chunks,
                     "status": "transferring"
