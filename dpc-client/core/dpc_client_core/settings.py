@@ -179,7 +179,12 @@ class Settings:
             'background_threshold_mb': '50',  # Background transfer threshold in MB
             'direct_tls_only_threshold_mb': '100',  # Direct TLS preference threshold in MB
             'max_concurrent_transfers': '3',  # Max concurrent file transfers
-            'verify_hash': 'true'  # Verify file hash after transfer (SHA256)
+            'verify_hash': 'true',  # Verify file hash after transfer (SHA256)
+            # Preparation timeout configuration (v0.11.2+)
+            'preparation_timeout_base': '60',  # Base timeout in seconds (for small files)
+            'preparation_timeout_per_gb': '40',  # Additional timeout per GB (40s/GB)
+            'preparation_progress_interval_mb': '100',  # Emit progress every N MB during SHA256
+            'preparation_progress_interval_chunks': '10000'  # Emit progress every N chunks during CRC32
         }
 
         self._config['logging'] = {

@@ -5,7 +5,7 @@ import base64
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -91,7 +91,7 @@ class TokenCache:
 
         try:
             # Calculate expiration time
-            expires_at = (datetime.utcnow() + timedelta(seconds=expires_in)).isoformat()
+            expires_at = (datetime.now(timezone.utc) + timedelta(seconds=expires_in)).isoformat()
 
             # Prepare cache data
             cache_data = {
@@ -100,7 +100,7 @@ class TokenCache:
                 "node_id": node_id,
                 "provider": provider,
                 "expires_at": expires_at,
-                "cached_at": datetime.utcnow().isoformat()
+                "cached_at": datetime.now(timezone.utc).isoformat()
             }
 
             # Serialize and encrypt
@@ -142,7 +142,7 @@ class TokenCache:
 
             # Check if token is expired
             expires_at = datetime.fromisoformat(cache_data.get("expires_at", ""))
-            if datetime.utcnow() >= expires_at:
+            if datetime.now(timezone.utc) >= expires_at:
                 logger.info("Cached tokens expired")
                 self.clear()
                 return None

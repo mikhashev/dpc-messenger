@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 from dpc_protocol.crypto import DPC_HOME_DIR
 
@@ -74,7 +74,7 @@ class CommitMetrics:
             self.review_interval_days = 1
 
         self.next_review_date = (
-            datetime.utcnow() + timedelta(days=self.review_interval_days)
+            datetime.now(timezone.utc) + timedelta(days=self.review_interval_days)
         ).isoformat()
         self.review_count += 1
 
@@ -146,7 +146,7 @@ class EffectivenessTracker:
 
         metrics = self.metrics[commit_id]
         metrics.times_referenced += 1
-        metrics.last_accessed = datetime.utcnow().isoformat()
+        metrics.last_accessed = datetime.now(timezone.utc).isoformat()
 
         self._save_metrics()
 
@@ -238,7 +238,7 @@ class EffectivenessTracker:
         Returns:
             List of (commit_id, metrics) tuples
         """
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         needing_review = []
 
         for commit_id, metrics in self.metrics.items():

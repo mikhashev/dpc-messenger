@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class OperationMode(Enum):
@@ -70,7 +70,7 @@ class ConnectionStatus:
 
         self.hub_connected = connected
         if connected:
-            self.hub_last_connected = datetime.utcnow().isoformat()
+            self.hub_last_connected = datetime.now(timezone.utc).isoformat()
             self.hub_connection_error = None
         else:
             self.hub_connection_error = error

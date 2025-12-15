@@ -65,7 +65,7 @@ from dpc_protocol.pcm_core import (
     load_instructions, save_instructions, migrate_instructions_from_personal_context
 )
 from dpc_protocol.utils import parse_dpc_uri
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Define the path to the user's D-PC configuration directory
 DPC_HOME_DIR = Path.home() / ".dpc"
@@ -2191,7 +2191,7 @@ class CoreService:
                 sender_node_id=self.p2p_manager.node_id,
                 sender_name="You",  # Outgoing messages from local user
                 text=text,
-                timestamp=datetime.utcnow().isoformat()
+                timestamp=datetime.now(timezone.utc).isoformat()
             )
 
             # Buffer the outgoing message (conversation monitor handles both directions)
@@ -3051,7 +3051,7 @@ class CoreService:
                     sender_node_id=self.p2p_manager.node_id,  # BUG FIX: Use actual node ID
                     sender_name=self.p2p_manager.get_display_name() or "User",  # BUG FIX: Use actual display name
                     text=prompt,
-                    timestamp=datetime.utcnow().isoformat()
+                    timestamp=datetime.now(timezone.utc).isoformat()
                 )
                 await monitor.on_message(user_message)
 
@@ -3066,7 +3066,7 @@ class CoreService:
                     sender_node_id="ai",
                     sender_name=ai_name,
                     text=response_payload.get("content", ""),
-                    timestamp=datetime.utcnow().isoformat()
+                    timestamp=datetime.now(timezone.utc).isoformat()
                 )
                 proposal = await monitor.on_message(ai_message)
 

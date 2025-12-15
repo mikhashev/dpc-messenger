@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSource
 from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
@@ -140,7 +140,7 @@ class ConversationMonitor:
         # Analyze every 5 messages or if buffer gets large
         if len(self.message_buffer) >= 5:
             self.knowledge_score = await self._calculate_knowledge_score()
-            self.last_analysis_time = datetime.utcnow().isoformat()
+            self.last_analysis_time = datetime.now(timezone.utc).isoformat()
 
             # Check if conversation is knowledge-worthy
             if self.knowledge_score > self.knowledge_threshold:
@@ -173,7 +173,7 @@ class ConversationMonitor:
         # Calculate score if not already done
         if self.knowledge_score == 0.0:
             self.knowledge_score = await self._calculate_knowledge_score()
-            self.last_analysis_time = datetime.utcnow().isoformat()
+            self.last_analysis_time = datetime.now(timezone.utc).isoformat()
 
         # Check if we should generate proposal
         if force or self.knowledge_score > self.knowledge_threshold:
