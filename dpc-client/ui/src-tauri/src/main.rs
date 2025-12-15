@@ -5,10 +5,29 @@
 // Import the `Manager` trait to bring its methods into scope.
 use tauri::Manager;
 
+// File metadata helper for dynamic timeout calculation (v0.11.2+)
+#[tauri::command]
+fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
+    let metadata = std::fs::metadata(&path)
+        .map_err(|e| format!("Failed to get file metadata: {}", e))?;
+
+    Ok(FileMetadata {
+        size: metadata.len(),
+        is_file: metadata.is_file(),
+    })
+}
+
+#[derive(serde::Serialize)]
+struct FileMetadata {
+    size: u64,
+    is_file: bool,
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .invoke_handler(tauri::generate_handler![get_file_metadata])
         .setup(|app| {
             #[cfg(debug_assertions)]
             {
