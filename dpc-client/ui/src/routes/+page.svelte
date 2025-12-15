@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
@@ -244,6 +244,31 @@
     fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
     showFileOfferToast = true;
     setTimeout(() => showFileOfferToast = false, 5000);
+  }
+
+  // Reactive: Handle chat history restored (v0.11.2)
+  $: if ($historyRestored) {
+    console.log(`Restoring ${$historyRestored.message_count} messages to chat with ${$historyRestored.conversation_id}`);
+
+    // Update chatHistories store - convert backend format to UI format
+    chatHistories.update(map => {
+      const newMap = new Map(map);
+      const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => ({
+        id: `restored-${index}-${Date.now()}`,
+        sender: msg.role === 'user' ? 'user' : $historyRestored.conversation_id,
+        senderName: msg.role === 'user' ? 'You' : getPeerDisplayName($historyRestored.conversation_id),
+        text: msg.content,
+        timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,  // Stagger timestamps
+        attachments: msg.attachments || []
+      }));
+      newMap.set($historyRestored.conversation_id, restoredMessages);
+      return newMap;
+    });
+
+    // Show success toast
+    fileOfferToastMessage = `✓ Chat history restored: ${$historyRestored.message_count} messages`;
+    showFileOfferToast = true;
+    setTimeout(() => showFileOfferToast = false, 3000);
   }
 
   // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)

@@ -55,6 +55,9 @@ export const filePreparationStarted = writable<any>(null);  // {filename, size_b
 export const filePreparationProgress = writable<any>(null);  // {filename, phase, percent, bytes_processed, total_size}
 export const filePreparationCompleted = writable<any>(null);  // {filename, hash, total_chunks}
 
+// Chat history restore store (v0.11.2 - for auto-restore on reconnect)
+export const historyRestored = writable<any>(null);  // {conversation_id, message_count, messages}
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -364,6 +367,11 @@ export function connectToCoreService() {
                 else if (message.event === "file_preparation_completed") {
                     filePreparationCompleted.set(message.payload);
                     console.log(`File preparation completed: ${message.payload.filename} (hash: ${message.payload.hash?.substring(0, 16)}...)`);
+                }
+                else if (message.event === "history_restored") {
+                    // Chat history restored from peer (v0.11.2)
+                    historyRestored.set(message.payload);
+                    console.log(`Chat history restored: ${message.payload.message_count} messages from ${message.payload.conversation_id}`);
                 }
             } catch (error) {
                 console.error("Error parsing message:", error);
