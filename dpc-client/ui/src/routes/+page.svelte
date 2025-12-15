@@ -161,6 +161,11 @@
   // Reactive: Get current chat's token usage
   $: currentTokenUsage = tokenUsageMap.get(activeChatId) || {used: 0, limit: 0};
 
+  // Reactive: Check if current peer is connected (for enabling/disabling send controls)
+  $: isPeerConnected = !activeChatId.startsWith('ai_') && activeChatId !== 'local_ai'
+    ? ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
+    : true; // AI chats don't require peer connection
+
   // Phase 7: Reactive: Check if context window is full (100% or more)
   $: isContextWindowFull = currentTokenUsage.limit > 0 && (currentTokenUsage.used / currentTokenUsage.limit) >= 1.0;
 
@@ -1644,14 +1649,15 @@
           <button
             class="file-button"
             on:click={handleSendFile}
-            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
-            title="Send file (P2P chat only)"
+            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || !isPeerConnected}
+            title={isPeerConnected ? "Send file (P2P chat only)" : "Peer disconnected"}
           >
             📎
           </button>
           <button
             on:click={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim() || isContextWindowFull}
+            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim() || isContextWindowFull || !isPeerConnected}
+            title={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer disconnected" : ""}
           >
             {#if isLoading}Sending...{:else}Send{/if}
           </button>
