@@ -1419,7 +1419,12 @@
           <button class="btn-new-chat" on:click={() => handleNewChat(activeChatId)}>
             New Session
           </button>
-          <button class="btn-end-session" on:click={() => handleEndSession(activeChatId)}>
+          <button
+            class="btn-end-session"
+            on:click={() => handleEndSession(activeChatId)}
+            disabled={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')}
+            title={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer must be online to save knowledge (requires voting)" : "Extract and save knowledge from this conversation"}
+          >
             End Session & Save Knowledge
           </button>
           {#if $aiChats.has(activeChatId)}
