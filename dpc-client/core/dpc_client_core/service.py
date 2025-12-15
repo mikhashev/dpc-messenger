@@ -2199,13 +2199,14 @@ class CoreService:
         except Exception as e:
             logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
 
-    async def send_file(self, node_id: str, file_path: str):
+    async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None):
         """
         Send a file to a peer via P2P file transfer.
 
         Args:
             node_id: Target peer's node ID
             file_path: Absolute path to file to send
+            file_size_bytes: Optional file size (used by frontend for timeout calculation, ignored by backend)
 
         Returns:
             Dict with transfer_id and status
