@@ -50,6 +50,11 @@ export const fileTransferCancelled = writable<any>(null);  // Cancelled transfer
 // Track active file transfers (transfer_id -> {node_id, filename, direction, progress, status})
 export const activeFileTransfers = writable<Map<string, any>>(new Map());
 
+// File preparation stores (v0.11.2 - for Send File dialog progress indicator)
+export const filePreparationStarted = writable<any>(null);  // {filename, size_bytes, size_mb}
+export const filePreparationProgress = writable<any>(null);  // {filename, phase, percent, bytes_processed, total_size}
+export const filePreparationCompleted = writable<any>(null);  // {filename, hash, total_chunks}
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -348,12 +353,16 @@ export function connectToCoreService() {
                         }
                     }
 
+                    // Update store for UI progress indicator
+                    filePreparationProgress.set(message.payload);
                     console.log(`File prep: ${message.payload.filename} - ${message.payload.phase} ${message.payload.percent}%`);
                 }
                 else if (message.event === "file_preparation_started") {
+                    filePreparationStarted.set(message.payload);
                     console.log(`File preparation started: ${message.payload.filename} (${message.payload.size_mb} MB)`);
                 }
                 else if (message.event === "file_preparation_completed") {
+                    filePreparationCompleted.set(message.payload);
                     console.log(`File preparation completed: ${message.payload.filename} (hash: ${message.payload.hash?.substring(0, 16)}...)`);
                 }
             } catch (error) {

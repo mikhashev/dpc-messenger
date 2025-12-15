@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
@@ -871,12 +871,20 @@
       setTimeout(() => showFileOfferToast = false, 5000);
     } finally {
       isSendingFile = false;  // Reset flag after completion
+      // Clear file preparation state
+      filePreparationStarted.set(null);
+      filePreparationProgress.set(null);
+      filePreparationCompleted.set(null);
     }
   }
 
   function handleCancelSendFile() {
     showSendFileDialog = false;
     pendingFileSend = null;
+    // Clear file preparation state
+    filePreparationStarted.set(null);
+    filePreparationProgress.set(null);
+    filePreparationCompleted.set(null);
     console.log('File send cancelled by user');
   }
 
@@ -1774,9 +1782,39 @@
       <h3>Send File</h3>
       <p><strong>File:</strong> {pendingFileSend.fileName}</p>
       <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
+
+      {#if $filePreparationStarted && isSendingFile}
+        <p style="margin-top: 10px; font-size: 13px;">
+          <strong>Size:</strong> {$filePreparationStarted.size_mb} MB
+        </p>
+      {/if}
+
+      {#if $filePreparationProgress && isSendingFile}
+        <div style="margin-top: 15px;">
+          <p style="font-size: 13px; margin-bottom: 5px; color: #555;">
+            {#if $filePreparationProgress.phase === 'hashing_file'}
+              Computing file hash: {$filePreparationProgress.percent}%
+            {:else if $filePreparationProgress.phase === 'computing_chunks'}
+              Computing chunk hashes: {$filePreparationProgress.percent}%
+            {:else}
+              Preparing file: {$filePreparationProgress.percent}%
+            {/if}
+          </p>
+          <div style="width: 100%; background-color: #e0e0e0; border-radius: 4px; height: 8px; overflow: hidden;">
+            <div style="width: {$filePreparationProgress.percent}%; background-color: #4CAF50; height: 100%; transition: width 0.3s ease;"></div>
+          </div>
+        </div>
+      {/if}
+
       <div class="modal-buttons">
         <button class="accept-button" on:click={handleConfirmSendFile} disabled={isSendingFile}>
-          {isSendingFile ? 'Sending...' : 'Send'}
+          {#if $filePreparationCompleted && isSendingFile}
+            Sending...
+          {:else if isSendingFile}
+            Preparing...
+          {:else}
+            Send
+          {/if}
         </button>
         <button class="reject-button" on:click={handleCancelSendFile} disabled={isSendingFile}>Cancel</button>
       </div>
