@@ -133,6 +133,18 @@ class ConversationMonitor:
         self.message_buffer.append(message)  # For incremental auto-detection
         self.full_conversation.append(message)  # For manual "End Session" extraction
 
+        # Add to message_history for chat history sync (v0.11.2)
+        # Determine role based on sender
+        role = "user"  # Default to user
+        for participant in self.participants:
+            if participant["node_id"] == message.sender_node_id:
+                if participant.get("context") == "peer":
+                    role = "peer"
+                break
+
+        self.add_message(role, message.text)
+        logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
+
         # Only run automatic detection if enabled
         if not self.auto_detect:
             return None

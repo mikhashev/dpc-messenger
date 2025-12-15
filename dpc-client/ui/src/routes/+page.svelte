@@ -265,6 +265,13 @@
       return newMap;
     });
 
+    // Scroll to bottom after restoring history
+    setTimeout(() => {
+      if (chatContainer) {
+        chatContainer.scrollTop = chatContainer.scrollHeight;
+      }
+    }, 100);
+
     // Show success toast
     fileOfferToastMessage = `✓ Chat history restored: ${$historyRestored.message_count} messages`;
     showFileOfferToast = true;
