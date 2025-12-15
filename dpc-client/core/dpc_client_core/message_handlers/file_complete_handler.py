@@ -30,15 +30,15 @@ class FileCompleteHandler(MessageHandler):
 
         self.logger.info(f"FILE_COMPLETE from {sender_node_id} for transfer {transfer_id}")
 
-        # Delegate to FileTransferManager
+        # Get transfer info BEFORE calling handle_file_complete (which deletes it)
         file_transfer_manager = self.service.file_transfer_manager
-        await file_transfer_manager.handle_file_complete(sender_node_id, payload)
-
-        # Get transfer info
         transfer = file_transfer_manager.active_transfers.get(transfer_id)
         if not transfer:
             self.logger.warning(f"FILE_COMPLETE for unknown transfer: {transfer_id}")
             return None
+
+        # Delegate to FileTransferManager (will cleanup/delete the transfer)
+        await file_transfer_manager.handle_file_complete(sender_node_id, payload)
 
         # Broadcast completion event to UI
         await self.service.local_api.broadcast_event("file_transfer_complete", {
