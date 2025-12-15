@@ -59,6 +59,7 @@ from .message_handlers.file_chunk_handler import FileChunkHandler
 from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
+from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
 from .managers.file_transfer_manager import FileTransferManager
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
@@ -276,6 +277,10 @@ class CoreService:
         self.message_router.register_handler(FileCompleteHandler(self))
         self.message_router.register_handler(FileCancelHandler(self))
         self.message_router.register_handler(FileChunkRetryHandler(self))  # v0.11.1
+
+        # Chat history sync handlers (v0.11.2)
+        self.message_router.register_handler(RequestChatHistoryHandler(self))
+        self.message_router.register_handler(ChatHistoryResponseHandler(self))
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 
@@ -821,6 +826,27 @@ class CoreService:
                 supports_direct=(connection_type == "direct_tls"),
                 metadata={"last_connection_type": connection_type}
             )
+
+            # Auto-request chat history if our history is empty (v0.11.2)
+            # This handles reconnection after app restart
+            conversation_monitor = self.conversation_monitors.get(peer_id)
+            if conversation_monitor:
+                history = conversation_monitor.get_message_history()
+                if len(history) == 0:
+                    # Our history is empty, request from peer
+                    logger.info(f"Requesting chat history from {peer_id} (empty local history)")
+                    import uuid
+                    request_id = str(uuid.uuid4())
+                    try:
+                        await self.p2p_manager.send_message_to_peer(peer_id, {
+                            "command": "REQUEST_CHAT_HISTORY",
+                            "payload": {
+                                "conversation_id": peer_id,
+                                "request_id": request_id
+                            }
+                        })
+                    except Exception as e:
+                        logger.error(f"Failed to request chat history from {peer_id}: {e}")
 
         await self.local_api.broadcast_event("status_update", await self.get_status())
     

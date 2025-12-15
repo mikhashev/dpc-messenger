@@ -989,6 +989,55 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self.peer_context_cache = {}
         self.peer_device_context_cache = {}
 
+    def export_history(self) -> List[Dict[str, Any]]:
+        """Export conversation history for syncing with peer
+
+        Returns history in serializable format with timestamps added.
+        No message limit - returns full history.
+
+        Returns:
+            List of message dicts with 'role', 'content', 'timestamp', 'attachments'
+        """
+        exported = []
+        for msg in self.message_history:
+            exported_msg = {
+                "role": msg["role"],
+                "content": msg["content"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),  # Add current timestamp
+            }
+            if "attachments" in msg:
+                exported_msg["attachments"] = msg["attachments"]
+            exported.append(exported_msg)
+
+        logger.info(f"Exported {len(exported)} messages from conversation history")
+        return exported
+
+    def import_history(self, messages: List[Dict[str, Any]]):
+        """Import conversation history received from peer
+
+        Replaces current history with received messages.
+        Used when reconnecting to restore lost history.
+
+        Args:
+            messages: List of message dicts from export_history()
+        """
+        if not messages:
+            logger.info("No messages to import")
+            return
+
+        # Replace current history (assume peer's history is authoritative)
+        self.message_history = []
+        for msg in messages:
+            imported_msg = {
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            }
+            if "attachments" in msg:
+                imported_msg["attachments"] = msg["attachments"]
+            self.message_history.append(imported_msg)
+
+        logger.info(f"Imported {len(messages)} messages into conversation history")
+
     # Phase 7: Peer context cache management methods
     def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):
         """Cache peer's personal context and device context locally
