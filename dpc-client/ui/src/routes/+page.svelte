@@ -166,6 +166,48 @@
     ? ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
     : true; // AI chats don't require peer connection
 
+  // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
+  // Handles page refresh scenario: frontend loses chatHistories, backend keeps conversation_monitors
+  $: if ($connectionStatus === 'connected' && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+    // Check if this peer chat has no messages in frontend
+    const currentHistory = $chatHistories.get(activeChatId);
+    if (!currentHistory || currentHistory.length === 0) {
+      // Load from backend (async IIFE to allow await in reactive statement)
+      (async () => {
+        try {
+          const result = await sendCommand('get_conversation_history', { conversation_id: activeChatId });
+          if (result.status === 'success' && result.messages && result.messages.length > 0) {
+            console.log(`Loaded ${result.message_count} messages from backend for ${activeChatId}`);
+
+            // Convert backend format to frontend format
+            chatHistories.update(map => {
+              const newMap = new Map(map);
+              const loadedMessages = result.messages.map((msg: any, index: number) => ({
+                id: `backend-${index}-${Date.now()}`,
+                sender: msg.role === 'user' ? 'user' : activeChatId,
+                senderName: msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId),
+                text: msg.content,
+                timestamp: Date.now() - (result.messages.length - index) * 1000,
+                attachments: msg.attachments || []
+              }));
+              newMap.set(activeChatId, loadedMessages);
+              return newMap;
+            });
+
+            // Scroll to bottom
+            setTimeout(() => {
+              if (chatWindow) {
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+              }
+            }, 100);
+          }
+        } catch (e) {
+          console.error(`Failed to load history from backend for ${activeChatId}:`, e);
+        }
+      })();
+    }
+  }
+
   // Phase 7: Reactive: Check if context window is full (100% or more)
   $: isContextWindowFull = currentTokenUsage.limit > 0 && (currentTokenUsage.used / currentTokenUsage.limit) >= 1.0;
 
@@ -267,8 +309,8 @@
 
     // Scroll to bottom after restoring history
     setTimeout(() => {
-      if (chatContainer) {
-        chatContainer.scrollTop = chatContainer.scrollHeight;
+      if (chatWindow) {
+        chatWindow.scrollTop = chatWindow.scrollHeight;
       }
     }, 100);
 

@@ -2065,6 +2065,58 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def get_conversation_history(self, conversation_id: str) -> Dict[str, Any]:
+        """Get conversation history from backend (for frontend sync after page refresh).
+
+        UI Integration: Called when frontend reconnects or switches to chat with empty history.
+
+        Args:
+            conversation_id: The conversation/chat ID to get history for
+
+        Returns:
+            Dict with messages list
+        """
+        try:
+            monitor = self.conversation_monitors.get(conversation_id)
+            if not monitor:
+                logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
+                return {
+                    "status": "success",
+                    "messages": [],
+                    "message_count": 0
+                }
+
+            # Get message history (same format as export_history)
+            history = monitor.get_message_history()
+
+            # Convert to frontend format (role, content, attachments)
+            messages = []
+            for msg in history:
+                message_dict = {
+                    "role": msg["role"],
+                    "content": msg["content"]
+                }
+                if "attachments" in msg:
+                    message_dict["attachments"] = msg["attachments"]
+                messages.append(message_dict)
+
+            logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
+
+            return {
+                "status": "success",
+                "messages": messages,
+                "message_count": len(messages)
+            }
+
+        except Exception as e:
+            logger.error("Error getting conversation history: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "error": str(e),
+                "messages": [],
+                "message_count": 0
+            }
+
     async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
         """Reset conversation history and context tracking for "New Chat" button.
 
