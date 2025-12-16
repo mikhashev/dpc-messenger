@@ -457,7 +457,8 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'toggle_auto_knowledge_detection',
             'send_file',
             'accept_file_transfer',
-            'cancel_file_transfer'
+            'cancel_file_transfer',
+            'get_conversation_history'  // v0.11.2 - backend→frontend sync
         ].includes(command);
 
         if (expectsResponse) {

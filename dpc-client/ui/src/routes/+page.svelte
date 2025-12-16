@@ -173,14 +173,14 @@
     const currentHistory = $chatHistories.get(activeChatId);
     console.log(`[ChatHistory] Reactive triggered: chatId=${activeChatId.slice(0,20)}, historyLen=${currentHistory?.length || 0}`);
     if (!currentHistory || currentHistory.length === 0) {
-      console.log(`[ChatHistory] 📥 Loading history from backend for ${activeChatId.slice(0,20)}...`);
+      console.log(`[ChatHistory] Loading history from backend for ${activeChatId.slice(0,20)}...`);
       // Load from backend (async IIFE to allow await in reactive statement)
       (async () => {
         try {
           const result = await sendCommand('get_conversation_history', { conversation_id: activeChatId });
-          console.log(`[ChatHistory] 📦 Backend response:`, result);
+          console.log(`[ChatHistory] Backend response:`, result);
           if (result.status === 'success' && result.messages && result.messages.length > 0) {
-            console.log(`[ChatHistory] ✅ Loaded ${result.message_count} messages from backend`);
+            console.log(`[ChatHistory] Loaded ${result.message_count} messages from backend`);
 
             // Convert backend format to frontend format
             chatHistories.update(map => {
@@ -194,7 +194,7 @@
                 attachments: msg.attachments || []
               }));
               newMap.set(activeChatId, loadedMessages);
-              console.log(`[ChatHistory] 💾 Updated chatHistories with ${loadedMessages.length} messages`);
+              console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages`);
               return newMap;
             });
 
@@ -205,14 +205,14 @@
               }
             }, 100);
           } else {
-            console.log(`[ChatHistory] ⚠️ No messages: status=${result.status}, count=${result.messages?.length || 0}`);
+            console.log(`[ChatHistory] No messages: status=${result.status}, count=${result.messages?.length || 0}`);
           }
         } catch (e) {
-          console.error(`[ChatHistory] ❌ Error loading history:`, e);
+          console.error(`[ChatHistory] Error loading history:`, e);
         }
       })();
     } else {
-      console.log(`[ChatHistory] ⏭️ Skipping load - already have ${currentHistory.length} messages`);
+      console.log(`[ChatHistory] Skipping load - already have ${currentHistory.length} messages`);
     }
   }
 
