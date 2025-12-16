@@ -1679,7 +1679,10 @@
             on:keydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                handleSendMessage();
+                // Only send if peer is connected (or local AI chat)
+                if (isPeerConnected || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
+                  handleSendMessage();
+                }
               }
             }}
           ></textarea>
