@@ -248,10 +248,13 @@ class NewSessionProposalManager:
             }
         }
 
+        # Extract peer's node_id (conversations are keyed by peer's node_id)
+        peer_node_id = next((p for p in proposal.participants if p != self.core_service.p2p_manager.node_id), None)
+
         # If approved: clear local history (for all participants)
         if is_approved:
-            self.logger.info("Proposal approved, clearing local conversation history")
-            monitor = self.core_service._get_or_create_conversation_monitor(proposal.conversation_id)
+            self.logger.info("Proposal approved, clearing local conversation history for %s", peer_node_id[:20] if peer_node_id else "unknown")
+            monitor = self.core_service._get_or_create_conversation_monitor(peer_node_id)
             monitor.reset_conversation()
 
         # Broadcast result to all participants
@@ -259,7 +262,6 @@ class NewSessionProposalManager:
             await self.on_result_broadcast(result_payload, list(proposal.participants))
 
         # Emit event to UI for initiator (add peer's node_id for frontend lookup)
-        peer_node_id = next((p for p in proposal.participants if p != self.core_service.p2p_manager.node_id), None)
         ui_payload = {**result_payload, "sender_node_id": peer_node_id}
         await self.core_service.local_api.broadcast_event(
             "new_session_result",
