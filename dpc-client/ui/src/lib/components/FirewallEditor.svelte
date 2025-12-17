@@ -1060,6 +1060,26 @@
             <h3>Notification Settings</h3>
             <p class="help-text">Control desktop notifications for different events.</p>
 
+            <div class="permission-request" style="margin: 1rem 0;">
+              <button
+                class="btn btn-edit"
+                on:click={async () => {
+                  const { requestNotificationPermission } = await import('$lib/notificationService');
+                  const granted = await requestNotificationPermission();
+                  if (granted) {
+                    alert('Notification permission granted!');
+                  } else {
+                    alert('Notification permission denied. You can enable it in your OS settings.');
+                  }
+                }}
+              >
+                Request OS Notification Permission
+              </button>
+              <p class="help-text-small" style="margin-top: 0.5rem;">
+                Click to request permission from your operating system to show desktop notifications.
+              </p>
+            </div>
+
             {#if editMode && editedRules?.notifications}
               <div class="form-group">
                 <label for="notifications-enabled">
