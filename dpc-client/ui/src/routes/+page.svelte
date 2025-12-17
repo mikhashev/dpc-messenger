@@ -156,7 +156,8 @@
 
   // Reactive: Clear frontend state when new session approved (v0.11.3)
   $: if ($newSessionResult && $newSessionResult.result === "approved") {
-    const conversationId = $newSessionResult.conversation_id;
+    // Use sender_node_id if present (received from peer), else conversation_id (initiator)
+    const conversationId = $newSessionResult.sender_node_id || $newSessionResult.conversation_id;
 
     // Clear message history for this chat
     chatHistories.update(h => {

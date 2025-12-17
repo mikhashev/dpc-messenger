@@ -115,7 +115,8 @@ class NewSessionResultHandler(MessageHandler):
                 del self.service.session_manager.active_sessions[proposal_id]
             self.logger.debug("Removed finalized session %s from active sessions", proposal_id[:8])
 
-        # Broadcast event to UI
-        await self.service.local_api.broadcast_event("new_session_result", payload)
+        # Broadcast event to UI (add sender_node_id for frontend conversation lookup)
+        ui_payload = {**payload, "sender_node_id": sender_node_id}
+        await self.service.local_api.broadcast_event("new_session_result", ui_payload)
 
         return None
