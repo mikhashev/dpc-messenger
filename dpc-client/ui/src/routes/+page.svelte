@@ -1247,8 +1247,8 @@
         autoScroll();
       }
 
-      // Send notification if message is from a different chat and not from user
-      if (msg.sender_node_id !== "user" && msg.sender_node_id !== activeChatId) {
+      // Send notification if app is in background (showNotificationIfBackground handles the check)
+      if (msg.sender_node_id !== "user") {
         (async () => {
           const messagePreview = msg.text.length > 50 ? msg.text.slice(0, 50) + '...' : msg.text;
           const notified = await showNotificationIfBackground({
