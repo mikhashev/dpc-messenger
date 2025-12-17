@@ -116,7 +116,7 @@ class NewSessionProposalManager:
 
         proposal = NewSessionProposal(
             proposal_id=proposal_id,
-            initiator_node_id=self.core_service.node_id,
+            initiator_node_id=self.core_service.p2p_manager.node_id,
             conversation_id=conversation_id,
             timestamp=timestamp,
             participants=participants,
@@ -125,7 +125,7 @@ class NewSessionProposalManager:
         )
 
         # Auto-vote approve for initiator
-        proposal.votes[self.core_service.node_id] = True
+        proposal.votes[self.core_service.p2p_manager.node_id] = True
 
         # Create voting session
         session = VotingSession(
@@ -311,7 +311,7 @@ class NewSessionProposalManager:
 
         # Send to all participants except self
         for node_id in proposal.participants:
-            if node_id == self.core_service.node_id:
+            if node_id == self.core_service.p2p_manager.node_id:
                 continue
 
             if node_id in self.core_service.p2p_manager.peers:

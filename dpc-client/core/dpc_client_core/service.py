@@ -2149,7 +2149,7 @@ class CoreService:
         try:
             # Get participants (all peers in conversation)
             # For now, conversation_id is the peer_id in P2P mode
-            participants = {self.node_id, conversation_id}
+            participants = {self.p2p_manager.node_id, conversation_id}
 
             # Check if peer is connected
             if conversation_id not in self.p2p_manager.peers:
@@ -2239,7 +2239,7 @@ class CoreService:
             proposal = session.proposal
 
             # Record local vote
-            await self.session_manager.record_vote(proposal_id, self.node_id, vote)
+            await self.session_manager.record_vote(proposal_id, self.p2p_manager.node_id, vote)
 
             # Send VOTE_NEW_SESSION to all other participants
             message = {
@@ -2247,12 +2247,12 @@ class CoreService:
                 "payload": {
                     "proposal_id": proposal_id,
                     "vote": vote,
-                    "voter_node_id": self.node_id
+                    "voter_node_id": self.p2p_manager.node_id
                 }
             }
 
             for node_id in proposal.participants:
-                if node_id == self.node_id:
+                if node_id == self.p2p_manager.node_id:
                     continue
 
                 if node_id in self.p2p_manager.peers:
@@ -2919,7 +2919,7 @@ class CoreService:
 
         # Send to all participants except self (who are currently connected)
         for node_id in participants:
-            if node_id == self.node_id:
+            if node_id == self.p2p_manager.node_id:
                 continue  # Don't send to self
 
             if node_id in self.p2p_manager.peers:
