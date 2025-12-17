@@ -2257,7 +2257,7 @@ class CoreService:
 
                 if node_id in self.p2p_manager.peers:
                     try:
-                        await self.p2p_manager.send_message(node_id, message)
+                        await self.p2p_manager.send_message_to_peer(node_id, message)
                         logger.debug("Sent VOTE_NEW_SESSION to %s", node_id[:20])
                     except Exception as e:
                         logger.error("Error sending vote to %s: %s", node_id[:20], e)
@@ -2924,7 +2924,7 @@ class CoreService:
 
             if node_id in self.p2p_manager.peers:
                 try:
-                    await self.p2p_manager.send_message(node_id, message)
+                    await self.p2p_manager.send_message_to_peer(node_id, message)
                     logger.info("Sent NEW_SESSION_RESULT to %s", node_id[:20])
                 except Exception as e:
                     logger.error("Failed to send session result to %s: %s", node_id[:20], e, exc_info=True)

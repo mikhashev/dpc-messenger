@@ -316,7 +316,7 @@ class NewSessionProposalManager:
 
             if node_id in self.core_service.p2p_manager.peers:
                 try:
-                    await self.core_service.p2p_manager.send_message(node_id, message)
+                    await self.core_service.p2p_manager.send_message_to_peer(node_id, message)
                     self.logger.debug("Sent PROPOSE_NEW_SESSION to %s", node_id[:20])
                 except Exception as e:
                     self.logger.error("Error sending proposal to %s: %s", node_id[:20], e)
