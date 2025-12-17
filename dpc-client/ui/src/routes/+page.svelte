@@ -14,6 +14,8 @@
   import Toast from "$lib/components/Toast.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
   import { ask, open } from '@tauri-apps/plugin-dialog';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
 
   console.log("Full D-PC Messenger loading...");
   
@@ -141,23 +143,84 @@
   // UI collapse states
   let contextPanelCollapsed: boolean = false;  // Context toggle panel collapsible
 
+  // Notification state
+  let windowFocused: boolean = true;
+  let showNotificationPermissionDialog: boolean = false;
+
+  // Initialize window focus tracking and notification permission
+  (async () => {
+    if (typeof window !== 'undefined') {
+      try {
+        const appWindow = getCurrentWindow();
+
+        // Listen to focus changes
+        await appWindow.onFocusChanged(({ payload: focused }) => {
+          windowFocused = focused;
+          console.log(`[Notifications] Window focus changed: ${focused}`);
+        });
+
+        // Check initial focus state
+        windowFocused = await appWindow.isFocused();
+
+        // Request notification permission on first launch
+        const permissionRequested = localStorage.getItem('permissionRequestedAt');
+        if (!permissionRequested) {
+          // First launch - show friendly dialog after 2s
+          setTimeout(() => {
+            showNotificationPermissionDialog = true;
+          }, 2000);
+        }
+      } catch (error) {
+        console.error('[Notifications] Failed to set up window tracking:', error);
+      }
+    }
+  })();
+
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $: setActiveChat(activeChatId);
 
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
     showCommitDialog = true;
+
+    // Send notification for knowledge commit proposal
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: 'Vote Requested',
+        body: $knowledgeCommitProposal.proposal?.topic || 'Knowledge commit proposal'
+      });
+      console.log(`[Notifications] Knowledge proposal notification: ${notified ? 'system' : 'skip'}`);
+    })();
   }
 
   // Reactive: Open new session dialog when proposal received (v0.11.3)
   $: if ($newSessionProposal) {
     showNewSessionDialog = true;
+
+    // Send notification for new session proposal
+    (async () => {
+      const initiatorName = getPeerDisplayName($newSessionProposal.initiator_node_id);
+      const notified = await showNotificationIfBackground({
+        title: 'New Session Requested',
+        body: `${initiatorName} wants to start a new session`
+      });
+      console.log(`[Notifications] New session proposal notification: ${notified ? 'system' : 'skip'}`);
+    })();
   }
 
   // Reactive: Clear frontend state when new session approved (v0.11.3)
   $: if ($newSessionResult && $newSessionResult.result === "approved") {
     // Use sender_node_id if present (received from peer), else conversation_id (initiator)
     const conversationId = $newSessionResult.sender_node_id || $newSessionResult.conversation_id;
+
+    // Send notification for new session result
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: `Session ${$newSessionResult.result}`,
+        body: `New session ${$newSessionResult.result}`
+      });
+      console.log(`[Notifications] New session result notification: ${notified ? 'system' : 'skip'}`);
+    })();
 
     console.log('[NewSession] Clearing chat for:', conversationId);
     console.log('[NewSession] sender_node_id:', $newSessionResult.sender_node_id);
@@ -287,6 +350,15 @@
 
     showCommitResultToast = true;
 
+    // Send notification for knowledge commit result
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: 'Vote Complete',
+        body: `${topic} - ${status}`
+      });
+      console.log(`[Notifications] Knowledge commit result notification: ${notified ? 'system' : 'skip'}`);
+    })();
+
     // Clear the result from store after showing
     knowledgeCommitResult.set(null);
   }
@@ -312,10 +384,19 @@
 
   // File transfer event handlers (Week 1)
   $: if ($fileTransferOffer) {
-    const { node_id, filename, size_bytes, transfer_id } = $fileTransferOffer;
+    const { node_id, filename, size_bytes, transfer_id, sender_name } = $fileTransferOffer;
     currentFileOffer = $fileTransferOffer;
     showFileOfferDialog = true;
     console.log(`File offer received: ${filename} (${(size_bytes / 1024).toFixed(1)} KB) from ${node_id.slice(0, 15)}...`);
+
+    // Send notification for file offer
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: `File from ${sender_name || node_id.slice(0, 16)}`,
+        body: `${filename} (${(size_bytes / 1048576).toFixed(2)} MB)`
+      });
+      console.log(`[Notifications] File offer notification: ${notified ? 'system' : 'skip'}`);
+    })();
   }
 
   $: if ($fileTransferComplete) {
@@ -325,6 +406,15 @@
       : `✓ File sent: ${filename}`;
     showFileOfferToast = true;
     setTimeout(() => showFileOfferToast = false, 5000);
+
+    // Send notification for file transfer complete
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: 'File Transfer Complete',
+        body: `${filename} (${direction})`
+      });
+      console.log(`[Notifications] File complete notification: ${notified ? 'system' : 'skip'}`);
+    })();
   }
 
   $: if ($fileTransferCancelled) {
@@ -332,6 +422,15 @@
     fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
     showFileOfferToast = true;
     setTimeout(() => showFileOfferToast = false, 5000);
+
+    // Send notification for file transfer cancelled
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: 'Transfer Cancelled',
+        body: `${filename} (${reason})`
+      });
+      console.log(`[Notifications] File cancelled notification: ${notified ? 'system' : 'skip'}`);
+    })();
   }
 
   // Reactive: Handle chat history restored (v0.11.2)
@@ -1126,6 +1225,18 @@
         autoScroll();
       }
 
+      // Send notification if message is from a different chat and not from user
+      if (msg.sender_node_id !== "user" && msg.sender_node_id !== activeChatId) {
+        (async () => {
+          const messagePreview = msg.text.length > 50 ? msg.text.slice(0, 50) + '...' : msg.text;
+          const notified = await showNotificationIfBackground({
+            title: msg.sender_name || msg.sender_node_id.slice(0, 16),
+            body: messagePreview
+          });
+          console.log(`[Notifications] P2P message notification: ${notified ? 'system' : 'skip'}`);
+        })();
+      }
+
       if (processedMessageIds.size > 100) {
         const firstId = processedMessageIds.values().next().value;
         if (firstId) {
@@ -1813,6 +1924,67 @@
   on:vote={handleSessionVote}
   on:close={closeNewSessionDialog}
 />
+
+<!-- Notification Permission Dialog -->
+{#if showNotificationPermissionDialog}
+  <div
+    class="dialog-overlay"
+    role="button"
+    tabindex="0"
+    on:click={() => showNotificationPermissionDialog = false}
+    on:keydown={(e) => {
+      if (e.key === 'Escape' || e.key === 'Enter') {
+        showNotificationPermissionDialog = false;
+      }
+    }}
+  >
+    <div
+      class="notification-dialog-box"
+      role="dialog"
+      aria-labelledby="notification-dialog-title"
+      tabindex="-1"
+      on:click|stopPropagation
+      on:keydown|stopPropagation
+    >
+      <h2 id="notification-dialog-title">Enable Desktop Notifications</h2>
+      <p>Get notified when:</p>
+      <ul>
+        <li>You receive new messages</li>
+        <li>Someone sends you a file</li>
+        <li>You're asked to vote on knowledge</li>
+        <li>Session requests are made</li>
+      </ul>
+      <div class="dialog-actions">
+        <button
+          class="btn-primary"
+          on:click={async () => {
+            const granted = await requestNotificationPermission();
+            showNotificationPermissionDialog = false;
+
+            // Show result toast
+            fileOfferToastMessage = granted
+              ? 'Notifications enabled'
+              : 'Notifications disabled - you can enable them later in settings';
+            showFileOfferToast = true;
+            setTimeout(() => showFileOfferToast = false, 3000);
+          }}
+        >
+          Enable Notifications
+        </button>
+        <button
+          class="btn-secondary"
+          on:click={() => {
+            showNotificationPermissionDialog = false;
+            localStorage.setItem('notificationPreference', 'disabled');
+            localStorage.setItem('permissionRequestedAt', new Date().toISOString());
+          }}
+        >
+          Maybe Later
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <ContextViewer
   bind:open={showContextViewer}
@@ -3694,5 +3866,86 @@
     color: #4a4a4a;
     font-size: 12px;
     margin-top: 4px;
+  }
+
+  /* Notification Permission Dialog */
+  .dialog-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10001;
+  }
+
+  .notification-dialog-box {
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    max-width: 400px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  }
+
+  .notification-dialog-box h2 {
+    margin-top: 0;
+    margin-bottom: 1rem;
+    color: #333;
+  }
+
+  .notification-dialog-box p {
+    margin-bottom: 0.5rem;
+    color: #666;
+  }
+
+  .notification-dialog-box ul {
+    margin: 1rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .notification-dialog-box li {
+    margin: 0.5rem 0;
+    color: #666;
+  }
+
+  .dialog-actions {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1.5rem;
+    justify-content: flex-end;
+  }
+
+  .btn-primary {
+    background: #2196F3;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    font-weight: 500;
+    transition: background 0.2s ease;
+  }
+
+  .btn-primary:hover {
+    background: #1976D2;
+  }
+
+  .btn-secondary {
+    background: #f5f5f5;
+    color: #666;
+    border: 1px solid #ddd;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: background 0.2s ease;
+  }
+
+  .btn-secondary:hover {
+    background: #e0e0e0;
   }
 </style>
