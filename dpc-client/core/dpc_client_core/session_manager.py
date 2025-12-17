@@ -258,10 +258,12 @@ class NewSessionProposalManager:
         if self.on_result_broadcast:
             await self.on_result_broadcast(result_payload, list(proposal.participants))
 
-        # Emit event to UI for initiator
+        # Emit event to UI for initiator (add peer's node_id for frontend lookup)
+        peer_node_id = next((p for p in proposal.participants if p != self.core_service.p2p_manager.node_id), None)
+        ui_payload = {**result_payload, "sender_node_id": peer_node_id}
         await self.core_service.local_api.broadcast_event(
             "new_session_result",
-            result_payload
+            ui_payload
         )
 
         # Remove from active sessions
