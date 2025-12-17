@@ -2,6 +2,7 @@
 <!-- FIXED VERSION - Proper URI detection for Direct TLS vs WebRTC -->
 
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
@@ -147,14 +148,20 @@
   let windowFocused: boolean = true;
   let showNotificationPermissionDialog: boolean = false;
 
-  // Initialize window focus tracking and notification permission
-  (async () => {
+  // Chat history loading state (prevent infinite loop)
+  let loadingHistory = new Set<string>();
+
+  // Window focus tracking cleanup
+  let unlistenFocus: (() => void) | null = null;
+
+  // Initialize window focus tracking and notification permission (runs once on mount)
+  onMount(async () => {
     if (typeof window !== 'undefined') {
       try {
         const appWindow = getCurrentWindow();
 
-        // Listen to focus changes
-        await appWindow.onFocusChanged(({ payload: focused }) => {
+        // Listen to focus changes (store unlisten function for cleanup)
+        unlistenFocus = await appWindow.onFocusChanged(({ payload: focused }) => {
           windowFocused = focused;
           console.log(`[Notifications] Window focus changed: ${focused}`);
         });
@@ -174,7 +181,15 @@
         console.error('[Notifications] Failed to set up window tracking:', error);
       }
     }
-  })();
+  });
+
+  // Cleanup focus listener on component destroy
+  onDestroy(() => {
+    if (unlistenFocus) {
+      unlistenFocus();
+      unlistenFocus = null;
+    }
+  });
 
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $: setActiveChat(activeChatId);
@@ -272,9 +287,17 @@
   $: if ($connectionStatus === 'connected' && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
     // Check if this peer chat has no messages in frontend
     const currentHistory = $chatHistories.get(activeChatId);
-    console.log(`[ChatHistory] Reactive triggered: chatId=${activeChatId.slice(0,20)}, historyLen=${currentHistory?.length || 0}`);
-    if (!currentHistory || currentHistory.length === 0) {
+    console.log(`[ChatHistory] Reactive triggered: chatId=${activeChatId.slice(0,20)}, historyLen=${currentHistory?.length || 0}, loading=${loadingHistory.has(activeChatId)}`);
+
+    // Guard: Skip if already loading or already have messages
+    if (loadingHistory.has(activeChatId)) {
+      console.log(`[ChatHistory] Skipping - already loading history for ${activeChatId.slice(0,20)}`);
+    } else if (!currentHistory || currentHistory.length === 0) {
       console.log(`[ChatHistory] Loading history from backend for ${activeChatId.slice(0,20)}...`);
+
+      // Mark as loading to prevent re-triggers
+      loadingHistory.add(activeChatId);
+
       // Load from backend (async IIFE to allow await in reactive statement)
       (async () => {
         try {
@@ -310,6 +333,9 @@
           }
         } catch (e) {
           console.error(`[ChatHistory] Error loading history:`, e);
+        } finally {
+          // Always remove from loading set when done
+          loadingHistory.delete(activeChatId);
         }
       })();
     } else {
