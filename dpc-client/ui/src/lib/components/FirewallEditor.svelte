@@ -26,6 +26,11 @@
       groups?: Record<string, any>;
       nodes?: Record<string, any>;
     };
+    notifications?: {
+      _comment?: string;
+      enabled: boolean;
+      events: Record<string, boolean>;
+    };
     nodes?: Record<string, Record<string, string>>;
     groups?: Record<string, Record<string, string>>;
     ai_scopes?: Record<string, Record<string, string>>;
@@ -33,7 +38,7 @@
   };
 
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'peers' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'notifications' | 'peers' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -473,6 +478,13 @@
           on:click={() => selectedTab = 'file-transfer'}
         >
           File Transfer
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'notifications'}
+          on:click={() => selectedTab = 'notifications'}
+        >
+          Notifications
         </button>
         <button
           class="tab"
@@ -1039,6 +1051,81 @@
             {#if !editMode}
               <div class="info-box">
                 <strong>Info:</strong> File transfer permissions control who can send you files and what types/sizes are allowed. Supports per-node and per-group settings with MIME type wildcards (e.g., "image/*", "application/pdf"). Use Edit mode to modify permissions.
+              </div>
+            {/if}
+          </div>
+
+        {:else if selectedTab === 'notifications'}
+          <div class="section">
+            <h3>Notification Settings</h3>
+            <p class="help-text">Control desktop notifications for different events.</p>
+
+            {#if editMode && editedRules?.notifications}
+              <div class="form-group">
+                <label for="notifications-enabled">
+                  <input
+                    type="checkbox"
+                    id="notifications-enabled"
+                    bind:checked={editedRules.notifications.enabled}
+                  />
+                  Enable Desktop Notifications
+                </label>
+                <p class="help-text-small">Master toggle for all desktop notifications</p>
+              </div>
+
+              <h4 style="margin-top: 1.5rem;">Event Notifications</h4>
+              <div class="notification-events">
+                {#each Object.entries(editedRules.notifications.events) as [event, enabled]}
+                  <div class="notification-event-item">
+                    <label for="notif-{event}">
+                      <input
+                        type="checkbox"
+                        id="notif-{event}"
+                        bind:checked={editedRules.notifications.events[event]}
+                        disabled={!editedRules.notifications.enabled}
+                      />
+                      <span class="event-name">{event.replace(/_/g, ' ')}</span>
+                    </label>
+                  </div>
+                {/each}
+              </div>
+            {:else if displayRules?.notifications}
+              <div class="form-group">
+                <label for="notifications-enabled">
+                  <input
+                    type="checkbox"
+                    id="notifications-enabled"
+                    checked={displayRules.notifications.enabled}
+                    disabled
+                  />
+                  Enable Desktop Notifications
+                </label>
+                <p class="help-text-small">Master toggle for all desktop notifications</p>
+              </div>
+
+              {#if displayRules.notifications.events}
+                <h4 style="margin-top: 1.5rem;">Event Notifications</h4>
+                <div class="notification-events">
+                  {#each Object.entries(displayRules.notifications.events) as [event, enabled]}
+                    <div class="notification-event-item">
+                      <label for="notif-{event}">
+                        <input
+                          type="checkbox"
+                          id="notif-{event}"
+                          checked={enabled}
+                          disabled
+                        />
+                        <span class="event-name">{event.replace(/_/g, ' ')}</span>
+                      </label>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            {/if}
+
+            {#if !editMode}
+              <div class="info-box" style="margin-top: 1.5rem;">
+                <strong>Info:</strong> Notification settings control when desktop notifications appear when the app is in the background. Master toggle must be enabled for individual event notifications to work. Operating system permission must also be granted.
               </div>
             {/if}
           </div>
@@ -1613,5 +1700,54 @@
     border-radius: 4px;
     font-size: 0.9rem;
     cursor: pointer;
+  }
+
+  /* Notification Settings Styles */
+  .form-group {
+    margin-bottom: 1rem;
+  }
+
+  .form-group label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .help-text-small {
+    color: #666;
+    font-size: 0.85rem;
+    margin: 0.25rem 0 0 1.75rem;
+  }
+
+  .notification-events {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+  }
+
+  .notification-event-item {
+    padding: 0.5rem;
+    background: #f5f5f5;
+    border-radius: 4px;
+  }
+
+  .notification-event-item label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+  }
+
+  .notification-event-item input[type="checkbox"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .event-name {
+    text-transform: capitalize;
+    font-size: 0.9rem;
   }
 </style>
