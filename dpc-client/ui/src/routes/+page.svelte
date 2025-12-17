@@ -180,6 +180,9 @@
     lastSentContextHash.delete(conversationId);
     lastSentPeerHashes = new Map(lastSentPeerHashes);
     lastSentPeerHashes.delete(conversationId);
+
+    // Clear the result to prevent re-triggering this reactive statement
+    newSessionResult.set(null);
   }
 
   // Reactive: Handle token warnings (Phase 2)
