@@ -248,8 +248,8 @@ class NewSessionProposalManager:
             }
         }
 
-        # If approved and initiator: clear local history
-        if is_approved and session.is_initiator:
+        # If approved: clear local history (for all participants)
+        if is_approved:
             self.logger.info("Proposal approved, clearing local conversation history")
             monitor = self.core_service._get_or_create_conversation_monitor(proposal.conversation_id)
             monitor.reset_conversation()
