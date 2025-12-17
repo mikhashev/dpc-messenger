@@ -159,6 +159,11 @@
     // Use sender_node_id if present (received from peer), else conversation_id (initiator)
     const conversationId = $newSessionResult.sender_node_id || $newSessionResult.conversation_id;
 
+    console.log('[NewSession] Clearing chat for:', conversationId);
+    console.log('[NewSession] sender_node_id:', $newSessionResult.sender_node_id);
+    console.log('[NewSession] conversation_id:', $newSessionResult.conversation_id);
+    console.log('[NewSession] Current chatHistories keys:', Array.from($chatHistories.keys()));
+
     // Clear message history for this chat
     chatHistories.update(h => {
       const newMap = new Map(h);
