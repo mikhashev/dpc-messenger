@@ -60,7 +60,11 @@ from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
 from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
+from .message_handlers.session_handler import (
+    ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
+)
 from .managers.file_transfer_manager import FileTransferManager
+from .session_manager import NewSessionProposalManager
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
     load_instructions, save_instructions, migrate_instructions_from_personal_context
@@ -174,6 +178,9 @@ class CoreService:
         # Register callback to broadcast voting results to participants
         self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
 
+        # Session manager (mutual new session approval)
+        self.session_manager = None
+
         # Phase 6 managers will be initialized in start() after DHT is created by P2PManager
         self.hole_punch_manager = None
         self.relay_manager = None
@@ -197,6 +204,11 @@ class CoreService:
             local_api=self.local_api,
             service=self
         )
+
+        # Session manager (mutual new session approval)
+        self.session_manager = NewSessionProposalManager(self)
+        self.session_manager.on_proposal_received = self._on_session_proposal_received
+        self.session_manager.on_result_broadcast = self._broadcast_session_result
 
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
@@ -281,6 +293,11 @@ class CoreService:
         # Chat history sync handlers (v0.11.2)
         self.message_router.register_handler(RequestChatHistoryHandler(self))
         self.message_router.register_handler(ChatHistoryResponseHandler(self))
+
+        # Session management (mutual new session approval)
+        self.message_router.register_handler(ProposeNewSessionHandler(self))
+        self.message_router.register_handler(VoteNewSessionHandler(self))
+        self.message_router.register_handler(NewSessionResultHandler(self))
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 
@@ -2117,10 +2134,57 @@ class CoreService:
                 "message_count": 0
             }
 
-    async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
-        """Reset conversation history and context tracking for "New Chat" button.
+    async def propose_new_session(self, conversation_id: str) -> Dict[str, Any]:
+        """Propose a new session to connected peers (mutual approval flow).
 
-        UI Integration: Called when user clicks "New Chat" button.
+        UI Integration: Called when user clicks "New Session" button.
+        Initiates voting process - history only cleared if all peers approve.
+
+        Args:
+            conversation_id: The conversation/chat ID to reset
+
+        Returns:
+            Dict with status and proposal_id
+        """
+        try:
+            # Get participants (all peers in conversation)
+            # For now, conversation_id is the peer_id in P2P mode
+            participants = {self.node_id, conversation_id}
+
+            # Check if peer is connected
+            if conversation_id not in self.p2p_manager.peers:
+                return {
+                    "status": "error",
+                    "message": "Peer must be online to propose new session"
+                }
+
+            # Initiate proposal via session manager
+            result = await self.session_manager.propose_new_session(
+                conversation_id=conversation_id,
+                participants=participants
+            )
+
+            return result
+
+        except ValueError as e:
+            # Duplicate proposal
+            logger.warning("Cannot propose new session: %s", e)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+        except Exception as e:
+            logger.error("Error proposing new session: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """Reset conversation history and context tracking (internal method).
+
+        NOTE: This is now an internal method called after proposal approval.
+        UI should call propose_new_session() instead for mutual approval.
 
         Args:
             conversation_id: The conversation/chat ID to reset
@@ -2146,6 +2210,66 @@ class CoreService:
 
         except Exception as e:
             logger.error("Error resetting conversation: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def vote_new_session(self, proposal_id: str, vote: bool) -> Dict[str, Any]:
+        """Cast vote on a new session proposal.
+
+        UI Integration: Called when user clicks Approve/Reject in NewSessionDialog.
+
+        Args:
+            proposal_id: UUID of the proposal
+            vote: True for approve, False for reject
+
+        Returns:
+            Dict with status
+        """
+        try:
+            # Get session
+            session = self.session_manager.get_session(proposal_id)
+            if not session:
+                return {
+                    "status": "error",
+                    "message": "Proposal not found"
+                }
+
+            proposal = session.proposal
+
+            # Record local vote
+            await self.session_manager.record_vote(proposal_id, self.node_id, vote)
+
+            # Send VOTE_NEW_SESSION to all other participants
+            message = {
+                "command": "VOTE_NEW_SESSION",
+                "payload": {
+                    "proposal_id": proposal_id,
+                    "vote": vote,
+                    "voter_node_id": self.node_id
+                }
+            }
+
+            for node_id in proposal.participants:
+                if node_id == self.node_id:
+                    continue
+
+                if node_id in self.p2p_manager.peers:
+                    try:
+                        await self.p2p_manager.send_message(node_id, message)
+                        logger.debug("Sent VOTE_NEW_SESSION to %s", node_id[:20])
+                    except Exception as e:
+                        logger.error("Error sending vote to %s: %s", node_id[:20], e)
+
+            vote_str = "approve" if vote else "reject"
+            return {
+                "status": "success",
+                "message": f"Vote cast: {vote_str}"
+            }
+
+        except Exception as e:
+            logger.error("Error voting on new session: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -2758,6 +2882,54 @@ class CoreService:
 
         # Also emit to local UI
         await self.local_api.broadcast_event("knowledge_commit_result", result_payload)
+
+    async def _on_session_proposal_received(self, payload: dict):
+        """Callback when new session proposal received from peer.
+
+        Broadcasts proposal to UI so user can review and vote.
+
+        Args:
+            payload: The new session proposal payload from peer
+        """
+        proposal_id = payload.get("proposal_id")
+        initiator_id = payload.get("initiator_node_id")
+
+        logger.info(
+            "Broadcasting new session proposal to UI: %s from %s",
+            proposal_id[:8] if proposal_id else "none",
+            initiator_id[:20] if initiator_id else "none"
+        )
+
+        await self.local_api.broadcast_event(
+            "new_session_proposed",
+            payload
+        )
+
+    async def _broadcast_session_result(self, result_payload: dict, participants: List[str]):
+        """Broadcast NEW_SESSION_RESULT to all participants.
+
+        Args:
+            result_payload: Complete voting result data (result, clear_history, vote_tally, etc.)
+            participants: List of participant node_ids who should receive the notification
+        """
+        message = {
+            "command": "NEW_SESSION_RESULT",
+            "payload": result_payload
+        }
+
+        # Send to all participants except self (who are currently connected)
+        for node_id in participants:
+            if node_id == self.node_id:
+                continue  # Don't send to self
+
+            if node_id in self.p2p_manager.peers:
+                try:
+                    await self.p2p_manager.send_message(node_id, message)
+                    logger.info("Sent NEW_SESSION_RESULT to %s", node_id[:20])
+                except Exception as e:
+                    logger.error("Failed to send session result to %s: %s", node_id[:20], e, exc_info=True)
+            else:
+                logger.debug("Participant %s not connected, skipping result broadcast", node_id[:20])
 
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """

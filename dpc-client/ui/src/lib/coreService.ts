@@ -58,6 +58,10 @@ export const filePreparationCompleted = writable<any>(null);  // {filename, hash
 // Chat history restore store (v0.11.2 - for auto-restore on reconnect)
 export const historyRestored = writable<any>(null);  // {conversation_id, message_count, messages}
 
+// New session proposal store (v0.11.3 - mutual session approval)
+export const newSessionProposal = writable<any>(null);  // {proposal_id, initiator_node_id, conversation_id, timestamp}
+export const newSessionResult = writable<any>(null);  // {proposal_id, result, clear_history, vote_tally}
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -229,6 +233,27 @@ export function connectToCoreService() {
                 } else if (message.event === "knowledge_commit_result") {
                     console.log("Knowledge commit result received:", message.payload);
                     knowledgeCommitResult.set(message.payload);
+                }
+                // New session proposal handlers (v0.11.3)
+                else if (message.event === "new_session_proposed") {
+                    console.log("New session proposal received:", message.payload);
+                    newSessionProposal.set(message.payload);
+                } else if (message.event === "new_session_result") {
+                    console.log("New session result received:", message.payload);
+                    newSessionResult.set(message.payload);
+
+                    // Clear proposal after result
+                    newSessionProposal.set(null);
+
+                    // Show toast notification
+                    const result = message.payload.result;
+                    if (result === "approved") {
+                        console.log("✅ New session approved - conversation history cleared");
+                    } else if (result === "rejected") {
+                        console.log("❌ New session rejected");
+                    } else if (result === "timeout") {
+                        console.log("⏱️ New session request timed out");
+                    }
                 }
                 // Handle token limit warning (Phase 2)
                 else if (message.event === "token_limit_warning") {
@@ -568,4 +593,18 @@ export function resetUnreadCount(peerId: string) {
         currentCounts.delete(peerId);
         unreadMessageCounts.set(new Map(currentCounts));
     }
+}
+
+// New session proposal helpers (v0.11.3)
+export async function proposeNewSession(conversationId: string): Promise<any> {
+    return sendCommand('propose_new_session', {
+        conversation_id: conversationId
+    });
+}
+
+export async function voteNewSession(proposalId: string, vote: boolean): Promise<any> {
+    return sendCommand('vote_new_session', {
+        proposal_id: proposalId,
+        vote: vote
+    });
 }

@@ -3,8 +3,9 @@
 
 <script lang="ts">
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
+  import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
@@ -78,6 +79,7 @@
   let showFirewallEditor: boolean = false;
   let showProvidersEditor: boolean = false;
   let showCommitDialog: boolean = false;
+  let showNewSessionDialog: boolean = false;  // v0.11.3: mutual session approval
   let autoKnowledgeDetection: boolean = false;  // Default: disabled
 
   // Token tracking state (Phase 2)
@@ -145,6 +147,33 @@
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
     showCommitDialog = true;
+  }
+
+  // Reactive: Open new session dialog when proposal received (v0.11.3)
+  $: if ($newSessionProposal) {
+    showNewSessionDialog = true;
+  }
+
+  // Reactive: Clear frontend state when new session approved (v0.11.3)
+  $: if ($newSessionResult && $newSessionResult.result === "approved") {
+    const conversationId = $newSessionResult.conversation_id;
+
+    // Clear message history for this chat
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      newMap.set(conversationId, []);
+      return newMap;
+    });
+
+    // Clear token usage
+    tokenUsageMap = new Map(tokenUsageMap);
+    tokenUsageMap.delete(conversationId);
+
+    // Clear context tracking (will show "Updated" badge again on next query)
+    lastSentContextHash = new Map(lastSentContextHash);
+    lastSentContextHash.delete(conversationId);
+    lastSentPeerHashes = new Map(lastSentPeerHashes);
+    lastSentPeerHashes.delete(conversationId);
   }
 
   // Reactive: Handle token warnings (Phase 2)
@@ -696,6 +725,17 @@
     knowledgeCommitProposal.set(null);
   }
 
+  function handleSessionVote(event: CustomEvent) {
+    const { proposal_id, vote } = event.detail;
+    voteNewSession(proposal_id, vote);
+    showNewSessionDialog = false;
+  }
+
+  function closeNewSessionDialog() {
+    showNewSessionDialog = false;
+    newSessionProposal.set(null);
+  }
+
   function handleEndSession(conversationId: string) {
     if (confirm("End this conversation session and extract knowledge?")) {
       sendCommand("end_conversation_session", {
@@ -729,29 +769,9 @@
   }
 
   function handleNewChat(chatId: string) {
-    if (confirm("Start a new conversation? This will clear the current chat history and knowledge buffer.")) {
-      // Clear message history for this chat
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        newMap.set(chatId, []);  // Clear the message array for this chat
-        return newMap;
-      });
-
-      // Clear token usage for this chat (Phase 2)
-      tokenUsageMap = new Map(tokenUsageMap);
-      tokenUsageMap.delete(chatId);
-
-      // Phase 7: Clear context tracking (will show "Updated" badge again on next query)
-      lastSentContextHash = new Map(lastSentContextHash);
-      lastSentContextHash.delete(chatId);
-      lastSentPeerHashes = new Map(lastSentPeerHashes);
-      lastSentPeerHashes.delete(chatId);
-
-      // Phase 7: Reset conversation on backend (clears history, context tracking)
-      sendCommand("reset_conversation", {
-        conversation_id: chatId
-      });
-    }
+    // v0.11.3: Send proposal to peer for mutual approval
+    // Frontend state will be cleared only after approval
+    proposeNewSession(chatId);
   }
 
   function handleAddAIChat() {
@@ -1776,6 +1796,13 @@
   proposal={$knowledgeCommitProposal}
   on:vote={handleCommitVote}
   on:close={closeCommitDialog}
+/>
+
+<NewSessionDialog
+  bind:open={showNewSessionDialog}
+  proposal={$newSessionProposal}
+  on:vote={handleSessionVote}
+  on:close={closeNewSessionDialog}
 />
 
 <ContextViewer
