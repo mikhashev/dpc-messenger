@@ -143,6 +143,7 @@
 
   // UI collapse states
   let contextPanelCollapsed: boolean = false;  // Context toggle panel collapsible
+  let modeSectionCollapsed: boolean = false;  // Mode section collapsible
 
   // Notification state
   let windowFocused: boolean = true;
@@ -168,15 +169,6 @@
 
         // Check initial focus state
         windowFocused = await appWindow.isFocused();
-
-        // Request notification permission on first launch
-        const permissionRequested = localStorage.getItem('permissionRequestedAt');
-        if (!permissionRequested) {
-          // First launch - show friendly dialog after 2s
-          setTimeout(() => {
-            showNotificationPermissionDialog = true;
-          }, 2000);
-        }
       } catch (error) {
         console.error('[Notifications] Failed to set up window tracking:', error);
       }
@@ -322,6 +314,9 @@
               return newMap;
             });
 
+            // Remove from loading AFTER chatHistories update completes
+            loadingHistory.delete(activeChatId);
+
             // Scroll to bottom
             setTimeout(() => {
               if (chatWindow) {
@@ -330,11 +325,12 @@
             }, 100);
           } else {
             console.log(`[ChatHistory] No messages: status=${result.status}, count=${result.messages?.length || 0}`);
+            // No messages to load, safe to remove from loading
+            loadingHistory.delete(activeChatId);
           }
         } catch (e) {
           console.error(`[ChatHistory] Error loading history:`, e);
-        } finally {
-          // Always remove from loading set when done
+          // On error, remove from loading to allow retry
           loadingHistory.delete(activeChatId);
         }
       })();
@@ -1387,45 +1383,62 @@
           <!-- Connection Status (NEW) -->
           {#if $nodeStatus.operation_mode}
             <div class="connection-mode">
-              <p><strong>Mode:</strong></p>
-              <div class="mode-badge" class:fully-online={$nodeStatus.operation_mode === 'fully_online'}
-                   class:hub-offline={$nodeStatus.operation_mode === 'hub_offline'}
-                   class:fully-offline={$nodeStatus.operation_mode === 'fully_offline'}>
-                {#if $nodeStatus.operation_mode === 'fully_online'}
-                  🟢 Online
-                {:else if $nodeStatus.operation_mode === 'hub_offline'}
-                  🟡 Hub Offline
-                {:else}
-                  🔴 Offline
-                {/if}
+              <div
+                class="mode-header"
+                role="button"
+                tabindex="0"
+                on:click={() => modeSectionCollapsed = !modeSectionCollapsed}
+                on:keydown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    modeSectionCollapsed = !modeSectionCollapsed;
+                  }
+                }}
+              >
+                <p><strong>Mode:</strong></p>
+                <span class="collapse-icon">{modeSectionCollapsed ? '▶' : '▼'}</span>
               </div>
-              <p class="mode-description">{$nodeStatus.connection_status || 'All features available'}</p>
 
-              {#if $nodeStatus.available_features}
-                <details class="features-details">
-                  <summary>Available Features</summary>
-                  <ul class="features-list">
-                    {#each Object.entries($nodeStatus.available_features) as [feature, available]}
-                      {@const peerCount = peersByStrategy[feature]?.length || 0}
-                      {@const tooltip = peersByStrategy[feature]
-                        ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
-                        : ''}
-                      <li
-                        class:feature-available={available}
-                        class:feature-unavailable={!available}
-                        title={peerCount > 0 ? tooltip : ''}
-                      >
-                        {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
-                        {#if peerCount > 0}
-                          <span class="peer-count">({peerCount})</span>
-                        {/if}
-                      </li>
-                    {/each}
-                  </ul>
-                  {#if $nodeStatus.cached_peers_count > 0}
-                    <p class="cached-info">💾 {$nodeStatus.cached_peers_count} cached peer(s)</p>
+              {#if !modeSectionCollapsed}
+                <div class="mode-badge" class:fully-online={$nodeStatus.operation_mode === 'fully_online'}
+                     class:hub-offline={$nodeStatus.operation_mode === 'hub_offline'}
+                     class:fully-offline={$nodeStatus.operation_mode === 'fully_offline'}>
+                  {#if $nodeStatus.operation_mode === 'fully_online'}
+                    🟢 Online
+                  {:else if $nodeStatus.operation_mode === 'hub_offline'}
+                    🟡 Hub Offline
+                  {:else}
+                    🔴 Offline
                   {/if}
-                </details>
+                </div>
+                <p class="mode-description">{$nodeStatus.connection_status || 'All features available'}</p>
+
+                {#if $nodeStatus.available_features}
+                  <details class="features-details">
+                    <summary>Available Features</summary>
+                    <ul class="features-list">
+                      {#each Object.entries($nodeStatus.available_features) as [feature, available]}
+                        {@const peerCount = peersByStrategy[feature]?.length || 0}
+                        {@const tooltip = peersByStrategy[feature]
+                          ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
+                          : ''}
+                        <li
+                          class:feature-available={available}
+                          class:feature-unavailable={!available}
+                          title={peerCount > 0 ? tooltip : ''}
+                        >
+                          {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
+                          {#if peerCount > 0}
+                            <span class="peer-count">({peerCount})</span>
+                          {/if}
+                        </li>
+                      {/each}
+                    </ul>
+                    {#if $nodeStatus.cached_peers_count > 0}
+                      <p class="cached-info">💾 {$nodeStatus.cached_peers_count} cached peer(s)</p>
+                    {/if}
+                  </details>
+                {/if}
               {/if}
             </div>
           {/if}
@@ -3297,6 +3310,31 @@
     margin-top: 1rem;
     padding-top: 1rem;
     border-top: 1px solid #eee;
+  }
+
+  .mode-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    user-select: none;
+    padding: 0.25rem 0;
+  }
+
+  .mode-header:hover {
+    background: #f8f9fa;
+    border-radius: 4px;
+  }
+
+  .mode-header p {
+    margin: 0;
+    flex: 1;
+  }
+
+  .collapse-icon {
+    font-size: 0.8rem;
+    color: #666;
+    transition: transform 0.2s ease;
   }
 
   .mode-badge {

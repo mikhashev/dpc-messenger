@@ -54,6 +54,9 @@ class ContextFirewall:
         # Parse compute sharing settings
         self._parse_compute_settings()
 
+        # Parse notification settings
+        self._parse_notification_settings()
+
     def _parse_compute_settings(self):
         """Parse compute sharing settings from the config."""
         compute = self.rules.get('compute', {})
@@ -64,6 +67,24 @@ class ContextFirewall:
         logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
                      self.compute_enabled, len(self.compute_allowed_nodes),
                      len(self.compute_allowed_groups), len(self.compute_allowed_models))
+
+    def _parse_notification_settings(self):
+        """Parse notification settings from the config."""
+        notifications = self.rules.get('notifications', {})
+        self.notifications_enabled = notifications.get('enabled', True)
+        self.notification_events: Dict[str, bool] = notifications.get('events', {
+            'new_message': True,
+            'file_offer': True,
+            'file_complete': True,
+            'file_cancelled': True,
+            'knowledge_proposal': True,
+            'knowledge_result': True,
+            'session_proposal': True,
+            'session_result': True,
+            'connection_status': False
+        })
+        logger.debug("Notification settings updated: enabled=%s, events=%s",
+                     self.notifications_enabled, self.notification_events)
 
     def _ensure_file_exists(self):
         """Creates a default, secure privacy_rules.json file if one doesn't exist."""
@@ -130,6 +151,21 @@ class ContextFirewall:
                     "_comment": "Device context sharing rules",
                     "_example_basic": {
                         "device_context.json:hardware.gpu.*": "allow"
+                    }
+                },
+                "notifications": {
+                    "_comment": "Desktop notification settings",
+                    "enabled": True,
+                    "events": {
+                        "new_message": True,
+                        "file_offer": True,
+                        "file_complete": True,
+                        "file_cancelled": True,
+                        "knowledge_proposal": True,
+                        "knowledge_result": True,
+                        "session_proposal": True,
+                        "session_result": True,
+                        "connection_status": False
                     }
                 }
             }
