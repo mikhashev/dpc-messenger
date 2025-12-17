@@ -621,7 +621,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', '_comment']
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'notifications', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -771,6 +771,23 @@ class ContextFirewall:
                     if 'allowed_mime_types' in file_transfer:
                         if not isinstance(file_transfer['allowed_mime_types'], list):
                             errors.append("'file_transfer.allowed_mime_types' must be a list")
+
+            # Validate notifications section
+            if 'notifications' in config_dict:
+                notifications = config_dict['notifications']
+                if not isinstance(notifications, dict):
+                    errors.append("'notifications' section must be a dictionary")
+                else:
+                    if 'enabled' in notifications and not isinstance(notifications['enabled'], bool):
+                        errors.append("'notifications.enabled' must be a boolean (true or false)")
+
+                    if 'events' in notifications:
+                        if not isinstance(notifications['events'], dict):
+                            errors.append("'notifications.events' must be a dictionary")
+                        else:
+                            for event_name, enabled in notifications['events'].items():
+                                if not isinstance(enabled, bool):
+                                    errors.append(f"'notifications.events.{event_name}' must be a boolean (true or false)")
 
         except Exception as e:
             errors.append(f"Validation error: {str(e)}")
