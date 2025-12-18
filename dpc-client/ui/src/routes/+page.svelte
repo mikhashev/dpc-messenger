@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -143,7 +143,7 @@
 
   // UI collapse states
   let contextPanelCollapsed: boolean = false;  // Context toggle panel collapsible
-  let modeSectionCollapsed: boolean = false;  // Mode section collapsible
+  let modeSectionCollapsed: boolean = true;  // Mode section collapsible (collapsed by default)
 
   // Notification state
   let windowFocused: boolean = true;
@@ -253,6 +253,32 @@
 
     // Clear the result to prevent re-triggering this reactive statement
     newSessionResult.set(null);
+  }
+
+  // Reactive: Clear chat window on conversation reset (v0.11.3 - for AI chats and P2P resets)
+  $: if ($conversationReset) {
+    const conversationId = $conversationReset.conversation_id;
+    console.log('[ConversationReset] Clearing chat for:', conversationId);
+
+    // Clear message history for this chat
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      newMap.set(conversationId, []);
+      return newMap;
+    });
+
+    // Clear token usage
+    tokenUsageMap = new Map(tokenUsageMap);
+    tokenUsageMap.delete(conversationId);
+
+    // Clear context tracking
+    lastSentContextHash = new Map(lastSentContextHash);
+    lastSentContextHash.delete(conversationId);
+    lastSentPeerHashes = new Map(lastSentPeerHashes);
+    lastSentPeerHashes.delete(conversationId);
+
+    // Clear the event to prevent re-triggering
+    conversationReset.set(null);
   }
 
   // Reactive: Handle token warnings (Phase 2)

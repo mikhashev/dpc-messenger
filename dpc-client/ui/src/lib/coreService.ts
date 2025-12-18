@@ -62,6 +62,9 @@ export const historyRestored = writable<any>(null);  // {conversation_id, messag
 export const newSessionProposal = writable<any>(null);  // {proposal_id, initiator_node_id, conversation_id, timestamp}
 export const newSessionResult = writable<any>(null);  // {proposal_id, result, clear_history, vote_tally}
 
+// Conversation reset store (v0.11.3 - for AI chats and approved P2P session resets)
+export const conversationReset = writable<any>(null);  // {conversation_id}
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -254,6 +257,11 @@ export function connectToCoreService() {
                     } else if (result === "timeout") {
                         console.log("⏱️ New session request timed out");
                     }
+                }
+                // Conversation reset handler (v0.11.3 - for AI chats and approved P2P resets)
+                else if (message.event === "conversation_reset") {
+                    console.log("Conversation reset received:", message.payload);
+                    conversationReset.set(message.payload);
                 }
                 // Handle token limit warning (Phase 2)
                 else if (message.event === "token_limit_warning") {
