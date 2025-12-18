@@ -178,6 +178,7 @@
   function removeNodeGroup(groupName: string) {
     if (!editedRules || !editedRules.node_groups) return;
     delete editedRules.node_groups[groupName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addNodeToGroup(groupName: string) {
@@ -224,6 +225,7 @@
   function removeNodePermission(nodeId: string) {
     if (!editedRules || !editedRules.nodes) return;
     delete editedRules.nodes[nodeId];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addRuleToNode(nodeId: string) {
@@ -242,6 +244,7 @@
   function removeRuleFromNode(nodeId: string, path: string) {
     if (!editedRules || !editedRules.nodes) return;
     delete editedRules.nodes[nodeId][path];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   // Peer Permissions - Group Management Functions
@@ -262,6 +265,7 @@
   function removeGroupPermission(groupName: string) {
     if (!editedRules || !editedRules.groups) return;
     delete editedRules.groups[groupName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addRuleToGroup(groupName: string) {
@@ -280,6 +284,7 @@
   function removeRuleFromGroup(groupName: string, path: string) {
     if (!editedRules || !editedRules.groups) return;
     delete editedRules.groups[groupName][path];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   // File Groups Management Functions
@@ -300,6 +305,7 @@
   function removeFileGroup(groupName: string) {
     if (!editedRules || !editedRules.file_groups) return;
     delete editedRules.file_groups[groupName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addFilePatternToGroup(groupName: string) {
@@ -342,6 +348,7 @@
   function removeAIScope(scopeName: string) {
     if (!editedRules || !editedRules.ai_scopes) return;
     delete editedRules.ai_scopes[scopeName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addRuleToAIScope(scopeName: string) {
@@ -360,6 +367,7 @@
   function removeRuleFromAIScope(scopeName: string, path: string) {
     if (!editedRules || !editedRules.ai_scopes) return;
     delete editedRules.ai_scopes[scopeName][path];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   // Device Sharing Management Functions
@@ -380,6 +388,7 @@
   function removeDeviceSharingPreset(presetName: string) {
     if (!editedRules || !editedRules.device_sharing) return;
     delete editedRules.device_sharing[presetName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addRuleToDeviceSharingPreset(presetName: string) {
@@ -398,6 +407,7 @@
   function removeRuleFromDeviceSharingPreset(presetName: string, path: string) {
     if (!editedRules || !editedRules.device_sharing) return;
     delete editedRules.device_sharing[presetName][path];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 </script>
 
