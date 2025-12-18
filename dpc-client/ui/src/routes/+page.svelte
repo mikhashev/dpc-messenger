@@ -1467,7 +1467,7 @@
                 <!-- Hub Login (moved inside) -->
                 {#if $nodeStatus.hub_status !== 'Connected'}
                   <div class="hub-login-section">
-                    <p class="info-text">Connect to Hub for WebRTC and discovery</p>
+                    <p class="info-text">Connect to Hub for WebRTC signaling</p>
                     <div class="hub-login-buttons">
                       <button
                         on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
