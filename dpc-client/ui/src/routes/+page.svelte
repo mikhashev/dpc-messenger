@@ -1437,33 +1437,6 @@
                 </div>
                 <p class="mode-description">{$nodeStatus.connection_status || 'All features available'}</p>
 
-                {#if $nodeStatus.available_features}
-                  <details class="features-details">
-                    <summary>Available Features</summary>
-                    <ul class="features-list">
-                      {#each Object.entries($nodeStatus.available_features) as [feature, available]}
-                        {@const peerCount = peersByStrategy[feature]?.length || 0}
-                        {@const tooltip = peersByStrategy[feature]
-                          ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
-                          : ''}
-                        <li
-                          class:feature-available={available}
-                          class:feature-unavailable={!available}
-                          title={peerCount > 0 ? tooltip : ''}
-                        >
-                          {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
-                          {#if peerCount > 0}
-                            <span class="peer-count">({peerCount})</span>
-                          {/if}
-                        </li>
-                      {/each}
-                    </ul>
-                    {#if $nodeStatus.cached_peers_count > 0}
-                      <p class="cached-info">💾 {$nodeStatus.cached_peers_count} cached peer(s)</p>
-                    {/if}
-                  </details>
-                {/if}
-
                 <!-- Hub Login (moved inside) -->
                 {#if $nodeStatus.hub_status !== 'Connected'}
                   <div class="hub-login-section">
@@ -1566,6 +1539,34 @@
               </p>
             </div>
           </details>
+
+          <!-- Available Features -->
+          {#if $nodeStatus.available_features}
+            <details class="features-details">
+              <summary>Available Features</summary>
+              <ul class="features-list">
+                {#each Object.entries($nodeStatus.available_features) as [feature, available]}
+                  {@const peerCount = peersByStrategy[feature]?.length || 0}
+                  {@const tooltip = peersByStrategy[feature]
+                    ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
+                    : ''}
+                  <li
+                    class:feature-available={available}
+                    class:feature-unavailable={!available}
+                    title={peerCount > 0 ? tooltip : ''}
+                  >
+                    {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
+                    {#if peerCount > 0}
+                      <span class="peer-count">({peerCount})</span>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+              {#if $nodeStatus.cached_peers_count > 0}
+                <p class="cached-info">💾 {$nodeStatus.cached_peers_count} cached peer(s)</p>
+              {/if}
+            </details>
+          {/if}
         </div>
 
         <!-- Chat List -->
