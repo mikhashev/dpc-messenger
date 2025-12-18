@@ -1313,7 +1313,6 @@
             <div class="dpc-uris-section">
               <details class="uri-details">
                 <summary class="uri-summary">
-                  <span class="uri-icon">🔗</span>
                   <span class="uri-title">Local Network ({$nodeStatus.dpc_uris.length})</span>
                 </summary>
                 <div class="uri-help-text">
@@ -1349,7 +1348,6 @@
             <div class="dpc-uris-section">
               <details class="uri-details">
                 <summary class="uri-summary">
-                  <span class="uri-icon">🌐</span>
                   <span class="uri-title">External (Internet) ({$nodeStatus.external_uris.length})</span>
                 </summary>
                 <div class="uri-help-text">
@@ -1380,26 +1378,17 @@
             </div>
           {/if}
 
-          <!-- Connection Status (NEW) -->
+          <!-- Hub Mode -->
           {#if $nodeStatus.operation_mode}
-            <div class="connection-mode">
-              <div
-                class="mode-header"
-                role="button"
-                tabindex="0"
-                on:click={() => modeSectionCollapsed = !modeSectionCollapsed}
-                on:keydown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    modeSectionCollapsed = !modeSectionCollapsed;
-                  }
-                }}
-              >
-                <p><strong>Mode:</strong></p>
-                <span class="collapse-icon">{modeSectionCollapsed ? '▶' : '▼'}</span>
-              </div>
+            <div class="dpc-uris-section">
+              <details class="uri-details" open={!modeSectionCollapsed}>
+                <summary
+                  class="uri-summary"
+                  on:click={() => modeSectionCollapsed = !modeSectionCollapsed}
+                >
+                  <span class="uri-title">Hub Mode</span>
+                </summary>
 
-              {#if !modeSectionCollapsed}
                 <div class="mode-badge" class:fully-online={$nodeStatus.operation_mode === 'fully_online'}
                      class:hub-offline={$nodeStatus.operation_mode === 'hub_offline'}
                      class:fully-offline={$nodeStatus.operation_mode === 'fully_offline'}>
@@ -1439,32 +1428,32 @@
                     {/if}
                   </details>
                 {/if}
-              {/if}
-            </div>
-          {/if}
 
-          <!-- Hub Login -->
-          {#if $nodeStatus.hub_status !== 'Connected'}
-            <div class="hub-login-section">
-              <p class="info-text">Connect to Hub for WebRTC and discovery</p>
-              <div class="hub-login-buttons">
-                <button
-                  on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
-                  class="btn-oauth btn-google"
-                  title="Login with Google"
-                >
-                  <span class="oauth-icon">🔵</span>
-                  Google
-                </button>
-                <button
-                  on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
-                  class="btn-oauth btn-github"
-                  title="Login with GitHub"
-                >
-                  <span class="oauth-icon">⚫</span>
-                  GitHub
-                </button>
-              </div>
+                <!-- Hub Login (moved inside) -->
+                {#if $nodeStatus.hub_status !== 'Connected'}
+                  <div class="hub-login-section">
+                    <p class="info-text">Connect to Hub for WebRTC and discovery</p>
+                    <div class="hub-login-buttons">
+                      <button
+                        on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
+                        class="btn-oauth btn-google"
+                        title="Login with Google"
+                      >
+                        <span class="oauth-icon">🔵</span>
+                        Google
+                      </button>
+                      <button
+                        on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
+                        class="btn-oauth btn-github"
+                        title="Login with GitHub"
+                      >
+                        <span class="oauth-icon">⚫</span>
+                        GitHub
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </details>
             </div>
           {/if}
         </div>
@@ -3306,37 +3295,6 @@
   }
 
   /* Connection Status Styles */
-  .connection-mode {
-    margin-top: 1rem;
-    padding-top: 1rem;
-    border-top: 1px solid #eee;
-  }
-
-  .mode-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    cursor: pointer;
-    user-select: none;
-    padding: 0.25rem 0;
-  }
-
-  .mode-header:hover {
-    background: #f8f9fa;
-    border-radius: 4px;
-  }
-
-  .mode-header p {
-    margin: 0;
-    flex: 1;
-  }
-
-  .collapse-icon {
-    font-size: 0.8rem;
-    color: #666;
-    transition: transform 0.2s ease;
-  }
-
   .mode-badge {
     display: inline-block;
     padding: 0.5rem 1rem;
