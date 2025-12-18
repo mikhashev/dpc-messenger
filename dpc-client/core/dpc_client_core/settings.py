@@ -63,7 +63,7 @@ class Settings:
         """Create a default config file with common settings."""
         self._config['hub'] = {
             'url': hub_url if hub_url else 'http://localhost:8000',
-            'auto_connect': 'true'
+            'auto_connect': 'false'
         }
 
         self._config['oauth'] = {
@@ -255,7 +255,7 @@ class Settings:
 
     def get_p2p_connection_timeout(self) -> float:
         """Get the P2P connection establishment timeout in seconds."""
-        return float(self.get('p2p', 'connection_timeout', '30'))
+        return float(self.get('p2p', 'connection_timeout', '60'))
 
     def get_api_port(self) -> int:
         """Get the local API server port."""
@@ -267,7 +267,7 @@ class Settings:
 
     def get_hub_auto_connect(self) -> bool:
         """Check if Hub should auto-connect on startup."""
-        value = self.get('hub', 'auto_connect', 'true')
+        value = self.get('hub', 'auto_connect', 'false')
         return value.lower() in ('true', '1', 'yes')
 
     def get_turn_username(self) -> Optional[str]:
