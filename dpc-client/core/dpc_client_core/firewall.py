@@ -167,6 +167,13 @@ class ContextFirewall:
                         "session_result": True,
                         "connection_status": False
                     }
+                },
+                "file_transfer": {
+                    "_comment": "File transfer permissions (v0.11.0+)",
+                    "allow_nodes": [],
+                    "allow_groups": [],
+                    "max_size_mb": 1000,
+                    "allowed_mime_types": ["*"]
                 }
             }
 

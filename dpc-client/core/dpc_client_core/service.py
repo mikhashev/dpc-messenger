@@ -3198,13 +3198,15 @@ class CoreService:
         message_history = monitor.get_message_history()
 
         # Assemble final prompt (with or without context, message history always included)
+        # Phase 7: Include context blocks if local checkbox OR any peer checkboxes are checked
+        include_full_context = include_context or bool(aggregated_contexts)
         final_prompt = self._assemble_final_prompt(
             contexts=aggregated_contexts,
             clean_prompt=prompt,
             device_context=device_context_data,
             peer_device_contexts=peer_device_contexts,
             message_history=message_history,
-            include_full_context=include_context  # Simplified: just use checkbox state
+            include_full_context=include_full_context
         )
 
         response_payload = {}

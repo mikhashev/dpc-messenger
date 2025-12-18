@@ -1299,8 +1299,8 @@
   .modal {
     background: white;
     border-radius: 8px;
-    width: 90%;
-    max-width: 800px;
+    width: 95%;
+    max-width: 1100px;
     max-height: 90vh;
     display: flex;
     flex-direction: column;
