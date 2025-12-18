@@ -3146,18 +3146,16 @@ class CoreService:
                             context = await self._request_context_from_peer(node_id, prompt)
 
                         if context:
-                            # Phase 7: Compute peer context hash
+                            # Phase 7: ALWAYS add peer context when checkbox checked (matching local context behavior)
+                            # This ensures contexts are included in EVERY message, not just when they change
+                            aggregated_contexts[node_id] = context
+
+                            # Compute peer context hash for change detection (for UI "Updated" badges)
                             peer_hash = self._compute_peer_context_hash(context)
-
-                            # Include peer context if:
-                            # 1. This is first collaborative message, OR
-                            # 2. Peer's context has changed
-
-                            # Check if this is first fetch vs. actual change
                             is_first_fetch = node_id not in monitor.peer_context_hashes
 
+                            # Track hash changes for UI badge updates
                             if monitor.has_peer_context_changed(node_id, peer_hash):
-                                aggregated_contexts[node_id] = context
                                 monitor.update_peer_context_hash(node_id, peer_hash)
 
                                 if is_first_fetch:
@@ -3170,26 +3168,22 @@ class CoreService:
                                         "context_hash": peer_hash,
                                         "conversation_id": conversation_id
                                     })
-
-                                # Phase 7: Cache the peer context (so we don't fetch again next time)
-                                # Also fetch device context if we don't have it cached
-                                if not device_ctx:
-                                    device_ctx = await self._request_device_context_from_peer(node_id)
-                                    if device_ctx:
-                                        logger.info("Received device context from %s...", node_id[:20])
-
-                                # Cache both personal and device contexts
-                                monitor.cache_peer_context(node_id, context, device_ctx)
-
-                                # Add device context to result if we have it
-                                if device_ctx:
-                                    peer_device_contexts[node_id] = device_ctx
-
                             else:
-                                logger.debug("Context from %s... unchanged (using history)", node_id[:20])
-                                # Still add cached device context if available
+                                # Context unchanged, but still included in prompt
+                                logger.info("Context from %s... (included - unchanged)", node_id[:20])
+
+                            # Phase 7: Fetch device context if we don't have it cached
+                            if not device_ctx:
+                                device_ctx = await self._request_device_context_from_peer(node_id)
                                 if device_ctx:
-                                    peer_device_contexts[node_id] = device_ctx
+                                    logger.info("Received device context from %s...", node_id[:20])
+
+                            # Cache both personal and device contexts (for next time)
+                            monitor.cache_peer_context(node_id, context, device_ctx)
+
+                            # Add device context to result if we have it
+                            if device_ctx:
+                                peer_device_contexts[node_id] = device_ctx
                         else:
                             logger.warning("No context received from %s...", node_id[:20])
                     except Exception as e:
