@@ -108,6 +108,7 @@ class CoreService:
 
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
+        self.firewall.initialize()  # Create default privacy_rules.json if doesn't exist
         self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
@@ -240,6 +241,7 @@ class CoreService:
         self.p2p_manager.set_on_peer_disconnected(self._handle_peer_disconnected)
         self._processed_message_ids = set()  # Track processed messages
         self._max_processed_ids = 1000  # Limit set size
+        self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
 
         # Initialize message router and register handlers
         self.message_router = MessageRouter()
@@ -849,7 +851,8 @@ class CoreService:
             conversation_monitor = self.conversation_monitors.get(peer_id)
             if conversation_monitor:
                 history = conversation_monitor.get_message_history()
-                if len(history) == 0:
+                # Only request if: (1) history is empty AND (2) we haven't already requested for this peer
+                if len(history) == 0 and peer_id not in self._history_requested_peers:
                     # Our history is empty, request from peer
                     logger.info(f"Requesting chat history from {peer_id} (empty local history)")
                     import uuid
@@ -862,6 +865,8 @@ class CoreService:
                                 "request_id": request_id
                             }
                         })
+                        # Mark as requested to prevent repeated requests
+                        self._history_requested_peers.add(peer_id)
                     except Exception as e:
                         logger.error(f"Failed to request chat history from {peer_id}: {e}")
 
@@ -911,6 +916,10 @@ class CoreService:
 
         if transfers_to_cancel:
             logger.info(f"Cancelled {len(transfers_to_cancel)} active transfer(s) with {peer_id}")
+
+        # Clear history request tracking for this peer
+        # This allows us to request history again when they reconnect
+        self._history_requested_peers.discard(peer_id)
 
     # --- High-level methods (API for the UI) ---
 
