@@ -2138,15 +2138,24 @@ class CoreService:
         """Propose a new session to connected peers (mutual approval flow).
 
         UI Integration: Called when user clicks "New Session" button.
-        Initiates voting process - history only cleared if all peers approve.
+        For P2P chats: Initiates voting process - history only cleared if all peers approve.
+        For AI chats: Directly resets conversation (no voting needed).
 
         Args:
             conversation_id: The conversation/chat ID to reset
 
         Returns:
-            Dict with status and proposal_id
+            Dict with status and proposal_id (for P2P) or status (for AI)
         """
         try:
+            # Check if this is an AI chat (local_ai or ai_chat_xxx)
+            if conversation_id == 'local_ai' or conversation_id.startswith('ai_'):
+                # AI chats: directly reset without proposal
+                logger.info("Resetting AI conversation: %s", conversation_id)
+                result = await self.reset_conversation(conversation_id)
+                return result
+
+            # P2P chats: use proposal flow
             # Get participants (all peers in conversation)
             # For now, conversation_id is the peer_id in P2P mode
             participants = {self.p2p_manager.node_id, conversation_id}
