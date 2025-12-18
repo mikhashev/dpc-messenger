@@ -310,7 +310,7 @@
     // Guard: Skip if already loading or already have messages
     if (loadingHistory.has(activeChatId)) {
       console.log(`[ChatHistory] Skipping - already loading history for ${activeChatId.slice(0,20)}`);
-    } else if (!currentHistory || currentHistory.length === 0) {
+    } else if (currentHistory === undefined) {
       console.log(`[ChatHistory] Loading history from backend for ${activeChatId.slice(0,20)}...`);
 
       // Mark as loading to prevent re-triggers
@@ -351,7 +351,16 @@
             }, 100);
           } else {
             console.log(`[ChatHistory] No messages: status=${result.status}, count=${result.messages?.length || 0}`);
-            // No messages to load, safe to remove from loading
+
+            // Initialize with empty array to mark as "loaded but empty"
+            // This prevents infinite re-loading when chatHistories updates trigger reactive statement
+            chatHistories.update(map => {
+              const newMap = new Map(map);
+              newMap.set(activeChatId, []);
+              return newMap;
+            });
+
+            // Remove from loading AFTER chatHistories update completes
             loadingHistory.delete(activeChatId);
           }
         } catch (e) {
