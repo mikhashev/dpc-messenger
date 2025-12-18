@@ -228,7 +228,7 @@
 
   function addRuleToNode(nodeId: string) {
     if (!editedRules || !editedRules.nodes) return;
-    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
+    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.*, device_context.json:hardware.*, or personal.json:*):', 'personal.json:profile.*');
     if (resourcePath) {
       // Check for duplicates
       if (editedRules.nodes[nodeId][resourcePath]) {
@@ -266,7 +266,7 @@
 
   function addRuleToGroup(groupName: string) {
     if (!editedRules || !editedRules.groups) return;
-    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
+    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.*, device_context.json:hardware.*, or personal.json:*):', 'personal.json:profile.*');
     if (resourcePath) {
       // Check for duplicates
       if (editedRules.groups[groupName][resourcePath]) {
@@ -346,7 +346,7 @@
 
   function addRuleToAIScope(scopeName: string) {
     if (!editedRules || !editedRules.ai_scopes) return;
-    const resourcePath = prompt('Enter resource path (e.g., @work:*, @personal:*, personal.json:*):', '@work:*');
+    const resourcePath = prompt('Enter resource path (e.g., @work:*, @personal:*, personal.json:*, device_context.json:*):', '@work:*');
     if (resourcePath) {
       // Check for duplicates
       if (editedRules.ai_scopes[scopeName][resourcePath]) {
