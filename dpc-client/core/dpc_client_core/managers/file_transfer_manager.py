@@ -347,7 +347,8 @@ class FileTransferManager:
         self,
         node_id: str,
         file_path: Path,
-        progress_callback: Optional[Callable[[str, int, int], None]] = None
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        image_metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -356,6 +357,11 @@ class FileTransferManager:
             node_id: Target peer node ID
             file_path: Path to file to send
             progress_callback: Optional callback(transfer_id, chunks_sent, total_chunks)
+            image_metadata: Optional image metadata (for image transfers only):
+                - dimensions: {width: int, height: int}
+                - thumbnail_base64: str (data URL)
+                - source: str (e.g., "clipboard")
+                - captured_at: str (ISO timestamp)
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -429,18 +435,24 @@ class FileTransferManager:
         )
         self.active_transfers[transfer_id] = transfer
 
-        # Send FILE_OFFER
+        # Send FILE_OFFER (with optional image_metadata for Phase 2.3)
+        payload = {
+            "transfer_id": transfer_id,
+            "filename": transfer.filename,
+            "size_bytes": file_size,
+            "hash": file_hash,
+            "mime_type": mime_type,
+            "chunk_size": self.chunk_size,
+            "chunk_hashes": chunk_hashes  # v0.11.1: CRC32 per chunk for integrity
+        }
+
+        # Add image metadata if provided (Phase 2.3: Vision + P2P Image Transfer)
+        if image_metadata:
+            payload["image_metadata"] = image_metadata
+
         await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_OFFER",
-            "payload": {
-                "transfer_id": transfer_id,
-                "filename": transfer.filename,
-                "size_bytes": file_size,
-                "hash": file_hash,
-                "mime_type": mime_type,
-                "chunk_size": self.chunk_size,
-                "chunk_hashes": chunk_hashes  # v0.11.1: CRC32 per chunk for integrity
-            }
+            "payload": payload
         })
 
         logger.info(f"File transfer initiated: {file_path.name} ({file_size} bytes) to {node_id}")

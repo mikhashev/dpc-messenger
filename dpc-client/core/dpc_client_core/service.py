@@ -59,6 +59,7 @@ from .message_handlers.file_chunk_handler import FileChunkHandler
 from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
+from .message_handlers.image_handler import ImageOfferHandler
 from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
 from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
@@ -283,8 +284,8 @@ class CoreService:
         self.message_router.register_handler(RelayMessageHandler(self))  # Message forwarding
         self.message_router.register_handler(RelayDisconnectHandler(self))  # Session cleanup
 
-        # File transfer handlers
-        self.message_router.register_handler(FileOfferHandler(self))
+        # File transfer handlers (v0.11.3: ImageOfferHandler replaces FileOfferHandler, handles both files and images)
+        self.message_router.register_handler(ImageOfferHandler(self))
         self.message_router.register_handler(FileAcceptHandler(self))
         self.message_router.register_handler(FileChunkHandler(self))
         self.message_router.register_handler(FileCompleteHandler(self))
@@ -2463,6 +2464,150 @@ class CoreService:
             "filename": file.name,
             "size_bytes": file.stat().st_size
         }
+
+    async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = ""):
+        """
+        Send an image from clipboard paste (Phase 2.3: Vision + P2P Image Transfer).
+
+        Handles two cases:
+        - AI Chat (local_ai): Save image, run vision analysis, broadcast result
+        - P2P Chat: Generate thumbnail, send FILE_OFFER with image_metadata
+
+        Args:
+            conversation_id: 'local_ai' for AI chat, or node_id for P2P chat
+            image_base64: Data URL (e.g., "data:image/png;base64,...")
+            filename: Suggested filename (e.g., "screenshot_1234567890.png")
+            caption: Optional text caption (will be included in vision query for AI chat)
+
+        Returns:
+            Dict with status and metadata
+        """
+        import base64
+        import tempfile
+        import mimetypes
+        from pathlib import Path
+        from datetime import datetime, timezone
+        from .utils.image_utils import generate_thumbnail, get_image_dimensions, validate_image_format
+
+        # Parse data URL
+        if not image_base64.startswith("data:"):
+            raise ValueError("Invalid image data URL")
+
+        # Extract mime type and base64 data
+        header, data = image_base64.split(",", 1)
+        mime_type = header.split(";")[0].split(":")[1]
+
+        # Decode base64
+        image_bytes = base64.b64decode(data)
+        size_bytes = len(image_bytes)
+
+        # Check size limit (5MB default from privacy_rules.json vision settings)
+        max_size_mb = 5  # TODO: Read from settings.vision_max_size_mb
+        if size_bytes > max_size_mb * 1024 * 1024:
+            raise ValueError(f"Image too large ({round(size_bytes / (1024 * 1024), 2)}MB). Max: {max_size_mb}MB")
+
+        # Save to temporary file for processing
+        suffix = Path(filename).suffix or ".png"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_file.write(image_bytes)
+            tmp_path = Path(tmp_file.name)
+
+        try:
+            # Validate image format
+            if not validate_image_format(tmp_path):
+                raise ValueError(f"Invalid image format: {filename}")
+
+            # Extract dimensions
+            dimensions = get_image_dimensions(tmp_path)
+
+            if conversation_id == "local_ai":
+                # AI Chat: Run vision analysis
+                logger.info(f"AI chat vision analysis: {filename} ({dimensions['width']}x{dimensions['height']})")
+
+                # Build query with caption (if provided)
+                query = caption if caption else "What's in this image?"
+
+                # Prepare image for vision API
+                images = [{
+                    "path": str(tmp_path),
+                    "mime_type": mime_type,
+                    "base64": data  # Pass base64 data directly (already encoded)
+                }]
+
+                # Run vision query
+                response_metadata = await self.llm_manager.query(
+                    prompt=query,
+                    images=images,
+                    return_metadata=True
+                )
+
+                # Broadcast AI response to UI
+                await self.local_api.broadcast_event("ai_response_with_image", {
+                    "conversation_id": "local_ai",
+                    "query": query,
+                    "response": response_metadata["response"],
+                    "provider": response_metadata["provider"],
+                    "model": response_metadata["model"],
+                    "image_filename": filename,
+                    "image_dimensions": dimensions,
+                    "vision_used": True
+                })
+
+                return {
+                    "status": "analyzed",
+                    "conversation_id": "local_ai",
+                    "filename": filename,
+                    "dimensions": dimensions
+                }
+
+            else:
+                # P2P Chat: Send FILE_OFFER with image_metadata
+                logger.info(f"P2P image transfer: {filename} to {conversation_id}")
+
+                # Generate thumbnail
+                thumbnail_base64 = generate_thumbnail(tmp_path)
+
+                # Move file to peer-specific storage
+                peer_storage = DPC_HOME_DIR / "conversations" / conversation_id / "files"
+                peer_storage.mkdir(parents=True, exist_ok=True)
+                final_path = peer_storage / filename
+
+                # Handle duplicate filenames
+                if final_path.exists():
+                    stem = final_path.stem
+                    suffix = final_path.suffix
+                    counter = 1
+                    while final_path.exists():
+                        final_path = peer_storage / f"{stem}_{counter}{suffix}"
+                        counter += 1
+
+                tmp_path.rename(final_path)
+
+                # Initiate file transfer with image_metadata
+                transfer_id = await self.file_transfer_manager.send_file(
+                    conversation_id,
+                    final_path,
+                    image_metadata={
+                        "dimensions": dimensions,
+                        "thumbnail_base64": thumbnail_base64,
+                        "source": "clipboard",
+                        "captured_at": datetime.now(timezone.utc).isoformat()
+                    }
+                )
+
+                return {
+                    "status": "sending",
+                    "conversation_id": conversation_id,
+                    "transfer_id": transfer_id,
+                    "filename": filename,
+                    "dimensions": dimensions,
+                    "size_bytes": size_bytes
+                }
+
+        finally:
+            # Cleanup temp file (if not moved to peer storage)
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     async def accept_file_transfer(self, transfer_id: str):
         """
