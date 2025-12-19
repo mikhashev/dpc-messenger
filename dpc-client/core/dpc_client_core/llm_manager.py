@@ -4,8 +4,9 @@ import os
 import json
 import asyncio
 import logging
+import base64
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 # Import client libraries
 from openai import AsyncOpenAI
@@ -34,6 +35,30 @@ class AIProvider:
     async def generate_response(self, prompt: str) -> str:
         """Generates a response from the AI model."""
         raise NotImplementedError
+
+    def supports_vision(self) -> bool:
+        """Returns True if this provider supports vision API (multimodal queries)."""
+        return False
+
+    async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
+        """
+        Generates a response from the AI model with image inputs (vision API).
+
+        Args:
+            prompt: Text prompt
+            images: List of image dicts with keys:
+                - path: str (absolute path to image file)
+                - mime_type: str (e.g., "image/png")
+                - base64: str (optional, if already encoded)
+            **kwargs: Additional parameters (temperature, max_tokens, etc.)
+
+        Returns:
+            str: AI response text
+
+        Raises:
+            NotImplementedError: If provider doesn't support vision
+        """
+        raise NotImplementedError(f"Vision API not implemented for {self.__class__.__name__}")
 
 # --- Concrete Provider Implementations ---
 
@@ -138,11 +163,16 @@ class OpenAICompatibleProvider(AIProvider):
             api_key_env = config.get("api_key_env")
             if api_key_env:
                 api_key = os.getenv(api_key_env)
-        
+
         if not api_key:
             raise ValueError(f"API key not found for OpenAI compatible provider '{self.alias}'")
 
         self.client = AsyncOpenAI(base_url=config.get("base_url"), api_key=api_key)
+
+    def supports_vision(self) -> bool:
+        """OpenAI vision models: gpt-4o, gpt-4-turbo, gpt-4o-mini"""
+        vision_models = ["gpt-4o", "gpt-4-turbo", "gpt-4o-mini"]
+        return any(vm in self.model for vm in vision_models)
 
     async def generate_response(self, prompt: str) -> str:
         try:
@@ -153,6 +183,46 @@ class OpenAICompatibleProvider(AIProvider):
             return response.choices[0].message.content
         except Exception as e:
             raise RuntimeError(f"OpenAI compatible provider '{self.alias}' failed: {e}") from e
+
+    async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
+        """
+        OpenAI vision API using multimodal content arrays.
+        Docs: https://platform.openai.com/docs/guides/vision
+        """
+        try:
+            # Build multimodal message content
+            content = [{"type": "text", "text": prompt}]
+
+            for img in images:
+                # Encode image to base64 if not already
+                if "base64" in img:
+                    base64_data = img["base64"]
+                    # Strip data URL prefix if present
+                    if base64_data.startswith("data:"):
+                        base64_data = base64_data.split(",", 1)[1]
+                else:
+                    with open(img["path"], "rb") as f:
+                        base64_data = base64.b64encode(f.read()).decode("utf-8")
+
+                # OpenAI expects data URL format
+                mime_type = img.get("mime_type", "image/png")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{base64_data}",
+                        "detail": "high"  # or "low" for faster/cheaper processing
+                    }
+                })
+
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": content}],
+                temperature=kwargs.get("temperature", 0.7),
+                max_tokens=kwargs.get("max_tokens", 4000)
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise RuntimeError(f"OpenAI vision API failed for '{self.alias}': {e}") from e
 
 class AnthropicProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
@@ -169,6 +239,11 @@ class AnthropicProvider(AIProvider):
         # Set to None or omit from config to use model's maximum
         self.max_tokens = config.get("max_tokens", 4096)
 
+    def supports_vision(self) -> bool:
+        """Claude 3+ models support vision"""
+        vision_models = ["claude-3", "claude-opus", "claude-sonnet", "claude-haiku"]
+        return any(vm in self.model for vm in vision_models)
+
     async def generate_response(self, prompt: str) -> str:
         try:
             # Use configured max_tokens or default (Anthropic requires max_tokens parameter)
@@ -180,6 +255,50 @@ class AnthropicProvider(AIProvider):
             return message.content[0].text
         except Exception as e:
             raise RuntimeError(f"Anthropic provider '{self.alias}' failed: {e}") from e
+
+    async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
+        """
+        Anthropic vision API using multimodal content blocks.
+        Docs: https://docs.anthropic.com/claude/docs/vision
+        """
+        try:
+            # Build multimodal content array
+            content = []
+
+            # Add images first
+            for img in images:
+                # Encode image to base64 if not already
+                if "base64" in img:
+                    base64_data = img["base64"]
+                    # Strip data URL prefix if present
+                    if base64_data.startswith("data:"):
+                        base64_data = base64_data.split(",", 1)[1]
+                else:
+                    with open(img["path"], "rb") as f:
+                        base64_data = base64.b64encode(f.read()).decode("utf-8")
+
+                mime_type = img.get("mime_type", "image/png")
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": base64_data
+                    }
+                })
+
+            # Add text prompt after images
+            content.append({"type": "text", "text": prompt})
+
+            response = await self.client.messages.create(
+                model=self.model,
+                messages=[{"role": "user", "content": content}],
+                temperature=kwargs.get("temperature", 0.7),
+                max_tokens=kwargs.get("max_tokens", self.max_tokens or 4096)
+            )
+            return response.content[0].text
+        except Exception as e:
+            raise RuntimeError(f"Anthropic vision API failed for '{self.alias}': {e}") from e
 
 
 # --- The Manager Class ---
@@ -467,7 +586,8 @@ class LLMManager:
                       model, MODEL_CONTEXT_WINDOWS['default'])
         return MODEL_CONTEXT_WINDOWS["default"]
 
-    async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False):
+    async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False,
+                    images: Optional[List[Dict[str, Any]]] = None, **kwargs):
         """
         Routes a query to the specified provider, or the default provider if None.
 
@@ -475,6 +595,11 @@ class LLMManager:
             prompt: The prompt to send to the LLM
             provider_alias: Optional provider alias to use (uses default if None)
             return_metadata: If True, returns dict with 'response', 'provider', 'model', 'tokens_used', 'model_max_tokens'. If False, returns just the response string.
+            images: Optional list of image dicts for vision API (multimodal queries). Each dict should contain:
+                - path: str (absolute path to image file)
+                - mime_type: str (e.g., "image/png")
+                - base64: str (optional, if already encoded)
+            **kwargs: Additional parameters passed to vision API (temperature, max_tokens, etc.)
 
         Returns:
             str if return_metadata=False, dict if return_metadata=True
@@ -487,8 +612,18 @@ class LLMManager:
             raise ValueError(f"Provider '{alias_to_use}' is not configured or failed to load.")
 
         provider = self.providers[alias_to_use]
-        logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
-        response = await provider.generate_response(prompt)
+
+        # Check if vision is requested but provider doesn't support it
+        if images:
+            if not provider.supports_vision():
+                raise ValueError(f"Provider '{alias_to_use}' (model: {provider.model}) does not support vision API. "
+                               f"Use a vision-capable model like gpt-4o, gpt-4-turbo, or claude-3+.")
+            logger.info("Routing vision query to provider '%s' with model '%s' (%d images)",
+                       alias_to_use, provider.model, len(images))
+            response = await provider.generate_with_vision(prompt, images, **kwargs)
+        else:
+            logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
+            response = await provider.generate_response(prompt)
 
         if return_metadata:
             # Count tokens in prompt and response
@@ -506,7 +641,8 @@ class LLMManager:
                 "tokens_used": total_tokens,
                 "prompt_tokens": prompt_tokens,
                 "response_tokens": response_tokens,
-                "model_max_tokens": context_window
+                "model_max_tokens": context_window,
+                "vision_used": bool(images)  # NEW: Indicate if vision API was used
             }
         return response
 

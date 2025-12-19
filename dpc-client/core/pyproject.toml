@@ -18,6 +18,7 @@ httpx = ">=0.27.0,<0.28.0"
 aiortc = ">=1.6.0,<2.0.0"
 certifi = ">=2024.0.0"
 psutil = ">=5.9.0,<6.0.0"
+Pillow = ">=10.0.0,<11.0.0"
 fastapi = { version = "*", optional = true }
 
 # Dependency from local library dpc-protocol
