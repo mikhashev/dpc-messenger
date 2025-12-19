@@ -14,6 +14,7 @@
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import Toast from "$lib/components/Toast.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
+  import ImageMessage from "$lib/components/ImageMessage.svelte";
   import { ask, open } from '@tauri-apps/plugin-dialog';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
@@ -1891,8 +1892,8 @@
                 </strong>
                 <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
               </div>
-              <!-- Only show text if no attachments (avoid duplication) -->
-              {#if !msg.attachments || msg.attachments.length === 0}
+              <!-- Message text (shown always, serves as caption for images) -->
+              {#if msg.text && msg.text !== '[Image]'}
                 {#if msg.sender === 'ai' && enableMarkdown}
                   <MarkdownMessage content={msg.text} />
                 {:else}
@@ -1900,24 +1901,30 @@
                 {/if}
               {/if}
 
-              <!-- File attachments (Week 1) -->
+              <!-- Attachments (Phase 2.5: Images + Files) -->
               {#if msg.attachments && msg.attachments.length > 0}
                 <div class="message-attachments">
                   {#each msg.attachments as attachment}
-                    <div class="file-attachment">
-                      <div class="file-details">
-                        <div class="file-name">{attachment.filename}</div>
-                        <div class="file-meta">
-                          {attachment.size_mb ? `${attachment.size_mb} MB` : `${(attachment.size_bytes / (1024 * 1024)).toFixed(2)} MB`}
-                          {#if attachment.mime_type}
-                            • {attachment.mime_type}
-                          {/if}
-                          {#if attachment.status}
-                            • {attachment.status}
-                          {/if}
+                    {#if attachment.type === 'image'}
+                      <!-- Image attachment (Phase 2.5: Screenshot + Vision) -->
+                      <ImageMessage {attachment} conversationId={activeChatId} />
+                    {:else}
+                      <!-- Regular file attachment -->
+                      <div class="file-attachment">
+                        <div class="file-details">
+                          <div class="file-name">{attachment.filename}</div>
+                          <div class="file-meta">
+                            {attachment.size_mb ? `${attachment.size_mb} MB` : `${(attachment.size_bytes / (1024 * 1024)).toFixed(2)} MB`}
+                            {#if attachment.mime_type}
+                              • {attachment.mime_type}
+                            {/if}
+                            {#if attachment.status}
+                              • {attachment.status}
+                            {/if}
+                          </div>
                         </div>
                       </div>
-                    </div>
+                    {/if}
                   {/each}
                 </div>
               {/if}
