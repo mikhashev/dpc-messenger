@@ -187,6 +187,13 @@ class Settings:
             'preparation_progress_interval_chunks': '10000'  # Emit progress every N chunks during CRC32
         }
 
+        self._config['vision'] = {
+            'enabled': 'true',  # Enable vision API features (screenshot paste, image analysis)
+            'default_provider': 'openai',  # Default AI provider for vision: 'openai' or 'anthropic'
+            'max_image_size_mb': '5',  # Maximum image size in MB (clipboard paste and uploads)
+            'thumbnail_quality': '85'  # Thumbnail JPEG quality (0-100)
+        }
+
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
             'console': 'true',  # Enable console output
@@ -597,6 +604,23 @@ class Settings:
     def get_hole_punch_timeout(self) -> float:
         """Get hole punch connection timeout."""
         return self.get_connection_timeout('hole_punch')
+
+    # Vision API settings (Phase 2.6: Screenshot + Vision Integration)
+    def get_vision_enabled(self) -> bool:
+        """Get whether vision API features are enabled."""
+        return self.get('vision', 'enabled', 'true').lower() == 'true'
+
+    def get_vision_default_provider(self) -> str:
+        """Get default AI provider for vision analysis ('openai' or 'anthropic')."""
+        return self.get('vision', 'default_provider', 'openai')
+
+    def get_vision_max_image_size_mb(self) -> int:
+        """Get maximum image size in MB for clipboard paste and uploads."""
+        return int(self.get('vision', 'max_image_size_mb', '5'))
+
+    def get_vision_thumbnail_quality(self) -> int:
+        """Get thumbnail JPEG quality (0-100)."""
+        return int(self.get('vision', 'thumbnail_quality', '85'))
 
     def reload(self):
         """Reload configuration from file."""

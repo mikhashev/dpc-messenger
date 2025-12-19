@@ -38,7 +38,7 @@ import base64
 import uuid
 import zlib  # For CRC32 checksums
 from pathlib import Path
-from typing import Optional, Dict, Callable, List, TYPE_CHECKING
+from typing import Optional, Dict, Callable, List, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
 
