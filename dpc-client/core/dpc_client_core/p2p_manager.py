@@ -550,14 +550,14 @@ class P2PManager:
         """
         # Use configured timeout if not explicitly provided
         if timeout is None:
-            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 30.0
+            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 60.0
 
         logger.info("Initiating direct connection to %s at %s:%d", target_node_id, host, port)
 
         # Pre-flight check: Test basic port connectivity before SSL handshake
         # This provides clearer error messages than cryptic SSL errors (e.g., WinError 121)
         logger.debug("Running pre-flight port connectivity check for %s:%d", host, port)
-        preflight_timeout = 30.0  # Increased for high-latency networks (mobile carriers, CGNAT)
+        preflight_timeout = 60.0  # Increased for high-latency networks (mobile carriers, CGNAT)
         port_accessible, port_message = await self.test_port_connectivity(host, port, preflight_timeout)
 
         if not port_accessible:
@@ -955,7 +955,7 @@ class P2PManager:
 
         try:
             # Wait for connection to be ready (use configured timeout)
-            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 30.0
+            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 60.0
             await webrtc_peer.wait_ready(timeout=timeout)
 
             # Move from pending to active peers
@@ -995,7 +995,7 @@ class P2PManager:
         """Handle timeout for WebRTC connection establishment."""
         try:
             # Use configured timeout
-            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 30.0
+            timeout = self.settings.get_p2p_connection_timeout() if self.settings else 60.0
             await asyncio.sleep(timeout)
 
             # Check if connection is still pending

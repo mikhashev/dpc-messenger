@@ -10,7 +10,7 @@ import asyncio
 import logging
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 
 from dpc_protocol.pcm_core import PersonalContext, KnowledgeEntry, KnowledgeSource
 from dpc_protocol.knowledge_commit import KnowledgeCommitProposal
@@ -133,6 +133,18 @@ class ConversationMonitor:
         self.message_buffer.append(message)  # For incremental auto-detection
         self.full_conversation.append(message)  # For manual "End Session" extraction
 
+        # Add to message_history for chat history sync (v0.11.2)
+        # Determine role based on sender
+        role = "user"  # Default to user
+        for participant in self.participants:
+            if participant["node_id"] == message.sender_node_id:
+                if participant.get("context") == "peer":
+                    role = "peer"
+                break
+
+        self.add_message(role, message.text)
+        logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
+
         # Only run automatic detection if enabled
         if not self.auto_detect:
             return None
@@ -140,7 +152,7 @@ class ConversationMonitor:
         # Analyze every 5 messages or if buffer gets large
         if len(self.message_buffer) >= 5:
             self.knowledge_score = await self._calculate_knowledge_score()
-            self.last_analysis_time = datetime.utcnow().isoformat()
+            self.last_analysis_time = datetime.now(timezone.utc).isoformat()
 
             # Check if conversation is knowledge-worthy
             if self.knowledge_score > self.knowledge_threshold:
@@ -173,7 +185,7 @@ class ConversationMonitor:
         # Calculate score if not already done
         if self.knowledge_score == 0.0:
             self.knowledge_score = await self._calculate_knowledge_score()
-            self.last_analysis_time = datetime.utcnow().isoformat()
+            self.last_analysis_time = datetime.now(timezone.utc).isoformat()
 
         # Check if we should generate proposal
         if force or self.knowledge_score > self.knowledge_threshold:
@@ -192,33 +204,29 @@ class ConversationMonitor:
     def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
         """Infer inference settings when not explicitly tracked.
 
-        For peer conversations (conversation_id = node_id), ALWAYS uses peer compute for consistency.
-        For local AI conversations, uses tracked settings or defaults to local inference.
+        Priority order:
+        1. Local inference (if default provider configured)
+        2. Remote inference (fallback for peer conversations)
 
         Returns:
             (compute_host, model, provider) tuple
         """
-        # Peer conversations: conversation_id = node_id (starts with "dpc-node-")
+        # PRIORITY 1: Check if local inference is available (default provider configured)
+        if self.llm_manager and self.llm_manager.default_provider:
+            logger.info("Monitor %s: Using local inference for knowledge extraction (default provider available)",
+                       self.conversation_id)
+            return (None, None, None)  # Local inference with default provider
+
+        # PRIORITY 2: For peer conversations, try using peer compute as fallback
         if self.conversation_id.startswith("dpc-node-"):
-            # ALWAYS use peer as compute host for peer conversations (for consistency)
-            # Even if local models are available, peer conversations should use peer compute
-            if self.last_model:
-                logger.info("Monitor %s: Using tracked model for knowledge extraction (compute_host=%s, model=%s)",
-                           self.conversation_id, self.conversation_id, self.last_model)
-            else:
-                logger.info("Monitor %s: Using peer compute for knowledge extraction (compute_host=%s)",
-                           self.conversation_id, self.conversation_id)
-            return (self.conversation_id, self.last_model, None)  # Always use peer, track model if available
-        else:
-            # Local AI conversation: use tracked settings or default to local inference
-            if self.last_provider is not None:
-                logger.info("Monitor %s: Using tracked local inference settings (provider=%s)",
-                           self.conversation_id, self.last_provider)
-                return (None, self.last_model, self.last_provider)
-            else:
-                logger.info("Monitor %s: Defaulting to local inference for knowledge extraction",
-                           self.conversation_id)
-                return (None, None, None)  # Local inference with default provider
+            logger.info("Monitor %s: Will attempt peer compute for knowledge extraction (no local provider, compute_host=%s)",
+                       self.conversation_id, self.conversation_id)
+            return (self.conversation_id, self.last_model, None)  # Peer compute fallback
+
+        # PRIORITY 3: Final fallback - try local anyway (will fail gracefully if no providers)
+        logger.warning("Monitor %s: No inference provider available for knowledge extraction",
+                      self.conversation_id)
+        return (None, None, None)
 
     def _detect_conversation_type(self) -> str:
         """Detect conversation type from message content and participant context.
@@ -534,14 +542,60 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
             compute_host, model, provider = self._infer_inference_settings()
 
             # Use AI query function if available (supports remote inference), otherwise use llm_manager (local only)
+            response = None
+            primary_error = None
             if self.ai_query_func:
-                result = await self.ai_query_func(
-                    prompt=prompt,
-                    compute_host=compute_host,
-                    model=model,
-                    provider=provider
-                )
-                response = result["response"]
+                try:
+                    result = await self.ai_query_func(
+                        prompt=prompt,
+                        compute_host=compute_host,
+                        model=model,
+                        provider=provider
+                    )
+                    response = result["response"]
+                except Exception as primary_error:
+                    # Try fallback: if primary was remote, try local; if primary was local, try remote
+                    fallback_attempted = False
+
+                    # Case 1: Remote failed, try local as fallback
+                    if compute_host and self.llm_manager and self.llm_manager.default_provider:
+                        logger.warning("Remote inference failed, trying local inference as fallback: %s", primary_error)
+                        fallback_attempted = True
+                        try:
+                            result = await self.ai_query_func(
+                                prompt=prompt,
+                                compute_host=None,  # Force local inference
+                                model=None,
+                                provider=None
+                            )
+                            response = result["response"]
+                            primary_error = None  # Success! Clear error
+                        except Exception as local_error:
+                            logger.error("Local inference fallback also failed: %s", local_error)
+
+                    # Case 2: Local failed (or wasn't configured), try remote as fallback for peer conversations
+                    elif not compute_host and self.conversation_id.startswith("dpc-node-"):
+                        logger.warning("Local inference failed, trying remote inference as fallback: %s", primary_error)
+                        fallback_attempted = True
+                        try:
+                            result = await self.ai_query_func(
+                                prompt=prompt,
+                                compute_host=self.conversation_id,  # Try peer compute
+                                model=self.last_model,
+                                provider=None
+                            )
+                            response = result["response"]
+                            primary_error = None  # Success! Clear error
+                        except Exception as remote_error:
+                            logger.error("Remote inference fallback also failed: %s", remote_error)
+
+                    # If no fallback attempted or both failed, raise original error
+                    if primary_error:
+                        if not fallback_attempted:
+                            logger.error("Inference failed and no fallback available")
+                        else:
+                            logger.error("Both primary and fallback inference failed")
+                        raise primary_error
             else:
                 # Fallback to direct llm_manager call (local only)
                 response = await self.llm_manager.query(
@@ -718,14 +772,60 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
             # Use AI query function if available (supports remote inference), otherwise use llm_manager (local only)
             inference_result = None  # Save for metadata extraction
+            response = None
+            primary_error = None
             if self.ai_query_func:
-                inference_result = await self.ai_query_func(
-                    prompt=prompt,
-                    compute_host=compute_host,
-                    model=model,
-                    provider=provider
-                )
-                response = inference_result["response"]
+                try:
+                    inference_result = await self.ai_query_func(
+                        prompt=prompt,
+                        compute_host=compute_host,
+                        model=model,
+                        provider=provider
+                    )
+                    response = inference_result["response"]
+                except Exception as primary_error:
+                    # Try fallback: if primary was remote, try local; if primary was local, try remote
+                    fallback_attempted = False
+
+                    # Case 1: Remote failed, try local as fallback
+                    if compute_host and self.llm_manager and self.llm_manager.default_provider:
+                        logger.warning("Remote inference failed, trying local inference as fallback: %s", primary_error)
+                        fallback_attempted = True
+                        try:
+                            inference_result = await self.ai_query_func(
+                                prompt=prompt,
+                                compute_host=None,  # Force local inference
+                                model=None,
+                                provider=None
+                            )
+                            response = inference_result["response"]
+                            primary_error = None  # Success! Clear error
+                        except Exception as local_error:
+                            logger.error("Local inference fallback also failed: %s", local_error)
+
+                    # Case 2: Local failed (or wasn't configured), try remote as fallback for peer conversations
+                    elif not compute_host and self.conversation_id.startswith("dpc-node-"):
+                        logger.warning("Local inference failed, trying remote inference as fallback: %s", primary_error)
+                        fallback_attempted = True
+                        try:
+                            inference_result = await self.ai_query_func(
+                                prompt=prompt,
+                                compute_host=self.conversation_id,  # Try peer compute
+                                model=self.last_model,
+                                provider=None
+                            )
+                            response = inference_result["response"]
+                            primary_error = None  # Success! Clear error
+                        except Exception as remote_error:
+                            logger.error("Remote inference fallback also failed: %s", remote_error)
+
+                    # If no fallback attempted or both failed, raise original error
+                    if primary_error:
+                        if not fallback_attempted:
+                            logger.error("Inference failed and no fallback available")
+                        else:
+                            logger.error("Both primary and fallback inference failed")
+                        raise primary_error
             else:
                 # Fallback to direct llm_manager call (local only)
                 response = await self.llm_manager.query(
@@ -831,11 +931,31 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         except Exception as e:
             logger.error("Error generating commit proposal: %s", e, exc_info=True)
             logger.error("  LLM Response preview: %s...", response[:300] if 'response' in locals() else 'N/A')
+
+            # Determine error message based on exception type
+            error_msg = 'Failed to extract knowledge'
+            error_str = str(e).lower()
+
+            if 'access denied' in error_str or 'not authorized' in error_str:
+                error_msg += ' - Remote inference denied and no local provider available'
+            elif 'not connected' in error_str or 'connection' in error_str:
+                error_msg += ' - Service not available (check if Ollama/AI provider is running)'
+            elif 'no providers configured' in error_str or 'provider not found' in error_str:
+                error_msg += ' - No AI provider configured. Add a provider in Settings'
+            elif 'connection refused' in error_str or 'timeout' in error_str:
+                error_msg += ' - AI service not responding (is Ollama running?)'
+            elif 'model not found' in error_str:
+                error_msg += ' - Model not available. Check your AI provider configuration'
+            elif response:
+                error_msg += ' - LLM did not return valid JSON'
+            else:
+                error_msg += f' - {str(e)[:100]}'
+
             # Return empty proposal on error
             return KnowledgeCommitProposal(
                 conversation_id=self.conversation_id,
                 topic='error',
-                summary='Failed to extract knowledge - LLM did not return valid JSON',
+                summary=error_msg,
                 participants=[p['node_id'] for p in self.participants]
             )
 
@@ -988,6 +1108,55 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         # Clear peer context caches
         self.peer_context_cache = {}
         self.peer_device_context_cache = {}
+
+    def export_history(self) -> List[Dict[str, Any]]:
+        """Export conversation history for syncing with peer
+
+        Returns history in serializable format with timestamps added.
+        No message limit - returns full history.
+
+        Returns:
+            List of message dicts with 'role', 'content', 'timestamp', 'attachments'
+        """
+        exported = []
+        for msg in self.message_history:
+            exported_msg = {
+                "role": msg["role"],
+                "content": msg["content"],
+                "timestamp": datetime.now(timezone.utc).isoformat(),  # Add current timestamp
+            }
+            if "attachments" in msg:
+                exported_msg["attachments"] = msg["attachments"]
+            exported.append(exported_msg)
+
+        logger.info(f"Exported {len(exported)} messages from conversation history")
+        return exported
+
+    def import_history(self, messages: List[Dict[str, Any]]):
+        """Import conversation history received from peer
+
+        Replaces current history with received messages.
+        Used when reconnecting to restore lost history.
+
+        Args:
+            messages: List of message dicts from export_history()
+        """
+        if not messages:
+            logger.info("No messages to import")
+            return
+
+        # Replace current history (assume peer's history is authoritative)
+        self.message_history = []
+        for msg in messages:
+            imported_msg = {
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", "")
+            }
+            if "attachments" in msg:
+                imported_msg["attachments"] = msg["attachments"]
+            self.message_history.append(imported_msg)
+
+        logger.info(f"Imported {len(messages)} messages into conversation history")
 
     # Phase 7: Peer context cache management methods
     def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):

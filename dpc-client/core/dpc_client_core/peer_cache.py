@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, asdict
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ class CachedPeer:
             return False
         try:
             last_seen_dt = datetime.fromisoformat(self.last_seen)
-            threshold = datetime.utcnow() - timedelta(hours=hours)
+            threshold = datetime.now(timezone.utc) - timedelta(hours=hours)
             return last_seen_dt >= threshold
         except Exception:
             return False
@@ -93,7 +93,7 @@ class PeerCache:
 
             data = {
                 "version": "1.0",
-                "last_updated": datetime.utcnow().isoformat(),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
                 "peers": peers_data
             }
 
@@ -137,7 +137,7 @@ class PeerCache:
                 peer.last_direct_port = direct_port
             peer.supports_webrtc = supports_webrtc
             peer.supports_direct = supports_direct
-            peer.last_seen = datetime.utcnow().isoformat()
+            peer.last_seen = datetime.now(timezone.utc).isoformat()
             if metadata:
                 peer.metadata.update(metadata)
         else:
@@ -145,7 +145,7 @@ class PeerCache:
             peer = CachedPeer(
                 node_id=node_id,
                 display_name=display_name,
-                last_seen=datetime.utcnow().isoformat(),
+                last_seen=datetime.now(timezone.utc).isoformat(),
                 last_direct_ip=direct_ip,
                 last_direct_port=direct_port,
                 supports_webrtc=supports_webrtc,
@@ -222,7 +222,7 @@ class PeerCache:
         Args:
             days: Remove peers not seen for this many days
         """
-        threshold = datetime.utcnow() - timedelta(days=days)
+        threshold = datetime.now(timezone.utc) - timedelta(days=days)
         removed_count = 0
 
         for node_id, peer in list(self._peers.items()):

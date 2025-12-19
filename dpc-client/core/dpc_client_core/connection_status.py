@@ -3,13 +3,13 @@
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Callable
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class OperationMode(Enum):
     """Operating modes based on connectivity."""
-    FULLY_ONLINE = "fully_online"  # Hub + WebRTC + Direct TLS
-    HUB_OFFLINE = "hub_offline"     # Direct TLS only
+    FULLY_ONLINE = "fully_online"  # All 6 connection strategies available
+    HUB_OFFLINE = "hub_offline"     # 5 strategies (no WebRTC signaling)
     FULLY_OFFLINE = "fully_offline"  # Local operation only
 
 
@@ -70,7 +70,7 @@ class ConnectionStatus:
 
         self.hub_connected = connected
         if connected:
-            self.hub_last_connected = datetime.utcnow().isoformat()
+            self.hub_last_connected = datetime.now(timezone.utc).isoformat()
             self.hub_connection_error = None
         else:
             self.hub_connection_error = error
@@ -158,7 +158,7 @@ class ConnectionStatus:
         if mode == OperationMode.FULLY_ONLINE:
             return "Online - All features available"
         elif mode == OperationMode.HUB_OFFLINE:
-            return "Hub Offline - Direct TLS connections only"
+            return "Hub Offline - P2P connections available (no WebRTC)"
         else:
             return "Offline - Local operation only"
 

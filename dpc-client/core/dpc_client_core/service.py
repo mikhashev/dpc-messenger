@@ -59,13 +59,18 @@ from .message_handlers.file_chunk_handler import FileChunkHandler
 from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
+from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
+from .message_handlers.session_handler import (
+    ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
+)
 from .managers.file_transfer_manager import FileTransferManager
+from .session_manager import NewSessionProposalManager
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
     load_instructions, save_instructions, migrate_instructions_from_personal_context
 )
 from dpc_protocol.utils import parse_dpc_uri
-from datetime import datetime
+from datetime import datetime, timezone
 
 # Define the path to the user's D-PC configuration directory
 DPC_HOME_DIR = Path.home() / ".dpc"
@@ -103,6 +108,7 @@ class CoreService:
 
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
+        self.firewall.initialize()  # Create default privacy_rules.json if doesn't exist
         self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
@@ -173,6 +179,9 @@ class CoreService:
         # Register callback to broadcast voting results to participants
         self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
 
+        # Session manager (mutual new session approval)
+        self.session_manager = None
+
         # Phase 6 managers will be initialized in start() after DHT is created by P2PManager
         self.hole_punch_manager = None
         self.relay_manager = None
@@ -196,6 +205,11 @@ class CoreService:
             local_api=self.local_api,
             service=self
         )
+
+        # Session manager (mutual new session approval)
+        self.session_manager = NewSessionProposalManager(self)
+        self.session_manager.on_proposal_received = self._on_session_proposal_received
+        self.session_manager.on_result_broadcast = self._broadcast_session_result
 
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
@@ -227,6 +241,7 @@ class CoreService:
         self.p2p_manager.set_on_peer_disconnected(self._handle_peer_disconnected)
         self._processed_message_ids = set()  # Track processed messages
         self._max_processed_ids = 1000  # Limit set size
+        self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
 
         # Initialize message router and register handlers
         self.message_router = MessageRouter()
@@ -276,6 +291,15 @@ class CoreService:
         self.message_router.register_handler(FileCompleteHandler(self))
         self.message_router.register_handler(FileCancelHandler(self))
         self.message_router.register_handler(FileChunkRetryHandler(self))  # v0.11.1
+
+        # Chat history sync handlers (v0.11.2)
+        self.message_router.register_handler(RequestChatHistoryHandler(self))
+        self.message_router.register_handler(ChatHistoryResponseHandler(self))
+
+        # Session management (mutual new session approval)
+        self.message_router.register_handler(ProposeNewSessionHandler(self))
+        self.message_router.register_handler(VoteNewSessionHandler(self))
+        self.message_router.register_handler(NewSessionResultHandler(self))
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 
@@ -822,6 +846,30 @@ class CoreService:
                 metadata={"last_connection_type": connection_type}
             )
 
+            # Auto-request chat history if our history is empty (v0.11.2)
+            # This handles reconnection after app restart
+            conversation_monitor = self.conversation_monitors.get(peer_id)
+            if conversation_monitor:
+                history = conversation_monitor.get_message_history()
+                # Only request if: (1) history is empty AND (2) we haven't already requested for this peer
+                if len(history) == 0 and peer_id not in self._history_requested_peers:
+                    # Our history is empty, request from peer
+                    logger.info(f"Requesting chat history from {peer_id} (empty local history)")
+                    import uuid
+                    request_id = str(uuid.uuid4())
+                    try:
+                        await self.p2p_manager.send_message_to_peer(peer_id, {
+                            "command": "REQUEST_CHAT_HISTORY",
+                            "payload": {
+                                "conversation_id": peer_id,
+                                "request_id": request_id
+                            }
+                        })
+                        # Mark as requested to prevent repeated requests
+                        self._history_requested_peers.add(peer_id)
+                    except Exception as e:
+                        logger.error(f"Failed to request chat history from {peer_id}: {e}")
+
         await self.local_api.broadcast_event("status_update", await self.get_status())
     
     async def on_p2p_message_received(self, sender_node_id: str, message: Dict[str, Any]):
@@ -868,6 +916,10 @@ class CoreService:
 
         if transfers_to_cancel:
             logger.info(f"Cancelled {len(transfers_to_cancel)} active transfer(s) with {peer_id}")
+
+        # Clear history request tracking for this peer
+        # This allows us to request history again when they reconnect
+        self._history_requested_peers.discard(peer_id)
 
     # --- High-level methods (API for the UI) ---
 
@@ -2039,10 +2091,118 @@ class CoreService:
                 "message": str(e)
             }
 
-    async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
-        """Reset conversation history and context tracking for "New Chat" button.
+    async def get_conversation_history(self, conversation_id: str) -> Dict[str, Any]:
+        """Get conversation history from backend (for frontend sync after page refresh).
 
-        UI Integration: Called when user clicks "New Chat" button.
+        UI Integration: Called when frontend reconnects or switches to chat with empty history.
+
+        Args:
+            conversation_id: The conversation/chat ID to get history for
+
+        Returns:
+            Dict with messages list
+        """
+        try:
+            monitor = self.conversation_monitors.get(conversation_id)
+            if not monitor:
+                logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
+                return {
+                    "status": "success",
+                    "messages": [],
+                    "message_count": 0
+                }
+
+            # Get message history (same format as export_history)
+            history = monitor.get_message_history()
+
+            # Convert to frontend format (role, content, attachments)
+            messages = []
+            for msg in history:
+                message_dict = {
+                    "role": msg["role"],
+                    "content": msg["content"]
+                }
+                if "attachments" in msg:
+                    message_dict["attachments"] = msg["attachments"]
+                messages.append(message_dict)
+
+            logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
+
+            return {
+                "status": "success",
+                "messages": messages,
+                "message_count": len(messages)
+            }
+
+        except Exception as e:
+            logger.error("Error getting conversation history: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "error": str(e),
+                "messages": [],
+                "message_count": 0
+            }
+
+    async def propose_new_session(self, conversation_id: str) -> Dict[str, Any]:
+        """Propose a new session to connected peers (mutual approval flow).
+
+        UI Integration: Called when user clicks "New Session" button.
+        For P2P chats: Initiates voting process - history only cleared if all peers approve.
+        For AI chats: Directly resets conversation (no voting needed).
+
+        Args:
+            conversation_id: The conversation/chat ID to reset
+
+        Returns:
+            Dict with status and proposal_id (for P2P) or status (for AI)
+        """
+        try:
+            # Check if this is an AI chat (local_ai or ai_chat_xxx)
+            if conversation_id == 'local_ai' or conversation_id.startswith('ai_'):
+                # AI chats: directly reset without proposal
+                logger.info("Resetting AI conversation: %s", conversation_id)
+                result = await self.reset_conversation(conversation_id)
+                return result
+
+            # P2P chats: use proposal flow
+            # Get participants (all peers in conversation)
+            # For now, conversation_id is the peer_id in P2P mode
+            participants = {self.p2p_manager.node_id, conversation_id}
+
+            # Check if peer is connected
+            if conversation_id not in self.p2p_manager.peers:
+                return {
+                    "status": "error",
+                    "message": "Peer must be online to propose new session"
+                }
+
+            # Initiate proposal via session manager
+            result = await self.session_manager.propose_new_session(
+                conversation_id=conversation_id,
+                participants=participants
+            )
+
+            return result
+
+        except ValueError as e:
+            # Duplicate proposal
+            logger.warning("Cannot propose new session: %s", e)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+        except Exception as e:
+            logger.error("Error proposing new session: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def reset_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """Reset conversation history and context tracking (internal method).
+
+        NOTE: This is now an internal method called after proposal approval.
+        UI should call propose_new_session() instead for mutual approval.
 
         Args:
             conversation_id: The conversation/chat ID to reset
@@ -2068,6 +2228,66 @@ class CoreService:
 
         except Exception as e:
             logger.error("Error resetting conversation: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def vote_new_session(self, proposal_id: str, vote: bool) -> Dict[str, Any]:
+        """Cast vote on a new session proposal.
+
+        UI Integration: Called when user clicks Approve/Reject in NewSessionDialog.
+
+        Args:
+            proposal_id: UUID of the proposal
+            vote: True for approve, False for reject
+
+        Returns:
+            Dict with status
+        """
+        try:
+            # Get session
+            session = self.session_manager.get_session(proposal_id)
+            if not session:
+                return {
+                    "status": "error",
+                    "message": "Proposal not found"
+                }
+
+            proposal = session.proposal
+
+            # Record local vote
+            await self.session_manager.record_vote(proposal_id, self.p2p_manager.node_id, vote)
+
+            # Send VOTE_NEW_SESSION to all other participants
+            message = {
+                "command": "VOTE_NEW_SESSION",
+                "payload": {
+                    "proposal_id": proposal_id,
+                    "vote": vote,
+                    "voter_node_id": self.p2p_manager.node_id
+                }
+            }
+
+            for node_id in proposal.participants:
+                if node_id == self.p2p_manager.node_id:
+                    continue
+
+                if node_id in self.p2p_manager.peers:
+                    try:
+                        await self.p2p_manager.send_message_to_peer(node_id, message)
+                        logger.debug("Sent VOTE_NEW_SESSION to %s", node_id[:20])
+                    except Exception as e:
+                        logger.error("Error sending vote to %s: %s", node_id[:20], e)
+
+            vote_str = "approve" if vote else "reject"
+            return {
+                "status": "success",
+                "message": f"Vote cast: {vote_str}"
+            }
+
+        except Exception as e:
+            logger.error("Error voting on new session: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -2191,7 +2411,7 @@ class CoreService:
                 sender_node_id=self.p2p_manager.node_id,
                 sender_name="You",  # Outgoing messages from local user
                 text=text,
-                timestamp=datetime.utcnow().isoformat()
+                timestamp=datetime.now(timezone.utc).isoformat()
             )
 
             # Buffer the outgoing message (conversation monitor handles both directions)
@@ -2199,13 +2419,14 @@ class CoreService:
         except Exception as e:
             logger.error("Error tracking outgoing message in conversation monitor: %s", e, exc_info=True)
 
-    async def send_file(self, node_id: str, file_path: str):
+    async def send_file(self, node_id: str, file_path: str, file_size_bytes: int = None):
         """
         Send a file to a peer via P2P file transfer.
 
         Args:
             node_id: Target peer's node ID
             file_path: Absolute path to file to send
+            file_size_bytes: Optional file size (used by frontend for timeout calculation, ignored by backend)
 
         Returns:
             Dict with transfer_id and status
@@ -2680,6 +2901,54 @@ class CoreService:
         # Also emit to local UI
         await self.local_api.broadcast_event("knowledge_commit_result", result_payload)
 
+    async def _on_session_proposal_received(self, payload: dict):
+        """Callback when new session proposal received from peer.
+
+        Broadcasts proposal to UI so user can review and vote.
+
+        Args:
+            payload: The new session proposal payload from peer
+        """
+        proposal_id = payload.get("proposal_id")
+        initiator_id = payload.get("initiator_node_id")
+
+        logger.info(
+            "Broadcasting new session proposal to UI: %s from %s",
+            proposal_id[:8] if proposal_id else "none",
+            initiator_id[:20] if initiator_id else "none"
+        )
+
+        await self.local_api.broadcast_event(
+            "new_session_proposed",
+            payload
+        )
+
+    async def _broadcast_session_result(self, result_payload: dict, participants: List[str]):
+        """Broadcast NEW_SESSION_RESULT to all participants.
+
+        Args:
+            result_payload: Complete voting result data (result, clear_history, vote_tally, etc.)
+            participants: List of participant node_ids who should receive the notification
+        """
+        message = {
+            "command": "NEW_SESSION_RESULT",
+            "payload": result_payload
+        }
+
+        # Send to all participants except self (who are currently connected)
+        for node_id in participants:
+            if node_id == self.p2p_manager.node_id:
+                continue  # Don't send to self
+
+            if node_id in self.p2p_manager.peers:
+                try:
+                    await self.p2p_manager.send_message_to_peer(node_id, message)
+                    logger.info("Sent NEW_SESSION_RESULT to %s", node_id[:20])
+                except Exception as e:
+                    logger.error("Failed to send session result to %s: %s", node_id[:20], e, exc_info=True)
+            else:
+                logger.debug("Participant %s not connected, skipping result broadcast", node_id[:20])
+
     async def _request_context_from_peer(self, peer_id: str, query: str) -> PersonalContext:
         """
         Request context from a specific peer for the given query.
@@ -2886,18 +3155,16 @@ class CoreService:
                             context = await self._request_context_from_peer(node_id, prompt)
 
                         if context:
-                            # Phase 7: Compute peer context hash
+                            # Phase 7: ALWAYS add peer context when checkbox checked (matching local context behavior)
+                            # This ensures contexts are included in EVERY message, not just when they change
+                            aggregated_contexts[node_id] = context
+
+                            # Compute peer context hash for change detection (for UI "Updated" badges)
                             peer_hash = self._compute_peer_context_hash(context)
-
-                            # Include peer context if:
-                            # 1. This is first collaborative message, OR
-                            # 2. Peer's context has changed
-
-                            # Check if this is first fetch vs. actual change
                             is_first_fetch = node_id not in monitor.peer_context_hashes
 
+                            # Track hash changes for UI badge updates
                             if monitor.has_peer_context_changed(node_id, peer_hash):
-                                aggregated_contexts[node_id] = context
                                 monitor.update_peer_context_hash(node_id, peer_hash)
 
                                 if is_first_fetch:
@@ -2910,26 +3177,22 @@ class CoreService:
                                         "context_hash": peer_hash,
                                         "conversation_id": conversation_id
                                     })
-
-                                # Phase 7: Cache the peer context (so we don't fetch again next time)
-                                # Also fetch device context if we don't have it cached
-                                if not device_ctx:
-                                    device_ctx = await self._request_device_context_from_peer(node_id)
-                                    if device_ctx:
-                                        logger.info("Received device context from %s...", node_id[:20])
-
-                                # Cache both personal and device contexts
-                                monitor.cache_peer_context(node_id, context, device_ctx)
-
-                                # Add device context to result if we have it
-                                if device_ctx:
-                                    peer_device_contexts[node_id] = device_ctx
-
                             else:
-                                logger.debug("Context from %s... unchanged (using history)", node_id[:20])
-                                # Still add cached device context if available
+                                # Context unchanged, but still included in prompt
+                                logger.info("Context from %s... (included - unchanged)", node_id[:20])
+
+                            # Phase 7: Fetch device context if we don't have it cached
+                            if not device_ctx:
+                                device_ctx = await self._request_device_context_from_peer(node_id)
                                 if device_ctx:
-                                    peer_device_contexts[node_id] = device_ctx
+                                    logger.info("Received device context from %s...", node_id[:20])
+
+                            # Cache both personal and device contexts (for next time)
+                            monitor.cache_peer_context(node_id, context, device_ctx)
+
+                            # Add device context to result if we have it
+                            if device_ctx:
+                                peer_device_contexts[node_id] = device_ctx
                         else:
                             logger.warning("No context received from %s...", node_id[:20])
                     except Exception as e:
@@ -2944,13 +3207,15 @@ class CoreService:
         message_history = monitor.get_message_history()
 
         # Assemble final prompt (with or without context, message history always included)
+        # Phase 7: Include context blocks if local checkbox OR any peer checkboxes are checked
+        include_full_context = include_context or bool(aggregated_contexts)
         final_prompt = self._assemble_final_prompt(
             contexts=aggregated_contexts,
             clean_prompt=prompt,
             device_context=device_context_data,
             peer_device_contexts=peer_device_contexts,
             message_history=message_history,
-            include_full_context=include_context  # Simplified: just use checkbox state
+            include_full_context=include_full_context
         )
 
         response_payload = {}
@@ -3051,7 +3316,7 @@ class CoreService:
                     sender_node_id=self.p2p_manager.node_id,  # BUG FIX: Use actual node ID
                     sender_name=self.p2p_manager.get_display_name() or "User",  # BUG FIX: Use actual display name
                     text=prompt,
-                    timestamp=datetime.utcnow().isoformat()
+                    timestamp=datetime.now(timezone.utc).isoformat()
                 )
                 await monitor.on_message(user_message)
 
@@ -3066,7 +3331,7 @@ class CoreService:
                     sender_node_id="ai",
                     sender_name=ai_name,
                     text=response_payload.get("content", ""),
-                    timestamp=datetime.utcnow().isoformat()
+                    timestamp=datetime.now(timezone.utc).isoformat()
                 )
                 proposal = await monitor.on_message(ai_message)
 

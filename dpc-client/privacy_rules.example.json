@@ -108,5 +108,21 @@
         "file_transfer.allowed_mime_types": ["image/*", "application/pdf"]
       }
     }
+  },
+
+  "notifications": {
+    "_comment": "Desktop Notification Settings - Controls when system notifications appear (when app is minimized/background)",
+    "enabled": true,
+    "events": {
+      "new_message": true,
+      "file_offer": true,
+      "file_complete": true,
+      "file_cancelled": true,
+      "knowledge_proposal": true,
+      "knowledge_result": true,
+      "session_proposal": true,
+      "session_result": true,
+      "connection_status": false
+    }
   }
 }

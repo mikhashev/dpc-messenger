@@ -352,11 +352,48 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `token_cache.py` - OAuth token cache for offline mode
 - `connection_status.py` - Connection state tracking with operation mode (online/offline/degraded)
 
+### Session & Chat Management (v0.11.3+)
+
+**Session Manager:**
+- `session_manager.py` - Collaborative session management
+  - Mutual approval voting system for session resets
+  - Multi-party session coordination
+  - Prevents accidental data loss in group conversations
+  - Tracks voting state and participant approvals
+
+**Message Handlers:**
+- `message_handlers/session_handler.py` - Session protocol handlers
+  - NEW_SESSION_PROPOSAL - Initiate session reset vote
+  - NEW_SESSION_VOTE - Cast approval/rejection vote
+  - NEW_SESSION_RESULT - Distribute voting results
+  - Handles history clearing for all participants
+
+- `message_handlers/chat_history_handlers.py` - Chat history synchronization
+  - CHAT_HISTORY_REQUEST - Request peer's conversation history
+  - CHAT_HISTORY_RESPONSE - Send conversation history to peer
+  - Automatic sync on reconnect
+  - Backend→frontend sync for page refresh scenarios
+  - See [CHAT_HISTORY_SYNC_DESIGN.md](docs/CHAT_HISTORY_SYNC_DESIGN.md) for full specification
+
+**Frontend Components:**
+- `NewSessionDialog.svelte` - UI for session reset voting
+  - Displays vote status from all participants
+  - Real-time vote tracking
+  - Approval/rejection actions
+
 **Client Frontend (`dpc-client/ui`):**
 - Built with SvelteKit 5.0 + Tauri 2.x
 - Entry point: `src/routes/+page.svelte`
 - Backend communication: `src/lib/coreService.ts` (WebSocket client)
 - SSG mode with adapter-static (SPA fallback)
+
+**Notification System (v0.11.3+):**
+- `notificationService.ts` - Native desktop notifications
+  - OS permission request integration
+  - Window focus tracking
+  - Background event notifications
+  - Tauri integration for platform-native notifications
+  - Firewall-controlled notification settings
 
 **Hub Server (`dpc-hub`):**
 - `main.py` - FastAPI application and routes
@@ -929,6 +966,11 @@ Access control file format (`~/.dpc/privacy_rules.json`):
     "allow_groups": ["friends"],
     "max_size_mb": 1000,
     "allowed_mime_types": ["*"]
+  },
+  "notifications": {
+    "enabled": true,
+    "show_when_focused": false,
+    "allowed_events": ["message_received", "file_received", "peer_connected"]
   }
 }
 ```

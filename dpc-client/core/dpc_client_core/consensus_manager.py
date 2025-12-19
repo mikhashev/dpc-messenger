@@ -10,7 +10,7 @@ import logging
 import random
 from typing import List, Dict, Optional, Callable, Any
 from dataclasses import dataclass, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 from dpc_protocol.knowledge_commit import (
     KnowledgeCommitProposal,
@@ -115,7 +115,7 @@ class ConsensusManager:
             proposal.required_dissenter = random.choice(proposal.participants)
 
         # Set deadline
-        deadline = datetime.utcnow() + timedelta(minutes=self.vote_timeout_minutes)
+        deadline = datetime.now(timezone.utc) + timedelta(minutes=self.vote_timeout_minutes)
         proposal.vote_deadline = deadline.isoformat()
         proposal.status = 'voting'
 
@@ -309,7 +309,7 @@ class ConsensusManager:
                     "timestamp": v.timestamp
                 } for v in votes.values()
             ],
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
         # Add commit_id if approved
@@ -364,7 +364,7 @@ class ConsensusManager:
                 topic = context.knowledge[topic_name]
                 topic.entries.extend(commit.entries)
                 topic.version += 1
-                topic.last_modified = datetime.utcnow().isoformat()
+                topic.last_modified = datetime.now(timezone.utc).isoformat()
             else:
                 # Create new topic
                 from dpc_protocol.pcm_core import Topic
@@ -467,7 +467,7 @@ class ConsensusManager:
 
         session = self.sessions[proposal_id]
         if session.deadline:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             if session.deadline > now:
                 wait_seconds = (session.deadline - now).total_seconds()
                 await asyncio.sleep(wait_seconds)
@@ -508,7 +508,7 @@ class ConsensusManager:
         Returns:
             Number of sessions cleared
         """
-        cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
         to_remove = []
 
         for pid, session in self.sessions.items():
@@ -567,7 +567,7 @@ class ConsensusManager:
                 voter_node_id=sender_node_id,
                 vote=payload.get('vote'),
                 comment=payload.get('comment'),
-                timestamp=payload.get('timestamp', datetime.utcnow().isoformat()),
+                timestamp=payload.get('timestamp', datetime.now(timezone.utc).isoformat()),
                 is_required_dissent=payload.get('is_required_dissent', False)
             )
 

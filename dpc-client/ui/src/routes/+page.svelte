@@ -2,9 +2,11 @@
 <!-- FIXED VERSION - Proper URI detection for Direct TLS vs WebRTC -->
 
 <script lang="ts">
+  import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
+  import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
@@ -13,6 +15,8 @@
   import Toast from "$lib/components/Toast.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
   import { ask, open } from '@tauri-apps/plugin-dialog';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
 
   console.log("Full D-PC Messenger loading...");
   
@@ -78,6 +82,7 @@
   let showFirewallEditor: boolean = false;
   let showProvidersEditor: boolean = false;
   let showCommitDialog: boolean = false;
+  let showNewSessionDialog: boolean = false;  // v0.11.3: mutual session approval
   let autoKnowledgeDetection: boolean = false;  // Default: disabled
 
   // Token tracking state (Phase 2)
@@ -138,6 +143,45 @@
 
   // UI collapse states
   let contextPanelCollapsed: boolean = false;  // Context toggle panel collapsible
+  let modeSectionCollapsed: boolean = true;  // Mode section collapsible (collapsed by default)
+
+  // Notification state
+  let windowFocused: boolean = true;
+  let showNotificationPermissionDialog: boolean = false;
+
+  // Chat history loading state (prevent infinite loop)
+  let loadingHistory = new Set<string>();
+
+  // Window focus tracking cleanup
+  let unlistenFocus: (() => void) | null = null;
+
+  // Initialize window focus tracking and notification permission (runs once on mount)
+  onMount(async () => {
+    if (typeof window !== 'undefined') {
+      try {
+        const appWindow = getCurrentWindow();
+
+        // Listen to focus changes (store unlisten function for cleanup)
+        unlistenFocus = await appWindow.onFocusChanged(({ payload: focused }) => {
+          windowFocused = focused;
+          console.log(`[Notifications] Window focus changed: ${focused}`);
+        });
+
+        // Check initial focus state
+        windowFocused = await appWindow.isFocused();
+      } catch (error) {
+        console.error('[Notifications] Failed to set up window tracking:', error);
+      }
+    }
+  });
+
+  // Cleanup focus listener on component destroy
+  onDestroy(() => {
+    if (unlistenFocus) {
+      unlistenFocus();
+      unlistenFocus = null;
+    }
+  });
 
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
   $: setActiveChat(activeChatId);
@@ -145,6 +189,96 @@
   // Reactive: Open commit dialog when proposal received
   $: if ($knowledgeCommitProposal) {
     showCommitDialog = true;
+
+    // Send notification for knowledge commit proposal
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: 'Vote Requested',
+        body: $knowledgeCommitProposal.proposal?.topic || 'Knowledge commit proposal'
+      });
+      console.log(`[Notifications] Knowledge proposal notification: ${notified ? 'system' : 'skip'}`);
+    })();
+  }
+
+  // Reactive: Open new session dialog when proposal received (v0.11.3)
+  $: if ($newSessionProposal) {
+    showNewSessionDialog = true;
+
+    // Send notification for new session proposal
+    (async () => {
+      const initiatorName = getPeerDisplayName($newSessionProposal.initiator_node_id);
+      const notified = await showNotificationIfBackground({
+        title: 'New Session Requested',
+        body: `${initiatorName} wants to start a new session`
+      });
+      console.log(`[Notifications] New session proposal notification: ${notified ? 'system' : 'skip'}`);
+    })();
+  }
+
+  // Reactive: Clear frontend state when new session approved (v0.11.3)
+  $: if ($newSessionResult && $newSessionResult.result === "approved") {
+    // Use sender_node_id if present (received from peer), else conversation_id (initiator)
+    const conversationId = $newSessionResult.sender_node_id || $newSessionResult.conversation_id;
+
+    // Send notification for new session result
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: `Session ${$newSessionResult.result}`,
+        body: `New session ${$newSessionResult.result}`
+      });
+      console.log(`[Notifications] New session result notification: ${notified ? 'system' : 'skip'}`);
+    })();
+
+    console.log('[NewSession] Clearing chat for:', conversationId);
+    console.log('[NewSession] sender_node_id:', $newSessionResult.sender_node_id);
+    console.log('[NewSession] conversation_id:', $newSessionResult.conversation_id);
+    console.log('[NewSession] Current chatHistories keys:', Array.from($chatHistories.keys()));
+
+    // Clear message history for this chat
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      newMap.set(conversationId, []);
+      return newMap;
+    });
+
+    // Clear token usage
+    tokenUsageMap = new Map(tokenUsageMap);
+    tokenUsageMap.delete(conversationId);
+
+    // Clear context tracking (will show "Updated" badge again on next query)
+    lastSentContextHash = new Map(lastSentContextHash);
+    lastSentContextHash.delete(conversationId);
+    lastSentPeerHashes = new Map(lastSentPeerHashes);
+    lastSentPeerHashes.delete(conversationId);
+
+    // Clear the result to prevent re-triggering this reactive statement
+    newSessionResult.set(null);
+  }
+
+  // Reactive: Clear chat window on conversation reset (v0.11.3 - for AI chats and P2P resets)
+  $: if ($conversationReset) {
+    const conversationId = $conversationReset.conversation_id;
+    console.log('[ConversationReset] Clearing chat for:', conversationId);
+
+    // Clear message history for this chat
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      newMap.set(conversationId, []);
+      return newMap;
+    });
+
+    // Clear token usage
+    tokenUsageMap = new Map(tokenUsageMap);
+    tokenUsageMap.delete(conversationId);
+
+    // Clear context tracking
+    lastSentContextHash = new Map(lastSentContextHash);
+    lastSentContextHash.delete(conversationId);
+    lastSentPeerHashes = new Map(lastSentPeerHashes);
+    lastSentPeerHashes.delete(conversationId);
+
+    // Clear the event to prevent re-triggering
+    conversationReset.set(null);
   }
 
   // Reactive: Handle token warnings (Phase 2)
@@ -160,6 +294,85 @@
 
   // Reactive: Get current chat's token usage
   $: currentTokenUsage = tokenUsageMap.get(activeChatId) || {used: 0, limit: 0};
+
+  // Reactive: Check if current peer is connected (for enabling/disabling send controls)
+  $: isPeerConnected = !activeChatId.startsWith('ai_') && activeChatId !== 'local_ai'
+    ? ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
+    : true; // AI chats don't require peer connection
+
+  // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
+  // Handles page refresh scenario: frontend loses chatHistories, backend keeps conversation_monitors
+  $: if ($connectionStatus === 'connected' && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+    // Check if this peer chat has no messages in frontend
+    const currentHistory = $chatHistories.get(activeChatId);
+    console.log(`[ChatHistory] Reactive triggered: chatId=${activeChatId.slice(0,20)}, historyLen=${currentHistory?.length || 0}, loading=${loadingHistory.has(activeChatId)}`);
+
+    // Guard: Skip if already loading or already have messages
+    if (loadingHistory.has(activeChatId)) {
+      console.log(`[ChatHistory] Skipping - already loading history for ${activeChatId.slice(0,20)}`);
+    } else if (currentHistory === undefined) {
+      console.log(`[ChatHistory] Loading history from backend for ${activeChatId.slice(0,20)}...`);
+
+      // Mark as loading to prevent re-triggers
+      loadingHistory.add(activeChatId);
+
+      // Load from backend (async IIFE to allow await in reactive statement)
+      (async () => {
+        try {
+          const result = await sendCommand('get_conversation_history', { conversation_id: activeChatId });
+          console.log(`[ChatHistory] Backend response:`, result);
+          if (result.status === 'success' && result.messages && result.messages.length > 0) {
+            console.log(`[ChatHistory] Loaded ${result.message_count} messages from backend`);
+
+            // Convert backend format to frontend format
+            chatHistories.update(map => {
+              const newMap = new Map(map);
+              const loadedMessages = result.messages.map((msg: any, index: number) => ({
+                id: `backend-${index}-${Date.now()}`,
+                sender: msg.role === 'user' ? 'user' : activeChatId,
+                senderName: msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId),
+                text: msg.content,
+                timestamp: Date.now() - (result.messages.length - index) * 1000,
+                attachments: msg.attachments || []
+              }));
+              newMap.set(activeChatId, loadedMessages);
+              console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages`);
+              return newMap;
+            });
+
+            // Remove from loading AFTER chatHistories update completes
+            loadingHistory.delete(activeChatId);
+
+            // Scroll to bottom
+            setTimeout(() => {
+              if (chatWindow) {
+                chatWindow.scrollTop = chatWindow.scrollHeight;
+              }
+            }, 100);
+          } else {
+            console.log(`[ChatHistory] No messages: status=${result.status}, count=${result.messages?.length || 0}`);
+
+            // Initialize with empty array to mark as "loaded but empty"
+            // This prevents infinite re-loading when chatHistories updates trigger reactive statement
+            chatHistories.update(map => {
+              const newMap = new Map(map);
+              newMap.set(activeChatId, []);
+              return newMap;
+            });
+
+            // Remove from loading AFTER chatHistories update completes
+            loadingHistory.delete(activeChatId);
+          }
+        } catch (e) {
+          console.error(`[ChatHistory] Error loading history:`, e);
+          // On error, remove from loading to allow retry
+          loadingHistory.delete(activeChatId);
+        }
+      })();
+    } else {
+      console.log(`[ChatHistory] Skipping load - already have ${currentHistory.length} messages`);
+    }
+  }
 
   // Phase 7: Reactive: Check if context window is full (100% or more)
   $: isContextWindowFull = currentTokenUsage.limit > 0 && (currentTokenUsage.used / currentTokenUsage.limit) >= 1.0;
@@ -194,6 +407,15 @@
 
     showCommitResultToast = true;
 
+    // Send notification for knowledge commit result
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: 'Vote Complete',
+        body: `${topic} - ${status}`
+      });
+      console.log(`[Notifications] Knowledge commit result notification: ${notified ? 'system' : 'skip'}`);
+    })();
+
     // Clear the result from store after showing
     knowledgeCommitResult.set(null);
   }
@@ -219,10 +441,19 @@
 
   // File transfer event handlers (Week 1)
   $: if ($fileTransferOffer) {
-    const { node_id, filename, size_bytes, transfer_id } = $fileTransferOffer;
+    const { node_id, filename, size_bytes, transfer_id, sender_name } = $fileTransferOffer;
     currentFileOffer = $fileTransferOffer;
     showFileOfferDialog = true;
     console.log(`File offer received: ${filename} (${(size_bytes / 1024).toFixed(1)} KB) from ${node_id.slice(0, 15)}...`);
+
+    // Send notification for file offer
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: `File from ${sender_name || node_id.slice(0, 16)}`,
+        body: `${filename} (${(size_bytes / 1048576).toFixed(2)} MB)`
+      });
+      console.log(`[Notifications] File offer notification: ${notified ? 'system' : 'skip'}`);
+    })();
   }
 
   $: if ($fileTransferComplete) {
@@ -232,6 +463,15 @@
       : `✓ File sent: ${filename}`;
     showFileOfferToast = true;
     setTimeout(() => showFileOfferToast = false, 5000);
+
+    // Send notification for file transfer complete
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: 'File Transfer Complete',
+        body: `${filename} (${direction})`
+      });
+      console.log(`[Notifications] File complete notification: ${notified ? 'system' : 'skip'}`);
+    })();
   }
 
   $: if ($fileTransferCancelled) {
@@ -239,6 +479,47 @@
     fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
     showFileOfferToast = true;
     setTimeout(() => showFileOfferToast = false, 5000);
+
+    // Send notification for file transfer cancelled
+    (async () => {
+      const notified = await showNotificationIfBackground({
+        title: 'Transfer Cancelled',
+        body: `${filename} (${reason})`
+      });
+      console.log(`[Notifications] File cancelled notification: ${notified ? 'system' : 'skip'}`);
+    })();
+  }
+
+  // Reactive: Handle chat history restored (v0.11.2)
+  $: if ($historyRestored) {
+    console.log(`Restoring ${$historyRestored.message_count} messages to chat with ${$historyRestored.conversation_id}`);
+
+    // Update chatHistories store - convert backend format to UI format
+    chatHistories.update(map => {
+      const newMap = new Map(map);
+      const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => ({
+        id: `restored-${index}-${Date.now()}`,
+        sender: msg.role === 'user' ? 'user' : $historyRestored.conversation_id,
+        senderName: msg.role === 'user' ? 'You' : getPeerDisplayName($historyRestored.conversation_id),
+        text: msg.content,
+        timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,  // Stagger timestamps
+        attachments: msg.attachments || []
+      }));
+      newMap.set($historyRestored.conversation_id, restoredMessages);
+      return newMap;
+    });
+
+    // Scroll to bottom after restoring history
+    setTimeout(() => {
+      if (chatWindow) {
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+      }
+    }, 100);
+
+    // Show success toast
+    fileOfferToastMessage = `✓ Chat history restored: ${$historyRestored.message_count} messages`;
+    showFileOfferToast = true;
+    setTimeout(() => showFileOfferToast = false, 3000);
   }
 
   // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)
@@ -609,6 +890,17 @@
     knowledgeCommitProposal.set(null);
   }
 
+  function handleSessionVote(event: CustomEvent) {
+    const { proposal_id, vote } = event.detail;
+    voteNewSession(proposal_id, vote);
+    showNewSessionDialog = false;
+  }
+
+  function closeNewSessionDialog() {
+    showNewSessionDialog = false;
+    newSessionProposal.set(null);
+  }
+
   function handleEndSession(conversationId: string) {
     if (confirm("End this conversation session and extract knowledge?")) {
       sendCommand("end_conversation_session", {
@@ -642,29 +934,9 @@
   }
 
   function handleNewChat(chatId: string) {
-    if (confirm("Start a new conversation? This will clear the current chat history and knowledge buffer.")) {
-      // Clear message history for this chat
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        newMap.set(chatId, []);  // Clear the message array for this chat
-        return newMap;
-      });
-
-      // Clear token usage for this chat (Phase 2)
-      tokenUsageMap = new Map(tokenUsageMap);
-      tokenUsageMap.delete(chatId);
-
-      // Phase 7: Clear context tracking (will show "Updated" badge again on next query)
-      lastSentContextHash = new Map(lastSentContextHash);
-      lastSentContextHash.delete(chatId);
-      lastSentPeerHashes = new Map(lastSentPeerHashes);
-      lastSentPeerHashes.delete(chatId);
-
-      // Phase 7: Reset conversation on backend (clears history, context tracking)
-      sendCommand("reset_conversation", {
-        conversation_id: chatId
-      });
-    }
+    // v0.11.3: Send proposal to peer for mutual approval
+    // Frontend state will be cleared only after approval
+    proposeNewSession(chatId);
   }
 
   function handleAddAIChat() {
@@ -871,12 +1143,20 @@
       setTimeout(() => showFileOfferToast = false, 5000);
     } finally {
       isSendingFile = false;  // Reset flag after completion
+      // Clear file preparation state
+      filePreparationStarted.set(null);
+      filePreparationProgress.set(null);
+      filePreparationCompleted.set(null);
     }
   }
 
   function handleCancelSendFile() {
     showSendFileDialog = false;
     pendingFileSend = null;
+    // Clear file preparation state
+    filePreparationStarted.set(null);
+    filePreparationProgress.set(null);
+    filePreparationCompleted.set(null);
     console.log('File send cancelled by user');
   }
 
@@ -1002,6 +1282,18 @@
         autoScroll();
       }
 
+      // Send notification if app is in background (showNotificationIfBackground handles the check)
+      if (msg.sender_node_id !== "user") {
+        (async () => {
+          const messagePreview = msg.text.length > 50 ? msg.text.slice(0, 50) + '...' : msg.text;
+          const notified = await showNotificationIfBackground({
+            title: msg.sender_name || msg.sender_node_id.slice(0, 16),
+            body: messagePreview
+          });
+          console.log(`[Notifications] P2P message notification: ${notified ? 'system' : 'skip'}`);
+        })();
+      }
+
       if (processedMessageIds.size > 100) {
         const firstId = processedMessageIds.values().next().value;
         if (firstId) {
@@ -1056,7 +1348,6 @@
             <div class="dpc-uris-section">
               <details class="uri-details">
                 <summary class="uri-summary">
-                  <span class="uri-icon">🔗</span>
                   <span class="uri-title">Local Network ({$nodeStatus.dpc_uris.length})</span>
                 </summary>
                 <div class="uri-help-text">
@@ -1092,7 +1383,6 @@
             <div class="dpc-uris-section">
               <details class="uri-details">
                 <summary class="uri-summary">
-                  <span class="uri-icon">🌐</span>
                   <span class="uri-title">External (Internet) ({$nodeStatus.external_uris.length})</span>
                 </summary>
                 <div class="uri-help-text">
@@ -1123,74 +1413,55 @@
             </div>
           {/if}
 
-          <!-- Connection Status (NEW) -->
+          <!-- Hub Mode -->
           {#if $nodeStatus.operation_mode}
-            <div class="connection-mode">
-              <p><strong>Mode:</strong></p>
-              <div class="mode-badge" class:fully-online={$nodeStatus.operation_mode === 'fully_online'}
-                   class:hub-offline={$nodeStatus.operation_mode === 'hub_offline'}
-                   class:fully-offline={$nodeStatus.operation_mode === 'fully_offline'}>
-                {#if $nodeStatus.operation_mode === 'fully_online'}
-                  🟢 Online
-                {:else if $nodeStatus.operation_mode === 'hub_offline'}
-                  🟡 Hub Offline
-                {:else}
-                  🔴 Offline
-                {/if}
-              </div>
-              <p class="mode-description">{$nodeStatus.connection_status || 'All features available'}</p>
+            <div class="dpc-uris-section">
+              <details class="uri-details" open={!modeSectionCollapsed}>
+                <summary
+                  class="uri-summary"
+                  on:click={() => modeSectionCollapsed = !modeSectionCollapsed}
+                >
+                  <span class="uri-title">Hub Mode</span>
+                </summary>
 
-              {#if $nodeStatus.available_features}
-                <details class="features-details">
-                  <summary>Available Features</summary>
-                  <ul class="features-list">
-                    {#each Object.entries($nodeStatus.available_features) as [feature, available]}
-                      {@const peerCount = peersByStrategy[feature]?.length || 0}
-                      {@const tooltip = peersByStrategy[feature]
-                        ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
-                        : ''}
-                      <li
-                        class:feature-available={available}
-                        class:feature-unavailable={!available}
-                        title={peerCount > 0 ? tooltip : ''}
-                      >
-                        {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
-                        {#if peerCount > 0}
-                          <span class="peer-count">({peerCount})</span>
-                        {/if}
-                      </li>
-                    {/each}
-                  </ul>
-                  {#if $nodeStatus.cached_peers_count > 0}
-                    <p class="cached-info">💾 {$nodeStatus.cached_peers_count} cached peer(s)</p>
+                <div class="mode-badge" class:fully-online={$nodeStatus.operation_mode === 'fully_online'}
+                     class:hub-offline={$nodeStatus.operation_mode === 'hub_offline'}
+                     class:fully-offline={$nodeStatus.operation_mode === 'fully_offline'}>
+                  {#if $nodeStatus.operation_mode === 'fully_online'}
+                    🟢 Online
+                  {:else if $nodeStatus.operation_mode === 'hub_offline'}
+                    🟡 Hub Offline
+                  {:else}
+                    🔴 Offline
                   {/if}
-                </details>
-              {/if}
-            </div>
-          {/if}
+                </div>
+                <p class="mode-description">{$nodeStatus.connection_status || 'All features available'}</p>
 
-          <!-- Hub Login -->
-          {#if $nodeStatus.hub_status !== 'Connected'}
-            <div class="hub-login-section">
-              <p class="info-text">Connect to Hub for WebRTC and discovery</p>
-              <div class="hub-login-buttons">
-                <button
-                  on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
-                  class="btn-oauth btn-google"
-                  title="Login with Google"
-                >
-                  <span class="oauth-icon">🔵</span>
-                  Google
-                </button>
-                <button
-                  on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
-                  class="btn-oauth btn-github"
-                  title="Login with GitHub"
-                >
-                  <span class="oauth-icon">⚫</span>
-                  GitHub
-                </button>
-              </div>
+                <!-- Hub Login (moved inside) -->
+                {#if $nodeStatus.hub_status !== 'Connected'}
+                  <div class="hub-login-section">
+                    <p class="info-text">Connect to Hub for WebRTC signaling</p>
+                    <div class="hub-login-buttons">
+                      <button
+                        on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
+                        class="btn-oauth btn-google"
+                        title="Login with Google"
+                      >
+                        <span class="oauth-icon">🔵</span>
+                        Google
+                      </button>
+                      <button
+                        on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
+                        class="btn-oauth btn-github"
+                        title="Login with GitHub"
+                      >
+                        <span class="oauth-icon">⚫</span>
+                        GitHub
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+              </details>
             </div>
           {/if}
         </div>
@@ -1268,6 +1539,34 @@
               </p>
             </div>
           </details>
+
+          <!-- Available Features -->
+          {#if $nodeStatus.available_features}
+            <details class="features-details">
+              <summary>Available Features</summary>
+              <ul class="features-list">
+                {#each Object.entries($nodeStatus.available_features) as [feature, available]}
+                  {@const peerCount = peersByStrategy[feature]?.length || 0}
+                  {@const tooltip = peersByStrategy[feature]
+                    ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
+                    : ''}
+                  <li
+                    class:feature-available={available}
+                    class:feature-unavailable={!available}
+                    title={peerCount > 0 ? tooltip : ''}
+                  >
+                    {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
+                    {#if peerCount > 0}
+                      <span class="peer-count">({peerCount})</span>
+                    {/if}
+                  </li>
+                {/each}
+              </ul>
+              {#if $nodeStatus.cached_peers_count > 0}
+                <p class="cached-info">💾 {$nodeStatus.cached_peers_count} cached peer(s)</p>
+              {/if}
+            </details>
+          {/if}
         </div>
 
         <!-- Chat List -->
@@ -1406,7 +1705,12 @@
           <button class="btn-new-chat" on:click={() => handleNewChat(activeChatId)}>
             New Session
           </button>
-          <button class="btn-end-session" on:click={() => handleEndSession(activeChatId)}>
+          <button
+            class="btn-end-session"
+            on:click={() => handleEndSession(activeChatId)}
+            disabled={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')}
+            title={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer must be online to save knowledge (requires voting)" : "Extract and save knowledge from this conversation"}
+          >
             End Session & Save Knowledge
           </button>
           {#if $aiChats.has(activeChatId)}
@@ -1629,21 +1933,25 @@
             on:keydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                handleSendMessage();
+                // Only send if peer is connected (or local AI chat)
+                if (isPeerConnected || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
+                  handleSendMessage();
+                }
               }
             }}
           ></textarea>
           <button
             class="file-button"
             on:click={handleSendFile}
-            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
-            title="Send file (P2P chat only)"
+            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || !isPeerConnected}
+            title={isPeerConnected ? "Send file (P2P chat only)" : "Peer disconnected"}
           >
             📎
           </button>
           <button
             on:click={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim() || isContextWindowFull}
+            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim() || isContextWindowFull || !isPeerConnected}
+            title={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer disconnected" : ""}
           >
             {#if isLoading}Sending...{:else}Send{/if}
           </button>
@@ -1673,6 +1981,74 @@
   on:vote={handleCommitVote}
   on:close={closeCommitDialog}
 />
+
+<NewSessionDialog
+  bind:open={showNewSessionDialog}
+  proposal={$newSessionProposal}
+  on:vote={handleSessionVote}
+  on:close={closeNewSessionDialog}
+/>
+
+<!-- Notification Permission Dialog -->
+{#if showNotificationPermissionDialog}
+  <div
+    class="dialog-overlay"
+    role="button"
+    tabindex="0"
+    on:click={() => showNotificationPermissionDialog = false}
+    on:keydown={(e) => {
+      if (e.key === 'Escape' || e.key === 'Enter') {
+        showNotificationPermissionDialog = false;
+      }
+    }}
+  >
+    <div
+      class="notification-dialog-box"
+      role="dialog"
+      aria-labelledby="notification-dialog-title"
+      tabindex="-1"
+      on:click|stopPropagation
+      on:keydown|stopPropagation
+    >
+      <h2 id="notification-dialog-title">Enable Desktop Notifications</h2>
+      <p>Get notified when:</p>
+      <ul>
+        <li>You receive new messages</li>
+        <li>Someone sends you a file</li>
+        <li>You're asked to vote on knowledge</li>
+        <li>Session requests are made</li>
+      </ul>
+      <div class="dialog-actions">
+        <button
+          class="btn-primary"
+          on:click={async () => {
+            const granted = await requestNotificationPermission();
+            showNotificationPermissionDialog = false;
+
+            // Show result toast
+            fileOfferToastMessage = granted
+              ? 'Notifications enabled'
+              : 'Notifications disabled - you can enable them later in settings';
+            showFileOfferToast = true;
+            setTimeout(() => showFileOfferToast = false, 3000);
+          }}
+        >
+          Enable Notifications
+        </button>
+        <button
+          class="btn-secondary"
+          on:click={() => {
+            showNotificationPermissionDialog = false;
+            localStorage.setItem('notificationPreference', 'disabled');
+            localStorage.setItem('permissionRequestedAt', new Date().toISOString());
+          }}
+        >
+          Maybe Later
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <ContextViewer
   bind:open={showContextViewer}
@@ -1774,9 +2150,39 @@
       <h3>Send File</h3>
       <p><strong>File:</strong> {pendingFileSend.fileName}</p>
       <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
+
+      {#if $filePreparationStarted && isSendingFile}
+        <p style="margin-top: 10px; font-size: 13px;">
+          <strong>Size:</strong> {$filePreparationStarted.size_mb} MB
+        </p>
+      {/if}
+
+      {#if $filePreparationProgress && isSendingFile}
+        <div style="margin-top: 15px;">
+          <p style="font-size: 13px; margin-bottom: 5px; color: #555;">
+            {#if $filePreparationProgress.phase === 'hashing_file'}
+              Computing file hash: {$filePreparationProgress.percent}%
+            {:else if $filePreparationProgress.phase === 'computing_chunks'}
+              Computing chunk hashes: {$filePreparationProgress.percent}%
+            {:else}
+              Preparing file: {$filePreparationProgress.percent}%
+            {/if}
+          </p>
+          <div style="width: 100%; background-color: #e0e0e0; border-radius: 4px; height: 8px; overflow: hidden;">
+            <div style="width: {$filePreparationProgress.percent}%; background-color: #4CAF50; height: 100%; transition: width 0.3s ease;"></div>
+          </div>
+        </div>
+      {/if}
+
       <div class="modal-buttons">
         <button class="accept-button" on:click={handleConfirmSendFile} disabled={isSendingFile}>
-          {isSendingFile ? 'Sending...' : 'Send'}
+          {#if $filePreparationCompleted && isSendingFile}
+            Sending...
+          {:else if isSendingFile}
+            Preparing...
+          {:else}
+            Send
+          {/if}
         </button>
         <button class="reject-button" on:click={handleCancelSendFile} disabled={isSendingFile}>Cancel</button>
       </div>
@@ -2925,12 +3331,6 @@
   }
 
   /* Connection Status Styles */
-  .connection-mode {
-    margin-top: 1rem;
-    padding-top: 1rem;
-    border-top: 1px solid #eee;
-  }
-
   .mode-badge {
     display: inline-block;
     padding: 0.5rem 1rem;
@@ -3524,5 +3924,86 @@
     color: #4a4a4a;
     font-size: 12px;
     margin-top: 4px;
+  }
+
+  /* Notification Permission Dialog */
+  .dialog-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10001;
+  }
+
+  .notification-dialog-box {
+    background: white;
+    border-radius: 8px;
+    padding: 2rem;
+    max-width: 400px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+  }
+
+  .notification-dialog-box h2 {
+    margin-top: 0;
+    margin-bottom: 1rem;
+    color: #333;
+  }
+
+  .notification-dialog-box p {
+    margin-bottom: 0.5rem;
+    color: #666;
+  }
+
+  .notification-dialog-box ul {
+    margin: 1rem 0;
+    padding-left: 1.5rem;
+  }
+
+  .notification-dialog-box li {
+    margin: 0.5rem 0;
+    color: #666;
+  }
+
+  .dialog-actions {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1.5rem;
+    justify-content: flex-end;
+  }
+
+  .btn-primary {
+    background: #2196F3;
+    color: white;
+    border: none;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    font-weight: 500;
+    transition: background 0.2s ease;
+  }
+
+  .btn-primary:hover {
+    background: #1976D2;
+  }
+
+  .btn-secondary {
+    background: #f5f5f5;
+    color: #666;
+    border: 1px solid #ddd;
+    padding: 0.75rem 1.5rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.95rem;
+    transition: background 0.2s ease;
+  }
+
+  .btn-secondary:hover {
+    background: #e0e0e0;
   }
 </style>

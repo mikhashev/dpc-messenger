@@ -63,7 +63,7 @@ class Settings:
         """Create a default config file with common settings."""
         self._config['hub'] = {
             'url': hub_url if hub_url else 'http://localhost:8000',
-            'auto_connect': 'true'
+            'auto_connect': 'false'
         }
 
         self._config['oauth'] = {
@@ -179,7 +179,12 @@ class Settings:
             'background_threshold_mb': '50',  # Background transfer threshold in MB
             'direct_tls_only_threshold_mb': '100',  # Direct TLS preference threshold in MB
             'max_concurrent_transfers': '3',  # Max concurrent file transfers
-            'verify_hash': 'true'  # Verify file hash after transfer (SHA256)
+            'verify_hash': 'true',  # Verify file hash after transfer (SHA256)
+            # Preparation timeout configuration (v0.11.2+)
+            'preparation_timeout_base': '60',  # Base timeout in seconds (for small files)
+            'preparation_timeout_per_gb': '40',  # Additional timeout per GB (40s/GB)
+            'preparation_progress_interval_mb': '100',  # Emit progress every N MB during SHA256
+            'preparation_progress_interval_chunks': '10000'  # Emit progress every N chunks during CRC32
         }
 
         self._config['logging'] = {
@@ -250,7 +255,7 @@ class Settings:
 
     def get_p2p_connection_timeout(self) -> float:
         """Get the P2P connection establishment timeout in seconds."""
-        return float(self.get('p2p', 'connection_timeout', '30'))
+        return float(self.get('p2p', 'connection_timeout', '60'))
 
     def get_api_port(self) -> int:
         """Get the local API server port."""
@@ -262,7 +267,7 @@ class Settings:
 
     def get_hub_auto_connect(self) -> bool:
         """Check if Hub should auto-connect on startup."""
-        value = self.get('hub', 'auto_connect', 'true')
+        value = self.get('hub', 'auto_connect', 'false')
         return value.lower() in ('true', '1', 'yes')
 
     def get_turn_username(self) -> Optional[str]:

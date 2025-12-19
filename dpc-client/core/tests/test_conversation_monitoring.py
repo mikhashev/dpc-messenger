@@ -6,7 +6,7 @@ Tests automatic detection, manual extraction, and toggle functionality
 import pytest
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
-from datetime import datetime
+from datetime import datetime, timezone
 
 from dpc_client_core.service import CoreService
 from dpc_client_core.conversation_monitor import ConversationMonitor, Message as ConvMessage
@@ -216,7 +216,7 @@ class TestManualExtraction:
                 sender_node_id="peer123",
                 sender_name="Test Peer",
                 text=f"Test message {i}",
-                timestamp=datetime.utcnow().isoformat()
+                timestamp=datetime.now(timezone.utc).isoformat()
             ))
 
         # Mock the generate proposal to return None (no knowledge detected)

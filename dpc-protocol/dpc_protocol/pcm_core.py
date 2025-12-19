@@ -6,7 +6,7 @@ from pathlib import Path
 from .crypto import DPC_HOME_DIR
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -205,8 +205,13 @@ class PersonalContext:
         format_version = metadata.get('format_version', '1.0')
 
         # Load core v1 fields
-        profile_data = data.get('profile', {})
-        profile = Profile(**profile_data)
+        # Handle None values (can occur when firewall filters fields)
+        profile_data = data.get('profile')
+        if profile_data:
+            profile = Profile(**profile_data)
+        else:
+            # Create empty profile if blocked by firewall
+            profile = Profile(name="[Restricted]", description="[Access denied by firewall]")
 
         preferences_data = data.get('preferences')
         preferences = Preferences(**preferences_data) if preferences_data else None
@@ -298,8 +303,8 @@ class PersonalContext:
             last_commit_timestamp=last_commit_timestamp,
             commit_history=commit_history,
             metadata=metadata if metadata else {
-                "created": datetime.utcnow().isoformat(),
-                "last_updated": datetime.utcnow().isoformat(),
+                "created": datetime.now(timezone.utc).isoformat(),
+                "last_updated": datetime.now(timezone.utc).isoformat(),
                 "storage": "local",
                 "format_version": "2.0"
             }
@@ -449,7 +454,7 @@ def save_instructions(instructions: InstructionBlock, file_path: Path | None = N
 
     logger.info("Instructions saved to %s", file_path)
 
-
+# TODO check if this need
 def migrate_instructions_from_personal_context(
     personal_json_path: Path | None = None,
     instructions_json_path: Path | None = None

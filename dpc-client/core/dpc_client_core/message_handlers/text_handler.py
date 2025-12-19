@@ -3,7 +3,7 @@
 from typing import Dict, Any, Optional
 import hashlib
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from . import MessageHandler
 from ..conversation_monitor import Message as ConvMessage
 
@@ -70,7 +70,7 @@ class SendTextHandler(MessageHandler):
                 sender_node_id=sender_node_id,
                 sender_name=self.service.peer_metadata.get(sender_node_id, {}).get("name", sender_node_id),
                 text=text,
-                timestamp=datetime.utcnow().isoformat()
+                timestamp=datetime.now(timezone.utc).isoformat()
             )
 
             # Buffer message (always) and optionally auto-detect

@@ -50,6 +50,21 @@ export const fileTransferCancelled = writable<any>(null);  // Cancelled transfer
 // Track active file transfers (transfer_id -> {node_id, filename, direction, progress, status})
 export const activeFileTransfers = writable<Map<string, any>>(new Map());
 
+// File preparation stores (v0.11.2 - for Send File dialog progress indicator)
+export const filePreparationStarted = writable<any>(null);  // {filename, size_bytes, size_mb}
+export const filePreparationProgress = writable<any>(null);  // {filename, phase, percent, bytes_processed, total_size}
+export const filePreparationCompleted = writable<any>(null);  // {filename, hash, total_chunks}
+
+// Chat history restore store (v0.11.2 - for auto-restore on reconnect)
+export const historyRestored = writable<any>(null);  // {conversation_id, message_count, messages}
+
+// New session proposal store (v0.11.3 - mutual session approval)
+export const newSessionProposal = writable<any>(null);  // {proposal_id, initiator_node_id, conversation_id, timestamp}
+export const newSessionResult = writable<any>(null);  // {proposal_id, result, clear_history, vote_tally}
+
+// Conversation reset store (v0.11.3 - for AI chats and approved P2P session resets)
+export const conversationReset = writable<any>(null);  // {conversation_id}
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -62,7 +77,7 @@ const RECONNECT_DELAY = 3000;
 const API_URL = "ws://127.0.0.1:9999";
 
 // Map to track pending command responses
-const pendingCommands = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void }>();
+const pendingCommands = new Map<string, { resolve: (value: any) => void; reject: (reason: any) => void; resetTimeout?: () => void }>();
 
 function startPolling() {
     if (pollingInterval) {
@@ -222,6 +237,32 @@ export function connectToCoreService() {
                     console.log("Knowledge commit result received:", message.payload);
                     knowledgeCommitResult.set(message.payload);
                 }
+                // New session proposal handlers (v0.11.3)
+                else if (message.event === "new_session_proposed") {
+                    console.log("New session proposal received:", message.payload);
+                    newSessionProposal.set(message.payload);
+                } else if (message.event === "new_session_result") {
+                    console.log("New session result received:", message.payload);
+                    newSessionResult.set(message.payload);
+
+                    // Clear proposal after result
+                    newSessionProposal.set(null);
+
+                    // Show toast notification
+                    const result = message.payload.result;
+                    if (result === "approved") {
+                        console.log("✅ New session approved - conversation history cleared");
+                    } else if (result === "rejected") {
+                        console.log("❌ New session rejected");
+                    } else if (result === "timeout") {
+                        console.log("⏱️ New session request timed out");
+                    }
+                }
+                // Conversation reset handler (v0.11.3 - for AI chats and approved P2P resets)
+                else if (message.event === "conversation_reset") {
+                    console.log("Conversation reset received:", message.payload);
+                    conversationReset.set(message.payload);
+                }
                 // Handle token limit warning (Phase 2)
                 else if (message.event === "token_limit_warning") {
                     console.log("Token limit warning:", message.payload);
@@ -340,6 +381,31 @@ export function connectToCoreService() {
                         return newMap;
                     });
                 }
+                else if (message.event === "file_preparation_progress") {
+                    // Reset timeout on progress (keepalive mechanism for large file hash computation)
+                    for (const [cmdId, cmd] of pendingCommands.entries()) {
+                        if (cmd.resetTimeout) {
+                            cmd.resetTimeout();
+                        }
+                    }
+
+                    // Update store for UI progress indicator
+                    filePreparationProgress.set(message.payload);
+                    console.log(`File prep: ${message.payload.filename} - ${message.payload.phase} ${message.payload.percent}%`);
+                }
+                else if (message.event === "file_preparation_started") {
+                    filePreparationStarted.set(message.payload);
+                    console.log(`File preparation started: ${message.payload.filename} (${message.payload.size_mb} MB)`);
+                }
+                else if (message.event === "file_preparation_completed") {
+                    filePreparationCompleted.set(message.payload);
+                    console.log(`File preparation completed: ${message.payload.filename} (hash: ${message.payload.hash?.substring(0, 16)}...)`);
+                }
+                else if (message.event === "history_restored") {
+                    // Chat history restored from peer (v0.11.2)
+                    historyRestored.set(message.payload);
+                    console.log(`Chat history restored: ${message.payload.message_count} messages from ${message.payload.conversation_id}`);
+                }
             } catch (error) {
                 console.error("Error parsing message:", error);
             }
@@ -424,26 +490,57 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'toggle_auto_knowledge_detection',
             'send_file',
             'accept_file_transfer',
-            'cancel_file_transfer'
+            'cancel_file_transfer',
+            'get_conversation_history'  // v0.11.2 - backend→frontend sync
         ].includes(command);
 
         if (expectsResponse) {
             return new Promise((resolve, reject) => {
-                // Store the promise callbacks
-                pendingCommands.set(id, { resolve, reject });
+                // Calculate dynamic timeout for file operations
+                let timeout = 10000;  // Default: 10s
 
-                // Set timeout based on command type
-                // File operations need longer timeout for hash computation
-                const timeout = command === 'send_file' ? 60000 : 10000;  // 60s for file ops, 10s for others
+                if (command === 'send_file') {
+                    // Dynamic timeout based on file size (v0.11.2+)
+                    const fileSizeBytes = payload.file_size_bytes || 0;
+                    const fileSizeGB = fileSizeBytes / (1024 * 1024 * 1024);
+
+                    // Formula: base (60s) + per_gb (40s/GB) + safety margin (20s)
+                    // Examples: 1GB=120s, 5GB=280s, 10GB=480s
+                    const baseTimeout = 60000;      // 60 seconds
+                    const perGBTimeout = 40000;     // 40 seconds per GB
+                    const safetyMargin = 20000;     // 20 seconds extra
+
+                    timeout = baseTimeout + (fileSizeGB * perGBTimeout) + safetyMargin;
+
+                    console.log(`File send timeout: ${Math.round(timeout/1000)}s for ${fileSizeGB.toFixed(2)}GB file`);
+                }
+
                 const timeoutSeconds = timeout / 1000;
+                let timeoutHandle: ReturnType<typeof setTimeout>;
 
-                // Set timeout to reject if no response
-                setTimeout(() => {
-                    if (pendingCommands.has(id)) {
-                        pendingCommands.delete(id);
-                        reject(new Error(`Command '${command}' timed out after ${timeoutSeconds} seconds`));
+                // Create timeout handler
+                const createTimeout = () => {
+                    return setTimeout(() => {
+                        if (pendingCommands.has(id)) {
+                            pendingCommands.delete(id);
+                            reject(new Error(`Command '${command}' timed out after ${timeoutSeconds} seconds`));
+                        }
+                    }, timeout);
+                };
+
+                timeoutHandle = createTimeout();
+
+                // Store callbacks with timeout reset capability (keepalive mechanism)
+                pendingCommands.set(id, {
+                    resolve,
+                    reject,
+                    resetTimeout: () => {
+                        // Clear existing timeout and create new one (keepalive)
+                        clearTimeout(timeoutHandle);
+                        timeoutHandle = createTimeout();
+                        console.log(`Timeout reset for command ${id} (keepalive)`);
                     }
-                }, timeout);
+                });
 
                 // Send the message
                 socket!.send(JSON.stringify(message));
@@ -466,9 +563,21 @@ export function setActiveChat(chatId: string | null) {
 
 // File transfer helper functions (Week 1)
 export async function sendFile(nodeId: string, filePath: string): Promise<any> {
+    // Get file size for timeout calculation (v0.11.2+)
+    let fileSizeBytes = 0;
+    try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const metadata = await invoke('get_file_metadata', { path: filePath });
+        fileSizeBytes = (metadata as any).size;
+    } catch (e) {
+        console.warn('Could not get file size for timeout calculation:', e);
+        // Continue anyway - backend will use default timeout
+    }
+
     return sendCommand('send_file', {
         node_id: nodeId,
-        file_path: filePath
+        file_path: filePath,
+        file_size_bytes: fileSizeBytes
     });
 }
 
@@ -492,4 +601,18 @@ export function resetUnreadCount(peerId: string) {
         currentCounts.delete(peerId);
         unreadMessageCounts.set(new Map(currentCounts));
     }
+}
+
+// New session proposal helpers (v0.11.3)
+export async function proposeNewSession(conversationId: string): Promise<any> {
+    return sendCommand('propose_new_session', {
+        conversation_id: conversationId
+    });
+}
+
+export async function voteNewSession(proposalId: string, vote: boolean): Promise<any> {
+    return sendCommand('vote_new_session', {
+        proposal_id: proposalId,
+        vote: vote
+    });
 }

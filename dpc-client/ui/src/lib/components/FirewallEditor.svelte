@@ -26,6 +26,11 @@
       groups?: Record<string, any>;
       nodes?: Record<string, any>;
     };
+    notifications?: {
+      _comment?: string;
+      enabled: boolean;
+      events: Record<string, boolean>;
+    };
     nodes?: Record<string, Record<string, string>>;
     groups?: Record<string, Record<string, string>>;
     ai_scopes?: Record<string, Record<string, string>>;
@@ -33,7 +38,7 @@
   };
 
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'peers' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'notifications' | 'peers' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -173,6 +178,7 @@
   function removeNodeGroup(groupName: string) {
     if (!editedRules || !editedRules.node_groups) return;
     delete editedRules.node_groups[groupName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addNodeToGroup(groupName: string) {
@@ -219,11 +225,12 @@
   function removeNodePermission(nodeId: string) {
     if (!editedRules || !editedRules.nodes) return;
     delete editedRules.nodes[nodeId];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addRuleToNode(nodeId: string) {
     if (!editedRules || !editedRules.nodes) return;
-    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
+    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.*, device_context.json:hardware.*, or personal.json:*):', 'personal.json:profile.*');
     if (resourcePath) {
       // Check for duplicates
       if (editedRules.nodes[nodeId][resourcePath]) {
@@ -237,6 +244,7 @@
   function removeRuleFromNode(nodeId: string, path: string) {
     if (!editedRules || !editedRules.nodes) return;
     delete editedRules.nodes[nodeId][path];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   // Peer Permissions - Group Management Functions
@@ -257,11 +265,12 @@
   function removeGroupPermission(groupName: string) {
     if (!editedRules || !editedRules.groups) return;
     delete editedRules.groups[groupName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addRuleToGroup(groupName: string) {
     if (!editedRules || !editedRules.groups) return;
-    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.* or personal.json:*):', 'personal.json:profile.*');
+    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.*, device_context.json:hardware.*, or personal.json:*):', 'personal.json:profile.*');
     if (resourcePath) {
       // Check for duplicates
       if (editedRules.groups[groupName][resourcePath]) {
@@ -275,6 +284,7 @@
   function removeRuleFromGroup(groupName: string, path: string) {
     if (!editedRules || !editedRules.groups) return;
     delete editedRules.groups[groupName][path];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   // File Groups Management Functions
@@ -295,6 +305,7 @@
   function removeFileGroup(groupName: string) {
     if (!editedRules || !editedRules.file_groups) return;
     delete editedRules.file_groups[groupName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addFilePatternToGroup(groupName: string) {
@@ -337,11 +348,12 @@
   function removeAIScope(scopeName: string) {
     if (!editedRules || !editedRules.ai_scopes) return;
     delete editedRules.ai_scopes[scopeName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addRuleToAIScope(scopeName: string) {
     if (!editedRules || !editedRules.ai_scopes) return;
-    const resourcePath = prompt('Enter resource path (e.g., @work:*, @personal:*, personal.json:*):', '@work:*');
+    const resourcePath = prompt('Enter resource path (e.g., @work:*, @personal:*, personal.json:*, device_context.json:*):', '@work:*');
     if (resourcePath) {
       // Check for duplicates
       if (editedRules.ai_scopes[scopeName][resourcePath]) {
@@ -355,6 +367,7 @@
   function removeRuleFromAIScope(scopeName: string, path: string) {
     if (!editedRules || !editedRules.ai_scopes) return;
     delete editedRules.ai_scopes[scopeName][path];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   // Device Sharing Management Functions
@@ -375,6 +388,7 @@
   function removeDeviceSharingPreset(presetName: string) {
     if (!editedRules || !editedRules.device_sharing) return;
     delete editedRules.device_sharing[presetName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 
   function addRuleToDeviceSharingPreset(presetName: string) {
@@ -393,6 +407,7 @@
   function removeRuleFromDeviceSharingPreset(presetName: string, path: string) {
     if (!editedRules || !editedRules.device_sharing) return;
     delete editedRules.device_sharing[presetName][path];
+    editedRules = editedRules;  // Trigger Svelte reactivity
   }
 </script>
 
@@ -473,6 +488,13 @@
           on:click={() => selectedTab = 'file-transfer'}
         >
           File Transfer
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'notifications'}
+          on:click={() => selectedTab = 'notifications'}
+        >
+          Notifications
         </button>
         <button
           class="tab"
@@ -1043,6 +1065,101 @@
             {/if}
           </div>
 
+        {:else if selectedTab === 'notifications'}
+          <div class="section">
+            <h3>Notification Settings</h3>
+            <p class="help-text">Control desktop notifications for different events.</p>
+
+            <div class="permission-request" style="margin: 1rem 0;">
+              <button
+                class="btn btn-edit"
+                on:click={async () => {
+                  const { requestNotificationPermission } = await import('$lib/notificationService');
+                  const granted = await requestNotificationPermission();
+                  if (granted) {
+                    alert('Notification permission granted!');
+                  } else {
+                    alert('Notification permission denied. You can enable it in your OS settings.');
+                  }
+                }}
+              >
+                Request OS Notification Permission
+              </button>
+              <p class="help-text-small" style="margin-top: 0.5rem;">
+                Click to request permission from your operating system to show desktop notifications.
+              </p>
+            </div>
+
+            {#if editMode && editedRules?.notifications}
+              <div class="form-group">
+                <label for="notifications-enabled">
+                  <input
+                    type="checkbox"
+                    id="notifications-enabled"
+                    bind:checked={editedRules.notifications.enabled}
+                  />
+                  Enable Desktop Notifications
+                </label>
+                <p class="help-text-small">Master toggle for all desktop notifications</p>
+              </div>
+
+              <h4 style="margin-top: 1.5rem;">Event Notifications</h4>
+              <div class="notification-events">
+                {#each Object.entries(editedRules.notifications.events) as [event, enabled]}
+                  <div class="notification-event-item">
+                    <label for="notif-{event}">
+                      <input
+                        type="checkbox"
+                        id="notif-{event}"
+                        bind:checked={editedRules.notifications.events[event]}
+                        disabled={!editedRules.notifications.enabled}
+                      />
+                      <span class="event-name">{event.replace(/_/g, ' ')}</span>
+                    </label>
+                  </div>
+                {/each}
+              </div>
+            {:else if displayRules?.notifications}
+              <div class="form-group">
+                <label for="notifications-enabled">
+                  <input
+                    type="checkbox"
+                    id="notifications-enabled"
+                    checked={displayRules.notifications.enabled}
+                    disabled
+                  />
+                  Enable Desktop Notifications
+                </label>
+                <p class="help-text-small">Master toggle for all desktop notifications</p>
+              </div>
+
+              {#if displayRules.notifications.events}
+                <h4 style="margin-top: 1.5rem;">Event Notifications</h4>
+                <div class="notification-events">
+                  {#each Object.entries(displayRules.notifications.events) as [event, enabled]}
+                    <div class="notification-event-item">
+                      <label for="notif-{event}">
+                        <input
+                          type="checkbox"
+                          id="notif-{event}"
+                          checked={enabled}
+                          disabled
+                        />
+                        <span class="event-name">{event.replace(/_/g, ' ')}</span>
+                      </label>
+                    </div>
+                  {/each}
+                </div>
+              {/if}
+            {/if}
+
+            {#if !editMode}
+              <div class="info-box" style="margin-top: 1.5rem;">
+                <strong>Info:</strong> Notification settings control when desktop notifications appear when the app is in the background. Master toggle must be enabled for individual event notifications to work. Operating system permission must also be granted.
+              </div>
+            {/if}
+          </div>
+
         {:else if selectedTab === 'peers'}
           <div class="section">
             <h3>Peer Permissions</h3>
@@ -1192,8 +1309,8 @@
   .modal {
     background: white;
     border-radius: 8px;
-    width: 90%;
-    max-width: 800px;
+    width: 95%;
+    max-width: 1100px;
     max-height: 90vh;
     display: flex;
     flex-direction: column;
@@ -1613,5 +1730,54 @@
     border-radius: 4px;
     font-size: 0.9rem;
     cursor: pointer;
+  }
+
+  /* Notification Settings Styles */
+  .form-group {
+    margin-bottom: 1rem;
+  }
+
+  .form-group label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .help-text-small {
+    color: #666;
+    font-size: 0.85rem;
+    margin: 0.25rem 0 0 1.75rem;
+  }
+
+  .notification-events {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 0.75rem;
+    margin-top: 0.5rem;
+  }
+
+  .notification-event-item {
+    padding: 0.5rem;
+    background: #f5f5f5;
+    border-radius: 4px;
+  }
+
+  .notification-event-item label {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    cursor: pointer;
+  }
+
+  .notification-event-item input[type="checkbox"]:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+  }
+
+  .event-name {
+    text-transform: capitalize;
+    font-size: 0.9rem;
   }
 </style>

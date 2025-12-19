@@ -221,6 +221,128 @@ class FileTransferManager:
                 chunk_hashes.append(f"{crc:08x}")  # 8-char hex string
         return chunk_hashes
 
+    async def _emit_preparation_progress(self, filename: str, phase: str, percent: int, **kwargs):
+        """
+        Emit file preparation progress event to UI.
+
+        Args:
+            filename: Name of file being prepared
+            phase: "hashing_file" or "hashing_chunks"
+            percent: Progress percentage (0-100)
+            **kwargs: Additional metadata (bytes_processed, chunks_processed, etc.)
+        """
+        if self.local_api:
+            await self.local_api.broadcast_event("file_preparation_progress", {
+                "filename": filename,
+                "phase": phase,
+                "percent": percent,
+                **kwargs
+            })
+            logger.debug(f"File prep progress: {filename} - {phase} {percent}%")
+
+    async def _compute_file_hash_async(self, file_path: Path, progress_interval_bytes: int = 100 * 1024 * 1024) -> str:
+        """
+        Compute SHA256 hash of file asynchronously with progress reporting.
+
+        Uses thread pool executor to prevent blocking the event loop during
+        hash computation for large files.
+
+        Args:
+            file_path: Path to file
+            progress_interval_bytes: Emit progress event every N bytes (default: 100MB)
+
+        Returns:
+            SHA256 hash as hex string
+
+        Emits:
+            file_preparation_progress event with phase="hashing_file", percent, bytes_processed
+        """
+        loop = asyncio.get_event_loop()
+
+        def _hash_worker():
+            sha256 = hashlib.sha256()
+            total_size = file_path.stat().st_size
+            bytes_processed = 0
+            last_progress_emit = 0
+
+            with open(file_path, 'rb') as f:
+                # Use larger chunks (10MB) for better performance during hashing
+                while chunk := f.read(10 * 1024 * 1024):
+                    sha256.update(chunk)
+                    bytes_processed += len(chunk)
+
+                    # Emit progress every 100MB
+                    if bytes_processed - last_progress_emit >= progress_interval_bytes:
+                        percent = int((bytes_processed / total_size) * 100)
+                        # Schedule event emission on event loop (don't block worker thread)
+                        asyncio.run_coroutine_threadsafe(
+                            self._emit_preparation_progress(
+                                file_path.name,
+                                "hashing_file",
+                                min(percent, 100),  # Cap at 100%
+                                bytes_processed=bytes_processed,
+                                total_bytes=total_size
+                            ),
+                            loop
+                        )
+                        last_progress_emit = bytes_processed
+
+            return sha256.hexdigest()
+
+        # Run blocking hash computation in thread pool
+        return await loop.run_in_executor(None, _hash_worker)
+
+    async def _compute_chunk_hashes_async(self, file_path: Path, progress_interval_chunks: int = 10000) -> List[str]:
+        """
+        Compute CRC32 hash for each chunk asynchronously with progress reporting.
+
+        Uses thread pool executor to prevent blocking the event loop during
+        per-chunk hash computation for large files.
+
+        Args:
+            file_path: Path to file
+            progress_interval_chunks: Emit progress every N chunks (default: 10,000 = ~640MB)
+
+        Returns:
+            List of CRC32 hashes as hex strings
+
+        Emits:
+            file_preparation_progress event with phase="hashing_chunks", percent, chunks_processed
+        """
+        loop = asyncio.get_event_loop()
+
+        def _chunk_hash_worker():
+            chunk_hashes = []
+            total_size = file_path.stat().st_size
+            total_chunks = (total_size + self.chunk_size - 1) // self.chunk_size
+            chunks_processed = 0
+            last_progress_emit = 0
+
+            with open(file_path, 'rb') as f:
+                while chunk := f.read(self.chunk_size):  # 64KB chunks
+                    crc = zlib.crc32(chunk) & 0xffffffff
+                    chunk_hashes.append(f"{crc:08x}")
+                    chunks_processed += 1
+
+                    # Emit progress events periodically
+                    if chunks_processed - last_progress_emit >= progress_interval_chunks:
+                        percent = int((chunks_processed / total_chunks) * 100)
+                        asyncio.run_coroutine_threadsafe(
+                            self._emit_preparation_progress(
+                                file_path.name,
+                                "hashing_chunks",
+                                min(percent, 100),
+                                chunks_processed=chunks_processed,
+                                total_chunks=total_chunks
+                            ),
+                            loop
+                        )
+                        last_progress_emit = chunks_processed
+
+            return chunk_hashes
+
+        return await loop.run_in_executor(None, _chunk_hash_worker)
+
     async def send_file(
         self,
         node_id: str,
@@ -261,8 +383,27 @@ class FileTransferManager:
 
         # Compute file metadata
         file_size = file_path.stat().st_size
-        file_hash = self._compute_file_hash(file_path) if self.verify_hash else "none"
-        chunk_hashes = self._compute_chunk_hashes(file_path)  # v0.11.1: Per-chunk CRC32
+
+        # Emit preparation started event
+        if self.local_api:
+            await self.local_api.broadcast_event("file_preparation_started", {
+                "filename": file_path.name,
+                "size_bytes": file_size,
+                "size_mb": round(file_size / (1024 * 1024), 2)
+            })
+
+        # Use async hash computation with progress reporting
+        file_hash = await self._compute_file_hash_async(file_path) if self.verify_hash else "none"
+        chunk_hashes = await self._compute_chunk_hashes_async(file_path)  # v0.11.1: Per-chunk CRC32
+
+        # Emit preparation completed event
+        if self.local_api:
+            await self.local_api.broadcast_event("file_preparation_completed", {
+                "filename": file_path.name,
+                "hash": file_hash,
+                "total_chunks": len(chunk_hashes)
+            })
+
         mime_type = self._detect_mime_type(file_path)
         total_chunks = (file_size + self.chunk_size - 1) // self.chunk_size
 
@@ -767,7 +908,8 @@ class FileTransferManager:
                 mime_type = "application/octet-stream"
 
         # Check per-peer size limit (optional)
-        if max_size_mb and size_mb > max_size_mb:
+        # Note: max_size_mb = 0 means unlimited (no limit)
+        if max_size_mb and max_size_mb > 0 and size_mb > max_size_mb:
             error_msg = f"File too large: {size_mb:.1f} MB exceeds {max_size_mb} MB limit"
             logger.warning(f"{error_msg} for {node_id}")
             return (False, error_msg)

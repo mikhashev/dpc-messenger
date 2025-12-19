@@ -9,6 +9,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [0.11.3] - 2025-12-19
+
+### Added
+- **Native Desktop Notifications** - Real-time notifications for background events
+  - OS permission request button in Notifications tab
+  - Notification settings in Firewall UI
+  - Background notifications for active peer chat when app is minimized
+  - Window focus tracking for smart notification display
+  - Files: [notificationService.ts](dpc-client/ui/src/lib/notificationService.ts), [main.rs](dpc-client/ui/src-tauri/src/main.rs)
+
+- **Mutual New Session Approval** - Collaborative session management with voting
+  - Voting mechanism for session resets
+  - All participants approve before clearing history
+  - Prevents accidental data loss in multi-party conversations
+  - Files: [session_manager.py](dpc-client/core/dpc_client_core/session_manager.py), [session_handler.py](dpc-client/core/dpc_client_core/message_handlers/session_handler.py), [NewSessionDialog.svelte](dpc-client/ui/src/lib/components/NewSessionDialog.svelte)
+
+- **Chat History Synchronization** - Never lose conversation context
+  - Automatic history sync on peer reconnect
+  - Backend→frontend sync for page refresh scenarios
+  - Chat history restoration after temporary disconnections
+  - Files: [chat_history_handlers.py](dpc-client/core/dpc_client_core/message_handlers/chat_history_handlers.py)
+  - Documentation: [CHAT_HISTORY_SYNC_DESIGN.md](docs/CHAT_HISTORY_SYNC_DESIGN.md)
+
+- **UI Enhancements**
+  - File preparation progress indicator in Send File dialog
+  - Device context examples in firewall rule input prompts
+  - Collapsible Mode section in Notifications tab
+  - Disabled send/file/End Session buttons when peer disconnected
+
+### Fixed
+- **CRITICAL: Multiple Infinite Loop Fixes** - Resolved several UI freeze scenarios
+  - **Empty Conversation History:** Fixed infinite loop when requesting history for empty conversations
+  - **Multiple Peers:** Fixed infinite loop when loading empty conversation history with multiple peers
+  - **Window Focus Tracking:** Resolved infinite loops in window focus event handlers
+  - **Chat History Loading:** Fixed reactive loop bugs in chat history synchronization
+  - **Firewall Editor:** Resolved infinite reactive loop after clearing chat
+  - Files: [service.py](dpc-client/core/dpc_client_core/service.py), [+page.svelte](dpc-client/ui/src/routes/+page.svelte), [notificationService.ts](dpc-client/ui/src/lib/notificationService.ts)
+
+- **Session Management Fixes**
+  - Fixed frontend chat clearing for non-initiator participants
+  - Fixed history clearing for all participants on session approval
+  - Corrected node_id attribute references in session handlers
+  - Use peer_node_id for backend history clearing
+  - Handle AI chats in propose_new_session()
+  - Files: [session_handler.py](dpc-client/core/dpc_client_core/message_handlers/session_handler.py)
+
+- **Peer Context Inclusion Fixes**
+  - Fixed peer contexts included in every message when checkbox checked
+  - Handle None profile field when firewall blocks access
+  - Trigger Svelte reactivity when deleting firewall rules
+  - Files: [service.py](dpc-client/core/dpc_client_core/service.py), [pcm_core.py](dpc-protocol/dpc_protocol/pcm_core.py), [FirewallEditor.svelte](dpc-client/ui/src/lib/components/FirewallEditor.svelte)
+
+- **File Transfer Improvements**
+  - Added dynamic timeout and keepalive for large file preparation
+  - Show sent file message in sender's chat history
+  - Accept file_size_bytes parameter in send_file()
+  - Replace deprecated datetime.utcnow() with timezone-aware datetime
+  - Files: [file_transfer_manager.py](dpc-client/core/dpc_client_core/managers/file_transfer_manager.py), [coreService.ts](dpc-client/ui/src/lib/coreService.ts)
+
+- **Knowledge Extraction Fixes**
+  - Implement bidirectional inference fallback for knowledge detection
+  - Files: [conversation_monitor.py](dpc-client/core/dpc_client_core/conversation_monitor.py)
+
+- **UI State Management**
+  - Prevent Enter key from sending messages when peer disconnected
+  - Handle conversation_reset event to clear AI chat window
+  - Show notifications for active peer chat when app is in background
+  - Add get_conversation_history to expectsResponse array
+  - Files: [+page.svelte](dpc-client/ui/src/routes/+page.svelte), [coreService.ts](dpc-client/ui/src/lib/coreService.ts)
+
+### Changed
+- **UI Organization**
+  - Moved Available Features dropdown to Connect to Peer section
+  - Consolidated Hub Mode section with consistent styling
+  - Updated Hub Mode text to reflect 6-tier connection fallback
+  - Files: [+page.svelte](dpc-client/ui/src/routes/+page.svelte)
+
+- **Configuration**
+  - Changed default timings for improved performance
+  - Added notifications section to firewall validation rules
+  - Files: [example_default_config.ini](dpc-client/example_default_config.ini), [firewall.py](dpc-client/core/dpc_client_core/firewall.py)
+
+### Performance
+- Reduced UI freeze scenarios with infinite loop fixes
+- Improved file transfer handling for large files (dynamic timeouts)
+- Optimized chat history loading for multiple peer scenarios
+
+---
+
 ## [0.11.1] - 2025-12-13
 
 ### Added
