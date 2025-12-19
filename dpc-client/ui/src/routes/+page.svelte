@@ -29,8 +29,8 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
-    attachments?: Array<{  // File attachments (Week 1)
-      type: string;
+    attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4)
+      type: 'file' | 'image';
       filename: string;
       size_bytes: number;
       size_mb?: number;
@@ -38,6 +38,11 @@
       mime_type?: string;
       transfer_id?: string;
       status?: string;
+      // Image-specific fields (Phase 2.4):
+      dimensions?: { width: number; height: number };
+      thumbnail?: string;  // Base64 data URL
+      vision_analyzed?: boolean;  // AI chat only: was vision API used?
+      vision_result?: string;  // AI chat only: vision analysis text
     }>;
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
@@ -140,6 +145,10 @@
   let showSendFileDialog: boolean = false;
   let pendingFileSend: { filePath: string, fileName: string, recipientId: string, recipientName: string } | null = null;
   let isSendingFile: boolean = false;  // Prevent double-click bug
+
+  // Image paste state (Phase 2.4: Screenshot + Vision)
+  let pastedImage: { dataUrl: string; filename: string } | null = null;
+  let showImagePreview: boolean = false;
 
   // UI collapse states
   let contextPanelCollapsed: boolean = false;  // Context toggle panel collapsible
@@ -1121,6 +1130,146 @@
     }
   }
 
+  // Image paste handlers (Phase 2.4: Screenshot + Vision)
+  function handlePaste(event: ClipboardEvent) {
+    const items = event.clipboardData?.items;
+    if (!items) return;
+
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        event.preventDefault();
+        const blob = item.getAsFile();
+
+        // Check if blob is valid
+        if (!blob) continue;
+
+        // Validate size (5MB limit)
+        if (blob.size > 5 * 1024 * 1024) {
+          fileOfferToastMessage = `Image too large (${(blob.size / (1024 * 1024)).toFixed(2)}MB). Max: 5MB`;
+          showFileOfferToast = true;
+          setTimeout(() => showFileOfferToast = false, 5000);
+          return;
+        }
+
+        // Convert to data URL
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          pastedImage = {
+            dataUrl: e.target?.result as string,
+            filename: `screenshot_${Date.now()}.png`
+          };
+
+          // AI Chat: Auto-send with vision analysis (no preview needed)
+          // P2P Chat: Show preview for confirmation
+          if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
+            sendImageToAI(pastedImage);
+            pastedImage = null;
+          } else {
+            showImagePreview = true;
+          }
+        };
+        reader.readAsDataURL(blob);
+        break;
+      }
+    }
+  }
+
+  async function sendImageToAI(image: { dataUrl: string; filename: string }) {
+    // Add image to conversation history immediately
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      const hist = newMap.get(activeChatId) || [];
+      newMap.set(activeChatId, [...hist, {
+        id: crypto.randomUUID(),
+        sender: 'user',
+        text: currentInput.trim() || '[Image]',
+        timestamp: Date.now(),
+        attachments: [{
+          type: 'image',
+          filename: image.filename,
+          thumbnail: image.dataUrl,
+          size_bytes: 0  // Will be computed by backend
+        }]
+      }]);
+      return newMap;
+    });
+
+    // Send to backend for vision analysis
+    try {
+      isLoading = true;
+      await sendCommand('send_image', {
+        conversation_id: activeChatId,
+        image_base64: image.dataUrl,
+        filename: image.filename,
+        caption: currentInput.trim()  // Include any text typed before paste
+      });
+
+      currentInput = '';  // Clear input after sending
+      autoScroll();
+    } catch (error) {
+      console.error('Error sending image to AI:', error);
+      fileOfferToastMessage = `Failed to send image: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    } finally {
+      isLoading = false;
+    }
+  }
+
+  async function sendImageToPeer(caption: string) {
+    if (!pastedImage) return;
+
+    // Store image data before clearing pastedImage
+    const imageData = {
+      dataUrl: pastedImage.dataUrl,
+      filename: pastedImage.filename
+    };
+
+    // Add image to conversation history
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      const hist = newMap.get(activeChatId) || [];
+      newMap.set(activeChatId, [...hist, {
+        id: crypto.randomUUID(),
+        sender: 'user',
+        text: caption || '[Image]',
+        timestamp: Date.now(),
+        attachments: [{
+          type: 'image',
+          filename: imageData.filename,
+          thumbnail: imageData.dataUrl,
+          size_bytes: 0,  // Will be computed by backend
+          status: 'sending'
+        }]
+      }]);
+      return newMap;
+    });
+
+    try {
+      await sendCommand('send_image', {
+        conversation_id: activeChatId,
+        image_base64: imageData.dataUrl,
+        filename: imageData.filename,
+        caption: caption
+      });
+
+      showImagePreview = false;
+      pastedImage = null;
+      autoScroll();
+      console.log('Image sent to peer');
+    } catch (error) {
+      console.error('Error sending image to peer:', error);
+      fileOfferToastMessage = `Failed to send image: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  function handleCancelImagePreview() {
+    showImagePreview = false;
+    pastedImage = null;
+  }
+
   async function handleConfirmSendFile() {
     if (!pendingFileSend || isSendingFile) return;  // Guard against double-click
 
@@ -1927,7 +2076,7 @@
             bind:value={currentInput}
             placeholder={
               isContextWindowFull ? 'Context window full - End session to continue' :
-              ($connectionStatus === 'connected' ? 'Type a message... (Enter to send, Shift+Enter for new line)' : 'Connect to Core Service first...')
+              ($connectionStatus === 'connected' ? 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)' : 'Connect to Core Service first...')
             }
             disabled={$connectionStatus !== 'connected' || isLoading || isContextWindowFull}
             on:keydown={(e) => {
@@ -1939,6 +2088,7 @@
                 }
               }
             }}
+            on:paste={handlePaste}
           ></textarea>
           <button
             class="file-button"
@@ -2185,6 +2335,32 @@
           {/if}
         </button>
         <button class="reject-button" on:click={handleCancelSendFile} disabled={isSendingFile}>Cancel</button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Image Preview Dialog (Phase 2.4: Screenshot + Vision) -->
+{#if showImagePreview && pastedImage}
+  <div class="modal-overlay" role="presentation" on:click={handleCancelImagePreview} on:keydown={(e) => e.key === 'Escape' && handleCancelImagePreview()}>
+    <div class="modal-dialog image-preview-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+      <h3>Send Image</h3>
+      <div class="image-preview-container">
+        <img src={pastedImage.dataUrl} alt="Pasted screenshot" class="preview-image" />
+      </div>
+      <p><strong>Filename:</strong> {pastedImage.filename}</p>
+      <div class="caption-input">
+        <label for="image-caption">Caption (optional):</label>
+        <textarea
+          id="image-caption"
+          bind:value={currentInput}
+          placeholder="Add a caption to the image..."
+          rows="3"
+        ></textarea>
+      </div>
+      <div class="modal-buttons">
+        <button class="accept-button" on:click={() => sendImageToPeer(currentInput)}>Send</button>
+        <button class="reject-button" on:click={handleCancelImagePreview}>Cancel</button>
       </div>
     </div>
   </div>
@@ -4005,5 +4181,109 @@
 
   .btn-secondary:hover {
     background: #e0e0e0;
+  }
+
+  /* Image Preview Modal Styles (Phase 2.4) */
+  .modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+  }
+
+  .modal-dialog {
+    background: white;
+    padding: 2rem;
+    border-radius: 12px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    max-width: 90%;
+    max-height: 90vh;
+    overflow-y: auto;
+  }
+
+  .image-preview-dialog {
+    max-width: 600px;
+  }
+
+  .image-preview-container {
+    margin: 1rem 0;
+    text-align: center;
+  }
+
+  .preview-image {
+    max-width: 100%;
+    max-height: 400px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .caption-input {
+    margin: 1rem 0;
+  }
+
+  .caption-input label {
+    display: block;
+    margin-bottom: 0.5rem;
+    font-weight: 600;
+    color: #333;
+  }
+
+  .caption-input textarea {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 1rem;
+    resize: vertical;
+  }
+
+  .modal-buttons {
+    display: flex;
+    gap: 1rem;
+    margin-top: 1.5rem;
+    justify-content: flex-end;
+  }
+
+  .accept-button, .reject-button {
+    padding: 0.75rem 1.5rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: background 0.2s ease;
+  }
+
+  .accept-button {
+    background: #4CAF50;
+    color: white;
+  }
+
+  .accept-button:hover {
+    background: #45a049;
+  }
+
+  .accept-button:disabled {
+    background: #cccccc;
+    cursor: not-allowed;
+  }
+
+  .reject-button {
+    background: #f44336;
+    color: white;
+  }
+
+  .reject-button:hover {
+    background: #d32f2f;
+  }
+
+  .reject-button:disabled {
+    background: #cccccc;
+    cursor: not-allowed;
   }
 </style>
