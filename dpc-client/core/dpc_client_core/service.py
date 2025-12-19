@@ -108,7 +108,6 @@ class CoreService:
 
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
-        self.firewall.initialize()  # Create default privacy_rules.json if doesn't exist
         self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
