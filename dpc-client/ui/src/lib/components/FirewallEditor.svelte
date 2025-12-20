@@ -409,6 +409,59 @@
     delete editedRules.device_sharing[presetName][path];
     editedRules = editedRules;  // Trigger Svelte reactivity
   }
+
+  // File Transfer Management Functions
+  function addFileTransferGroup() {
+    if (!editedRules) return;
+    const groupName = prompt('Enter group name (e.g., friends, colleagues):');
+    if (groupName) {
+      if (!editedRules.file_transfer) editedRules.file_transfer = { groups: {}, nodes: {} };
+      if (!editedRules.file_transfer.groups) editedRules.file_transfer.groups = {};
+      // Check for duplicates
+      if (editedRules.file_transfer.groups[groupName]) {
+        alert('This group already has file transfer settings');
+        return;
+      }
+      editedRules.file_transfer.groups[groupName] = {
+        'file_transfer.allow': 'deny',
+        'file_transfer.max_size_mb': 100,
+        'file_transfer.allowed_mime_types': ['*']
+      };
+    }
+  }
+
+  function removeFileTransferGroup(groupName: string) {
+    if (!editedRules?.file_transfer?.groups) return;
+    delete editedRules.file_transfer.groups[groupName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
+  }
+
+  function addFileTransferNode() {
+    if (!editedRules) return;
+    const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
+    if (nodeId && nodeId.startsWith('dpc-node-')) {
+      if (!editedRules.file_transfer) editedRules.file_transfer = { groups: {}, nodes: {} };
+      if (!editedRules.file_transfer.nodes) editedRules.file_transfer.nodes = {};
+      // Check for duplicates
+      if (editedRules.file_transfer.nodes[nodeId]) {
+        alert('This node already has file transfer settings');
+        return;
+      }
+      editedRules.file_transfer.nodes[nodeId] = {
+        'file_transfer.allow': 'deny',
+        'file_transfer.max_size_mb': 100,
+        'file_transfer.allowed_mime_types': ['*']
+      };
+    } else if (nodeId) {
+      alert('Node ID must start with "dpc-node-"');
+    }
+  }
+
+  function removeFileTransferNode(nodeId: string) {
+    if (!editedRules?.file_transfer?.nodes) return;
+    delete editedRules.file_transfer.nodes[nodeId];
+    editedRules = editedRules;  // Trigger Svelte reactivity
+  }
 </script>
 
 {#if open && rules}
@@ -918,13 +971,22 @@
 
             {#if displayRules?.file_transfer}
               <!-- Group Permissions Section -->
+              <h4>Group Permissions</h4>
+              {#if editMode && editedRules}
+                <button class="btn btn-add" on:click={addFileTransferGroup}>+ Add Group</button>
+              {/if}
+
               {#if displayRules.file_transfer.groups && Object.keys(displayRules.file_transfer.groups).length > 0}
-                <h4>Group Permissions</h4>
                 {#each Object.entries(displayRules.file_transfer.groups) as [groupName, groupSettings]}
                   {#if !groupName.startsWith('_')}
                     <div class="peer-card">
                       <div class="group-header">
                         <h5>Group: {groupName}</h5>
+                        {#if editMode}
+                          <button class="btn-icon" on:click={() => removeFileTransferGroup(groupName)} title="Delete group">
+                            🗑️
+                          </button>
+                        {/if}
                       </div>
                       <div class="subsection">
                         <div class="setting-item">
@@ -987,13 +1049,22 @@
               {/if}
 
               <!-- Node Permissions Section -->
+              <h4>Individual Node Permissions</h4>
+              {#if editMode && editedRules}
+                <button class="btn btn-add" on:click={addFileTransferNode}>+ Add Node</button>
+              {/if}
+
               {#if displayRules.file_transfer.nodes && Object.keys(displayRules.file_transfer.nodes).length > 0}
-                <h4>Individual Node Permissions</h4>
                 {#each Object.entries(displayRules.file_transfer.nodes) as [nodeId, nodeSettings]}
                   {#if !nodeId.startsWith('_')}
                     <div class="peer-card">
                       <div class="group-header">
                         <h5>{nodeId}</h5>
+                        {#if editMode}
+                          <button class="btn-icon" on:click={() => removeFileTransferNode(nodeId)} title="Delete node">
+                            🗑️
+                          </button>
+                        {/if}
                       </div>
                       <div class="subsection">
                         <div class="setting-item">

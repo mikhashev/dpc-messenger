@@ -104,57 +104,80 @@ class ContextFirewall:
             # This ensures UI stays in sync with privacy_rules.json without requiring page refresh.
             # Example: AI scopes dropdown reloads immediately after user saves firewall rules.
             default_rules = {
-                "_comment": "D-PC Access Control File - This file controls who can access your context data and compute resources. By default, all access is denied.",
+                "_comment": "D-PC Access Control File - This file controls who can access your context data and compute resources. By default, all access is denied. Replace example node IDs (dpc-node-alice-123, etc.) with actual node IDs from your peers.",
                 "hub": {
+                    "_comment": "What the Hub can see for peer discovery (minimal by default)",
                     "personal.json:profile.name": "allow",
                     "personal.json:profile.description": "allow"
                 },
                 "node_groups": {
-                    "_comment": "Define which nodes belong to which groups",
-                    "_example_colleagues": ["dpc-node-alice-123", "dpc-node-bob-456"],
-                    "_example_friends": ["dpc-node-charlie-789"]
+                    "_comment": "Define which nodes belong to which groups. Add your peers' actual node IDs here.",
+                    "friends": ["dpc-node-alice-123", "dpc-node-charlie-789"],
+                    "colleagues": ["dpc-node-bob-456"],
+                    "family": []
                 },
                 "file_groups": {
-                    "_comment": "Define aliases for groups of files",
-                    "_example_work": ["work_*.json"],
-                    "_example_personal": ["personal.json"]
+                    "_comment": "Define aliases for groups of context files (supports wildcards)",
+                    "work": ["work_*.json", "projects.json"],
+                    "personal": ["personal.json", "hobbies.json"]
                 },
                 "compute": {
-                    "_comment": "Compute sharing settings (Remote Inference)",
+                    "_comment": "Compute sharing settings - Allow peers to run AI inference on your GPU/CPU",
                     "enabled": False,
-                    "allow_groups": [],
-                    "allow_nodes": [],
-                    "allowed_models": []
+                    "allow_groups": ["friends"],
+                    "allow_nodes": ["dpc-node-alice-123"],
+                    "allowed_models": ["llama3.1:8b", "llama3:70b"]
                 },
                 "nodes": {
-                    "_comment": "Access rules for specific nodes",
-                    "_example_dpc-node-friend-id-here": {
+                    "_comment": "Per-node access rules - Most specific, overrides group rules",
+                    "dpc-node-alice-123": {
                         "personal.json:profile.*": "allow",
-                        "personal.json:name": "allow",
-                        "personal.json:bio": "allow"
+                        "personal.json:knowledge.*": "allow",
+                        "device_context.json:software.*": "allow"
+                    },
+                    "dpc-node-bob-456": {
+                        "personal.json:profile.name": "allow",
+                        "personal.json:profile.description": "allow"
                     }
                 },
                 "groups": {
-                    "_comment": "Access rules for groups of nodes",
-                    "_example_colleagues": {
-                        "work_main.json:availability": "allow",
-                        "work_main.json:skills.*": "allow"
+                    "_comment": "Per-group access rules - Applied to all nodes in the group",
+                    "friends": {
+                        "personal.json:profile.*": "allow",
+                        "personal.json:knowledge.*": "allow"
+                    },
+                    "colleagues": {
+                        "personal.json:profile.name": "allow",
+                        "personal.json:profile.description": "allow",
+                        "personal.json:knowledge.professional_skills.*": "allow"
+                    },
+                    "family": {
+                        "personal.json:*": "allow"
                     }
                 },
                 "ai_scopes": {
-                    "_comment": "Access rules for AI scopes",
-                    "_example_work": {
+                    "_comment": "AI scope access rules - Control which scoped contexts peers can access",
+                    "work": {
                         "@work:*": "allow"
+                    },
+                    "personal": {
+                        "@personal:*": "deny"
                     }
                 },
                 "device_sharing": {
-                    "_comment": "Device context sharing rules",
-                    "_example_basic": {
-                        "device_context.json:hardware.gpu.*": "allow"
+                    "_comment": "Device context sharing rules - Control what hardware/software info peers can see",
+                    "colleagues": {
+                        "device_context.json:software.os.*": "allow",
+                        "device_context.json:software.dev_tools.*": "allow"
+                    },
+                    "friends": {
+                        "device_context.json:hardware.gpu.*": "allow",
+                        "device_context.json:hardware.cpu.*": "allow",
+                        "device_context.json:software.*": "allow"
                     }
                 },
                 "notifications": {
-                    "_comment": "Desktop notification settings",
+                    "_comment": "Desktop notification settings - When to show system notifications (app in background)",
                     "enabled": True,
                     "events": {
                         "new_message": True,
@@ -169,9 +192,26 @@ class ContextFirewall:
                     }
                 },
                 "file_transfer": {
-                    "_comment": "File transfer permissions (v0.11.0+)",
-                    "groups": {},
-                    "nodes": {}
+                    "_comment": "File transfer permissions (v0.11.0+). Configure per-group or per-node settings.",
+                    "groups": {
+                        "friends": {
+                            "file_transfer.allow": "allow",
+                            "file_transfer.max_size_mb": 100,
+                            "file_transfer.allowed_mime_types": ["*"]
+                        },
+                        "colleagues": {
+                            "file_transfer.allow": "allow",
+                            "file_transfer.max_size_mb": 50,
+                            "file_transfer.allowed_mime_types": ["image/*", "application/pdf", "text/*"]
+                        }
+                    },
+                    "nodes": {
+                        "dpc-node-example-abc123": {
+                            "file_transfer.allow": "allow",
+                            "file_transfer.max_size_mb": 500,
+                            "file_transfer.allowed_mime_types": ["*"]
+                        }
+                    }
                 }
             }
 

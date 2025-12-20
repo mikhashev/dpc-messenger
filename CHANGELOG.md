@@ -13,6 +13,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Aligns file_transfer section with context sharing permission patterns
   - Files: [firewall.py](dpc-client/core/dpc_client_core/firewall.py)
 
+- **Enhanced Firewall Default Rules** - Improved examples and documentation
+  - Added realistic examples for all sections (node_groups, file_groups, compute, nodes, groups, ai_scopes, device_sharing)
+  - Better comments explaining each section's purpose
+  - Real-world group names (friends, colleagues, family) instead of _example_ prefixes
+  - Multi-tier access examples (friends vs colleagues vs family)
+  - Files: [firewall.py](dpc-client/core/dpc_client_core/firewall.py)
+
+### Added
+- **File Transfer UI Management** - Add/remove groups and nodes in Firewall Editor
+  - "+ Add Group" button in File Transfer tab
+  - "+ Add Node" button in File Transfer tab
+  - Delete buttons (trash icons) for groups and nodes
+  - Duplicate detection when adding groups/nodes
+  - Files: [FirewallEditor.svelte](dpc-client/ui/src/lib/components/FirewallEditor.svelte)
+
 ---
 
 ## [0.11.3] - 2025-12-19
