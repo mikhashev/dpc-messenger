@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Firewall Configuration Structure** - Simplified file_transfer permissions schema
+  - Replaced flat structure (allow_nodes, allow_groups, max_size_mb, allowed_mime_types) with nested groups/nodes objects
+  - Aligns file_transfer section with context sharing permission patterns
+  - Files: [firewall.py](dpc-client/core/dpc_client_core/firewall.py)
+
 ---
 
 ## [0.11.3] - 2025-12-19
