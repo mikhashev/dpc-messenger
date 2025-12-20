@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -51,8 +51,8 @@
   ]));
   
   let activeChatId: string = 'local_ai';
-  let currentInput: string = "";
-  let isLoading: boolean = false;
+  let currentInput = $state("");
+  let isLoading = $state(false);
   let chatWindow: HTMLElement;
   let peerInput: string = "";  // RENAMED from peerUri for clarity
   let selectedComputeHost: string = "local";  // "local" or node_id for remote inference
@@ -126,9 +126,9 @@
   })();
 
   // Save markdown preference to localStorage when changed
-  $: {
+  $effect(() => {
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
-  }
+  });
 
   // Phase 7: Context hash tracking for "Updated" status indicators
   let currentContextHash: string = "";  // Current hash from backend (when context is saved)
@@ -147,9 +147,8 @@
   let pendingFileSend: { filePath: string, fileName: string, recipientId: string, recipientName: string } | null = null;
   let isSendingFile: boolean = false;  // Prevent double-click bug
 
-  // Image paste state (Phase 2.4: Screenshot + Vision)
-  let pastedImage: { dataUrl: string; filename: string } | null = null;
-  let showImagePreview: boolean = false;
+  // Image paste state (Phase 2.4: Screenshot + Vision - improved UX)
+  let pendingImage: { dataUrl: string; filename: string; sizeBytes: number } | null = $state(null);
 
   // UI collapse states
   let contextPanelCollapsed: boolean = false;  // Context toggle panel collapsible
@@ -194,381 +193,415 @@
   });
 
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
-  $: setActiveChat(activeChatId);
+  $effect(() => {
+    setActiveChat(activeChatId);
+  });
 
   // Reactive: Open commit dialog when proposal received
-  $: if ($knowledgeCommitProposal) {
-    showCommitDialog = true;
+  $effect(() => {
+    if ($knowledgeCommitProposal) {
+      showCommitDialog = true;
 
-    // Send notification for knowledge commit proposal
-    (async () => {
-      const notified = await showNotificationIfBackground({
-        title: 'Vote Requested',
-        body: $knowledgeCommitProposal.proposal?.topic || 'Knowledge commit proposal'
-      });
-      console.log(`[Notifications] Knowledge proposal notification: ${notified ? 'system' : 'skip'}`);
-    })();
-  }
+      // Send notification for knowledge commit proposal
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: 'Vote Requested',
+          body: $knowledgeCommitProposal.proposal?.topic || 'Knowledge commit proposal'
+        });
+        console.log(`[Notifications] Knowledge proposal notification: ${notified ? 'system' : 'skip'}`);
+      })();
+    }
+  });
 
   // Reactive: Open new session dialog when proposal received (v0.11.3)
-  $: if ($newSessionProposal) {
-    showNewSessionDialog = true;
+  $effect(() => {
+    if ($newSessionProposal) {
+      showNewSessionDialog = true;
 
-    // Send notification for new session proposal
-    (async () => {
-      const initiatorName = getPeerDisplayName($newSessionProposal.initiator_node_id);
-      const notified = await showNotificationIfBackground({
-        title: 'New Session Requested',
-        body: `${initiatorName} wants to start a new session`
-      });
-      console.log(`[Notifications] New session proposal notification: ${notified ? 'system' : 'skip'}`);
-    })();
-  }
+      // Send notification for new session proposal
+      (async () => {
+        const initiatorName = getPeerDisplayName($newSessionProposal.initiator_node_id);
+        const notified = await showNotificationIfBackground({
+          title: 'New Session Requested',
+          body: `${initiatorName} wants to start a new session`
+        });
+        console.log(`[Notifications] New session proposal notification: ${notified ? 'system' : 'skip'}`);
+      })();
+    }
+  });
 
   // Reactive: Clear frontend state when new session approved (v0.11.3)
-  $: if ($newSessionResult && $newSessionResult.result === "approved") {
-    // Use sender_node_id if present (received from peer), else conversation_id (initiator)
-    const conversationId = $newSessionResult.sender_node_id || $newSessionResult.conversation_id;
+  $effect(() => {
+    if ($newSessionResult && $newSessionResult.result === "approved") {
+      // Use sender_node_id if present (received from peer), else conversation_id (initiator)
+      const conversationId = $newSessionResult.sender_node_id || $newSessionResult.conversation_id;
 
-    // Send notification for new session result
-    (async () => {
-      const notified = await showNotificationIfBackground({
-        title: `Session ${$newSessionResult.result}`,
-        body: `New session ${$newSessionResult.result}`
+      // Send notification for new session result
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: `Session ${$newSessionResult.result}`,
+          body: `New session ${$newSessionResult.result}`
+        });
+        console.log(`[Notifications] New session result notification: ${notified ? 'system' : 'skip'}`);
+      })();
+
+      console.log('[NewSession] Clearing chat for:', conversationId);
+      console.log('[NewSession] sender_node_id:', $newSessionResult.sender_node_id);
+      console.log('[NewSession] conversation_id:', $newSessionResult.conversation_id);
+      console.log('[NewSession] Current chatHistories keys:', Array.from($chatHistories.keys()));
+
+      // Clear message history for this chat
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        newMap.set(conversationId, []);
+        return newMap;
       });
-      console.log(`[Notifications] New session result notification: ${notified ? 'system' : 'skip'}`);
-    })();
 
-    console.log('[NewSession] Clearing chat for:', conversationId);
-    console.log('[NewSession] sender_node_id:', $newSessionResult.sender_node_id);
-    console.log('[NewSession] conversation_id:', $newSessionResult.conversation_id);
-    console.log('[NewSession] Current chatHistories keys:', Array.from($chatHistories.keys()));
+      // Clear token usage
+      tokenUsageMap = new Map(tokenUsageMap);
+      tokenUsageMap.delete(conversationId);
 
-    // Clear message history for this chat
-    chatHistories.update(h => {
-      const newMap = new Map(h);
-      newMap.set(conversationId, []);
-      return newMap;
-    });
+      // Clear context tracking (will show "Updated" badge again on next query)
+      lastSentContextHash = new Map(lastSentContextHash);
+      lastSentContextHash.delete(conversationId);
+      lastSentPeerHashes = new Map(lastSentPeerHashes);
+      lastSentPeerHashes.delete(conversationId);
 
-    // Clear token usage
-    tokenUsageMap = new Map(tokenUsageMap);
-    tokenUsageMap.delete(conversationId);
-
-    // Clear context tracking (will show "Updated" badge again on next query)
-    lastSentContextHash = new Map(lastSentContextHash);
-    lastSentContextHash.delete(conversationId);
-    lastSentPeerHashes = new Map(lastSentPeerHashes);
-    lastSentPeerHashes.delete(conversationId);
-
-    // Clear the result to prevent re-triggering this reactive statement
-    newSessionResult.set(null);
-  }
+      // Clear the result to prevent re-triggering this reactive statement
+      newSessionResult.set(null);
+    }
+  });
 
   // Reactive: Clear chat window on conversation reset (v0.11.3 - for AI chats and P2P resets)
-  $: if ($conversationReset) {
-    const conversationId = $conversationReset.conversation_id;
-    console.log('[ConversationReset] Clearing chat for:', conversationId);
+  $effect(() => {
+    if ($conversationReset) {
+      const conversationId = $conversationReset.conversation_id;
+      console.log('[ConversationReset] Clearing chat for:', conversationId);
 
-    // Clear message history for this chat
-    chatHistories.update(h => {
-      const newMap = new Map(h);
-      newMap.set(conversationId, []);
-      return newMap;
-    });
+      // Clear message history for this chat
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        newMap.set(conversationId, []);
+        return newMap;
+      });
 
-    // Clear token usage
-    tokenUsageMap = new Map(tokenUsageMap);
-    tokenUsageMap.delete(conversationId);
+      // Clear token usage
+      tokenUsageMap = new Map(tokenUsageMap);
+      tokenUsageMap.delete(conversationId);
 
-    // Clear context tracking
-    lastSentContextHash = new Map(lastSentContextHash);
-    lastSentContextHash.delete(conversationId);
-    lastSentPeerHashes = new Map(lastSentPeerHashes);
-    lastSentPeerHashes.delete(conversationId);
+      // Clear context tracking
+      lastSentContextHash = new Map(lastSentContextHash);
+      lastSentContextHash.delete(conversationId);
+      lastSentPeerHashes = new Map(lastSentPeerHashes);
+      lastSentPeerHashes.delete(conversationId);
 
-    // Clear the event to prevent re-triggering
-    conversationReset.set(null);
-  }
+      // Clear the event to prevent re-triggering
+      conversationReset.set(null);
+    }
+  });
 
   // Reactive: Handle token warnings (Phase 2)
-  $: if ($tokenWarning) {
-    const {conversation_id, tokens_used, token_limit, usage_percent} = $tokenWarning;
-    // Update token usage map
-    tokenUsageMap = new Map(tokenUsageMap);
-    tokenUsageMap.set(conversation_id, {used: tokens_used, limit: token_limit});
-    // Show warning toast
-    showTokenWarning = true;
-    tokenWarningMessage = `Context window ${Math.round(usage_percent * 100)}% full. Consider ending session to save knowledge.`;
-  }
+  $effect(() => {
+    if ($tokenWarning) {
+      const {conversation_id, tokens_used, token_limit, usage_percent} = $tokenWarning;
+      // Update token usage map
+      tokenUsageMap = new Map(tokenUsageMap);
+      tokenUsageMap.set(conversation_id, {used: tokens_used, limit: token_limit});
+      // Show warning toast
+      showTokenWarning = true;
+      tokenWarningMessage = `Context window ${Math.round(usage_percent * 100)}% full. Consider ending session to save knowledge.`;
+    }
+  });
 
   // Reactive: Get current chat's token usage
-  $: currentTokenUsage = tokenUsageMap.get(activeChatId) || {used: 0, limit: 0};
+  let currentTokenUsage = $derived(tokenUsageMap.get(activeChatId) || {used: 0, limit: 0});
 
   // Reactive: Check if current peer is connected (for enabling/disabling send controls)
-  $: isPeerConnected = !activeChatId.startsWith('ai_') && activeChatId !== 'local_ai'
+  let isPeerConnected = $derived(!activeChatId.startsWith('ai_') && activeChatId !== 'local_ai'
     ? ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
-    : true; // AI chats don't require peer connection
+    : true); // AI chats don't require peer connection
 
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
   // Handles page refresh scenario: frontend loses chatHistories, backend keeps conversation_monitors
-  $: if ($connectionStatus === 'connected' && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
-    // Check if this peer chat has no messages in frontend
-    const currentHistory = $chatHistories.get(activeChatId);
-    console.log(`[ChatHistory] Reactive triggered: chatId=${activeChatId.slice(0,20)}, historyLen=${currentHistory?.length || 0}, loading=${loadingHistory.has(activeChatId)}`);
+  $effect(() => {
+    if ($connectionStatus === 'connected' && activeChatId && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+      // Check if this peer chat has no messages in frontend
+      const currentHistory = $chatHistories.get(activeChatId);
+      console.log(`[ChatHistory] Reactive triggered: chatId=${activeChatId.slice(0,20)}, historyLen=${currentHistory?.length || 0}, loading=${loadingHistory.has(activeChatId)}`);
 
-    // Guard: Skip if already loading or already have messages
-    if (loadingHistory.has(activeChatId)) {
-      console.log(`[ChatHistory] Skipping - already loading history for ${activeChatId.slice(0,20)}`);
-    } else if (currentHistory === undefined) {
-      console.log(`[ChatHistory] Loading history from backend for ${activeChatId.slice(0,20)}...`);
+      // Guard: Skip if already loading or already have messages
+      if (loadingHistory.has(activeChatId)) {
+        console.log(`[ChatHistory] Skipping - already loading history for ${activeChatId.slice(0,20)}`);
+      } else if (currentHistory === undefined) {
+        console.log(`[ChatHistory] Loading history from backend for ${activeChatId.slice(0,20)}...`);
 
-      // Mark as loading to prevent re-triggers
-      loadingHistory.add(activeChatId);
+        // Mark as loading to prevent re-triggers
+        loadingHistory.add(activeChatId);
 
-      // Load from backend (async IIFE to allow await in reactive statement)
-      (async () => {
-        try {
-          const result = await sendCommand('get_conversation_history', { conversation_id: activeChatId });
-          console.log(`[ChatHistory] Backend response:`, result);
-          if (result.status === 'success' && result.messages && result.messages.length > 0) {
-            console.log(`[ChatHistory] Loaded ${result.message_count} messages from backend`);
+        // Load from backend (async IIFE to allow await in reactive statement)
+        (async () => {
+          try {
+            const result = await sendCommand('get_conversation_history', { conversation_id: activeChatId });
+            console.log(`[ChatHistory] Backend response:`, result);
+            if (result.status === 'success' && result.messages && result.messages.length > 0) {
+              console.log(`[ChatHistory] Loaded ${result.message_count} messages from backend`);
 
-            // Convert backend format to frontend format
-            chatHistories.update(map => {
-              const newMap = new Map(map);
-              const loadedMessages = result.messages.map((msg: any, index: number) => ({
-                id: `backend-${index}-${Date.now()}`,
-                sender: msg.role === 'user' ? 'user' : activeChatId,
-                senderName: msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId),
-                text: msg.content,
-                timestamp: Date.now() - (result.messages.length - index) * 1000,
-                attachments: msg.attachments || []
-              }));
-              newMap.set(activeChatId, loadedMessages);
-              console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages`);
-              return newMap;
-            });
+              // Convert backend format to frontend format
+              chatHistories.update(map => {
+                const newMap = new Map(map);
+                const loadedMessages = result.messages.map((msg: any, index: number) => ({
+                  id: `backend-${index}-${Date.now()}`,
+                  sender: msg.role === 'user' ? 'user' : activeChatId,
+                  senderName: msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId),
+                  text: msg.content,
+                  timestamp: Date.now() - (result.messages.length - index) * 1000,
+                  attachments: msg.attachments || []
+                }));
+                newMap.set(activeChatId, loadedMessages);
+                console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages`);
+                return newMap;
+              });
 
-            // Remove from loading AFTER chatHistories update completes
-            loadingHistory.delete(activeChatId);
+              // Remove from loading AFTER chatHistories update completes
+              loadingHistory.delete(activeChatId);
 
-            // Scroll to bottom
-            setTimeout(() => {
-              if (chatWindow) {
-                chatWindow.scrollTop = chatWindow.scrollHeight;
-              }
-            }, 100);
-          } else {
-            console.log(`[ChatHistory] No messages: status=${result.status}, count=${result.messages?.length || 0}`);
+              // Scroll to bottom
+              setTimeout(() => {
+                if (chatWindow) {
+                  chatWindow.scrollTop = chatWindow.scrollHeight;
+                }
+              }, 100);
+            } else {
+              console.log(`[ChatHistory] No messages: status=${result.status}, count=${result.messages?.length || 0}`);
 
-            // Initialize with empty array to mark as "loaded but empty"
-            // This prevents infinite re-loading when chatHistories updates trigger reactive statement
-            chatHistories.update(map => {
-              const newMap = new Map(map);
-              newMap.set(activeChatId, []);
-              return newMap;
-            });
+              // Initialize with empty array to mark as "loaded but empty"
+              // This prevents infinite re-loading when chatHistories updates trigger reactive statement
+              chatHistories.update(map => {
+                const newMap = new Map(map);
+                newMap.set(activeChatId, []);
+                return newMap;
+              });
 
-            // Remove from loading AFTER chatHistories update completes
+              // Remove from loading AFTER chatHistories update completes
+              loadingHistory.delete(activeChatId);
+            }
+          } catch (e) {
+            console.error(`[ChatHistory] Error loading history:`, e);
+            // On error, remove from loading to allow retry
             loadingHistory.delete(activeChatId);
           }
-        } catch (e) {
-          console.error(`[ChatHistory] Error loading history:`, e);
-          // On error, remove from loading to allow retry
-          loadingHistory.delete(activeChatId);
-        }
-      })();
-    } else {
-      console.log(`[ChatHistory] Skipping load - already have ${currentHistory.length} messages`);
+        })();
+      } else {
+        console.log(`[ChatHistory] Skipping load - already have ${currentHistory.length} messages`);
+      }
     }
-  }
+  });
 
   // Phase 7: Reactive: Check if context window is full (100% or more)
-  $: isContextWindowFull = currentTokenUsage.limit > 0 && (currentTokenUsage.used / currentTokenUsage.limit) >= 1.0;
+  let isContextWindowFull = $derived(currentTokenUsage.limit > 0 && (currentTokenUsage.used / currentTokenUsage.limit) >= 1.0);
 
   // Reactive: Handle knowledge extraction failures (Phase 4)
-  $: if ($extractionFailure) {
-    const {conversation_id, reason} = $extractionFailure;
-    showExtractionFailure = true;
-    extractionFailureMessage = `Knowledge extraction failed for ${conversation_id}: ${reason}`;
-  }
+  $effect(() => {
+    if ($extractionFailure) {
+      const {conversation_id, reason} = $extractionFailure;
+      showExtractionFailure = true;
+      extractionFailureMessage = `Knowledge extraction failed for ${conversation_id}: ${reason}`;
+    }
+  });
 
   // Reactive: Handle knowledge commit voting results
-  $: if ($knowledgeCommitResult) {
-    const { status, topic, vote_tally } = $knowledgeCommitResult;
+  $effect(() => {
+    if ($knowledgeCommitResult) {
+      const { status, topic, vote_tally } = $knowledgeCommitResult;
 
-    // Store full result for detailed view
-    currentVoteResult = $knowledgeCommitResult;
+      // Store full result for detailed view
+      currentVoteResult = $knowledgeCommitResult;
 
-    if (status === "approved") {
-      commitResultMessage = `✅ Knowledge commit approved: ${topic} (${vote_tally.approve}/${vote_tally.total} votes) - Click for details`;
-      commitResultType = "info";
-    } else if (status === "rejected") {
-      commitResultMessage = `❌ Knowledge commit rejected: ${topic} (${vote_tally.reject} reject, ${vote_tally.request_changes} change requests) - Click for details`;
-      commitResultType = "error";
-    } else if (status === "revision_needed") {
-      commitResultMessage = `📝 Changes requested for: ${topic} (${vote_tally.request_changes}/${vote_tally.total} requested changes) - Click for details`;
-      commitResultType = "warning";
-    } else if (status === "timeout") {
-      commitResultMessage = `⏱️ Voting timeout for: ${topic} (${vote_tally.total} votes received) - Click for details`;
-      commitResultType = "warning";
+      if (status === "approved") {
+        commitResultMessage = `✅ Knowledge commit approved: ${topic} (${vote_tally.approve}/${vote_tally.total} votes) - Click for details`;
+        commitResultType = "info";
+      } else if (status === "rejected") {
+        commitResultMessage = `❌ Knowledge commit rejected: ${topic} (${vote_tally.reject} reject, ${vote_tally.request_changes} change requests) - Click for details`;
+        commitResultType = "error";
+      } else if (status === "revision_needed") {
+        commitResultMessage = `📝 Changes requested for: ${topic} (${vote_tally.request_changes}/${vote_tally.total} requested changes) - Click for details`;
+        commitResultType = "warning";
+      } else if (status === "timeout") {
+        commitResultMessage = `⏱️ Voting timeout for: ${topic} (${vote_tally.total} votes received) - Click for details`;
+        commitResultType = "warning";
+      }
+
+      showCommitResultToast = true;
+
+      // Send notification for knowledge commit result
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: 'Vote Complete',
+          body: `${topic} - ${status}`
+        });
+        console.log(`[Notifications] Knowledge commit result notification: ${notified ? 'system' : 'skip'}`);
+      })();
+
+      // Clear the result from store after showing
+      knowledgeCommitResult.set(null);
     }
-
-    showCommitResultToast = true;
-
-    // Send notification for knowledge commit result
-    (async () => {
-      const notified = await showNotificationIfBackground({
-        title: 'Vote Complete',
-        body: `${topic} - ${status}`
-      });
-      console.log(`[Notifications] Knowledge commit result notification: ${notified ? 'system' : 'skip'}`);
-    })();
-
-    // Clear the result from store after showing
-    knowledgeCommitResult.set(null);
-  }
+  });
 
   // Phase 7: Handle personal context updates (for "Updated" status indicator)
-  $: if ($contextUpdated) {
-    const { context_hash } = $contextUpdated;
-    if (context_hash) {
-      currentContextHash = context_hash;
-      console.log(`[Context Updated] New hash: ${context_hash.slice(0, 8)}...`);
+  $effect(() => {
+    if ($contextUpdated) {
+      const { context_hash } = $contextUpdated;
+      if (context_hash) {
+        currentContextHash = context_hash;
+        console.log(`[Context Updated] New hash: ${context_hash.slice(0, 8)}...`);
+      }
     }
-  }
+  });
 
   // Phase 7: Handle peer context updates (for "Updated" status indicators)
-  $: if ($peerContextUpdated) {
-    const { node_id, context_hash } = $peerContextUpdated;
-    if (node_id && context_hash) {
-      peerContextHashes = new Map(peerContextHashes);
-      peerContextHashes.set(node_id, context_hash);
-      console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
+  $effect(() => {
+    if ($peerContextUpdated) {
+      const { node_id, context_hash } = $peerContextUpdated;
+      if (node_id && context_hash) {
+        peerContextHashes = new Map(peerContextHashes);
+        peerContextHashes.set(node_id, context_hash);
+        console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
+      }
     }
-  }
+  });
 
   // File transfer event handlers (Week 1)
-  $: if ($fileTransferOffer) {
-    const { node_id, filename, size_bytes, transfer_id, sender_name } = $fileTransferOffer;
-    currentFileOffer = $fileTransferOffer;
-    showFileOfferDialog = true;
-    console.log(`File offer received: ${filename} (${(size_bytes / 1024).toFixed(1)} KB) from ${node_id.slice(0, 15)}...`);
+  $effect(() => {
+    if ($fileTransferOffer) {
+      const { node_id, filename, size_bytes, transfer_id, sender_name } = $fileTransferOffer;
+      currentFileOffer = $fileTransferOffer;
+      showFileOfferDialog = true;
+      console.log(`File offer received: ${filename} (${(size_bytes / 1024).toFixed(1)} KB) from ${node_id.slice(0, 15)}...`);
 
-    // Send notification for file offer
-    (async () => {
-      const notified = await showNotificationIfBackground({
-        title: `File from ${sender_name || node_id.slice(0, 16)}`,
-        body: `${filename} (${(size_bytes / 1048576).toFixed(2)} MB)`
-      });
-      console.log(`[Notifications] File offer notification: ${notified ? 'system' : 'skip'}`);
-    })();
-  }
+      // Send notification for file offer
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: `File from ${sender_name || node_id.slice(0, 16)}`,
+          body: `${filename} (${(size_bytes / 1048576).toFixed(2)} MB)`
+        });
+        console.log(`[Notifications] File offer notification: ${notified ? 'system' : 'skip'}`);
+      })();
+    }
+  });
 
-  $: if ($fileTransferComplete) {
-    const { filename, node_id, direction } = $fileTransferComplete;
-    fileOfferToastMessage = direction === "download"
-      ? `✓ File downloaded: ${filename}`
-      : `✓ File sent: ${filename}`;
-    showFileOfferToast = true;
-    setTimeout(() => showFileOfferToast = false, 5000);
+  $effect(() => {
+    if ($fileTransferComplete) {
+      const { filename, node_id, direction } = $fileTransferComplete;
+      fileOfferToastMessage = direction === "download"
+        ? `✓ File downloaded: ${filename}`
+        : `✓ File sent: ${filename}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
 
-    // Send notification for file transfer complete
-    (async () => {
-      const notified = await showNotificationIfBackground({
-        title: 'File Transfer Complete',
-        body: `${filename} (${direction})`
-      });
-      console.log(`[Notifications] File complete notification: ${notified ? 'system' : 'skip'}`);
-    })();
-  }
+      // Send notification for file transfer complete
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: 'File Transfer Complete',
+          body: `${filename} (${direction})`
+        });
+        console.log(`[Notifications] File complete notification: ${notified ? 'system' : 'skip'}`);
+      })();
+    }
+  });
 
-  $: if ($fileTransferCancelled) {
-    const { filename, reason } = $fileTransferCancelled;
-    fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
-    showFileOfferToast = true;
-    setTimeout(() => showFileOfferToast = false, 5000);
+  $effect(() => {
+    if ($fileTransferCancelled) {
+      const { filename, reason } = $fileTransferCancelled;
+      fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
 
-    // Send notification for file transfer cancelled
-    (async () => {
-      const notified = await showNotificationIfBackground({
-        title: 'Transfer Cancelled',
-        body: `${filename} (${reason})`
-      });
-      console.log(`[Notifications] File cancelled notification: ${notified ? 'system' : 'skip'}`);
-    })();
-  }
+      // Send notification for file transfer cancelled
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: 'Transfer Cancelled',
+          body: `${filename} (${reason})`
+        });
+        console.log(`[Notifications] File cancelled notification: ${notified ? 'system' : 'skip'}`);
+      })();
+    }
+  });
 
   // Reactive: Handle chat history restored (v0.11.2)
-  $: if ($historyRestored) {
-    console.log(`Restoring ${$historyRestored.message_count} messages to chat with ${$historyRestored.conversation_id}`);
+  $effect(() => {
+    if ($historyRestored) {
+      console.log(`Restoring ${$historyRestored.message_count} messages to chat with ${$historyRestored.conversation_id}`);
 
-    // Update chatHistories store - convert backend format to UI format
-    chatHistories.update(map => {
-      const newMap = new Map(map);
-      const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => ({
-        id: `restored-${index}-${Date.now()}`,
-        sender: msg.role === 'user' ? 'user' : $historyRestored.conversation_id,
-        senderName: msg.role === 'user' ? 'You' : getPeerDisplayName($historyRestored.conversation_id),
-        text: msg.content,
-        timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,  // Stagger timestamps
-        attachments: msg.attachments || []
-      }));
-      newMap.set($historyRestored.conversation_id, restoredMessages);
-      return newMap;
-    });
+      // Update chatHistories store - convert backend format to UI format
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => ({
+          id: `restored-${index}-${Date.now()}`,
+          sender: msg.role === 'user' ? 'user' : $historyRestored.conversation_id,
+          senderName: msg.role === 'user' ? 'You' : getPeerDisplayName($historyRestored.conversation_id),
+          text: msg.content,
+          timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,  // Stagger timestamps
+          attachments: msg.attachments || []
+        }));
+        newMap.set($historyRestored.conversation_id, restoredMessages);
+        return newMap;
+      });
 
-    // Scroll to bottom after restoring history
-    setTimeout(() => {
-      if (chatWindow) {
-        chatWindow.scrollTop = chatWindow.scrollHeight;
-      }
-    }, 100);
+      // Scroll to bottom after restoring history
+      setTimeout(() => {
+        if (chatWindow) {
+          chatWindow.scrollTop = chatWindow.scrollHeight;
+        }
+      }, 100);
 
-    // Show success toast
-    fileOfferToastMessage = `✓ Chat history restored: ${$historyRestored.message_count} messages`;
-    showFileOfferToast = true;
-    setTimeout(() => showFileOfferToast = false, 3000);
-  }
+      // Show success toast
+      fileOfferToastMessage = `✓ Chat history restored: ${$historyRestored.message_count} messages`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 3000);
+    }
+  });
 
   // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)
-  $: localContextUpdated = currentContextHash && lastSentContextHash.get(activeChatId) !== currentContextHash;
+  let localContextUpdated = $derived(currentContextHash && lastSentContextHash.get(activeChatId) !== currentContextHash);
 
   // Phase 7: Reactive: Check which peer contexts have changed (not yet sent to AI)
-  $: peerContextsUpdated = new Set(
+  let peerContextsUpdated = $derived(new Set(
     Array.from(peerContextHashes.keys()).filter(nodeId => {
       const conversationPeerHashes = lastSentPeerHashes.get(activeChatId);
       if (!conversationPeerHashes) return true;  // Never sent
       return conversationPeerHashes.get(nodeId) !== peerContextHashes.get(nodeId);
     })
-  );
+  ));
 
   // Reactive: Reset compute host if selected peer disconnects
-  $: if (selectedComputeHost !== "local" && $nodeStatus?.p2p_peers) {
-    const isStillConnected = $nodeStatus.p2p_peers.includes(selectedComputeHost);
-    if (!isStillConnected) {
-      console.log(`Compute host ${selectedComputeHost} disconnected, resetting to local`);
-      selectedComputeHost = "local";
-      selectedRemoteModel = "";
-    }
-  }
-
-  // Reactive: Reset selected peer contexts if peers disconnect
-  $: if (selectedPeerContexts.size > 0 && $nodeStatus?.p2p_peers) {
-    const connectedPeers = new Set($nodeStatus.p2p_peers);
-    let needsUpdate = false;
-    for (const peerId of selectedPeerContexts) {
-      if (!connectedPeers.has(peerId)) {
-        selectedPeerContexts.delete(peerId);
-        needsUpdate = true;
-        console.log(`Peer ${peerId} disconnected, removing from selected contexts`);
+  $effect(() => {
+    if (selectedComputeHost !== "local" && $nodeStatus?.p2p_peers) {
+      const isStillConnected = $nodeStatus.p2p_peers.includes(selectedComputeHost);
+      if (!isStillConnected) {
+        console.log(`Compute host ${selectedComputeHost} disconnected, resetting to local`);
+        selectedComputeHost = "local";
+        selectedRemoteModel = "";
       }
     }
-    if (needsUpdate) {
-      selectedPeerContexts = selectedPeerContexts;
+  });
+
+  // Reactive: Reset selected peer contexts if peers disconnect
+  $effect(() => {
+    if (selectedPeerContexts.size > 0 && $nodeStatus?.p2p_peers) {
+      const connectedPeers = new Set($nodeStatus.p2p_peers);
+      let needsUpdate = false;
+      for (const peerId of selectedPeerContexts) {
+        if (!connectedPeers.has(peerId)) {
+          selectedPeerContexts.delete(peerId);
+          needsUpdate = true;
+          console.log(`Peer ${peerId} disconnected, removing from selected contexts`);
+        }
+      }
+      if (needsUpdate) {
+        selectedPeerContexts = selectedPeerContexts;
+      }
     }
-  }
+  });
 
   // Helper: Group peers by connection strategy
   function getPeersByStrategy(peerInfo: any[]) {
@@ -604,7 +637,7 @@
   }
 
   // Reactive statement to compute peer counts
-  $: peersByStrategy = getPeersByStrategy($nodeStatus?.peer_info);
+  let peersByStrategy = $derived(getPeersByStrategy($nodeStatus?.peer_info));
 
   function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
     if (!element) return true;
@@ -622,7 +655,7 @@
   
   // Reactive derived value that maps peer IDs to display names
   // This ensures Svelte tracks changes to peer_info properly
-  $: peerDisplayNames = (() => {
+  let peerDisplayNames = $derived.by(() => {
     if (!$nodeStatus || !$nodeStatus.peer_info) {
       console.log('[PeerNames] No nodeStatus or peer_info');
       return new Map();
@@ -642,7 +675,7 @@
     }
     console.log('[PeerNames] Final map size:', names.size);
     return names;
-  })();
+  });
 
   function getPeerDisplayName(peerId: string): string {
     // Use the reactive map, with fallback for peers not in peer_info yet
@@ -703,7 +736,58 @@
   }
 
   // --- CHAT FUNCTIONS ---
-  function handleSendMessage() {
+  async function handleSendMessage() {
+    // Handle image + text
+    if (pendingImage) {
+      const text = currentInput.trim();
+      const imageData = pendingImage;
+
+      // Clear input and pending image
+      currentInput = "";
+      pendingImage = null;
+
+      // Add to conversation history with attachment
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        const hist = newMap.get(activeChatId) || [];
+        newMap.set(activeChatId, [...hist, {
+          id: crypto.randomUUID(),
+          sender: 'user',
+          text: text || '[Image]',
+          timestamp: Date.now(),
+          attachments: [{
+            type: 'image',
+            filename: imageData.filename,
+            thumbnail: imageData.dataUrl,
+            size_bytes: imageData.sizeBytes
+          }]
+        }]);
+        return newMap;
+      });
+
+      // Send image with caption to backend
+      try {
+        isLoading = true;
+        await sendCommand('send_image', {
+          conversation_id: activeChatId,
+          image_base64: imageData.dataUrl,
+          filename: imageData.filename,
+          caption: text
+        });
+        autoScroll();
+        // Note: Don't set isLoading = false here!
+        // The ai_response_with_image event handler will clear it when the vision response arrives
+      } catch (error) {
+        console.error('Error sending image:', error);
+        fileOfferToastMessage = `Failed to send image: ${error}`;
+        showFileOfferToast = true;
+        setTimeout(() => showFileOfferToast = false, 5000);
+        isLoading = false;  // Only clear loading on error
+      }
+      return;
+    }
+
+    // Handle text-only message
     if (!currentInput.trim()) return;
 
     const text = currentInput.trim();
@@ -862,24 +946,30 @@
   }
 
   // Load AI scopes when WebSocket connects (only once per connection)
-  $: if ($connectionStatus === "connected" && !aiScopesLoaded) {
-    loadAIScopes();
-  }
+  $effect(() => {
+    if ($connectionStatus === "connected" && !aiScopesLoaded) {
+      loadAIScopes();
+    }
+  });
 
   // Reset AI scopes loaded flag on disconnection (to reload on reconnect)
-  $: if ($connectionStatus === "disconnected" || $connectionStatus === "error") {
-    aiScopesLoaded = false;
-  }
+  $effect(() => {
+    if ($connectionStatus === "disconnected" || $connectionStatus === "error") {
+      aiScopesLoaded = false;
+    }
+  });
 
   // Reload AI scopes when firewall rules are updated (via FirewallEditor)
   // IMPORTANT: This reactive statement ensures UI updates immediately after saving firewall rules.
   // If you add more UI components that read from privacy_rules.json, add similar reactive
   // statements here to reload their data when $firewallRulesUpdated changes.
   // Example: if ($firewallRulesUpdated && $connectionStatus === "connected") { loadNodeGroups(); }
-  $: if ($firewallRulesUpdated && $connectionStatus === "connected") {
-    aiScopesLoaded = false;
-    loadAIScopes();
-  }
+  $effect(() => {
+    if ($firewallRulesUpdated && $connectionStatus === "connected") {
+      aiScopesLoaded = false;
+      loadAIScopes();
+    }
+  });
 
   function openProvidersEditor() {
     showProvidersEditor = true;
@@ -1131,7 +1221,7 @@
     }
   }
 
-  // Image paste handlers (Phase 2.4: Screenshot + Vision)
+  // Image paste handlers (Phase 2.4: Screenshot + Vision - improved UX)
   function handlePaste(event: ClipboardEvent) {
     const items = event.clipboardData?.items;
     if (!items) return;
@@ -1152,22 +1242,14 @@
           return;
         }
 
-        // Convert to data URL
+        // Convert to data URL and show as preview chip
         const reader = new FileReader();
         reader.onload = (e) => {
-          pastedImage = {
+          pendingImage = {
             dataUrl: e.target?.result as string,
-            filename: `screenshot_${Date.now()}.png`
+            filename: `screenshot_${Date.now()}.png`,
+            sizeBytes: blob.size
           };
-
-          // AI Chat: Auto-send with vision analysis (no preview needed)
-          // P2P Chat: Show preview for confirmation
-          if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
-            sendImageToAI(pastedImage);
-            pastedImage = null;
-          } else {
-            showImagePreview = true;
-          }
         };
         reader.readAsDataURL(blob);
         break;
@@ -1175,100 +1257,8 @@
     }
   }
 
-  async function sendImageToAI(image: { dataUrl: string; filename: string }) {
-    // Add image to conversation history immediately
-    chatHistories.update(h => {
-      const newMap = new Map(h);
-      const hist = newMap.get(activeChatId) || [];
-      newMap.set(activeChatId, [...hist, {
-        id: crypto.randomUUID(),
-        sender: 'user',
-        text: currentInput.trim() || '[Image]',
-        timestamp: Date.now(),
-        attachments: [{
-          type: 'image',
-          filename: image.filename,
-          thumbnail: image.dataUrl,
-          size_bytes: 0  // Will be computed by backend
-        }]
-      }]);
-      return newMap;
-    });
-
-    // Send to backend for vision analysis
-    try {
-      isLoading = true;
-      await sendCommand('send_image', {
-        conversation_id: activeChatId,
-        image_base64: image.dataUrl,
-        filename: image.filename,
-        caption: currentInput.trim()  // Include any text typed before paste
-      });
-
-      currentInput = '';  // Clear input after sending
-      autoScroll();
-    } catch (error) {
-      console.error('Error sending image to AI:', error);
-      fileOfferToastMessage = `Failed to send image: ${error}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-    } finally {
-      isLoading = false;
-    }
-  }
-
-  async function sendImageToPeer(caption: string) {
-    if (!pastedImage) return;
-
-    // Store image data before clearing pastedImage
-    const imageData = {
-      dataUrl: pastedImage.dataUrl,
-      filename: pastedImage.filename
-    };
-
-    // Add image to conversation history
-    chatHistories.update(h => {
-      const newMap = new Map(h);
-      const hist = newMap.get(activeChatId) || [];
-      newMap.set(activeChatId, [...hist, {
-        id: crypto.randomUUID(),
-        sender: 'user',
-        text: caption || '[Image]',
-        timestamp: Date.now(),
-        attachments: [{
-          type: 'image',
-          filename: imageData.filename,
-          thumbnail: imageData.dataUrl,
-          size_bytes: 0,  // Will be computed by backend
-          status: 'sending'
-        }]
-      }]);
-      return newMap;
-    });
-
-    try {
-      await sendCommand('send_image', {
-        conversation_id: activeChatId,
-        image_base64: imageData.dataUrl,
-        filename: imageData.filename,
-        caption: caption
-      });
-
-      showImagePreview = false;
-      pastedImage = null;
-      autoScroll();
-      console.log('Image sent to peer');
-    } catch (error) {
-      console.error('Error sending image to peer:', error);
-      fileOfferToastMessage = `Failed to send image: ${error}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-    }
-  }
-
-  function handleCancelImagePreview() {
-    showImagePreview = false;
-    pastedImage = null;
+  function clearPendingImage() {
+    pendingImage = null;
   }
 
   async function handleConfirmSendFile() {
@@ -1328,8 +1318,9 @@
   }
 
   // --- HANDLE INCOMING MESSAGES ---
-  $: if ($coreMessages?.id) {
-    const message = $coreMessages;
+  $effect(() => {
+    if ($coreMessages?.id) {
+      const message = $coreMessages;
 
     if (message.command === "execute_ai_query") {
       isLoading = false;
@@ -1392,9 +1383,42 @@
 
       autoScroll();
     }
-  }
-  
-  $: if ($p2pMessages) {
+    }
+  });
+
+  // Handle AI vision responses (Phase 2)
+  $effect(() => {
+    if ($aiResponseWithImage) {
+      const response = $aiResponseWithImage;
+      isLoading = false;
+
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        const hist = newMap.get(response.conversation_id) || [];
+
+        // Add assistant response (just text, image is already in user's message)
+        newMap.set(response.conversation_id, [
+          ...hist,
+          {
+            id: crypto.randomUUID(),
+            sender: 'ai',
+            text: response.response,
+            timestamp: Date.now(),
+            model: response.model
+          }
+        ]);
+        return newMap;
+      });
+
+      autoScroll();
+
+      // Clear the store after processing
+      aiResponseWithImage.set(null);
+    }
+  });
+
+  $effect(() => {
+    if ($p2pMessages) {
     const msg = $p2pMessages;
     const messageId = msg.message_id || `${msg.sender_node_id}-${msg.text}`;
 
@@ -1451,9 +1475,10 @@
         }
       }
     }
-  }
-  
-  $: activeMessages = $chatHistories.get(activeChatId) || [];
+    }
+  });
+
+  let activeMessages = $derived($chatHistories.get(activeChatId) || []);
 </script>
 
 <main class="container">
@@ -1465,10 +1490,10 @@
       <span class="status-connecting">Backend status: connecting...</span>
     {:else if $connectionStatus === 'error'}
       <span class="status-error">Backend status: error</span>
-      <button class="btn-small" on:click={handleReconnect}>Retry</button>
+      <button class="btn-small" onclick={handleReconnect}>Retry</button>
     {:else}
       <span class="status-disconnected">Backend status: disconnected</span>
-      <button class="btn-small" on:click={handleReconnect}>Connect</button>
+      <button class="btn-small" onclick={handleReconnect}>Connect</button>
     {/if}
   </div>
 
@@ -1483,7 +1508,7 @@
             <code class="node-id">{$nodeStatus.node_id}</code>
             <button
               class="copy-btn"
-              on:click={() => {
+              onclick={() => {
                 navigator.clipboard.writeText($nodeStatus.node_id);
                 alert('Node ID copied!');
               }}
@@ -1509,7 +1534,7 @@
                       <span class="ip-badge">{ip}</span>
                       <button
                         class="copy-btn-icon"
-                        on:click={() => {
+                        onclick={() => {
                           navigator.clipboard.writeText(uri);
                           alert('✓ URI copied!');
                         }}
@@ -1544,7 +1569,7 @@
                       <span class="ip-badge external">{ip}</span>
                       <button
                         class="copy-btn-icon"
-                        on:click={() => {
+                        onclick={() => {
                           navigator.clipboard.writeText(uri);
                           alert('✓ External URI copied!');
                         }}
@@ -1569,7 +1594,7 @@
               <details class="uri-details" open={!modeSectionCollapsed}>
                 <summary
                   class="uri-summary"
-                  on:click={() => modeSectionCollapsed = !modeSectionCollapsed}
+                  onclick={() => modeSectionCollapsed = !modeSectionCollapsed}
                 >
                   <span class="uri-title">Hub Mode</span>
                 </summary>
@@ -1593,7 +1618,7 @@
                     <p class="info-text">Connect to Hub for WebRTC signaling</p>
                     <div class="hub-login-buttons">
                       <button
-                        on:click={() => sendCommand('login_to_hub', {provider: 'google'})}
+                        onclick={() => sendCommand('login_to_hub', {provider: 'google'})}
                         class="btn-oauth btn-google"
                         title="Login with Google"
                       >
@@ -1601,7 +1626,7 @@
                         Google
                       </button>
                       <button
-                        on:click={() => sendCommand('login_to_hub', {provider: 'github'})}
+                        onclick={() => sendCommand('login_to_hub', {provider: 'github'})}
                         class="btn-oauth btn-github"
                         title="Login with GitHub"
                       >
@@ -1618,19 +1643,19 @@
 
         <!-- Personal Context Button (Knowledge Architecture) -->
         <div class="context-section">
-          <button class="btn-context" on:click={loadPersonalContext}>
+          <button class="btn-context" onclick={loadPersonalContext}>
             View Personal Context
           </button>
 
-          <button class="btn-context" on:click={openInstructionsEditor}>
+          <button class="btn-context" onclick={openInstructionsEditor}>
             AI Instructions
           </button>
 
-          <button class="btn-context" on:click={openFirewallEditor}>
+          <button class="btn-context" onclick={openFirewallEditor}>
             Firewall and Privacy Rules
           </button>
 
-          <button class="btn-context" on:click={openProvidersEditor}>
+          <button class="btn-context" onclick={openProvidersEditor}>
             AI Providers
           </button>
 
@@ -1642,7 +1667,7 @@
                 name="auto-knowledge-detection"
                 type="checkbox"
                 bind:checked={autoKnowledgeDetection}
-                on:change={toggleAutoKnowledgeDetection}
+                onchange={toggleAutoKnowledgeDetection}
               />
               <span class="toggle-slider"></span>
               <span class="toggle-label">
@@ -1666,9 +1691,9 @@
             type="text"
             bind:value={peerInput}
             placeholder="node_id or dpc://IP:port?node_id=..."
-            on:keydown={(e) => e.key === 'Enter' && handleConnectPeer()}
+            onkeydown={(e) => e.key === 'Enter' && handleConnectPeer()}
           />
-          <button on:click={handleConnectPeer}>Connect</button>
+          <button onclick={handleConnectPeer}>Connect</button>
 
           <!-- Connection Methods Help (Collapsible) -->
           <details class="connection-methods-details">
@@ -1725,7 +1750,7 @@
             <h3>Chats</h3>
             <button
               class="btn-add-chat"
-              on:click={handleAddAIChat}
+              onclick={handleAddAIChat}
               title="Add a new AI chat with a different provider"
             >
               + AI
@@ -1739,7 +1764,7 @@
                   type="button"
                   class="chat-button"
                   class:active={activeChatId === chatId}
-                  on:click={() => activeChatId = chatId}
+                  onclick={() => activeChatId = chatId}
                   title={chatInfo.provider ? `Provider: ${chatInfo.provider}` : 'Default AI Assistant'}
                 >
                   {chatInfo.name}
@@ -1748,7 +1773,7 @@
                   <button
                     type="button"
                     class="disconnect-btn"
-                    on:click|stopPropagation={() => handleDeleteAIChat(chatId)}
+                    onclick={(e) => { e.stopPropagation(); handleDeleteAIChat(chatId); }}
                     title="Delete AI chat"
                   >
                     ×
@@ -1765,7 +1790,7 @@
                     type="button"
                     class="chat-button"
                     class:active={activeChatId === peerId}
-                    on:click={() => {
+                    onclick={() => {
                       activeChatId = peerId;
                       resetUnreadCount(peerId);
                     }}
@@ -1779,7 +1804,7 @@
                   <button
                     type="button"
                     class="disconnect-btn"
-                    on:click|stopPropagation={() => handleDisconnectPeer(peerId)}
+                    onclick={(e) => { e.stopPropagation(); handleDisconnectPeer(peerId); }}
                     title="Disconnect from peer"
                   >
                     ×
@@ -1821,7 +1846,7 @@
               <select
                 id="provider-select"
                 value={$chatProviders.get(activeChatId) || $availableProviders.default_provider}
-                on:change={(e) => {
+                onchange={(e) => {
                   chatProviders.update(map => {
                     const newMap = new Map(map);
                     newMap.set(activeChatId, e.currentTarget.value);
@@ -1852,12 +1877,12 @@
         {/if}
 
         <div class="chat-actions">
-          <button class="btn-new-chat" on:click={() => handleNewChat(activeChatId)}>
+          <button class="btn-new-chat" onclick={() => handleNewChat(activeChatId)}>
             New Session
           </button>
           <button
             class="btn-end-session"
-            on:click={() => handleEndSession(activeChatId)}
+            onclick={() => handleEndSession(activeChatId)}
             disabled={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')}
             title={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer must be online to save knowledge (requires voting)" : "Extract and save knowledge from this conversation"}
           >
@@ -1867,7 +1892,7 @@
             <button
               class="btn-markdown-toggle"
               class:active={enableMarkdown}
-              on:click={() => enableMarkdown = !enableMarkdown}
+              onclick={() => enableMarkdown = !enableMarkdown}
               title={enableMarkdown ? 'Disable markdown rendering' : 'Enable markdown rendering'}
             >
               {enableMarkdown ? 'Markdown' : 'Text'}
@@ -1944,7 +1969,7 @@
             <button
               type="button"
               class="context-toggle-header"
-              on:click={() => contextPanelCollapsed = !contextPanelCollapsed}
+              onclick={() => contextPanelCollapsed = !contextPanelCollapsed}
               aria-expanded={!contextPanelCollapsed}
             >
               <span class="context-toggle-title">
@@ -2014,7 +2039,7 @@
                       name={`peer-context-${peer.node_id}`}
                       type="checkbox"
                       checked={selectedPeerContexts.has(peer.node_id)}
-                      on:change={() => togglePeerContext(peer.node_id)}
+                      onchange={() => togglePeerContext(peer.node_id)}
                     />
                     <span>
                       {displayName}
@@ -2034,7 +2059,7 @@
         {#if activeChatId === 'local_ai'}
           <div class="compute-host-selector">
             <label for="compute-host">🖥️ Compute Host:</label>
-            <select id="compute-host" bind:value={selectedComputeHost} on:change={() => {
+            <select id="compute-host" bind:value={selectedComputeHost} onchange={() => {
               // Reset selected model when switching compute hosts
               selectedRemoteModel = "";
               // Auto-select first available model if switching to remote
@@ -2076,6 +2101,18 @@
             {/if}
           </div>
         {/if}
+        <!-- Image Preview Chip (Phase 2.4: improved UX) -->
+        {#if pendingImage}
+          <div class="image-preview-chip">
+            <img src={pendingImage.dataUrl} alt={pendingImage.filename} class="preview-thumbnail" />
+            <div class="preview-info">
+              <span class="preview-filename">{pendingImage.filename}</span>
+              <span class="preview-size">{(pendingImage.sizeBytes / (1024 * 1024)).toFixed(2)} MB</span>
+            </div>
+            <button class="preview-remove" onclick={clearPendingImage} aria-label="Remove image">✕</button>
+          </div>
+        {/if}
+
         <div class="input-row">
           <textarea
             id="message-input"
@@ -2083,31 +2120,31 @@
             bind:value={currentInput}
             placeholder={
               isContextWindowFull ? 'Context window full - End session to continue' :
-              ($connectionStatus === 'connected' ? 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)' : 'Connect to Core Service first...')
+              ($connectionStatus === 'connected' ? (pendingImage ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
             }
             disabled={$connectionStatus !== 'connected' || isLoading || isContextWindowFull}
-            on:keydown={(e) => {
+            onkeydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                // Only send if peer is connected (or local AI chat)
-                if (isPeerConnected || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
+                // Only send if peer is connected (or local AI chat) AND (has text OR has pending image)
+                if ((isPeerConnected || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) && (currentInput.trim() || pendingImage)) {
                   handleSendMessage();
                 }
               }
             }}
-            on:paste={handlePaste}
+            onpaste={handlePaste}
           ></textarea>
           <button
             class="file-button"
-            on:click={handleSendFile}
+            onclick={handleSendFile}
             disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || !isPeerConnected}
             title={isPeerConnected ? "Send file (P2P chat only)" : "Peer disconnected"}
           >
             📎
           </button>
           <button
-            on:click={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || !currentInput.trim() || isContextWindowFull || !isPeerConnected}
+            onclick={handleSendMessage}
+            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || !isPeerConnected}
             title={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer disconnected" : ""}
           >
             {#if isLoading}Sending...{:else}Send{/if}
@@ -2120,7 +2157,7 @@
       <div
         class="resize-handle"
         class:resizing={isResizing}
-        on:mousedown={startResize}
+        onmousedown={startResize}
         role="separator"
         aria-orientation="horizontal"
         aria-label="Resize chat panel"
@@ -2152,8 +2189,8 @@
     class="dialog-overlay"
     role="button"
     tabindex="0"
-    on:click={() => showNotificationPermissionDialog = false}
-    on:keydown={(e) => {
+    onclick={() => showNotificationPermissionDialog = false}
+    onkeydown={(e) => {
       if (e.key === 'Escape' || e.key === 'Enter') {
         showNotificationPermissionDialog = false;
       }
@@ -2164,8 +2201,8 @@
       role="dialog"
       aria-labelledby="notification-dialog-title"
       tabindex="-1"
-      on:click|stopPropagation
-      on:keydown|stopPropagation
+      onclick={(e) => e.stopPropagation()}
+      onkeydown={(e) => e.stopPropagation()}
     >
       <h2 id="notification-dialog-title">Enable Desktop Notifications</h2>
       <p>Get notified when:</p>
@@ -2178,7 +2215,7 @@
       <div class="dialog-actions">
         <button
           class="btn-primary"
-          on:click={async () => {
+          onclick={async () => {
             const granted = await requestNotificationPermission();
             showNotificationPermissionDialog = false;
 
@@ -2194,7 +2231,7 @@
         </button>
         <button
           class="btn-secondary"
-          on:click={() => {
+          onclick={() => {
             showNotificationPermissionDialog = false;
             localStorage.setItem('notificationPreference', 'disabled');
             localStorage.setItem('permissionRequestedAt', new Date().toISOString());
@@ -2286,15 +2323,15 @@
 
 <!-- File Offer Dialog -->
 {#if showFileOfferDialog && currentFileOffer}
-  <div class="modal-overlay" role="presentation" on:click={handleRejectFile} on:keydown={(e) => e.key === 'Escape' && handleRejectFile()}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+  <div class="modal-overlay" role="presentation" onclick={handleRejectFile} onkeydown={(e) => e.key === 'Escape' && handleRejectFile()}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
       <h3>Incoming File</h3>
       <p><strong>File:</strong> {currentFileOffer.filename}</p>
       <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
       <p><strong>From:</strong> {currentFileOffer.node_id.slice(0, 20)}...</p>
       <div class="modal-buttons">
-        <button class="accept-button" on:click={handleAcceptFile}>Accept</button>
-        <button class="reject-button" on:click={handleRejectFile}>Reject</button>
+        <button class="accept-button" onclick={handleAcceptFile}>Accept</button>
+        <button class="reject-button" onclick={handleRejectFile}>Reject</button>
       </div>
     </div>
   </div>
@@ -2302,8 +2339,8 @@
 
 <!-- Send File Confirmation Dialog -->
 {#if showSendFileDialog && pendingFileSend}
-  <div class="modal-overlay" role="presentation" on:click={handleCancelSendFile} on:keydown={(e) => e.key === 'Escape' && handleCancelSendFile()}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
+  <div class="modal-overlay" role="presentation" onclick={handleCancelSendFile} onkeydown={(e) => e.key === 'Escape' && handleCancelSendFile()}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
       <h3>Send File</h3>
       <p><strong>File:</strong> {pendingFileSend.fileName}</p>
       <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
@@ -2332,7 +2369,7 @@
       {/if}
 
       <div class="modal-buttons">
-        <button class="accept-button" on:click={handleConfirmSendFile} disabled={isSendingFile}>
+        <button class="accept-button" onclick={handleConfirmSendFile} disabled={isSendingFile}>
           {#if $filePreparationCompleted && isSendingFile}
             Sending...
           {:else if isSendingFile}
@@ -2341,33 +2378,7 @@
             Send
           {/if}
         </button>
-        <button class="reject-button" on:click={handleCancelSendFile} disabled={isSendingFile}>Cancel</button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- Image Preview Dialog (Phase 2.4: Screenshot + Vision) -->
-{#if showImagePreview && pastedImage}
-  <div class="modal-overlay" role="presentation" on:click={handleCancelImagePreview} on:keydown={(e) => e.key === 'Escape' && handleCancelImagePreview()}>
-    <div class="modal-dialog image-preview-dialog" role="dialog" aria-modal="true" tabindex="-1" on:click|stopPropagation on:keydown|stopPropagation>
-      <h3>Send Image</h3>
-      <div class="image-preview-container">
-        <img src={pastedImage.dataUrl} alt="Pasted screenshot" class="preview-image" />
-      </div>
-      <p><strong>Filename:</strong> {pastedImage.filename}</p>
-      <div class="caption-input">
-        <label for="image-caption">Caption (optional):</label>
-        <textarea
-          id="image-caption"
-          bind:value={currentInput}
-          placeholder="Add a caption to the image..."
-          rows="3"
-        ></textarea>
-      </div>
-      <div class="modal-buttons">
-        <button class="accept-button" on:click={() => sendImageToPeer(currentInput)}>Send</button>
-        <button class="reject-button" on:click={handleCancelImagePreview}>Cancel</button>
+        <button class="reject-button" onclick={handleCancelSendFile} disabled={isSendingFile}>Cancel</button>
       </div>
     </div>
   </div>
@@ -2395,7 +2406,7 @@
           <span class="transfer-status">{transfer.direction === 'upload' ? '↑' : '↓'} {transfer.status}</span>
           <button
             class="cancel-transfer-button"
-            on:click={() => handleCancelTransfer(transfer.transfer_id, transfer.filename)}
+            onclick={() => handleCancelTransfer(transfer.transfer_id, transfer.filename)}
             title="Cancel transfer"
             aria-label="Cancel transfer"
           >
@@ -2420,8 +2431,8 @@
   <div
     class="modal-overlay"
     role="presentation"
-    on:click={cancelAddAIChat}
-    on:keydown={(e) => e.key === 'Escape' && cancelAddAIChat()}
+    onclick={cancelAddAIChat}
+    onkeydown={(e) => e.key === 'Escape' && cancelAddAIChat()}
   >
     <!-- svelte-ignore a11y-click-events-have-key-events -->
     <!-- svelte-ignore a11y-no-static-element-interactions -->
@@ -2431,7 +2442,7 @@
       aria-labelledby="modal-title"
       aria-modal="true"
       tabindex="-1"
-      on:click|stopPropagation
+      onclick={(e) => e.stopPropagation()}
     >
       <h2 id="modal-title">Add New AI Chat</h2>
       <p>Select an AI provider for the new chat:</p>
@@ -2448,8 +2459,8 @@
       </div>
 
       <div class="dialog-actions">
-        <button class="btn-cancel" on:click={cancelAddAIChat}>Cancel</button>
-        <button class="btn-confirm" on:click={confirmAddAIChat}>Create Chat</button>
+        <button class="btn-cancel" onclick={cancelAddAIChat}>Cancel</button>
+        <button class="btn-confirm" onclick={confirmAddAIChat}>Create Chat</button>
       </div>
     </div>
   </div>
@@ -4292,5 +4303,79 @@
   .reject-button:disabled {
     background: #cccccc;
     cursor: not-allowed;
+  }
+
+  /* Image Preview Chip (Phase 2.4: improved UX) */
+  .image-preview-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.5rem;
+    margin-bottom: 0.5rem;
+    background: #f5f5f5;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+  }
+
+  .image-preview-chip:hover {
+    background: #ebebeb;
+    border-color: #ccc;
+  }
+
+  .preview-thumbnail {
+    width: 60px;
+    height: 60px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+  }
+
+  .preview-info {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0; /* Enable text truncation */
+  }
+
+  .preview-filename {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #333;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .preview-size {
+    font-size: 0.75rem;
+    color: #666;
+  }
+
+  .preview-remove {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    background: #f44336;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    font-size: 1.2rem;
+    line-height: 1;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .preview-remove:hover {
+    background: #d32f2f;
+  }
+
+  .preview-remove:active {
+    transform: scale(0.95);
   }
 </style>

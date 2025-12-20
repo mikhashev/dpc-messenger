@@ -12,6 +12,29 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
+    """
+    Sanitize payload for logging by truncating large base64 strings.
+
+    Args:
+        payload: The payload dict to sanitize
+        max_length: Maximum length for base64 strings (default: 30 characters)
+
+    Returns:
+        Sanitized copy of payload with truncated base64 strings
+    """
+    sanitized = payload.copy()
+
+    # Truncate image_base64 field if present
+    if 'image_base64' in sanitized and isinstance(sanitized['image_base64'], str):
+        original = sanitized['image_base64']
+        if len(original) > max_length:
+            sanitized['image_base64'] = f"{original[:max_length]}... ({len(original)} chars)"
+
+    return sanitized
+
+
 class LocalApiServer:
     def __init__(self, core_service: "CoreService", host: str = "127.0.0.1", port: int = 9999):
         self.core_service = core_service
@@ -44,7 +67,9 @@ class LocalApiServer:
                     handler_method = getattr(self.core_service, command, None)
 
                     if handler_method and asyncio.iscoroutinefunction(handler_method):
-                        logger.debug("Executing command '%s' with payload: %s", command, payload)
+                        # Sanitize payload for logging (truncate large base64 strings)
+                        sanitized_payload = _sanitize_payload_for_logging(payload)
+                        logger.debug("Executing command '%s' with payload: %s", command, sanitized_payload)
 
                         # For long-running tasks like AI queries, run them in the background
                         if command == "execute_ai_query":

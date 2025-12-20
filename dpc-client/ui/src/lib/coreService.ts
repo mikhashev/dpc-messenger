@@ -47,6 +47,9 @@ export const fileTransferProgress = writable<any>(null);  // Progress updates
 export const fileTransferComplete = writable<any>(null);  // Completed transfers
 export const fileTransferCancelled = writable<any>(null);  // Cancelled transfers
 
+// Vision/Image stores (Phase 2)
+export const aiResponseWithImage = writable<any>(null);  // AI vision analysis responses
+
 // Track active file transfers (transfer_id -> {node_id, filename, direction, progress, status})
 export const activeFileTransfers = writable<Map<string, any>>(new Map());
 
@@ -314,6 +317,11 @@ export function connectToCoreService() {
                 else if (message.event === "firewall_rules_updated") {
                     console.log("Firewall rules updated, triggering AI scope reload");
                     firewallRulesUpdated.set(message.payload);
+                }
+                // Handle AI vision response (Phase 2)
+                else if (message.event === "ai_response_with_image") {
+                    console.log("AI vision response received:", message.payload);
+                    aiResponseWithImage.set(message.payload);
                 }
                 // File transfer event handlers (Week 1)
                 else if (message.event === "file_transfer_offered") {
