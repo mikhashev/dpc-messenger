@@ -50,22 +50,22 @@
     ['local_ai', []]
   ]));
   
-  let activeChatId: string = 'local_ai';
+  let activeChatId = $state('local_ai');
   let currentInput = $state("");
   let isLoading = $state(false);
   let chatWindow: HTMLElement;
-  let peerInput: string = "";  // RENAMED from peerUri for clarity
-  let selectedComputeHost: string = "local";  // "local" or node_id for remote inference
-  let selectedRemoteModel: string = "";  // Selected model when using remote compute host
-  let selectedPeerContexts: Set<string> = new Set();  // Set of peer node_ids to fetch context from
+  let peerInput = $state("");  // RENAMED from peerUri for clarity
+  let selectedComputeHost = $state("local");  // "local" or node_id for remote inference
+  let selectedRemoteModel = $state("");  // Selected model when using remote compute host
+  let selectedPeerContexts = $state(new Set<string>());  // Set of peer node_ids to fetch context from
 
   // Resizable chat panel state
-  let chatPanelHeight: number = (() => {
+  let chatPanelHeight = $state((() => {
     // Load saved height from localStorage, default to calc(100vh - 120px)
     const saved = localStorage.getItem('chatPanelHeight');
     return saved ? parseInt(saved, 10) : 600;
-  })();
-  let isResizing: boolean = false;
+  })());
+  let isResizing = $state(false);
   let resizeStartY: number = 0;
   let resizeStartHeight: number = 0;
 
@@ -83,47 +83,47 @@
   let processedMessageIds = new Set<string>();
 
   // Knowledge Architecture UI state
-  let showContextViewer: boolean = false;
-  let showInstructionsEditor: boolean = false;
-  let showFirewallEditor: boolean = false;
-  let showProvidersEditor: boolean = false;
-  let showCommitDialog: boolean = false;
-  let showNewSessionDialog: boolean = false;  // v0.11.3: mutual session approval
-  let autoKnowledgeDetection: boolean = false;  // Default: disabled
+  let showContextViewer = $state(false);
+  let showInstructionsEditor = $state(false);
+  let showFirewallEditor = $state(false);
+  let showProvidersEditor = $state(false);
+  let showCommitDialog = $state(false);
+  let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
+  let autoKnowledgeDetection = $state(false);  // Default: disabled
 
   // Token tracking state (Phase 2)
-  let tokenUsageMap: Map<string, {used: number, limit: number}> = new Map();
-  let showTokenWarning: boolean = false;
-  let tokenWarningMessage: string = "";
+  let tokenUsageMap = $state(new Map<string, {used: number, limit: number}>());
+  let showTokenWarning = $state(false);
+  let tokenWarningMessage = $state("");
 
   // Knowledge extraction failure state (Phase 4)
-  let showExtractionFailure: boolean = false;
-  let extractionFailureMessage: string = "";
+  let showExtractionFailure = $state(false);
+  let extractionFailureMessage = $state("");
 
   // Knowledge commit result notification state
-  let showCommitResultToast: boolean = false;
-  let commitResultMessage: string = "";
-  let commitResultType: "info" | "error" | "warning" = "info";
-  let showVoteResultDialog: boolean = false;
-  let currentVoteResult: any = null;
+  let showCommitResultToast = $state(false);
+  let commitResultMessage = $state("");
+  let commitResultType = $state<"info" | "error" | "warning">("info");
+  let showVoteResultDialog = $state(false);
+  let currentVoteResult = $state<any>(null);
 
   // Add AI Chat dialog state
-  let showAddAIChatDialog: boolean = false;
-  let selectedProviderForNewChat: string = "";
+  let showAddAIChatDialog = $state(false);
+  let selectedProviderForNewChat = $state("");
 
   // Personal context inclusion toggle
-  let includePersonalContext: boolean = true;
+  let includePersonalContext = $state(true);
 
   // AI Scope selection (for filtering what local AI can access)
-  let selectedAIScope: string = ""; // Empty = no filtering (full context)
-  let availableAIScopes: string[] = []; // List of scope names from privacy rules
-  let aiScopesLoaded: boolean = false; // Guard flag to prevent infinite loop
+  let selectedAIScope = $state(""); // Empty = no filtering (full context)
+  let availableAIScopes = $state<string[]>([]); // List of scope names from privacy rules
+  let aiScopesLoaded = $state(false); // Guard flag to prevent infinite loop
 
   // Markdown rendering toggle (with localStorage persistence)
-  let enableMarkdown: boolean = (() => {
+  let enableMarkdown = $state((() => {
     const saved = localStorage.getItem('enableMarkdown');
     return saved !== null ? saved === 'true' : true; // Default: enabled
-  })();
+  })());
 
   // Save markdown preference to localStorage when changed
   $effect(() => {
@@ -131,32 +131,32 @@
   });
 
   // Phase 7: Context hash tracking for "Updated" status indicators
-  let currentContextHash: string = "";  // Current hash from backend (when context is saved)
-  let lastSentContextHash: Map<string, string> = new Map();  // Per-conversation: last hash sent to AI
-  let peerContextHashes: Map<string, string> = new Map();  // Per-peer: current hash from backend
-  let lastSentPeerHashes: Map<string, Map<string, string>> = new Map();  // Per-conversation, per-peer: last hash sent
+  let currentContextHash = $state("");  // Current hash from backend (when context is saved)
+  let lastSentContextHash = $state(new Map<string, string>());  // Per-conversation: last hash sent to AI
+  let peerContextHashes = $state(new Map<string, string>());  // Per-peer: current hash from backend
+  let lastSentPeerHashes = $state(new Map<string, Map<string, string>>());  // Per-conversation, per-peer: last hash sent
 
   // File transfer UI state (Week 1)
-  let showFileOfferDialog: boolean = false;
-  let currentFileOffer: any = null;
-  let fileOfferToastMessage: string = "";
-  let showFileOfferToast: boolean = false;
+  let showFileOfferDialog = $state(false);
+  let currentFileOffer = $state<any>(null);
+  let fileOfferToastMessage = $state("");
+  let showFileOfferToast = $state(false);
 
   // Send file confirmation dialog
-  let showSendFileDialog: boolean = false;
-  let pendingFileSend: { filePath: string, fileName: string, recipientId: string, recipientName: string } | null = null;
-  let isSendingFile: boolean = false;  // Prevent double-click bug
+  let showSendFileDialog = $state(false);
+  let pendingFileSend = $state<{ filePath: string, fileName: string, recipientId: string, recipientName: string } | null>(null);
+  let isSendingFile = $state(false);  // Prevent double-click bug
 
   // Image paste state (Phase 2.4: Screenshot + Vision - improved UX)
-  let pendingImage: { dataUrl: string; filename: string; sizeBytes: number } | null = $state(null);
+  let pendingImage = $state<{ dataUrl: string; filename: string; sizeBytes: number } | null>(null);
 
   // UI collapse states
-  let contextPanelCollapsed: boolean = false;  // Context toggle panel collapsible
-  let modeSectionCollapsed: boolean = true;  // Mode section collapsible (collapsed by default)
+  let contextPanelCollapsed = $state(false);  // Context toggle panel collapsible
+  let modeSectionCollapsed = $state(true);  // Mode section collapsible (collapsed by default)
 
   // Notification state
-  let windowFocused: boolean = true;
-  let showNotificationPermissionDialog: boolean = false;
+  let windowFocused = $state(true);
+  let showNotificationPermissionDialog = $state(false);
 
   // Chat history loading state (prevent infinite loop)
   let loadingHistory = new Set<string>();
@@ -2153,7 +2153,7 @@
       </div>
 
       <!-- Resize Handle -->
-      <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
+      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="resize-handle"
         class:resizing={isResizing}
@@ -2426,16 +2426,16 @@
 
 <!-- Add AI Chat Dialog -->
 {#if showAddAIChatDialog}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="modal-overlay"
     role="presentation"
     onclick={cancelAddAIChat}
     onkeydown={(e) => e.key === 'Escape' && cancelAddAIChat()}
   >
-    <!-- svelte-ignore a11y-click-events-have-key-events -->
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div
       class="modal-content"
       role="dialog"
@@ -4223,42 +4223,6 @@
     max-width: 90%;
     max-height: 90vh;
     overflow-y: auto;
-  }
-
-  .image-preview-dialog {
-    max-width: 600px;
-  }
-
-  .image-preview-container {
-    margin: 1rem 0;
-    text-align: center;
-  }
-
-  .preview-image {
-    max-width: 100%;
-    max-height: 400px;
-    border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  }
-
-  .caption-input {
-    margin: 1rem 0;
-  }
-
-  .caption-input label {
-    display: block;
-    margin-bottom: 0.5rem;
-    font-weight: 600;
-    color: #333;
-  }
-
-  .caption-input textarea {
-    width: 100%;
-    padding: 0.75rem;
-    border: 1px solid #ccc;
-    border-radius: 6px;
-    font-size: 1rem;
-    resize: vertical;
   }
 
   .modal-buttons {
