@@ -62,10 +62,24 @@ class AIProvider:
 
 # --- Concrete Provider Implementations ---
 
+# Vision-capable Ollama models (for auto-detection)
+OLLAMA_VISION_MODELS = [
+    "qwen3-vl",         # Qwen3-VL (all variants: 2b, 4b, 8b, 30b, etc.)
+    "llava",            # LLaVA variants
+    "llama3.2-vision",  # Llama 3.2 vision models
+    "ministral-3",      # Ministral 3 vision models (3b, 8b, 14b)
+    "bakllava",         # BakLLaVA
+    "moondream",        # Moondream
+]
+
 class OllamaProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         self.client = ollama.AsyncClient(host=config.get("host"))
+
+    def supports_vision(self) -> bool:
+        """Check if this Ollama model supports vision/multimodal inputs."""
+        return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
 
     async def generate_response(self, prompt: str) -> str:
         try:
@@ -90,6 +104,68 @@ class OllamaProvider(AIProvider):
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after 60 seconds.")
         except Exception as e:
             raise RuntimeError(f"Ollama provider '{self.alias}' failed: {e}") from e
+
+    async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
+        """
+        Ollama vision API using images parameter.
+        Docs: https://docs.ollama.com/capabilities/vision
+
+        Args:
+            prompt: Text prompt
+            images: List of dicts with keys:
+                - path: str (file path)
+                - base64: str (optional, base64 data)
+                - mime_type: str (optional)
+            **kwargs: Additional parameters (temperature, timeout, etc.)
+
+        Returns:
+            str: AI response text
+        """
+        try:
+            # Build image list (Ollama accepts paths or base64)
+            image_inputs = []
+            for img in images:
+                if "base64" in img:
+                    # Use base64 data if available
+                    base64_data = img["base64"]
+                    # Strip data URL prefix if present (data:image/png;base64,...)
+                    if base64_data.startswith("data:"):
+                        base64_data = base64_data.split(",", 1)[1]
+                    image_inputs.append(base64_data)
+                elif "path" in img:
+                    # Use file path (Ollama SDK handles reading)
+                    image_inputs.append(str(img["path"]))
+                else:
+                    raise ValueError("Image must have 'path' or 'base64' key")
+
+            # Build message with images
+            message = {
+                'role': 'user',
+                'content': prompt,
+                'images': image_inputs
+            }
+
+            # Build options dict for custom parameters
+            options = {}
+            if self.config.get("context_window"):
+                options["num_ctx"] = self.config["context_window"]
+
+            # Vision queries may take longer - use configurable timeout
+            timeout = kwargs.get("timeout", 120.0)  # Default 120s for vision
+
+            response = await asyncio.wait_for(
+                self.client.chat(
+                    model=self.model,
+                    messages=[message],
+                    options=options if options else None
+                ),
+                timeout=timeout
+            )
+            return response['message']['content']
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {kwargs.get('timeout', 120)}s.")
+        except Exception as e:
+            raise RuntimeError(f"Ollama vision API failed for '{self.alias}': {e}") from e
 
     async def get_model_info(self) -> Dict[str, Any]:
         """Query Ollama for model information including parameters.
@@ -323,6 +399,21 @@ MODEL_CONTEXT_WINDOWS = {
     "deepseek-coder-v2:16b": 131072,
     "codellama:7b": 16384,
 
+    # Ollama vision models
+    "qwen3-vl:2b": 262144,     # 256K tokens
+    "qwen3-vl:4b": 262144,
+    "qwen3-vl:8b": 262144,
+    "qwen3-vl:30b": 262144,
+    "qwen3-vl:32b": 262144,
+    "llama3.2-vision:11b": 131072,  # 128K tokens
+    "llama3.2-vision:90b": 131072,
+    "ministral-3:3b": 262144,   # 256K tokens
+    "ministral-3:8b": 262144,
+    "ministral-3:14b": 262144,
+    "llava:7b": 4096,
+    "llava:13b": 4096,
+    "llava:34b": 4096,
+
     # OpenAI models
     "gpt-4": 8192,
     "gpt-4-32k": 32768,
@@ -352,6 +443,7 @@ class LLMManager:
         self.config_path = config_path
         self.providers: Dict[str, AIProvider] = {}
         self.default_provider: str | None = None
+        self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
         self._migrate_from_toml_if_needed()
         self._load_providers_from_config()
 
@@ -416,6 +508,7 @@ class LLMManager:
                 config = json.load(f)
 
             self.default_provider = config.get("default_provider")
+            self.vision_provider = config.get("vision_provider")  # Load vision provider for auto-selection
 
             for provider_config in config.get("providers", []):
                 alias = provider_config.get("alias")
@@ -589,11 +682,16 @@ class LLMManager:
     async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False,
                     images: Optional[List[Dict[str, Any]]] = None, **kwargs):
         """
-        Routes a query to the specified provider, or the default provider if None.
+        Routes a query to the specified provider, or auto-selects based on query type.
+
+        Auto-selection logic (when provider_alias is None):
+        - If images present and vision_provider configured → use vision_provider
+        - If images present and no vision_provider → find first vision-capable provider
+        - If no images → use default_provider
 
         Args:
             prompt: The prompt to send to the LLM
-            provider_alias: Optional provider alias to use (uses default if None)
+            provider_alias: Optional provider alias to use (overrides auto-selection)
             return_metadata: If True, returns dict with 'response', 'provider', 'model', 'tokens_used', 'model_max_tokens'. If False, returns just the response string.
             images: Optional list of image dicts for vision API (multimodal queries). Each dict should contain:
                 - path: str (absolute path to image file)
@@ -604,7 +702,31 @@ class LLMManager:
         Returns:
             str if return_metadata=False, dict if return_metadata=True
         """
-        alias_to_use = provider_alias or self.default_provider
+        # Auto-select provider based on query type
+        if provider_alias is None:
+            if images:
+                # Vision query: prefer vision_provider, fallback to first vision-capable
+                if self.vision_provider and self.vision_provider in self.providers:
+                    alias_to_use = self.vision_provider
+                    logger.info("Auto-selected vision provider '%s' for image query", alias_to_use)
+                else:
+                    # Find first vision-capable provider
+                    alias_to_use = None
+                    for alias, provider in self.providers.items():
+                        if provider.supports_vision():
+                            alias_to_use = alias
+                            logger.info("Auto-selected vision-capable provider '%s' (no vision_provider configured)", alias_to_use)
+                            break
+
+                    if not alias_to_use:
+                        raise ValueError("No vision-capable provider found. Please configure a vision_provider or add a vision-capable model.")
+            else:
+                # Text-only query: use default provider
+                alias_to_use = self.default_provider
+        else:
+            # Explicit provider specified
+            alias_to_use = provider_alias
+
         if not alias_to_use:
             raise ValueError("No provider specified and no default provider is set.")
 
