@@ -479,16 +479,34 @@ class LLMManager:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
             default_config = {
-                "default_provider": "ollama_local",
+                "_comment": "AI Provider Configuration - Edit this file to configure text and vision models",
+                "default_provider": "ollama_text",
+                "vision_provider": "ollama_vision",
                 "providers": [
                     {
-                        "alias": "ollama_local",
+                        "alias": "ollama_text",
                         "type": "ollama",
                         "model": "llama3.1:8b",
                         "host": "http://127.0.0.1:11434",
-                        "context_window": 131072
+                        "context_window": 131072,
+                        "_note": "Fast text model for regular chat queries"
+                    },
+                    {
+                        "alias": "ollama_vision",
+                        "type": "ollama",
+                        "model": "qwen3-vl:8b",
+                        "host": "http://127.0.0.1:11434",
+                        "context_window": 262144,
+                        "_note": "Vision model for image analysis - change to your installed vision model"
                     }
-                ]
+                ],
+                "_instructions": {
+                    "default_provider": "Used for all text queries (no images)",
+                    "vision_provider": "Used for image analysis queries (screenshots, photos)",
+                    "model_installation": "Install models with: ollama pull llama3.1:8b && ollama pull qwen3-vl:8b",
+                    "supported_types": "ollama, openai_compatible, anthropic",
+                    "vision_models": "qwen3-vl, llava, llama3.2-vision, ministral-3, gpt-4o, claude-3+"
+                }
             }
 
             with open(self.config_path, 'w') as f:

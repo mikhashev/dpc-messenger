@@ -1268,6 +1268,45 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def get_default_providers(self) -> Dict[str, Any]:
+        """
+        Get default provider configuration for UI initialization.
+
+        Returns:
+            Dictionary with:
+            - default_provider: str (text provider alias)
+            - vision_provider: str (vision provider alias)
+        """
+        return {
+            "default_provider": self.llm_manager.default_provider or "",
+            "vision_provider": self.llm_manager.vision_provider or ""
+        }
+
+    async def get_providers_list(self) -> Dict[str, Any]:
+        """
+        Get list of available providers for UI dropdowns.
+
+        Returns:
+            Dictionary with:
+            - providers: List of provider dicts with alias, model, type, supports_vision
+            - default_provider: Default text provider alias
+            - vision_provider: Default vision provider alias
+        """
+        providers_info = []
+        for alias, provider in self.llm_manager.providers.items():
+            providers_info.append({
+                "alias": alias,
+                "model": provider.model,
+                "type": provider.__class__.__name__.replace("Provider", ""),  # "Ollama", "OpenAICompatible", etc.
+                "supports_vision": provider.supports_vision()
+            })
+
+        return {
+            "providers": providers_info,
+            "default_provider": self.llm_manager.default_provider or "",
+            "vision_provider": self.llm_manager.vision_provider or ""
+        }
+
     async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
         Save and validate providers configuration.
@@ -2465,7 +2504,7 @@ class CoreService:
             "size_bytes": file.stat().st_size
         }
 
-    async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = ""):
+    async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = "", provider_alias: str = None):
         """
         Send an image from clipboard paste (Phase 2.3: Vision + P2P Image Transfer).
 
@@ -2478,6 +2517,7 @@ class CoreService:
             image_base64: Data URL (e.g., "data:image/png;base64,...")
             filename: Suggested filename (e.g., "screenshot_1234567890.png")
             caption: Optional text caption (will be included in vision query for AI chat)
+            provider_alias: Optional provider to use for vision analysis (overrides vision_provider config)
 
         Returns:
             Dict with status and metadata
@@ -2538,6 +2578,7 @@ class CoreService:
                 response_metadata = await self.llm_manager.query(
                     prompt=query,
                     images=images,
+                    provider_alias=provider_alias,  # Pass UI selection (or None for auto-selection)
                     return_metadata=True
                 )
 
