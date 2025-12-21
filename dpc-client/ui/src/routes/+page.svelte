@@ -1852,27 +1852,28 @@
             {/if}
           </h2>
 
-          {#if $aiChats.has(activeChatId) && $availableProviders && $availableProviders.providers && $availableProviders.providers.length >= 1}
-            <div class="provider-selector">
-              <label for="provider-select">Provider:</label>
-              <select
-                id="provider-select"
-                value={$chatProviders.get(activeChatId) || $availableProviders.default_provider}
-                onchange={(e) => {
-                  chatProviders.update(map => {
-                    const newMap = new Map(map);
-                    newMap.set(activeChatId, e.currentTarget.value);
-                    return newMap;
-                  });
-                }}
-                disabled={$availableProviders.providers.length === 1}
-              >
-                {#each $availableProviders.providers as provider}
-                  <option value={provider.alias}>
-                    {provider.alias} ({provider.model})
-                  </option>
-                {/each}
-              </select>
+          {#if $aiChats.has(activeChatId) && $providersList.length > 0}
+            <div class="provider-selector-header">
+              <div class="provider-row-header">
+                <label for="text-provider-header">Text:</label>
+                <select id="text-provider-header" bind:value={selectedTextProvider}>
+                  {#each $providersList as provider}
+                    <option value={provider.alias}>
+                      {provider.alias} ({provider.model})
+                    </option>
+                  {/each}
+                </select>
+              </div>
+              <div class="provider-row-header">
+                <label for="vision-provider-header">Vision:</label>
+                <select id="vision-provider-header" bind:value={selectedVisionProvider}>
+                  {#each $providersList.filter(p => p.supports_vision) as provider}
+                    <option value={provider.alias}>
+                      {provider.alias} ({provider.model})
+                    </option>
+                  {/each}
+                </select>
+              </div>
             </div>
           {/if}
         </div>
@@ -2065,35 +2066,6 @@
             </div>
             {/if}
             {/if}
-          </div>
-        {/if}
-
-        <!-- Dual Provider Dropdowns (Phase 1: Separate Text and Vision Providers) -->
-        {#if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) && $providersList.length > 0}
-          <div class="provider-selector-panel">
-            <!-- Text Provider Dropdown -->
-            <div class="provider-row">
-              <label for="text-provider">Text Provider:</label>
-              <select id="text-provider" bind:value={selectedTextProvider}>
-                {#each $providersList as provider}
-                  <option value={provider.alias}>
-                    {provider.alias} ({provider.model})
-                  </option>
-                {/each}
-              </select>
-            </div>
-
-            <!-- Vision Provider Dropdown -->
-            <div class="provider-row">
-              <label for="vision-provider">Vision Provider:</label>
-              <select id="vision-provider" bind:value={selectedVisionProvider}>
-                {#each $providersList.filter(p => p.supports_vision) as provider}
-                  <option value={provider.alias}>
-                    {provider.alias} ({provider.model})
-                  </option>
-                {/each}
-              </select>
-            </div>
           </div>
         {/if}
 
@@ -3023,41 +2995,45 @@
     padding: 0;
   }
 
-  .provider-selector {
+  /* Dual Provider Selector in Header (Phase 1) */
+  .provider-selector-header {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+  }
+
+  .provider-row-header {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    font-size: 0.9rem;
+    gap: 0.4rem;
   }
 
-  .provider-selector label {
+  .provider-row-header label {
+    font-size: 0.85rem;
     font-weight: 500;
     color: #666;
+    white-space: nowrap;
   }
 
-  .provider-selector select {
+  .provider-row-header select {
     padding: 0.4rem 0.6rem;
     border: 1px solid #ddd;
     border-radius: 4px;
     background: white;
     cursor: pointer;
     font-size: 0.85rem;
+    min-width: 200px;
+    max-width: 300px;
   }
 
-  .provider-selector select:hover {
+  .provider-row-header select:hover {
     border-color: #4CAF50;
   }
 
-  .provider-selector select:focus {
+  .provider-row-header select:focus {
     outline: none;
     border-color: #4CAF50;
     box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.1);
-  }
-
-  .provider-selector select:disabled {
-    background: #f5f5f5;
-    cursor: not-allowed;
-    opacity: 0.7;
   }
 
   .token-counter {
@@ -3493,57 +3469,6 @@
   .peer-context-checkbox span {
     color: #374151;
     font-weight: 500;
-  }
-
-  /* Dual Provider Selector (Phase 1: Separate Text and Vision Providers) */
-  .provider-selector-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.5rem;
-    background: #f0f4ff;
-    border-radius: 6px;
-    border: 1px solid #d0d8e8;
-    margin-bottom: 0.5rem;
-  }
-
-  .provider-row {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-
-  .provider-row label {
-    font-size: 0.9rem;
-    font-weight: 500;
-    color: #555;
-    min-width: 110px;
-    margin: 0;
-  }
-
-  .provider-row select {
-    flex: 1;
-    max-width: 400px;
-    padding: 0.4rem 0.6rem;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    background: white;
-    font-size: 0.9rem;
-    cursor: pointer;
-    transition: border-color 0.2s;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .provider-row select:hover {
-    border-color: #999;
-  }
-
-  .provider-row select:focus {
-    outline: none;
-    border-color: #4285f4;
-    box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.1);
   }
 
   .compute-host-selector {
