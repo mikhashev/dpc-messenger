@@ -3,6 +3,25 @@
 
 import { writable, get } from 'svelte/store';
 
+// TypeScript types for dual provider system
+export interface ProviderInfo {
+    alias: string;
+    model: string;
+    type: string;
+    supports_vision: boolean;
+}
+
+export interface DefaultProvidersResponse {
+    default_provider: string;
+    vision_provider: string;
+}
+
+export interface ProvidersListResponse {
+    providers: ProviderInfo[];
+    default_provider: string;
+    vision_provider: string;
+}
+
 export const connectionStatus = writable<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
 export const nodeStatus = writable<any>(null);
 export const coreMessages = writable<any>(null);
@@ -19,8 +38,12 @@ export const tokenWarning = writable<any>(null);
 // Knowledge extraction failure store (Phase 4)
 export const extractionFailure = writable<any>(null);
 
-// AI Providers store
+// AI Providers store (legacy)
 export const availableProviders = writable<any>(null);
+
+// Dual Provider Stores (Phase 1: Dual Dropdowns)
+export const defaultProviders = writable<DefaultProvidersResponse | null>(null);
+export const providersList = writable<ProviderInfo[]>([]);
 
 // Peer Providers store (node_id -> provider list)
 export const peerProviders = writable<Map<string, any[]>>(new Map());
@@ -174,6 +197,8 @@ export function connectToCoreService() {
             reconnectAttempts = 0;
             sendCommand("get_status");
             sendCommand("list_providers");
+            sendCommand("get_default_providers");  // Fetch default text/vision providers
+            sendCommand("get_providers_list");     // Fetch full provider list with vision flags
 
             // Stop polling
             if (pollingInterval) {
@@ -293,10 +318,25 @@ export function connectToCoreService() {
                         personalContext.set(message.payload.context);
                     }
                 }
-                // Handle list_providers response
+                // Handle list_providers response (legacy)
                 else if (message.command === "list_providers" && message.status === "OK") {
                     console.log("Available providers loaded:", message.payload);
                     availableProviders.set(message.payload);
+                }
+                // Handle get_default_providers response
+                else if (message.command === "get_default_providers" && message.status === "OK") {
+                    console.log("Default providers loaded:", message.payload);
+                    defaultProviders.set(message.payload);
+                }
+                // Handle get_providers_list response
+                else if (message.command === "get_providers_list" && message.status === "OK") {
+                    console.log("Providers list loaded:", message.payload);
+                    providersList.set(message.payload.providers);
+                    // Also update defaults in case they changed
+                    defaultProviders.set({
+                        default_provider: message.payload.default_provider,
+                        vision_provider: message.payload.vision_provider
+                    });
                 }
                 // Handle peer_providers_updated event
                 else if (message.event === "peer_providers_updated") {
@@ -494,6 +534,8 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'validate_firewall_rules',
             'get_providers_config',
             'save_providers_config',
+            'get_default_providers',  // Dual provider system
+            'get_providers_list',     // Dual provider system
             'query_ollama_model_info',
             'toggle_auto_knowledge_detection',
             'send_file',

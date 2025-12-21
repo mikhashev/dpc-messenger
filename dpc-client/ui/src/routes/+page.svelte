@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -58,6 +58,10 @@
   let selectedComputeHost = $state("local");  // "local" or node_id for remote inference
   let selectedRemoteModel = $state("");  // Selected model when using remote compute host
   let selectedPeerContexts = $state(new Set<string>());  // Set of peer node_ids to fetch context from
+
+  // Dual provider selection (Phase 1: separate text and vision providers)
+  let selectedTextProvider = $state("");  // Provider for text-only queries
+  let selectedVisionProvider = $state("");  // Provider for image queries
 
   // Resizable chat panel state
   let chatPanelHeight = $state((() => {
@@ -128,6 +132,14 @@
   // Save markdown preference to localStorage when changed
   $effect(() => {
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
+  });
+
+  // Initialize provider selections from defaults (Phase 1: Dual Dropdowns)
+  $effect(() => {
+    if ($defaultProviders && !selectedTextProvider && !selectedVisionProvider) {
+      selectedTextProvider = $defaultProviders.default_provider;
+      selectedVisionProvider = $defaultProviders.vision_provider;
+    }
   });
 
   // Phase 7: Context hash tracking for "Updated" status indicators
@@ -772,7 +784,8 @@
           conversation_id: activeChatId,
           image_base64: imageData.dataUrl,
           filename: imageData.filename,
-          caption: text
+          caption: text,
+          provider_alias: selectedVisionProvider  // Pass selected vision provider
         });
         autoScroll();
         // Note: Don't set isLoading = false here!
@@ -841,10 +854,9 @@
           payload.model = selectedRemoteModel;
         }
       } else {
-        // Local inference - send provider if one is selected
-        const selectedProvider = $chatProviders.get(activeChatId);
-        if (selectedProvider) {
-          payload.provider = selectedProvider;
+        // Local inference - pass selected text provider (Phase 1: Dual Dropdowns)
+        if (selectedTextProvider) {
+          payload.provider_alias = selectedTextProvider;
         }
       }
 
@@ -2053,6 +2065,35 @@
             </div>
             {/if}
             {/if}
+          </div>
+        {/if}
+
+        <!-- Dual Provider Dropdowns (Phase 1: Separate Text and Vision Providers) -->
+        {#if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) && $providersList.length > 0}
+          <div class="provider-selector-panel">
+            <!-- Text Provider Dropdown -->
+            <div class="provider-row">
+              <label for="text-provider">Text Provider:</label>
+              <select id="text-provider" bind:value={selectedTextProvider}>
+                {#each $providersList as provider}
+                  <option value={provider.alias}>
+                    {provider.alias} ({provider.model})
+                  </option>
+                {/each}
+              </select>
+            </div>
+
+            <!-- Vision Provider Dropdown -->
+            <div class="provider-row">
+              <label for="vision-provider">Vision Provider:</label>
+              <select id="vision-provider" bind:value={selectedVisionProvider}>
+                {#each $providersList.filter(p => p.supports_vision) as provider}
+                  <option value={provider.alias}>
+                    {provider.alias} ({provider.model})
+                  </option>
+                {/each}
+              </select>
+            </div>
           </div>
         {/if}
 
@@ -3452,6 +3493,57 @@
   .peer-context-checkbox span {
     color: #374151;
     font-weight: 500;
+  }
+
+  /* Dual Provider Selector (Phase 1: Separate Text and Vision Providers) */
+  .provider-selector-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    background: #f0f4ff;
+    border-radius: 6px;
+    border: 1px solid #d0d8e8;
+    margin-bottom: 0.5rem;
+  }
+
+  .provider-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .provider-row label {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #555;
+    min-width: 110px;
+    margin: 0;
+  }
+
+  .provider-row select {
+    flex: 1;
+    max-width: 400px;
+    padding: 0.4rem 0.6rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    background: white;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: border-color 0.2s;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .provider-row select:hover {
+    border-color: #999;
+  }
+
+  .provider-row select:focus {
+    outline: none;
+    border-color: #4285f4;
+    box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.1);
   }
 
   .compute-host-selector {
