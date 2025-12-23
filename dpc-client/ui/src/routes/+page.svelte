@@ -159,7 +159,7 @@
   let selectedProviderForNewChat = $state("");
 
   // Personal context inclusion toggle
-  let includePersonalContext = $state(true);
+  let includePersonalContext = $state(false);
 
   // AI Scope selection (for filtering what local AI can access)
   let selectedAIScope = $state(""); // Empty = no filtering (full context)
