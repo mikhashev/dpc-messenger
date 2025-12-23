@@ -1848,7 +1848,7 @@ class CoreService:
         try:
             transfer_id = await self.file_transfer_manager.send_file(
                 node_id=node_id,
-                file_path=str(file_path),
+                file_path=file_path,
                 image_metadata={
                     "dimensions": {"width": width, "height": height},
                     "thumbnail_base64": thumbnail_base64,
