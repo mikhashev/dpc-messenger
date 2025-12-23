@@ -801,27 +801,27 @@
       currentInput = "";
       pendingImage = null;
 
-      // Add to conversation history with attachment
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        const hist = newMap.get(activeChatId) || [];
-        newMap.set(activeChatId, [...hist, {
-          id: crypto.randomUUID(),
-          sender: 'user',
-          text: text || '[Image]',
-          timestamp: Date.now(),
-          attachments: [{
-            type: 'image',
-            filename: imageData.filename,
-            thumbnail: imageData.dataUrl,
-            size_bytes: imageData.sizeBytes
-          }]
-        }]);
-        return newMap;
-      });
-
       // Check if this is an AI chat or P2P chat (Phase 2.3: Fix P2P screenshot sharing)
       if ($aiChats.has(activeChatId)) {
+        // AI chat: Add to conversation history with attachment
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          const hist = newMap.get(activeChatId) || [];
+          newMap.set(activeChatId, [...hist, {
+            id: crypto.randomUUID(),
+            sender: 'user',
+            text: text || '[Image]',
+            timestamp: Date.now(),
+            attachments: [{
+              type: 'image',
+              filename: imageData.filename,
+              thumbnail: imageData.dataUrl,
+              size_bytes: imageData.sizeBytes
+            }]
+          }]);
+          return newMap;
+        });
+
         // AI chat: Send for vision analysis
         try {
           isLoading = true;

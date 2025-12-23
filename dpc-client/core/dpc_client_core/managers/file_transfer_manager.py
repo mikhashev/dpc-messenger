@@ -102,6 +102,7 @@ class FileTransfer:
     chunks_failed: Optional[set] = None  # Failed chunk indices
     retry_count: Optional[dict] = None   # Chunk index -> retry count
     max_retries: int = 3                 # Max retries per chunk
+    image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.)
 
 
 class FileTransferManager:
@@ -672,23 +673,37 @@ class FileTransferManager:
 
             size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
 
+            # Detect if this is an image transfer
+            is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
+                       and transfer.image_metadata is not None)
+
+            # Build attachment
+            attachment = {
+                "type": "image" if is_image else "file",
+                "filename": transfer.filename,
+                "size_bytes": transfer.size_bytes,
+                "size_mb": size_mb,
+                "hash": transfer.hash,
+                "mime_type": transfer.mime_type,
+                "transfer_id": transfer.transfer_id,
+                "status": "completed"
+            }
+
+            # Add image-specific fields
+            if is_image:
+                attachment["file_path"] = str(file_path)
+                if transfer.image_metadata:
+                    attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
+                    attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
+
             await self.local_api.broadcast_event("new_p2p_message", {
                 "sender_node_id": node_id,
                 "sender_name": sender_name,
                 "text": f"{transfer.filename} ({size_mb} MB)",
                 "message_id": message_id,
-                "attachments": [{
-                    "type": "file",
-                    "filename": transfer.filename,
-                    "size_bytes": transfer.size_bytes,
-                    "size_mb": size_mb,
-                    "hash": transfer.hash,
-                    "mime_type": transfer.mime_type,
-                    "transfer_id": transfer.transfer_id,
-                    "status": "completed"
-                }]
+                "attachments": [attachment]
             })
-            logger.debug(f"Broadcasted file received message to UI: {transfer.filename}")
+            logger.debug(f"Broadcasted {'image' if is_image else 'file'} received message to UI: {transfer.filename}")
 
             # Broadcast completion event to hide active transfer panel
             await self.local_api.broadcast_event("file_transfer_complete", {

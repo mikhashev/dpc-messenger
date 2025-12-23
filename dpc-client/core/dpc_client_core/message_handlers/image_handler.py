@@ -150,7 +150,8 @@ class ImageOfferHandler(MessageHandler):
             total_chunks=total_chunks,
             chunk_hashes=chunk_hashes,  # v0.11.1: Store for per-chunk verification
             chunks_failed=set(),  # v0.11.1: Track failed chunks for retry
-            retry_count={}  # v0.11.1: Track retry attempts per chunk
+            retry_count={},  # v0.11.1: Track retry attempts per chunk
+            image_metadata=image_metadata  # Store image metadata for chat display
         )
         file_transfer_manager.active_transfers[transfer_id] = transfer
 
