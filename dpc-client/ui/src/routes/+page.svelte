@@ -3041,8 +3041,10 @@
   
   .chat-header {
     display: flex;
+    flex-wrap: wrap;  /* Wrap left/right sections when they don't fit */
     justify-content: space-between;
     align-items: center;
+    gap: 0.75rem;  /* Add spacing between wrapped items */
     padding: 1rem;
     border-bottom: 1px solid #eee;
   }
@@ -3051,6 +3053,8 @@
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
+    flex: 1 1 auto;  /* Allow to shrink/grow, wrap when doesn't fit */
+    min-width: 0;  /* Allow shrinking below content size */
   }
 
   .chat-header h2 {
@@ -3134,8 +3138,12 @@
 
   .chat-actions {
     display: flex;
+    flex-wrap: wrap;  /* Wrap buttons naturally when they don't fit */
     gap: 0.75rem;
     align-items: center;
+    justify-content: flex-end;  /* Keep buttons right-aligned */
+    flex: 0 1 auto;  /* Don't grow, but allow shrinking */
+    min-width: 0;  /* Allow shrinking below content size */
   }
 
   .btn-new-chat {
