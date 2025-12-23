@@ -2504,12 +2504,12 @@ class CoreService:
             "size_bytes": file.stat().st_size
         }
 
-    async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = "", provider_alias: str = None):
+    async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = "", provider_alias: str = None, compute_host: str = None):
         """
-        Send an image from clipboard paste (Phase 2.3: Vision + P2P Image Transfer).
+        Send an image from clipboard paste (Phase 2.3: Vision + Remote Vision).
 
         Handles two cases:
-        - AI Chat (local_ai): Save image, run vision analysis, broadcast result
+        - AI Chat (local_ai): Save image, run vision analysis (local or remote), broadcast result
         - P2P Chat: Generate thumbnail, send FILE_OFFER with image_metadata
 
         Args:
@@ -2518,6 +2518,7 @@ class CoreService:
             filename: Suggested filename (e.g., "screenshot_1234567890.png")
             caption: Optional text caption (will be included in vision query for AI chat)
             provider_alias: Optional provider to use for vision analysis (overrides vision_provider config)
+            compute_host: Optional node_id of peer to use for remote vision (Phase 2.3)
 
         Returns:
             Dict with status and metadata
@@ -2574,12 +2575,12 @@ class CoreService:
                     "base64": data  # Pass base64 data directly (already encoded)
                 }]
 
-                # Run vision query
-                response_metadata = await self.llm_manager.query(
+                # Run vision query (Phase 2.3: Support remote vision via compute_host)
+                response_metadata = await self.inference_orchestrator.execute_inference(
                     prompt=query,
                     images=images,
-                    provider_alias=provider_alias,  # Pass UI selection (or None for auto-selection)
-                    return_metadata=True
+                    provider=provider_alias,  # Pass UI selection (or None for auto-selection)
+                    compute_host=compute_host  # Pass compute_host for remote vision
                 )
 
                 # Broadcast AI response to UI

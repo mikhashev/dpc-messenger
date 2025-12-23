@@ -3086,8 +3086,12 @@
     background: white;
     cursor: pointer;
     font-size: 0.85rem;
-    min-width: 200px;
-    max-width: 300px;
+    min-width: 150px;
+    max-width: 220px;
+    /* Handle text overflow */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .provider-row-header select:hover {
@@ -3100,8 +3104,8 @@
     box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.1);
   }
 
-  /* Phase 2.3: Responsive layout - stack dropdowns vertically on small screens */
-  @media (max-width: 900px) {
+  /* Phase 2.3: Responsive layout - stack dropdowns vertically on smaller screens */
+  @media (max-width: 1200px) {
     .provider-selector-header {
       flex-direction: column;
       align-items: stretch;
