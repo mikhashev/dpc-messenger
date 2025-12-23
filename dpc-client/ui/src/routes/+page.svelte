@@ -64,11 +64,13 @@
   let selectedVisionProvider = $state("");  // Provider for image queries
 
   // Merged provider lists (Phase 2: combines local + remote providers)
+  // Phase 2.3: Add uniqueId to track provider source for remote vision routing
   const mergedProviders = $derived(() => {
     const local = ($providersList || []).map(p => ({
       ...p,
       source: 'local' as const,
-      displayText: `${p.alias} (${p.model}) - local`
+      displayText: `${p.alias} (${p.model}) - local`,
+      uniqueId: `local:${p.alias}`  // Unique identifier for selection tracking
     }));
 
     if (selectedComputeHost === "local") {
@@ -78,7 +80,8 @@
     const remote = ($peerProviders.get(selectedComputeHost) || []).map(p => ({
       ...p,
       source: 'remote' as const,
-      displayText: `${p.alias} (${p.model}) - remote`
+      displayText: `${p.alias} (${p.model}) - remote`,
+      uniqueId: `remote:${selectedComputeHost}:${p.alias}`  // Include node_id for routing
     }));
 
     return [...local, ...remote];
@@ -86,6 +89,22 @@
 
   const mergedTextProviders = $derived(() => mergedProviders());
   const mergedVisionProviders = $derived(() => mergedProviders().filter(p => p.supports_vision));
+
+  // Helper function to parse provider selection (Phase 2.3)
+  function parseProviderSelection(uniqueId: string): { source: 'local' | 'remote', alias: string, nodeId?: string } {
+    if (!uniqueId) return { source: 'local', alias: '' };
+
+    if (uniqueId.startsWith('remote:')) {
+      const parts = uniqueId.split(':');
+      return {
+        source: 'remote',
+        nodeId: parts[1],  // Extract node_id
+        alias: parts.slice(2).join(':')  // Rejoin alias (in case it contains ':')
+      };
+    }
+
+    return { source: 'local', alias: uniqueId.replace('local:', '') };
+  }
 
   // Resizable chat panel state
   let chatPanelHeight = $state((() => {
@@ -158,11 +177,11 @@
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
   });
 
-  // Initialize provider selections from defaults (Phase 1: Dual Dropdowns)
+  // Initialize provider selections from defaults (Phase 2.3: use uniqueId format)
   $effect(() => {
     if ($defaultProviders && !selectedTextProvider && !selectedVisionProvider) {
-      selectedTextProvider = $defaultProviders.default_provider;
-      selectedVisionProvider = $defaultProviders.vision_provider;
+      selectedTextProvider = `local:${$defaultProviders.default_provider}`;
+      selectedVisionProvider = `local:${$defaultProviders.vision_provider}`;
     }
   });
 
@@ -801,25 +820,67 @@
         return newMap;
       });
 
-      // Send image with caption to backend
-      try {
-        isLoading = true;
-        await sendCommand('send_image', {
-          conversation_id: activeChatId,
-          image_base64: imageData.dataUrl,
-          filename: imageData.filename,
-          caption: text,
-          provider_alias: selectedVisionProvider  // Pass selected vision provider
-        });
-        autoScroll();
-        // Note: Don't set isLoading = false here!
-        // The ai_response_with_image event handler will clear it when the vision response arrives
-      } catch (error) {
-        console.error('Error sending image:', error);
-        fileOfferToastMessage = `Failed to send image: ${error}`;
-        showFileOfferToast = true;
-        setTimeout(() => showFileOfferToast = false, 5000);
-        isLoading = false;  // Only clear loading on error
+      // Check if this is an AI chat or P2P chat (Phase 2.3: Fix P2P screenshot sharing)
+      if ($aiChats.has(activeChatId)) {
+        // AI chat: Send for vision analysis
+        try {
+          isLoading = true;
+
+          // Parse vision provider to extract compute_host for remote vision
+          const visionProvider = parseProviderSelection(selectedVisionProvider);
+
+          const payload: any = {
+            conversation_id: activeChatId,
+            image_base64: imageData.dataUrl,
+            filename: imageData.filename,
+            caption: text,
+            provider_alias: visionProvider.alias
+          };
+
+          // Add compute_host if using remote vision provider
+          if (visionProvider.source === 'remote' && visionProvider.nodeId) {
+            payload.compute_host = visionProvider.nodeId;
+          }
+
+          await sendCommand('send_image', payload);
+          autoScroll();
+          // Note: Don't set isLoading = false here!
+          // The ai_response_with_image event handler will clear it when the vision response arrives
+        } catch (error) {
+          console.error('Error sending image:', error);
+          fileOfferToastMessage = `Failed to send image: ${error}`;
+          showFileOfferToast = true;
+          setTimeout(() => showFileOfferToast = false, 5000);
+          isLoading = false;  // Only clear loading on error
+        }
+      } else {
+        // P2P chat: Send as file (Phase 2.3: Fix screenshot sharing in P2P)
+        try {
+          // Convert data URL to blob for file transfer
+          const response = await fetch(imageData.dataUrl);
+          const blob = await response.blob();
+
+          // Create temporary file for transfer
+          // Note: File API doesn't support creating File from Blob directly in all browsers
+          // We'll need to use the blob and filename separately
+          const file = new File([blob], imageData.filename, { type: blob.type });
+
+          // Save to temporary location for file transfer
+          // For now, we'll use the data URL approach
+          console.log(`Sending image file to peer ${activeChatId}`);
+
+          // TODO: Implement proper file transfer for clipboard images
+          // This requires backend support for sending files from base64 data
+          // For now, show a message to the user
+          fileOfferToastMessage = `P2P image sharing via clipboard not yet fully implemented. Please use the file button to send images.`;
+          showFileOfferToast = true;
+          setTimeout(() => showFileOfferToast = false, 5000);
+        } catch (error) {
+          console.error('Error sending image file:', error);
+          fileOfferToastMessage = `Failed to send image: ${error}`;
+          showFileOfferToast = true;
+          setTimeout(() => showFileOfferToast = false, 5000);
+        }
       }
       return;
     }
@@ -871,16 +932,17 @@
         payload.context_ids = Array.from(selectedPeerContexts);
       }
 
-      if (selectedComputeHost !== "local") {
-        // Remote inference - send compute_host and model
-        payload.compute_host = selectedComputeHost;
-        if (selectedRemoteModel) {
-          payload.model = selectedRemoteModel;
-        }
+      // Phase 2.3: Parse text provider to support remote text inference
+      const textProvider = parseProviderSelection(selectedTextProvider);
+
+      if (textProvider.source === 'remote' && textProvider.nodeId) {
+        // Remote inference - send compute_host and provider alias
+        payload.compute_host = textProvider.nodeId;
+        payload.provider_alias = textProvider.alias;
       } else {
-        // Local inference - pass selected text provider (Phase 1: Dual Dropdowns)
-        if (selectedTextProvider) {
-          payload.provider_alias = selectedTextProvider;
+        // Local inference - pass provider alias
+        if (textProvider.alias) {
+          payload.provider_alias = textProvider.alias;
         }
       }
 
@@ -1898,24 +1960,24 @@
                 </select>
               </div>
 
-              <!-- Text Provider Selector (Phase 2: merged local + remote) -->
+              <!-- Text Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
               <div class="provider-row-header">
                 <label for="text-provider-header">Text:</label>
                 <select id="text-provider-header" bind:value={selectedTextProvider}>
                   {#each mergedTextProviders() as provider}
-                    <option value={provider.alias}>
+                    <option value={provider.uniqueId}>
                       {provider.displayText}
                     </option>
                   {/each}
                 </select>
               </div>
 
-              <!-- Vision Provider Selector (Phase 2: merged local + remote) -->
+              <!-- Vision Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
               <div class="provider-row-header">
                 <label for="vision-provider-header">Vision:</label>
                 <select id="vision-provider-header" bind:value={selectedVisionProvider}>
                   {#each mergedVisionProviders() as provider}
-                    <option value={provider.alias}>
+                    <option value={provider.uniqueId}>
                       {provider.displayText}
                     </option>
                   {/each}
@@ -3036,6 +3098,25 @@
     outline: none;
     border-color: #4CAF50;
     box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.1);
+  }
+
+  /* Phase 2.3: Responsive layout - stack dropdowns vertically on small screens */
+  @media (max-width: 900px) {
+    .provider-selector-header {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 0.5rem;
+    }
+
+    .provider-row-header {
+      width: 100%;
+    }
+
+    .provider-row-header select {
+      flex: 1;
+      min-width: auto;
+      max-width: none;
+    }
   }
 
   .token-counter {
