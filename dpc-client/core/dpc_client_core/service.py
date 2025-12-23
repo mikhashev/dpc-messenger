@@ -1757,7 +1757,8 @@ class CoreService:
         from PIL import Image
 
         # 1. Validate peer connection
-        if node_id not in self.p2p_coordinator.active_peers:
+        connected_peers = self.p2p_coordinator.get_connected_peers()
+        if node_id not in connected_peers:
             raise ValueError(f"Peer {node_id} not connected")
 
         # 2. Parse data URL
