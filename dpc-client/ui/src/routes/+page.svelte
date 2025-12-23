@@ -63,6 +63,30 @@
   let selectedTextProvider = $state("");  // Provider for text-only queries
   let selectedVisionProvider = $state("");  // Provider for image queries
 
+  // Merged provider lists (Phase 2: combines local + remote providers)
+  const mergedProviders = $derived(() => {
+    const local = ($providersList || []).map(p => ({
+      ...p,
+      source: 'local' as const,
+      displayText: `${p.alias} (${p.model}) - local`
+    }));
+
+    if (selectedComputeHost === "local") {
+      return local;
+    }
+
+    const remote = ($peerProviders.get(selectedComputeHost) || []).map(p => ({
+      ...p,
+      source: 'remote' as const,
+      displayText: `${p.alias} (${p.model}) - remote`
+    }));
+
+    return [...local, ...remote];
+  });
+
+  const mergedTextProviders = $derived(() => mergedProviders());
+  const mergedVisionProviders = $derived(() => mergedProviders().filter(p => p.supports_vision));
+
   // Resizable chat panel state
   let chatPanelHeight = $state((() => {
     // Load saved height from localStorage, default to calc(100vh - 120px)
@@ -1854,22 +1878,45 @@
 
           {#if $aiChats.has(activeChatId) && $providersList.length > 0}
             <div class="provider-selector-header">
+              <!-- AI Host Selector (Phase 2: Remote Vision) -->
+              <div class="provider-row-header">
+                <label for="ai-host-header">AI Host:</label>
+                <select id="ai-host-header" bind:value={selectedComputeHost}>
+                  <option value="local">Local</option>
+                  {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
+                    <optgroup label="Remote Peers">
+                      {#each $nodeStatus.peer_info as peer}
+                        {@const displayName = peer.name
+                          ? `${peer.name} | ${peer.node_id.slice(0, 20)}...`
+                          : `${peer.node_id.slice(0, 20)}...`}
+                        <option value={peer.node_id}>
+                          {displayName}
+                        </option>
+                      {/each}
+                    </optgroup>
+                  {/if}
+                </select>
+              </div>
+
+              <!-- Text Provider Selector (Phase 2: merged local + remote) -->
               <div class="provider-row-header">
                 <label for="text-provider-header">Text:</label>
                 <select id="text-provider-header" bind:value={selectedTextProvider}>
-                  {#each $providersList as provider}
+                  {#each mergedTextProviders() as provider}
                     <option value={provider.alias}>
-                      {provider.alias} ({provider.model})
+                      {provider.displayText}
                     </option>
                   {/each}
                 </select>
               </div>
+
+              <!-- Vision Provider Selector (Phase 2: merged local + remote) -->
               <div class="provider-row-header">
                 <label for="vision-provider-header">Vision:</label>
                 <select id="vision-provider-header" bind:value={selectedVisionProvider}>
-                  {#each $providersList.filter(p => p.supports_vision) as provider}
+                  {#each mergedVisionProviders() as provider}
                     <option value={provider.alias}>
-                      {provider.alias} ({provider.model})
+                      {provider.displayText}
                     </option>
                   {/each}
                 </select>
@@ -2069,51 +2116,6 @@
           </div>
         {/if}
 
-        {#if activeChatId === 'local_ai'}
-          <div class="compute-host-selector">
-            <label for="compute-host">🖥️ Compute Host:</label>
-            <select id="compute-host" bind:value={selectedComputeHost} onchange={() => {
-              // Reset selected model when switching compute hosts
-              selectedRemoteModel = "";
-              // Auto-select first available model if switching to remote
-              if (selectedComputeHost !== "local") {
-                const providers = $peerProviders.get(selectedComputeHost);
-                if (providers && providers.length > 0) {
-                  selectedRemoteModel = providers[0].model;
-                }
-              }
-            }}>
-              <option value="local">Local (this device)</option>
-              {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
-                <optgroup label="Remote Peers">
-                  {#each $nodeStatus.peer_info as peer}
-                    {@const displayName = peer.name
-                      ? `${peer.name} | ${peer.node_id.slice(0, 20)}...`
-                      : `${peer.node_id.slice(0, 20)}...`}
-                    <option value={peer.node_id}>
-                      {displayName}
-                    </option>
-                  {/each}
-                </optgroup>
-              {/if}
-            </select>
-
-            <!-- Model selector for remote compute host -->
-            {#if selectedComputeHost !== "local"}
-              {@const providers = $peerProviders.get(selectedComputeHost)}
-              {#if providers && providers.length > 0}
-                <label for="remote-model">Model:</label>
-                <select id="remote-model" bind:value={selectedRemoteModel}>
-                  {#each providers as provider}
-                    <option value={provider.model}>
-                      {provider.alias} ({provider.model})
-                    </option>
-                  {/each}
-                </select>
-              {/if}
-            {/if}
-          </div>
-        {/if}
         <!-- Image Preview Chip (Phase 2.4: improved UX) -->
         {#if pendingImage}
           <div class="image-preview-chip">
@@ -3469,49 +3471,6 @@
   .peer-context-checkbox span {
     color: #374151;
     font-weight: 500;
-  }
-
-  .compute-host-selector {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem;
-    background: #f8f9fa;
-    border-radius: 6px;
-    border: 1px solid #e0e0e0;
-  }
-
-  .compute-host-selector label {
-    font-size: 0.9rem;
-    font-weight: 500;
-    color: #555;
-    margin: 0;
-  }
-
-  .compute-host-selector select {
-    flex: 1;
-    max-width: 400px;  /* Prevent selects from becoming too wide */
-    padding: 0.4rem 0.6rem;
-    border: 1px solid #ccc;
-    border-radius: 4px;
-    background: white;
-    font-size: 0.9rem;
-    cursor: pointer;
-    transition: border-color 0.2s;
-    /* Truncate long model names with ellipsis */
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .compute-host-selector select:hover {
-    border-color: #999;
-  }
-
-  .compute-host-selector select:focus {
-    outline: none;
-    border-color: #4285f4;
-    box-shadow: 0 0 0 2px rgba(66, 133, 244, 0.1);
   }
 
   .input-row {
