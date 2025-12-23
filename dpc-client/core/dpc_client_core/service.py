@@ -2756,14 +2756,22 @@ class CoreService:
         """
         await self.context_coordinator.handle_device_context_request(peer_id, request_id)
 
-    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None):
+    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None):
         """
         Handle incoming remote inference request from a peer.
         Check firewall permissions, run inference, and send response.
+
+        Args:
+            peer_id: Node ID of the requesting peer
+            request_id: Unique request identifier
+            prompt: Text prompt for the model
+            model: Optional model name
+            provider: Optional provider alias
+            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
         """
         from dpc_protocol.protocol import create_remote_inference_response
 
-        logger.debug("Handling inference request from %s (request_id: %s)", peer_id, request_id)
+        logger.debug("Handling inference request from %s (request_id: %s, images: %s)", peer_id, request_id, "yes" if images else "no")
 
         # Check if peer is allowed to request inference
         if not self.firewall.can_request_inference(peer_id, model):
@@ -2797,7 +2805,7 @@ class CoreService:
                 else:
                     raise ValueError(f"No provider found for model '{model}'")
 
-            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use, return_metadata=True)
+            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use, images=images, return_metadata=True)
             logger.info("Inference completed successfully for %s", peer_id)
 
             # Send success response with token metadata
@@ -2854,7 +2862,8 @@ class CoreService:
             all_providers.append({
                 "alias": alias,
                 "model": model,
-                "type": provider_type
+                "type": provider_type,
+                "supports_vision": provider.supports_vision()  # Phase 2: Add vision capability flag
             })
             all_models.append(model)
 
@@ -3156,7 +3165,7 @@ class CoreService:
         """
         return await self.context_coordinator.request_device_context(peer_id)
 
-    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, timeout: float = 60.0) -> str:
+    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 60.0) -> str:
         """
         Request remote inference from a specific peer.
         Uses async request-response pattern with Future.
@@ -3166,6 +3175,7 @@ class CoreService:
             prompt: The prompt to send for inference
             model: Optional model name to use
             provider: Optional provider alias to use
+            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
             timeout: Timeout in seconds (default 60s for inference)
 
         Returns:
@@ -3178,7 +3188,7 @@ class CoreService:
         """
         from dpc_protocol.protocol import create_remote_inference_request
 
-        logger.debug("Requesting inference from peer: %s", peer_id)
+        logger.debug("Requesting inference from peer: %s (images: %s)", peer_id, 'yes' if images else 'no')
 
         if peer_id not in self.p2p_manager.peers:
             raise ConnectionError(f"Peer {peer_id} is not connected")
@@ -3191,12 +3201,13 @@ class CoreService:
             response_future = asyncio.Future()
             self._pending_inference_requests[request_id] = response_future
 
-            # Create inference request message
+            # Create inference request message (Phase 2: includes images)
             request_message = create_remote_inference_request(
                 request_id=request_id,
                 prompt=prompt,
                 model=model,
-                provider=provider
+                provider=provider,
+                images=images
             )
 
             # Send request

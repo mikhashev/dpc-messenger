@@ -31,7 +31,8 @@ class InferenceOrchestrator:
         prompt: str,
         compute_host: Optional[str] = None,
         model: Optional[str] = None,
-        provider: Optional[str] = None
+        provider: Optional[str] = None,
+        images: Optional[list] = None
     ) -> Dict[str, Any]:
         """
         Execute AI inference (local or remote).
@@ -41,6 +42,7 @@ class InferenceOrchestrator:
             compute_host: Optional node_id of peer to use for inference (None = local)
             model: Optional model name to use
             provider: Optional provider alias to use
+            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
 
         Returns:
             Dict with 'response', 'model', 'provider', 'compute_host' keys
@@ -50,26 +52,29 @@ class InferenceOrchestrator:
             ValueError: If compute_host is specified but peer is not connected
             RuntimeError: If inference fails
         """
-        logger.info("Inference - compute_host: %s, model: %s",
-                   compute_host or 'local', model or 'default')
+        logger.info("Inference - compute_host: %s, model: %s, images: %s",
+                   compute_host or 'local', model or 'default', 'yes' if images else 'no')
 
         if compute_host:
             return await self._execute_remote_inference(
                 compute_host=compute_host,
                 prompt=prompt,
                 model=model,
-                provider=provider
+                provider=provider,
+                images=images
             )
         else:
             return await self._execute_local_inference(
                 prompt=prompt,
-                provider=provider
+                provider=provider,
+                images=images
             )
 
     async def _execute_local_inference(
         self,
         prompt: str,
-        provider: Optional[str] = None
+        provider: Optional[str] = None,
+        images: Optional[list] = None
     ) -> Dict[str, Any]:
         """
         Execute local inference using llm_manager.
@@ -77,6 +82,7 @@ class InferenceOrchestrator:
         Args:
             prompt: The prompt to send to the AI
             provider: Optional provider alias to use
+            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
 
         Returns:
             Dict with 'response', 'model', 'provider', 'compute_host', and token metadata
@@ -88,6 +94,7 @@ class InferenceOrchestrator:
             result = await self.llm_manager.query(
                 prompt,
                 provider_alias=provider,
+                images=images,
                 return_metadata=True
             )
             result['compute_host'] = 'local'
@@ -101,7 +108,8 @@ class InferenceOrchestrator:
         compute_host: str,
         prompt: str,
         model: Optional[str] = None,
-        provider: Optional[str] = None
+        provider: Optional[str] = None,
+        images: Optional[list] = None
     ) -> Dict[str, Any]:
         """
         Execute remote inference on peer node.
@@ -111,6 +119,7 @@ class InferenceOrchestrator:
             prompt: The prompt to send to the AI
             model: Optional model name to use
             provider: Optional provider alias to use
+            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
 
         Returns:
             Dict with 'response', 'model', 'provider', 'compute_host', and token metadata
@@ -124,7 +133,8 @@ class InferenceOrchestrator:
                 peer_id=compute_host,
                 prompt=prompt,
                 model=model,
-                provider=provider
+                provider=provider,
+                images=images
             )
 
             # result_data is a dict with response and token metadata
