@@ -212,6 +212,12 @@ class ContextFirewall:
                             "file_transfer.allowed_mime_types": ["*"]
                         }
                     }
+                },
+                "image_transfer": {
+                    "_comment": "Screenshot/image transfer settings (P2P clipboard paste). Controls auto-accept behavior and size limits for pasted images.",
+                    "auto_accept_threshold_mb": 25,
+                    "allowed_sources": ["clipboard", "file", "camera"],
+                    "max_size_mb": 100
                 }
             }
 
@@ -666,7 +672,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'notifications', '_comment']
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -833,6 +839,39 @@ class ContextFirewall:
                             for event_name, enabled in notifications['events'].items():
                                 if not isinstance(enabled, bool):
                                     errors.append(f"'notifications.events.{event_name}' must be a boolean (true or false)")
+
+            # Validate image_transfer section
+            if 'image_transfer' in config_dict:
+                img_transfer = config_dict['image_transfer']
+                if not isinstance(img_transfer, dict):
+                    errors.append("'image_transfer' section must be a dictionary")
+                else:
+                    # Validate auto_accept_threshold_mb
+                    if 'auto_accept_threshold_mb' in img_transfer:
+                        threshold = img_transfer['auto_accept_threshold_mb']
+                        if not isinstance(threshold, (int, float)):
+                            errors.append("'image_transfer.auto_accept_threshold_mb' must be a number")
+                        elif threshold < 0:
+                            errors.append("'image_transfer.auto_accept_threshold_mb' must be non-negative (0 or greater)")
+
+                    # Validate allowed_sources
+                    if 'allowed_sources' in img_transfer:
+                        sources = img_transfer['allowed_sources']
+                        if not isinstance(sources, list):
+                            errors.append("'image_transfer.allowed_sources' must be a list")
+                        else:
+                            valid_sources = {"clipboard", "file", "camera"}
+                            for source in sources:
+                                if source not in valid_sources:
+                                    errors.append(f"Invalid source '{source}' in image_transfer.allowed_sources (valid options: {valid_sources})")
+
+                    # Validate max_size_mb
+                    if 'max_size_mb' in img_transfer:
+                        max_size = img_transfer['max_size_mb']
+                        if not isinstance(max_size, (int, float)):
+                            errors.append("'image_transfer.max_size_mb' must be a number")
+                        elif max_size <= 0:
+                            errors.append("'image_transfer.max_size_mb' must be positive (greater than 0)")
 
         except Exception as e:
             errors.append(f"Validation error: {str(e)}")

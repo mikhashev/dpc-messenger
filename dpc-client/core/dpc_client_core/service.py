@@ -1735,6 +1735,143 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def send_p2p_image(self, node_id: str, image_base64: str, filename: str = None) -> dict:
+        """
+        Send screenshot/image to peer via file transfer with inline preview support.
+
+        Args:
+            node_id: Target peer node ID
+            image_base64: Base64 data URL (data:image/png;base64,...)
+            filename: Optional filename (auto-generated: screenshot_TIMESTAMP.png)
+
+        Returns:
+            dict with transfer_id, file_path, thumbnail_base64, size_bytes, width, height, mime_type
+
+        Raises:
+            ValueError: Invalid data URL, peer not connected, or privacy rules violation
+        """
+        from datetime import datetime, timezone
+        import base64
+        import re
+        from pathlib import Path
+        from PIL import Image
+
+        # 1. Validate peer connection
+        if node_id not in self.p2p_coordinator.active_peers:
+            raise ValueError(f"Peer {node_id} not connected")
+
+        # 2. Parse data URL
+        if not image_base64.startswith("data:image/"):
+            raise ValueError("Invalid data URL format (must start with 'data:image/')")
+
+        match = re.match(r'data:([^;]+);base64,(.+)', image_base64)
+        if not match:
+            raise ValueError("Invalid data URL format (expected 'data:MIME;base64,DATA')")
+
+        mime_type = match.group(1)  # e.g., "image/png"
+        encoded_data = match.group(2)
+        extension = mime_type.split("/")[1]  # e.g., "png"
+
+        # 3. Decode image data
+        try:
+            image_data = base64.b64decode(encoded_data)
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 data: {e}")
+
+        # 4. Check privacy rules
+        img_rules = self.firewall.rules.get("image_transfer", {})
+        max_size_mb = img_rules.get("max_size_mb", 100)
+        allowed_sources = img_rules.get("allowed_sources", ["clipboard", "file", "camera"])
+
+        # Validate size
+        size_mb = len(image_data) / (1024 * 1024)
+        if size_mb > max_size_mb:
+            raise ValueError(f"Image too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+
+        # Validate source (clipboard is the current source)
+        if "clipboard" not in allowed_sources:
+            raise ValueError("Clipboard image sharing disabled in privacy rules")
+
+        # 5. Generate filename
+        if not filename:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            filename = f"screenshot_{timestamp}.{extension}"
+
+        # 6. Create screenshots directory
+        peer_files_dir = self.base_path / "conversations" / node_id / "files" / "screenshots"
+        peer_files_dir.mkdir(parents=True, exist_ok=True)
+
+        # 7. Save image file
+        file_path = peer_files_dir / filename
+
+        # Handle filename collisions
+        if file_path.exists():
+            stem = file_path.stem
+            suffix = file_path.suffix
+            counter = 1
+            while file_path.exists():
+                file_path = peer_files_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+        try:
+            with open(file_path, "wb") as f:
+                f.write(image_data)
+            logger.info(f"Saved P2P screenshot: {file_path} ({len(image_data)} bytes)")
+        except Exception as e:
+            raise ValueError(f"Failed to save image file: {e}")
+
+        # 8. Validate image format and get dimensions
+        try:
+            with Image.open(file_path) as img:
+                # Validate format
+                if img.format not in ["PNG", "JPEG", "GIF", "WEBP"]:
+                    file_path.unlink()  # Clean up
+                    raise ValueError(f"Unsupported image format: {img.format}")
+
+                width, height = img.size
+        except Exception as e:
+            # Clean up file if image is invalid
+            if file_path.exists():
+                file_path.unlink()
+            raise ValueError(f"Invalid image file: {e}")
+
+        # 9. Generate thumbnail (reuse existing utility)
+        from .utils.image_utils import generate_thumbnail
+        try:
+            thumbnail_base64 = generate_thumbnail(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to generate thumbnail: {e}")
+            thumbnail_base64 = ""  # Continue without thumbnail
+
+        # 10. Send via file transfer with image_metadata
+        try:
+            transfer_id = await self.file_transfer_manager.send_file(
+                node_id=node_id,
+                file_path=str(file_path),
+                image_metadata={
+                    "dimensions": {"width": width, "height": height},
+                    "thumbnail_base64": thumbnail_base64,
+                    "source": "clipboard",
+                    "captured_at": datetime.now(timezone.utc).isoformat()
+                }
+            )
+        except Exception as e:
+            # Clean up file if transfer fails to start
+            if file_path.exists():
+                file_path.unlink()
+            raise ValueError(f"Failed to start file transfer: {e}")
+
+        # 11. Return details for frontend
+        return {
+            "transfer_id": transfer_id,
+            "file_path": str(file_path),
+            "thumbnail_base64": thumbnail_base64,
+            "size_bytes": len(image_data),
+            "width": width,
+            "height": height,
+            "mime_type": mime_type
+        }
+
     async def get_token_usage(self, conversation_id: str) -> Dict[str, Any]:
         """Get token usage statistics for a conversation
 

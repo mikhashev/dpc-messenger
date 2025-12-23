@@ -854,33 +854,75 @@
           isLoading = false;  // Only clear loading on error
         }
       } else {
-        // P2P chat: Send as file (Phase 2.3: Fix screenshot sharing in P2P)
+        // P2P chat: Send screenshot via file transfer
         try {
-          // Convert data URL to blob for file transfer
-          const response = await fetch(imageData.dataUrl);
-          const blob = await response.blob();
+          // Check image size and warn if large
+          const imageSizeBytes = imageData.dataUrl.length * 0.75; // Approximate base64 overhead
+          const imageSizeMB = imageSizeBytes / (1024 * 1024);
 
-          // Create temporary file for transfer
-          // Note: File API doesn't support creating File from Blob directly in all browsers
-          // We'll need to use the blob and filename separately
-          const file = new File([blob], imageData.filename, { type: blob.type });
+          if (imageSizeMB > 25) {
+            const confirm = window.confirm(
+              `This screenshot is ${imageSizeMB.toFixed(1)} MB. Large images may take time to upload. Continue?`
+            );
+            if (!confirm) {
+              pendingImage = null;
+              return;
+            }
+          }
 
-          // Save to temporary location for file transfer
-          // For now, we'll use the data URL approach
-          console.log(`Sending image file to peer ${activeChatId}`);
+          // Send screenshot to peer via backend
+          const response = await sendCommand("send_p2p_image", {
+            node_id: activeChatId,
+            image_base64: imageData.dataUrl,
+            filename: imageData.filename
+          });
 
-          // TODO: Implement proper file transfer for clipboard images
-          // This requires backend support for sending files from base64 data
-          // For now, show a message to the user
-          fileOfferToastMessage = `P2P image sharing via clipboard not yet fully implemented. Please use the file button to send images.`;
-          showFileOfferToast = true;
-          setTimeout(() => showFileOfferToast = false, 5000);
+          if (response.success) {
+            console.log("Screenshot sent successfully:", response.data);
+
+            // Optimistic UI: Show image immediately in chat
+            chatHistories.update(histories => {
+              const newMap = new Map(histories);
+              const history = newMap.get(activeChatId) || [];
+              const optimisticMsg: Message = {
+                id: `temp-${Date.now()}`,
+                sender: 'user',
+                senderName: 'You',
+                text: text || '', // Include caption if user typed one
+                timestamp: Date.now(),
+                attachments: [{
+                  type: 'image' as const,
+                  filename: imageData.filename,
+                  size_bytes: response.data.size_bytes,
+                  transfer_id: response.data.transfer_id,
+                  status: 'uploading',
+                  dimensions: {
+                    width: response.data.width,
+                    height: response.data.height
+                  },
+                  thumbnail: response.data.thumbnail_base64
+                }]
+              };
+              newMap.set(activeChatId, [...history, optimisticMsg]);
+              return newMap;
+            });
+
+            autoScroll();
+          } else {
+            fileOfferToastMessage = `Failed to send screenshot: ${response.error}`;
+            showFileOfferToast = true;
+            setTimeout(() => showFileOfferToast = false, 5000);
+          }
         } catch (error) {
-          console.error('Error sending image file:', error);
-          fileOfferToastMessage = `Failed to send image: ${error}`;
+          console.error('Error sending screenshot:', error);
+          fileOfferToastMessage = `Error sending screenshot: ${error}`;
           showFileOfferToast = true;
           setTimeout(() => showFileOfferToast = false, 5000);
         }
+
+        // Clear pending image
+        pendingImage = null;
+        currentInput = ''; // Clear text input
       }
       return;
     }
