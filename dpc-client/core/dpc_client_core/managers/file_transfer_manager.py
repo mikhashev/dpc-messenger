@@ -638,17 +638,32 @@ class FileTransferManager:
             # Compute hash for FILE_COMPLETE even if verification disabled
             computed_hash = hashlib.sha256(assembled_data).hexdigest()
 
-        # Save file
-        storage_path = self._get_peer_storage_path(node_id, "files")
+        # Detect if this is an image transfer
+        is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
+                   and transfer.image_metadata is not None)
+
+        # Save file - use screenshots subdirectory for images
+        subdir = "files/screenshots" if is_image else "files"
+        storage_path = self._get_peer_storage_path(node_id, subdir)
         # Use hash in filename to avoid collisions
         safe_filename = f"{transfer.filename.replace('/', '_')}"
         file_path = storage_path / safe_filename
 
-        with open(file_path, 'wb') as f:
-            f.write(assembled_data)
+        # Check privacy settings - allow disabling screenshot storage
+        save_to_disk = True
+        if is_image and self.firewall:
+            img_rules = self.firewall.rules.get("image_transfer", {})
+            save_to_disk = img_rules.get("save_screenshots_to_disk", True)
 
-        transfer.status = TransferStatus.COMPLETED
-        logger.info(f"File saved: {file_path}")
+        if save_to_disk:
+            with open(file_path, 'wb') as f:
+                f.write(assembled_data)
+            transfer.status = TransferStatus.COMPLETED
+            logger.info(f"{'Screenshot' if is_image else 'File'} saved: {file_path}")
+        else:
+            # Don't save to disk - use thumbnail for display only
+            transfer.status = TransferStatus.COMPLETED
+            logger.info(f"Screenshot received but not saved to disk (save_screenshots_to_disk=false): {transfer.filename}")
 
         # Send FILE_COMPLETE
         await self.p2p_manager.send_message_to_peer(node_id, {
@@ -739,6 +754,19 @@ class FileTransferManager:
 
         transfer.status = TransferStatus.COMPLETED
         logger.info(f"File transfer completed: {transfer.filename}")
+
+        # Detect if this is an image transfer
+        is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
+                   and transfer.image_metadata is not None)
+
+        # Check privacy settings - delete screenshot if save_screenshots_to_disk is false
+        if is_image and transfer.file_path and self.firewall:
+            img_rules = self.firewall.rules.get("image_transfer", {})
+            save_to_disk = img_rules.get("save_screenshots_to_disk", True)
+
+            if not save_to_disk and transfer.file_path.exists():
+                transfer.file_path.unlink()  # Delete the screenshot file
+                logger.info(f"Deleted screenshot after upload (save_screenshots_to_disk=false): {transfer.file_path}")
 
         # Broadcast completion to UI (sender side)
         if self.local_api and transfer.direction == "upload":

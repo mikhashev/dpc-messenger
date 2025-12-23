@@ -110,6 +110,14 @@
     }
   },
 
+  "image_transfer": {
+    "_comment": "Screenshot/image transfer settings (P2P clipboard paste). Controls auto-accept behavior, size limits, and storage for pasted images.",
+    "auto_accept_threshold_mb": 25,
+    "allowed_sources": ["clipboard", "file", "camera"],
+    "max_size_mb": 100,
+    "save_screenshots_to_disk": false
+  },
+
   "notifications": {
     "_comment": "Desktop Notification Settings - Controls when system notifications appear (when app is minimized/background)",
     "enabled": true,

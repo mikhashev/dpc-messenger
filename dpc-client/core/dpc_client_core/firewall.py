@@ -214,10 +214,11 @@ class ContextFirewall:
                     }
                 },
                 "image_transfer": {
-                    "_comment": "Screenshot/image transfer settings (P2P clipboard paste). Controls auto-accept behavior and size limits for pasted images.",
+                    "_comment": "Screenshot/image transfer settings (P2P clipboard paste). Controls auto-accept behavior, size limits, and storage for pasted images.",
                     "auto_accept_threshold_mb": 25,
                     "allowed_sources": ["clipboard", "file", "camera"],
-                    "max_size_mb": 100
+                    "max_size_mb": 100,
+                    "save_screenshots_to_disk": false
                 }
             }
 
@@ -872,6 +873,12 @@ class ContextFirewall:
                             errors.append("'image_transfer.max_size_mb' must be a number")
                         elif max_size <= 0:
                             errors.append("'image_transfer.max_size_mb' must be positive (greater than 0)")
+
+                    # Validate save_screenshots_to_disk
+                    if 'save_screenshots_to_disk' in img_transfer:
+                        save_to_disk = img_transfer['save_screenshots_to_disk']
+                        if not isinstance(save_to_disk, bool):
+                            errors.append("'image_transfer.save_screenshots_to_disk' must be a boolean (true or false)")
 
         except Exception as e:
             errors.append(f"Validation error: {str(e)}")
