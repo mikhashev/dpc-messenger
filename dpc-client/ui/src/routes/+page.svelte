@@ -3062,7 +3062,8 @@
   /* Dual Provider Selector in Header (Phase 1) */
   .provider-selector-header {
     display: flex;
-    gap: 1rem;
+    flex-wrap: wrap;  /* Wrap items naturally when they don't fit */
+    gap: 0.75rem;
     align-items: center;
   }
 
@@ -3102,25 +3103,6 @@
     outline: none;
     border-color: #4CAF50;
     box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.1);
-  }
-
-  /* Phase 2.3: Responsive layout - stack dropdowns vertically on smaller screens */
-  @media (max-width: 1200px) {
-    .provider-selector-header {
-      flex-direction: column;
-      align-items: stretch;
-      gap: 0.5rem;
-    }
-
-    .provider-row-header {
-      width: 100%;
-    }
-
-    .provider-row-header select {
-      flex: 1;
-      min-width: auto;
-      max-width: none;
-    }
   }
 
   .token-counter {
