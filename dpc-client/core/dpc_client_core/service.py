@@ -1799,7 +1799,7 @@ class CoreService:
             filename = f"screenshot_{timestamp}.{extension}"
 
         # 6. Create screenshots directory
-        peer_files_dir = self.base_path / "conversations" / node_id / "files" / "screenshots"
+        peer_files_dir = DPC_HOME_DIR / "conversations" / node_id / "files" / "screenshots"
         peer_files_dir.mkdir(parents=True, exist_ok=True)
 
         # 7. Save image file
