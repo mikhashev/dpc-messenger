@@ -218,7 +218,7 @@ class ContextFirewall:
                     "auto_accept_threshold_mb": 25,
                     "allowed_sources": ["clipboard", "file", "camera"],
                     "max_size_mb": 100,
-                    "save_screenshots_to_disk": false
+                    "save_screenshots_to_disk": False
                 }
             }
 
