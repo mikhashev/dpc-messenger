@@ -191,16 +191,17 @@
   function addNodeToGroup(groupName: string) {
     if (!editedRules || !editedRules.node_groups) return;
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
-    if (nodeId && nodeId.startsWith('dpc-node-')) {
+    const trimmedNodeId = nodeId?.trim();
+    if (trimmedNodeId && trimmedNodeId.startsWith('dpc-node-')) {
       // Check for duplicates
-      if (editedRules.node_groups[groupName].includes(nodeId)) {
+      if (editedRules.node_groups[groupName].includes(trimmedNodeId)) {
         alert('This node is already in the group');
         return;
       }
       // Use immutable update to trigger Svelte reactivity
       editedRules.node_groups[groupName] = [
         ...editedRules.node_groups[groupName],
-        nodeId
+        trimmedNodeId
       ];
     } else if (nodeId) {
       alert('Node ID must start with "dpc-node-"');
@@ -216,14 +217,15 @@
   function addNodePermission() {
     if (!editedRules) return;
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
-    if (nodeId && nodeId.startsWith('dpc-node-')) {
+    const trimmedNodeId = nodeId?.trim();
+    if (trimmedNodeId && trimmedNodeId.startsWith('dpc-node-')) {
       if (!editedRules.nodes) editedRules.nodes = {};
       // Check for duplicates
-      if (editedRules.nodes[nodeId]) {
+      if (editedRules.nodes[trimmedNodeId]) {
         alert('This node already has permission rules');
         return;
       }
-      editedRules.nodes[nodeId] = {};
+      editedRules.nodes[trimmedNodeId] = {};
     } else if (nodeId) {
       alert('Node ID must start with "dpc-node-"');
     }
@@ -446,15 +448,16 @@
   function addFileTransferNode() {
     if (!editedRules) return;
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
-    if (nodeId && nodeId.startsWith('dpc-node-')) {
+    const trimmedNodeId = nodeId?.trim();
+    if (trimmedNodeId && trimmedNodeId.startsWith('dpc-node-')) {
       if (!editedRules.file_transfer) editedRules.file_transfer = { groups: {}, nodes: {} };
       if (!editedRules.file_transfer.nodes) editedRules.file_transfer.nodes = {};
       // Check for duplicates
-      if (editedRules.file_transfer.nodes[nodeId]) {
+      if (editedRules.file_transfer.nodes[trimmedNodeId]) {
         alert('This node already has file transfer settings');
         return;
       }
-      editedRules.file_transfer.nodes[nodeId] = {
+      editedRules.file_transfer.nodes[trimmedNodeId] = {
         'file_transfer.allow': 'deny',
         'file_transfer.max_size_mb': 100,
         'file_transfer.allowed_mime_types': ['*']

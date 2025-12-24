@@ -33,6 +33,7 @@
     attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4)
       type: 'file' | 'image';
       filename: string;
+      file_path?: string;  // Full-size image file path (for P2P file transfers)
       size_bytes: number;
       size_mb?: number;
       hash?: string;
@@ -893,6 +894,7 @@
                 attachments: [{
                   type: 'image' as const,
                   filename: imageData.filename,
+                  file_path: response.data.file_path,  // For full-size display
                   size_bytes: response.data.size_bytes,
                   transfer_id: response.data.transfer_id,
                   status: 'uploading',

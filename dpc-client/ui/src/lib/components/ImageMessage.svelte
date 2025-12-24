@@ -10,10 +10,13 @@
    * - P2P Chat: Just display image (no vision analysis)
    */
 
+  import { convertFileSrc } from '@tauri-apps/api/core';
+
   interface ImageAttachment {
     type: 'image' | 'file';  // Accept union type from parent
     filename: string;
     thumbnail?: string;  // Base64 data URL (optional for backward compat)
+    file_path?: string;  // Full-size image file path (for P2P file transfers)
     dimensions?: { width: number; height: number };
     vision_analyzed?: boolean;  // AI chat only
     vision_result?: string;  // AI chat only
@@ -45,6 +48,16 @@
 
   // Check if this is an AI conversation
   const isAIChat = $derived(conversationId === 'local_ai' || conversationId.startsWith('ai_'));
+
+  // Get full-size image source (prefer file_path, fall back to thumbnail)
+  const fullImageSrc = $derived(() => {
+    if (attachment.file_path) {
+      // Convert file path to Tauri asset URL for full-size display
+      return convertFileSrc(attachment.file_path);
+    }
+    // Fall back to thumbnail (for AI chat or if file was deleted)
+    return attachment.thumbnail || '';
+  });
 </script>
 
 <div class="image-message">
@@ -95,7 +108,7 @@
 </div>
 
 <!-- Full Image Modal -->
-{#if showFullImage && attachment.thumbnail}
+{#if showFullImage && (attachment.thumbnail || attachment.file_path)}
   <div
     class="full-image-overlay"
     role="presentation"
@@ -107,7 +120,7 @@
         ✕
       </button>
       <img
-        src={attachment.thumbnail}
+        src={fullImageSrc()}
         alt={attachment.filename}
         class="full-image"
       />
