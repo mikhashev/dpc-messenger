@@ -465,15 +465,15 @@ class LLMManager:
                         "model": "llama3.1:8b",
                         "host": "http://127.0.0.1:11434",
                         "context_window": 16384,
-                        "_note": "Fast text model for regular chat queries (128K context)"
+                        "_note": "Fast text model for regular chat queries"
                     },
                     {
                         "alias": "ollama_vision",
                         "type": "ollama",
-                        "model": "llama3.2-vision:11b",
+                        "model": "qwen3-vl:8b",
                         "host": "http://127.0.0.1:11434",
                         "context_window": 16384,
-                        "_note": "Vision model for image analysis - llama3.2-vision recommended for best quality"
+                        "_note": "Vision model for image analysis"
                     }
                 ],
                 "_examples": {
@@ -571,12 +571,13 @@ class LLMManager:
                         "256K": "qwen3-vl, ministral-3 (excellent for long documents)",
                         "200K": "claude-3+, claude-4.5 (best for complex analysis)"
                     },
-                    "ram_requirements": {
-                        "1GB": "llama3.2:1b (tiny, embedded devices)",
-                        "2GB": "llama3.2:3b (small, budget systems)",
-                        "8GB": "llama3.1:8b, qwen3-vl:8b, ministral-3:8b (recommended)",
-                        "16GB": "llama3.2-vision:11b, llama3.1:13b (best quality)",
-                        "24GB+": "llama3.1:70b, llama3.2-vision:90b (professional workstations)"
+                    "vram_requirements": {
+                        "1GB": "llama3.2:1b (tiny, embedded GPUs)",
+                        "2GB": "llama3.2:3b (small, budget GPUs)",
+                        "8GB": "llama3.1:8b, qwen3-vl:8b, ministral-3:8b (recommended - RTX 3060)",
+                        "12GB": "llama3.1:13b (RTX 3060 12GB, RTX 4060 Ti)",
+                        "16GB": "llama3.2-vision:11b (RTX 4060 Ti 16GB, RTX 4080)",
+                        "24GB+": "llama3.1:70b, llama3.2-vision:90b (RTX 4090, A5000, professional)"
                     },
                     "api_key_setup": {
                         "linux_mac": "Add to ~/.bashrc: export OPENAI_API_KEY='sk-...' && export ANTHROPIC_API_KEY='sk-ant-...'",
