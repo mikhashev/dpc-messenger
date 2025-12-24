@@ -714,10 +714,15 @@ class FileTransferManager:
                     attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
                     attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
 
+            # Extract text caption from image_metadata if available
+            caption_text = ""
+            if is_image and transfer.image_metadata:
+                caption_text = transfer.image_metadata.get("text", "")
+
             await self.local_api.broadcast_event("new_p2p_message", {
                 "sender_node_id": node_id,
                 "sender_name": sender_name,
-                "text": f"{transfer.filename} ({size_mb} MB)",
+                "text": caption_text,  # Sender's caption (empty if not provided)
                 "message_id": message_id,
                 "attachments": [attachment]
             })

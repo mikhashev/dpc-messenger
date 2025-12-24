@@ -1735,7 +1735,7 @@ class CoreService:
                 "message": str(e)
             }
 
-    async def send_p2p_image(self, node_id: str, image_base64: str, filename: str = None) -> dict:
+    async def send_p2p_image(self, node_id: str, image_base64: str, filename: str = None, text: str = "") -> dict:
         """
         Send screenshot/image to peer via file transfer with inline preview support.
 
@@ -1743,6 +1743,7 @@ class CoreService:
             node_id: Target peer node ID
             image_base64: Base64 data URL (data:image/png;base64,...)
             filename: Optional filename (auto-generated: screenshot_TIMESTAMP.png)
+            text: Optional text caption to display with the image
 
         Returns:
             dict with transfer_id, file_path, thumbnail_base64, size_bytes, width, height, mime_type
@@ -1853,7 +1854,8 @@ class CoreService:
                     "dimensions": {"width": width, "height": height},
                     "thumbnail_base64": thumbnail_base64,
                     "source": "clipboard",
-                    "captured_at": datetime.now(timezone.utc).isoformat()
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "text": text  # Store user caption
                 }
             )
         except Exception as e:

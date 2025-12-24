@@ -875,7 +875,8 @@
           await sendCommand("send_p2p_image", {
             node_id: activeChatId,
             image_base64: imageData.dataUrl,
-            filename: imageData.filename
+            filename: imageData.filename,
+            text: currentInput.trim()  // Include user caption with screenshot
           });
 
           // Success - backend will broadcast new_p2p_message when transfer completes

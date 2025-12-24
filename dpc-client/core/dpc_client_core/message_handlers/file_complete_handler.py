@@ -84,16 +84,23 @@ class FileCompleteHandler(MessageHandler):
             }
 
             # Add image-specific fields
-            if is_image and transfer.file_path:
-                attachment["file_path"] = str(transfer.file_path)
+            if is_image:
+                # Only include file_path if file still exists (not deleted by privacy settings)
+                if transfer.file_path and transfer.file_path.exists():
+                    attachment["file_path"] = str(transfer.file_path)
                 if transfer.image_metadata:
                     attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
                     attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
 
+            # Extract text caption from image_metadata if available
+            caption_text = ""
+            if is_image and transfer.image_metadata:
+                caption_text = transfer.image_metadata.get("text", "")
+
             await self.service.local_api.broadcast_event("new_p2p_message", {
                 "sender_node_id": "user",
                 "sender_name": "You",
-                "text": f"{transfer.filename} ({size_mb} MB)",
+                "text": caption_text,  # User's caption (empty if not provided)
                 "message_id": message_id,
                 "attachments": [attachment]
             })
