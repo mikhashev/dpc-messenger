@@ -18,22 +18,8 @@ class ContextFirewall:
     """
     def __init__(self, access_file_path: Path):
         self.access_file_path = access_file_path
-        self._migrate_from_old_filename()
         self._ensure_file_exists()
         self._load_rules()
-
-    def _migrate_from_old_filename(self):
-        """Migrate from old .dpc_access.json to new privacy_rules.json filename."""
-        old_path = self.access_file_path.parent / ".dpc_access.json"
-
-        # Only migrate if old file exists and new file doesn't
-        if old_path.exists() and not self.access_file_path.exists():
-            logger.info("Migrating %s to %s", old_path.name, self.access_file_path.name)
-            try:
-                old_path.rename(self.access_file_path)
-                logger.info("Migration successful")
-            except Exception as e:
-                logger.error("Error migrating privacy rules file: %s", e, exc_info=True)
 
     def _load_rules(self):
         """Load and parse rules from JSON file."""

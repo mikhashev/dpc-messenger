@@ -2,6 +2,50 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
+## [Unreleased] - 2025-12-24
+
+### BREAKING: Migration Code Removed (No Active Users)
+
+**Rationale:** Since there are no active users, all migration code has been removed for a cleaner codebase.
+
+#### Removed
+- **Migration functions:**
+  - `migrate_instructions_from_personal_context()` - v1→v2 instruction migration
+  - `_migrate_from_old_filename()` - firewall filename migration
+  - `_migrate_from_toml_if_needed()` - TOML→JSON provider migration
+  - `_migrate_or_recreate_config()` - old config format migration
+- **Migration files:**
+  - `dpc-protocol/migrate_pcm.py` - standalone migration script
+  - `dpc-protocol/tests/test_pcm_compatibility.py` - v1.0 compatibility tests
+
+#### Changed
+- **PersonalContext dataclass:** Removed `instruction` field (now separate in `instructions.json`)
+- **from_dict():** Removed v1.0 compatibility, only supports v2.0 format
+- **service.py:** Fixed to use `self.instructions` (from `instructions.json`) instead of `context.instruction`
+- **settings.py:** Simplified `_migrate_or_recreate_config()` → `_recreate_config_with_backup()` (error recovery only)
+
+#### Added
+- **Auto-create instructions.json:** Now created automatically on first load with default settings
+
+#### Architecture (v2.0 Clean)
+```
+~/.dpc/
+├── personal.json          # Profile, knowledge, metadata (NO instruction field)
+├── instructions.json      # AI behavior rules (separate file, auto-created)
+├── device_context.json    # Hardware/software specs
+├── privacy_rules.json     # Firewall access rules
+├── providers.json         # AI provider configs
+└── config.ini            # Service configuration
+```
+
+#### Migration from Old Installations
+If you have an old installation with `instruction` field in `personal.json`:
+1. Manually extract the `instruction` block
+2. Save it to `~/.dpc/instructions.json`
+3. Remove the `instruction` field from `personal.json`
+
+Or simply delete `~/.dpc/` folder for a fresh v2.0 install.
+
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 

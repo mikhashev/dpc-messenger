@@ -444,31 +444,7 @@ class LLMManager:
         self.providers: Dict[str, AIProvider] = {}
         self.default_provider: str | None = None
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
-        self._migrate_from_toml_if_needed()
         self._load_providers_from_config()
-
-    def _migrate_from_toml_if_needed(self):
-        """Migrates providers.toml to providers.json if needed."""
-        toml_path = self.config_path.parent / "providers.toml"
-
-        # Only migrate if TOML exists and JSON doesn't
-        if toml_path.exists() and not self.config_path.exists():
-            logger.info("Migrating %s to %s", toml_path, self.config_path)
-            try:
-                # Import toml only if needed for migration
-                import toml
-                config = toml.load(toml_path)
-
-                # Save as JSON
-                with open(self.config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-
-                # Backup TOML file
-                backup_path = toml_path.with_suffix('.toml.backup')
-                toml_path.rename(backup_path)
-                logger.info("Migration successful - original file backed up as %s", backup_path)
-            except Exception as e:
-                logger.error("Error migrating TOML to JSON: %s", e, exc_info=True)
 
     def _ensure_config_exists(self):
         """Creates a default providers.json file if one doesn't exist."""

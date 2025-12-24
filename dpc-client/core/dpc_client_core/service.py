@@ -68,7 +68,7 @@ from .managers.file_transfer_manager import FileTransferManager
 from .session_manager import NewSessionProposalManager
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
-    load_instructions, save_instructions, migrate_instructions_from_personal_context
+    load_instructions, save_instructions
 )
 from dpc_protocol.utils import parse_dpc_uri
 from datetime import datetime, timezone
@@ -123,9 +123,6 @@ class CoreService:
 
         # Knowledge Architecture components (Phase 1-6)
         self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
-
-        # Migrate instructions to separate file (one-time operation)
-        migrate_instructions_from_personal_context()
 
         # Load AI instructions from instructions.json
         self.instructions = load_instructions()
@@ -1543,9 +1540,6 @@ class CoreService:
             # more sophisticated merging logic
             if "profile" in context_dict:
                 current.profile.__dict__.update(context_dict["profile"])
-
-            if "instruction" in context_dict:
-                current.instruction.__dict__.update(context_dict["instruction"])
 
             if "knowledge" in context_dict:
                 # For knowledge, we need to be more careful with the structure
@@ -3768,23 +3762,10 @@ class CoreService:
             message_history: List of conversation messages (optional, for Phase 7)
             include_full_context: If True, include context blocks; if False, skip (Phase 7)
         """
-        # Extract instruction blocks and bias settings from contexts
-        instruction_blocks = []
-        bias_mitigation_settings = []
+        # Extract cultural contexts from PersonalContext objects
         cultural_contexts = []
 
         for source_id, context_obj in contexts.items():
-            # Extract instruction block if present
-            if hasattr(context_obj, 'instruction') and context_obj.instruction:
-                instruction = context_obj.instruction
-                instruction_blocks.append({
-                    'source': source_id,
-                    'primary': instruction.primary,
-                    'verification_protocol': instruction.verification_protocol,
-                    'bias_mitigation': instruction.bias_mitigation
-                })
-                bias_mitigation_settings.append(instruction.bias_mitigation)
-
             # Extract cultural context if present
             if hasattr(context_obj, 'cognitive_profile') and context_obj.cognitive_profile:
                 if context_obj.cognitive_profile.cultural_background:
@@ -3793,7 +3774,15 @@ class CoreService:
                         'background': context_obj.cognitive_profile.cultural_background
                     })
 
-        # Build system instruction with bias mitigation
+        # Build system instruction with bias mitigation (using local instructions.json)
+        instruction_blocks = [{
+            'source': 'local',
+            'primary': self.instructions.primary,
+            'verification_protocol': self.instructions.verification_protocol,
+            'bias_mitigation': self.instructions.bias_mitigation
+        }]
+        bias_mitigation_settings = [self.instructions.bias_mitigation]
+
         system_instruction = self._build_bias_aware_system_instruction(
             instruction_blocks,
             bias_mitigation_settings,

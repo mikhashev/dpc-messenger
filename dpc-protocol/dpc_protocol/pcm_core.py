@@ -173,9 +173,6 @@ class PersonalContext:
     knowledge: Dict[str, Topic] = field(default_factory=dict)
     preferences: Optional[Preferences] = None
 
-    # v2.0 enhancements - Instructions (from PCM)
-    instruction: InstructionBlock = field(default_factory=InstructionBlock)
-
     # v2.0 enhancements - Cognitive profile (from self-education template + bias awareness)
     cognitive_profile: Optional[CognitiveProfile] = None
 
@@ -196,13 +193,9 @@ class PersonalContext:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> 'PersonalContext':
-        """Creates a PersonalContext instance from a dictionary, handling nested structures.
-
-        Supports both v1.0 and v2.0 formats for backward compatibility.
-        """
-        # Detect format version
+        """Creates a PersonalContext instance from a dictionary (v2.0 format)."""
+        # Load metadata
         metadata = data.get('metadata', {})
-        format_version = metadata.get('format_version', '1.0')
 
         # Load core v1 fields
         # Handle None values (can occur when firewall filters fields)
@@ -264,10 +257,7 @@ class PersonalContext:
 
             knowledge[topic_name] = Topic(**topic_kwargs)
 
-        # Load v2 fields if present (backward compatibility)
-        instruction_data = data.get('instruction', {})
-        instruction = InstructionBlock(**instruction_data) if instruction_data else InstructionBlock()
-
+        # Load v2 fields
         cognitive_profile_data = data.get('cognitive_profile')
         cognitive_profile = None
         if cognitive_profile_data:
@@ -295,7 +285,6 @@ class PersonalContext:
             profile=profile,
             knowledge=knowledge,
             preferences=preferences,
-            instruction=instruction,
             cognitive_profile=cognitive_profile,
             version=version,
             last_commit_id=last_commit_id,
@@ -403,10 +392,12 @@ def load_instructions(file_path: Path | None = None) -> InstructionBlock:
     else:
         file_path = Path(file_path)
 
-    # If instructions.json doesn't exist, return default
+    # If instructions.json doesn't exist, create it with defaults
     if not file_path.exists():
-        logger.info("Instructions file not found at %s. Using default instructions", file_path)
-        return InstructionBlock()
+        logger.info("Instructions file not found at %s. Creating default instructions", file_path)
+        default_instructions = InstructionBlock()
+        save_instructions(default_instructions, file_path)
+        return default_instructions
 
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
@@ -453,135 +444,6 @@ def save_instructions(instructions: InstructionBlock, file_path: Path | None = N
         json.dump(data, f, indent=2, ensure_ascii=False)
 
     logger.info("Instructions saved to %s", file_path)
-
-# TODO check if this need
-def migrate_instructions_from_personal_context(
-    personal_json_path: Path | None = None,
-    instructions_json_path: Path | None = None
-) -> bool:
-    """
-    Migrate instructions from personal.json to instructions.json.
-
-    IDEMPOTENT: Safe to run multiple times.
-
-    Args:
-        personal_json_path: Path to personal.json. Defaults to ~/.dpc/personal.json
-        instructions_json_path: Path to instructions.json. Defaults to ~/.dpc/instructions.json
-
-    Returns:
-        True if changes were made, False if no changes needed
-    """
-    if personal_json_path is None:
-        personal_json_path = DPC_HOME_DIR / "personal.json"
-    else:
-        personal_json_path = Path(personal_json_path)
-
-    if instructions_json_path is None:
-        instructions_json_path = DPC_HOME_DIR / "instructions.json"
-    else:
-        instructions_json_path = Path(instructions_json_path)
-
-    if not personal_json_path.exists():
-        logger.info("No personal.json found, skipping migration")
-        return False
-
-    try:
-        with open(personal_json_path, 'r', encoding='utf-8') as f:
-            personal_data = json.load(f)
-
-        changes_made = False
-
-        # CASE 1: instructions.json exists
-        if instructions_json_path.exists():
-            logger.info("Instructions file exists at %s", instructions_json_path)
-
-            # Check if personal.json still has instruction field
-            if 'instruction' in personal_data:
-                logger.info("Cleaning up legacy instruction field")
-
-                # Remove instruction field
-                del personal_data['instruction']
-                changes_made = True
-
-                # Add external_files reference
-                if 'external_files' not in personal_data.get('metadata', {}):
-                    personal_data.setdefault('metadata', {})['external_files'] = {}
-
-                from datetime import datetime
-                personal_data['metadata']['external_files']['instructions'] = {
-                    "file": "instructions.json",
-                    "description": "AI behavior instructions",
-                    "last_updated": datetime.utcnow().isoformat()
-                }
-
-                logger.info("Removed instruction field")
-                logger.info("Added external_files reference")
-            else:
-                logger.info("Already clean")
-                return False
-
-        # CASE 2: instructions.json doesn't exist
-        else:
-            if 'instruction' not in personal_data:
-                logger.info("No instruction field found")
-                return False
-
-            logger.info("Migrating instructions to separate file")
-
-            # Extract instruction
-            instruction_data = personal_data['instruction']
-
-            # Create InstructionBlock from data
-            instructions = InstructionBlock(
-                primary=instruction_data.get('primary', InstructionBlock().primary),
-                context_update=instruction_data.get('context_update', InstructionBlock().context_update),
-                verification_protocol=instruction_data.get('verification_protocol', InstructionBlock().verification_protocol),
-                learning_support=instruction_data.get('learning_support', InstructionBlock().learning_support),
-                bias_mitigation=instruction_data.get('bias_mitigation', InstructionBlock().bias_mitigation),
-                collaboration_mode=instruction_data.get('collaboration_mode', 'individual'),
-                consensus_required=instruction_data.get('consensus_required', True),
-                ai_curation_enabled=instruction_data.get('ai_curation_enabled', True),
-                dissent_encouraged=instruction_data.get('dissent_encouraged', True)
-            )
-
-            # Save to instructions.json
-            save_instructions(instructions, instructions_json_path)
-            logger.info("Created %s", instructions_json_path)
-
-            # Remove from personal.json
-            del personal_data['instruction']
-
-            # Add external_files reference
-            from datetime import datetime
-            personal_data.setdefault('metadata', {})['external_files'] = {
-                'instructions': {
-                    "file": "instructions.json",
-                    "description": "AI behavior instructions",
-                    "last_updated": datetime.utcnow().isoformat()
-                }
-            }
-
-            changes_made = True
-
-        # Save cleaned personal.json
-        if changes_made:
-            # Backup original
-            import shutil
-            backup_path = personal_json_path.with_suffix('.json.backup')
-            shutil.copy(personal_json_path, backup_path)
-            logger.info("Backed up to %s", backup_path)
-
-            # Save cleaned version
-            with open(personal_json_path, 'w', encoding='utf-8') as f:
-                json.dump(personal_data, f, indent=2, ensure_ascii=False)
-
-            logger.info("Updated %s", personal_json_path)
-
-        return changes_made
-
-    except Exception as e:
-        logger.error("Error during migration: %s", e, exc_info=True)
-        return False
 
 
 # --- 4. Usage example (for self-testing the module) ---

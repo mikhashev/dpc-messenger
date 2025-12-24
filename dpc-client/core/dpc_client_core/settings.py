@@ -25,27 +25,15 @@ class Settings:
                 # Validate that config has at least one section
                 if not self._config.sections():
                     print(f"Warning: Invalid config format in {self.config_file}")
-                    self._migrate_or_recreate_config()
+                    self._recreate_config_with_backup()
             except configparser.Error as e:
                 print(f"Warning: Failed to parse config file: {e}")
-                self._migrate_or_recreate_config()
+                self._recreate_config_with_backup()
         else:
             self._create_default_config()
 
-    def _migrate_or_recreate_config(self):
-        """Migrate old config format or recreate if invalid."""
-        # Try to read old hub URL if it exists
-        old_hub_url = None
-        try:
-            with open(self.config_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith('url =') or line.startswith('url='):
-                        old_hub_url = line.split('=', 1)[1].strip()
-                        break
-        except Exception:
-            pass
-
+    def _recreate_config_with_backup(self):
+        """Recreate config file after backing up the invalid one."""
         # Backup old config
         if self.config_file.exists():
             backup_file = self.config_file.with_suffix('.ini.bak')
@@ -56,13 +44,13 @@ class Settings:
             except Exception as e:
                 print(f"Warning: Could not backup config: {e}")
 
-        # Create new config with old URL if found
-        self._create_default_config(hub_url=old_hub_url)
+        # Create fresh config
+        self._create_default_config()
 
-    def _create_default_config(self, hub_url: Optional[str] = None):
+    def _create_default_config(self):
         """Create a default config file with common settings."""
         self._config['hub'] = {
-            'url': hub_url if hub_url else 'http://localhost:8000',
+            'url': 'http://localhost:8000',
             'auto_connect': 'false'
         }
 
