@@ -32,7 +32,7 @@ class KnowledgeSource:
     type: Literal["conversation", "ai_summary", "manual_edit", "import", "consensus"] = "manual_edit"
     conversation_id: Optional[str] = None
     participants: List[str] = field(default_factory=list)
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Consensus tracking
     consensus_status: Literal["draft", "approved", "rejected"] = "draft"
@@ -59,7 +59,7 @@ class KnowledgeEntry:
 
     # AI metadata
     confidence: float = 1.0
-    last_updated: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Edit tracking (Phase 5 - inline editing with attribution)
     edited_by: Optional[str] = None  # peer_id or node_id who last edited
@@ -84,8 +84,8 @@ class Topic:
 
     # Versioning (core)
     version: int = 1
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
-    last_modified: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_modified: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # v2.0 - Linked markdown file
     markdown_file: Optional[str] = None  # e.g., "knowledge/python_learning.md"
@@ -180,13 +180,13 @@ class PersonalContext:
     version: int = 1
     last_commit_id: Optional[str] = None
     last_commit_message: Optional[str] = None
-    last_commit_timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    last_commit_timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     commit_history: List[Dict[str, Any]] = field(default_factory=list)
 
     # Metadata
     metadata: Dict[str, Any] = field(default_factory=lambda: {
-        "created": datetime.utcnow().isoformat(),
-        "last_updated": datetime.utcnow().isoformat(),
+        "created": datetime.now(timezone.utc).isoformat(),
+        "last_updated": datetime.now(timezone.utc).isoformat(),
         "storage": "local",
         "format_version": "2.0"
     })
@@ -224,7 +224,7 @@ class PersonalContext:
                     tags=entry_data.get('tags', []),
                     source=source,
                     confidence=entry_data.get('confidence', 1.0),
-                    last_updated=entry_data.get('last_updated', datetime.utcnow().isoformat()),
+                    last_updated=entry_data.get('last_updated', datetime.now(timezone.utc).isoformat()),
                     usage_count=entry_data.get('usage_count', 0),
                     effectiveness_score=entry_data.get('effectiveness_score', 1.0),
                     review_due=entry_data.get('review_due'),
@@ -239,8 +239,8 @@ class PersonalContext:
                 'entries': entries,
                 'mastery_level': topic_content.get('mastery_level', 'beginner'),
                 'version': topic_content.get('version', 1),
-                'created_at': topic_content.get('created_at', datetime.utcnow().isoformat()),
-                'last_modified': topic_content.get('last_modified', datetime.utcnow().isoformat()),
+                'created_at': topic_content.get('created_at', datetime.now(timezone.utc).isoformat()),
+                'last_modified': topic_content.get('last_modified', datetime.now(timezone.utc).isoformat()),
                 'markdown_file': topic_content.get('markdown_file'),
                 'commit_id': topic_content.get('commit_id')
             }
@@ -278,7 +278,7 @@ class PersonalContext:
         version = data.get('version', 1)
         last_commit_id = data.get('last_commit_id')
         last_commit_message = data.get('last_commit_message')
-        last_commit_timestamp = data.get('last_commit_timestamp', datetime.utcnow().isoformat())
+        last_commit_timestamp = data.get('last_commit_timestamp', datetime.now(timezone.utc).isoformat())
         commit_history = data.get('commit_history', [])
 
         return cls(
@@ -353,7 +353,7 @@ class PCMCore:
     def save_context(self, context: PersonalContext):
         """Save context to file, updating metadata timestamps"""
         # Update metadata timestamp
-        context.metadata['last_updated'] = datetime.utcnow().isoformat()
+        context.metadata['last_updated'] = datetime.now(timezone.utc).isoformat()
         context.metadata['format_version'] = '2.0'
 
         with open(self.file_path, 'w', encoding='utf-8') as f:

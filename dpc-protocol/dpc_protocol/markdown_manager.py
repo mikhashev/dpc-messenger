@@ -660,7 +660,7 @@ class MarkdownKnowledgeManager:
         current_content_lines = []
         current_tags = []
         current_confidence = 0.95
-        current_timestamp = datetime.utcnow().isoformat()
+        current_timestamp = datetime.now(timezone.utc).isoformat()
 
         i = 0
         while i < len(lines):
@@ -684,7 +684,7 @@ class MarkdownKnowledgeManager:
                     content="",
                     tags=[],
                     confidence=0.95,
-                    last_updated=datetime.utcnow().isoformat()
+                    last_updated=datetime.now(timezone.utc).isoformat()
                 )
 
             # Parse metadata lines
@@ -773,7 +773,7 @@ if __name__ == '__main__':
 
     manager.update_topic_file(filepath, [new_entry], update_metadata={
         'version': 2,
-        'last_modified': datetime.utcnow().isoformat()
+        'last_modified': datetime.now(timezone.utc).isoformat()
     })
 
     logger.info("Updated: %s", filepath)
