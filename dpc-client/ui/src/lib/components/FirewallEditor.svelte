@@ -26,6 +26,13 @@
       groups?: Record<string, any>;
       nodes?: Record<string, any>;
     };
+    image_transfer?: {
+      _comment?: string;
+      auto_accept_threshold_mb: number;
+      allowed_sources: string[];
+      max_size_mb: number;
+      save_screenshots_to_disk: boolean;
+    };
     notifications?: {
       _comment?: string;
       enabled: boolean;
@@ -38,7 +45,7 @@
   };
 
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'notifications' | 'peers' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'peers' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -541,6 +548,13 @@
           on:click={() => selectedTab = 'file-transfer'}
         >
           File Transfer
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'image-transfer'}
+          on:click={() => selectedTab = 'image-transfer'}
+        >
+          Image Transfer
         </button>
         <button
           class="tab"
@@ -1132,6 +1146,124 @@
             {#if !editMode}
               <div class="info-box">
                 <strong>Info:</strong> File transfer permissions control who can send you files and what types/sizes are allowed. Supports per-node and per-group settings with MIME type wildcards (e.g., "image/*", "application/pdf"). Use Edit mode to modify permissions.
+              </div>
+            {/if}
+          </div>
+
+        {:else if selectedTab === 'image-transfer'}
+          <div class="section">
+            <h3>Image Transfer Settings</h3>
+            <p class="help-text">Configure screenshot/image transfer behavior for P2P chats (Ctrl+V clipboard paste).</p>
+
+            {#if displayRules?.image_transfer}
+              <div class="compute-settings">
+                <div class="setting-item">
+                  <span><strong>Auto-Accept Threshold (MB):</strong></span>
+                  {#if editMode && editedRules?.image_transfer}
+                    <input
+                      type="number"
+                      min="0"
+                      max="1000"
+                      bind:value={editedRules.image_transfer.auto_accept_threshold_mb}
+                      placeholder="25"
+                    />
+                  {:else}
+                    <span class="value">{displayRules.image_transfer.auto_accept_threshold_mb} MB</span>
+                  {/if}
+                </div>
+                <p class="help-text-small">Images smaller than this will be auto-accepted and displayed inline. Larger images will show an acceptance dialog.</p>
+
+                <div class="setting-item">
+                  <span><strong>Max Image Size (MB):</strong></span>
+                  {#if editMode && editedRules?.image_transfer}
+                    <input
+                      type="number"
+                      min="1"
+                      max="10000"
+                      bind:value={editedRules.image_transfer.max_size_mb}
+                      placeholder="100"
+                    />
+                  {:else}
+                    <span class="value">{displayRules.image_transfer.max_size_mb} MB</span>
+                  {/if}
+                </div>
+                <p class="help-text-small">Maximum allowed image size. Images larger than this will be rejected.</p>
+
+                <div class="subsection">
+                  <h4>Allowed Sources</h4>
+                  <p class="help-text-small">Control which image sources are permitted for transfer.</p>
+                  <div class="notification-events">
+                    {#each ['clipboard', 'file', 'camera'] as source}
+                      <div class="notification-event-item">
+                        {#if editMode && editedRules?.image_transfer}
+                          <label for="source-{source}">
+                            <input
+                              type="checkbox"
+                              id="source-{source}"
+                              checked={editedRules.image_transfer.allowed_sources.includes(source)}
+                              on:change={(e) => {
+                                if (editedRules?.image_transfer) {
+                                  const target = e.currentTarget as HTMLInputElement;
+                                  if (target.checked) {
+                                    if (!editedRules.image_transfer.allowed_sources.includes(source)) {
+                                      editedRules.image_transfer.allowed_sources = [
+                                        ...editedRules.image_transfer.allowed_sources,
+                                        source
+                                      ];
+                                    }
+                                  } else {
+                                    editedRules.image_transfer.allowed_sources =
+                                      editedRules.image_transfer.allowed_sources.filter(s => s !== source);
+                                  }
+                                }
+                              }}
+                            />
+                            <span class="event-name">{source}</span>
+                          </label>
+                        {:else}
+                          <label for="source-{source}">
+                            <input
+                              type="checkbox"
+                              id="source-{source}"
+                              checked={displayRules.image_transfer.allowed_sources.includes(source)}
+                              disabled
+                            />
+                            <span class="event-name">{source}</span>
+                          </label>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+
+                <div class="setting-item" style="margin-top: 1rem;">
+                  <label>
+                    {#if editMode && editedRules?.image_transfer}
+                      <input
+                        type="checkbox"
+                        id="save-screenshots"
+                        bind:checked={editedRules.image_transfer.save_screenshots_to_disk}
+                      />
+                    {:else}
+                      <input
+                        type="checkbox"
+                        id="save-screenshots-display"
+                        checked={displayRules.image_transfer.save_screenshots_to_disk}
+                        disabled
+                      />
+                    {/if}
+                    <strong>Save Screenshots to Disk</strong>
+                  </label>
+                </div>
+                <p class="help-text-small">When disabled (default), screenshots are sent/received but not permanently saved. Only thumbnails are kept for display.</p>
+              </div>
+            {:else}
+              <p class="empty">Image transfer settings not configured.</p>
+            {/if}
+
+            {#if !editMode}
+              <div class="info-box" style="margin-top: 1.5rem;">
+                <strong>Info:</strong> Image transfer settings control screenshot/image sharing behavior in P2P chats. Auto-accept threshold determines which images are displayed inline vs. requiring user approval. When "Save Screenshots to Disk" is disabled, images are transmitted but not stored permanently (privacy-conscious default).
               </div>
             {/if}
           </div>
