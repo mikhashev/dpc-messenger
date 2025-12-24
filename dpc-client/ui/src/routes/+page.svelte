@@ -1592,20 +1592,20 @@
   <div class="grid">
     <!-- Sidebar -->
     <div class="sidebar">
-      <!-- Status Bar (moved to sidebar top) -->
-      <div class="status-bar">
-        {#if $connectionStatus === 'connected'}
-          <span class="status-connected">Backend status: connected</span>
-        {:else if $connectionStatus === 'connecting'}
-          <span class="status-connecting">Backend status: connecting...</span>
-        {:else if $connectionStatus === 'error'}
-          <span class="status-error">Backend status: error</span>
-          <button class="btn-small" onclick={handleReconnect}>Retry</button>
-        {:else}
-          <span class="status-disconnected">Backend status: disconnected</span>
-          <button class="btn-small" onclick={handleReconnect}>Connect</button>
-        {/if}
-      </div>
+      <!-- Status Bar (only shown when NOT connected) -->
+      {#if $connectionStatus !== 'connected'}
+        <div class="status-bar">
+          {#if $connectionStatus === 'connecting'}
+            <span class="status-connecting">Backend status: connecting...</span>
+          {:else if $connectionStatus === 'error'}
+            <span class="status-error">Backend status: error</span>
+            <button class="btn-small" onclick={handleReconnect}>Retry</button>
+          {:else}
+            <span class="status-disconnected">Backend status: disconnected</span>
+            <button class="btn-small" onclick={handleReconnect}>Connect</button>
+          {/if}
+        </div>
+      {/if}
       {#if $connectionStatus === 'connected' && $nodeStatus}
         <!-- Node Info -->
         <div class="node-info">
@@ -2576,7 +2576,6 @@
     gap: 0.75rem;
   }
   
-  .status-connected { color: #28a745; font-weight: bold; }
   .status-disconnected, .status-error { color: #dc3545; font-weight: bold; }
   .status-connecting { color: #ffc107; font-weight: bold; }
   
