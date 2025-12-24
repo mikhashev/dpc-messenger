@@ -121,26 +121,39 @@ npm run tauri build
 
 ```json
 {
-  "default_provider": "ollama_local",
-  "providers": {
-    "ollama_local": {
+  "default_provider": "ollama_text",
+  "vision_provider": "ollama_vision",
+  "providers": [
+    {
+      "alias": "ollama_text",
       "type": "ollama",
-      "base_url": "http://localhost:11434",
-      "model": "llama3.2:latest"
+      "model": "llama3.1:8b",
+      "host": "http://127.0.0.1:11434",
+      "context_window": 131072
     },
-    "openai_gpt4": {
-      "type": "openai",
-      "api_key": "sk-...",
-      "model": "gpt-4",
-      "max_tokens": 4096
+    {
+      "alias": "ollama_vision",
+      "type": "ollama",
+      "model": "llama3.2-vision:11b",
+      "host": "http://127.0.0.1:11434",
+      "context_window": 131072
     },
-    "claude_sonnet": {
+    {
+      "alias": "openai_gpt4",
+      "type": "openai_compatible",
+      "model": "gpt-4o",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "context_window": 128000
+    },
+    {
+      "alias": "claude_sonnet",
       "type": "anthropic",
-      "api_key": "sk-ant-...",
       "model": "claude-3-5-sonnet-20241022",
-      "max_tokens": 8192
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "context_window": 200000
     }
-  }
+  ]
 }
 ```
 

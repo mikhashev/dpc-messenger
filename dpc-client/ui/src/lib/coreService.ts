@@ -354,6 +354,12 @@ export function connectToCoreService() {
                         return newMap;
                     });
                 }
+                // Handle providers_updated event (when user edits their own providers)
+                else if (message.event === "providers_updated") {
+                    console.log("Providers configuration updated, reloading provider list");
+                    sendCommand("get_providers_list");     // Reload full provider list
+                    sendCommand("get_default_providers");  // Reload defaults
+                }
                 // Handle firewall_rules_updated event
                 // NOTE: This event is triggered when user saves firewall rules via FirewallEditor.
                 // It allows UI components to reload data from privacy_rules.json without page refresh.

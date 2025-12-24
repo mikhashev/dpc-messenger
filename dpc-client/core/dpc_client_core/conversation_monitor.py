@@ -619,7 +619,7 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                 return float(result.get('score', 0.0))
         except Exception as e:
             logger.error("Error calculating knowledge score: %s", e, exc_info=True)
-            logger.error("  LLM Response preview: %s...", response[:200] if 'response' in locals() else 'N/A')
+            logger.error("  LLM Response preview: %s...", response[:200] if 'response' in locals() and response is not None and isinstance(response, str) else 'N/A')
             return 0.0
 
     def _detect_consensus(self) -> bool:

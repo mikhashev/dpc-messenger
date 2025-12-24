@@ -172,7 +172,7 @@ Bob checks firewall (privacy_rules.json):
   ↓
 Bob sends PROVIDERS_RESPONSE:
   [
-    {alias: "ollama_local", model: "llama3.1:8b", type: "ollama"},
+    {alias: "ollama_text", model: "llama3.1:8b", type: "ollama"},
     {alias: "openai_gpt4", model: "gpt-4", type: "openai_compatible"}
   ]
   ↓
@@ -184,7 +184,7 @@ Alice's UI updates:
 
 **UI State:**
 1. Alice selects **Compute Host**: "Bob"
-2. Model dropdown appears with: `ollama_local (llama3.1:8b)`, `openai_gpt4 (gpt-4)`
+2. Model dropdown appears with: `ollama_text (llama3.1:8b)`, `openai_gpt4 (gpt-4)`
 3. Alice selects **Model**: "gpt-4"
 4. Alice types query: "Explain quantum computing"
 5. Alice clicks Send
@@ -263,7 +263,7 @@ Charlie's UI shows: "Alice (no models available)"
 3. ✅ Check backend logs for "Received 1 providers from dpc-node-bob-..."
 4. ✅ In Alice's UI, check Compute Host dropdown shows "Bob - llama3.1:8b"
 5. ✅ Select Bob as compute host
-6. ✅ Verify Model dropdown appears with "ollama_local (llama3.1:8b)"
+6. ✅ Verify Model dropdown appears with "ollama_text (llama3.1:8b)"
 7. ✅ Send AI query
 8. ✅ Verify Bob's backend shows "Handling inference request from alice..."
 9. ✅ Verify Alice receives response

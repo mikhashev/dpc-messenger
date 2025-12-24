@@ -45,7 +45,7 @@ This is one of the **dual killer features** of D-PC Messenger, enabling users to
     "request_id": "uuid-here",
     "prompt": "What are some creative quest ideas for...",
     "model": "llama3-70b",  // optional
-    "provider": "ollama_local"  // optional
+    "provider": "ollama_text"  // optional
   }
 }
 ```

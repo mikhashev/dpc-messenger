@@ -455,7 +455,7 @@ class LLMManager:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
             default_config = {
-                "_comment": "AI Provider Configuration - Edit this file to configure text and vision models",
+                "_comment": "AI Provider Configuration - Manage your local and cloud AI providers",
                 "default_provider": "ollama_text",
                 "vision_provider": "ollama_vision",
                 "providers": [
@@ -464,24 +464,125 @@ class LLMManager:
                         "type": "ollama",
                         "model": "llama3.1:8b",
                         "host": "http://127.0.0.1:11434",
-                        "context_window": 131072,
-                        "_note": "Fast text model for regular chat queries"
+                        "context_window": 16384,
+                        "_note": "Fast text model for regular chat queries (128K context)"
                     },
                     {
                         "alias": "ollama_vision",
                         "type": "ollama",
-                        "model": "qwen3-vl:8b",
+                        "model": "llama3.2-vision:11b",
                         "host": "http://127.0.0.1:11434",
-                        "context_window": 262144,
-                        "_note": "Vision model for image analysis - change to your installed vision model"
+                        "context_window": 16384,
+                        "_note": "Vision model for image analysis - llama3.2-vision recommended for best quality"
                     }
                 ],
+                "_examples": {
+                    "_comment": "Example configurations - uncomment and add to providers array above",
+                    "ollama_vision_alternatives": [
+                        {
+                            "alias": "ollama_qwen_vision",
+                            "type": "ollama",
+                            "model": "qwen3-vl:8b",
+                            "host": "http://127.0.0.1:11434",
+                            "context_window": 262144,
+                            "_note": "Qwen3-VL 8B - excellent vision model (256K context)"
+                        },
+                        {
+                            "alias": "ollama_ministral_vision",
+                            "type": "ollama",
+                            "model": "ministral-3:8b",
+                            "host": "http://127.0.0.1:11434",
+                            "context_window": 262144,
+                            "_note": "Ministral 3 8B - fast vision model (256K context)"
+                        }
+                    ],
+                    "ollama_small_models": [
+                        {
+                            "alias": "ollama_small",
+                            "type": "ollama",
+                            "model": "llama3.2:3b",
+                            "host": "http://127.0.0.1:11434",
+                            "context_window": 131072,
+                            "_note": "Small model for resource-constrained systems (~2GB RAM)"
+                        },
+                        {
+                            "alias": "ollama_tiny",
+                            "type": "ollama",
+                            "model": "llama3.2:1b",
+                            "host": "http://127.0.0.1:11434",
+                            "context_window": 131072,
+                            "_note": "Tiny model for embedded devices (~1GB RAM)"
+                        }
+                    ],
+                    "lm_studio": {
+                        "alias": "lm_studio",
+                        "type": "openai_compatible",
+                        "model": "lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF",
+                        "base_url": "http://127.0.0.1:1234/v1",
+                        "api_key": "lm-studio",
+                        "_note": "Local LM Studio - OpenAI-compatible API"
+                    },
+                    "openai": {
+                        "alias": "gpt4o",
+                        "type": "openai_compatible",
+                        "model": "gpt-4o",
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key_env": "OPENAI_API_KEY",
+                        "context_window": 128000,
+                        "_note": "OpenAI GPT-4o - powerful vision-capable model",
+                        "_setup": "Set environment variable: export OPENAI_API_KEY='sk-...'"
+                    },
+                    "anthropic": [
+                        {
+                            "alias": "claude_sonnet",
+                            "type": "anthropic",
+                            "model": "claude-sonnet-4-5",
+                            "api_key_env": "ANTHROPIC_API_KEY",
+                            "context_window": 200000,
+                            "_note": "Claude Sonnet 4.5 - most capable (vision-capable, 200K context)",
+                            "_setup": "Set environment variable: export ANTHROPIC_API_KEY='sk-ant-...'"
+                        },
+                        {
+                            "alias": "claude_haiku",
+                            "type": "anthropic",
+                            "model": "claude-haiku-4-5",
+                            "api_key_env": "ANTHROPIC_API_KEY",
+                            "context_window": 200000,
+                            "_note": "Claude Haiku 4.5 - fast and affordable (vision-capable, 200K context)"
+                        }
+                    ]
+                },
                 "_instructions": {
-                    "default_provider": "Used for all text queries (no images)",
-                    "vision_provider": "Used for image analysis queries (screenshots, photos)",
-                    "model_installation": "Install models with: ollama pull llama3.1:8b && ollama pull qwen3-vl:8b",
-                    "supported_types": "ollama, openai_compatible, anthropic",
-                    "vision_models": "qwen3-vl, llava, llama3.2-vision, ministral-3, gpt-4o, claude-3+"
+                    "default_provider": "Provider used for all text-only queries (no images)",
+                    "vision_provider": "Provider used for image analysis queries (screenshots, photos, diagrams)",
+                    "model_installation": {
+                        "ollama": "Install models: ollama pull llama3.1:8b && ollama pull llama3.2-vision:11b",
+                        "alternative_vision": "Other vision models: ollama pull qwen3-vl:8b OR ollama pull ministral-3:8b",
+                        "small_models": "For low RAM: ollama pull llama3.2:3b (2GB) OR ollama pull llama3.2:1b (1GB)"
+                    },
+                    "supported_types": "ollama (local, free), openai_compatible (GPT, LM Studio), anthropic (Claude)",
+                    "vision_capable_models": {
+                        "ollama": "llama3.2-vision, qwen3-vl, ministral-3, llava (all sizes)",
+                        "openai": "gpt-4o, gpt-4-turbo, gpt-4o-mini",
+                        "anthropic": "claude-3+, claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5"
+                    },
+                    "context_windows": {
+                        "128K": "llama3.1, llama3.2-vision, gpt-4o (efficient for most use cases)",
+                        "256K": "qwen3-vl, ministral-3 (excellent for long documents)",
+                        "200K": "claude-3+, claude-4.5 (best for complex analysis)"
+                    },
+                    "ram_requirements": {
+                        "1GB": "llama3.2:1b (tiny, embedded devices)",
+                        "2GB": "llama3.2:3b (small, budget systems)",
+                        "8GB": "llama3.1:8b, qwen3-vl:8b, ministral-3:8b (recommended)",
+                        "16GB": "llama3.2-vision:11b, llama3.1:13b (best quality)",
+                        "24GB+": "llama3.1:70b, llama3.2-vision:90b (professional workstations)"
+                    },
+                    "api_key_setup": {
+                        "linux_mac": "Add to ~/.bashrc: export OPENAI_API_KEY='sk-...' && export ANTHROPIC_API_KEY='sk-ant-...'",
+                        "windows_cmd": "setx OPENAI_API_KEY \"sk-...\" && setx ANTHROPIC_API_KEY \"sk-ant-...\"",
+                        "windows_powershell": "$env:OPENAI_API_KEY='sk-...'; [Environment]::SetEnvironmentVariable('OPENAI_API_KEY', 'sk-...', 'User')"
+                    }
                 }
             }
 

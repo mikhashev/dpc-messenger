@@ -1437,6 +1437,13 @@
       const newSender = message.status === "OK" ? 'ai' : 'system';
       const modelName = message.status === "OK" ? message.payload.model : undefined;
 
+      // Show toast notification for errors (helps remote users see host failures)
+      if (message.status !== "OK") {
+        fileOfferToastMessage = `⚠️ AI Query Failed: ${message.payload?.message || 'Unknown error'}`;
+        showFileOfferToast = true;
+        setTimeout(() => showFileOfferToast = false, 7000);  // 7s for errors (longer than success)
+      }
+
       const responseCommandId = message.id;
 
       // Find which chat this command belongs to

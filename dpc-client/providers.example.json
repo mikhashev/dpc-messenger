@@ -1,14 +1,23 @@
 {
   "_comment": "D-PC AI Providers Configuration - Manage your local and cloud AI providers. Copy this to ~/.dpc/providers.json and customize.",
 
-  "default_provider": "ollama_local",
+  "default_provider": "ollama_text",
+  "vision_provider": "ollama_vision",
 
   "providers": [
     {
-      "_comment": "Local Ollama provider - No API key needed",
-      "alias": "ollama_local",
+      "_comment": "Local Ollama text provider - Fast model for regular chat queries",
+      "alias": "ollama_text",
       "type": "ollama",
       "model": "llama3.1:8b",
+      "host": "http://127.0.0.1:11434",
+      "context_window": 131072
+    },
+    {
+      "_comment": "Local Ollama vision provider - For image analysis queries",
+      "alias": "ollama_vision",
+      "type": "ollama",
+      "model": "llama3.2-vision:11b",
       "host": "http://127.0.0.1:11434",
       "context_window": 131072
     },

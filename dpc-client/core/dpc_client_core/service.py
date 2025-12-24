@@ -1450,6 +1450,11 @@ class CoreService:
         if default and default not in provider_aliases:
             errors.append(f"Default provider '{default}' not found in providers list")
 
+        # Check vision_provider exists (optional field)
+        vision = config_dict.get("vision_provider")
+        if vision and vision not in provider_aliases:
+            errors.append(f"Vision provider '{vision}' not found in providers list")
+
         return errors
 
     def set_peer_metadata(self, node_id: str, **kwargs):
