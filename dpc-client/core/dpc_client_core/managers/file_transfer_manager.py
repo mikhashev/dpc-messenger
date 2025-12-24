@@ -432,7 +432,8 @@ class FileTransferManager:
             total_chunks=total_chunks,
             file_path=file_path,
             progress_callback=progress_callback,
-            chunk_hashes=chunk_hashes  # v0.11.1: Store for retry requests
+            chunk_hashes=chunk_hashes,  # v0.11.1: Store for retry requests
+            image_metadata=image_metadata  # Store image metadata for screenshots
         )
         self.active_transfers[transfer_id] = transfer
 
@@ -773,52 +774,8 @@ class FileTransferManager:
         elif is_image:
             logger.debug(f"Screenshot cleanup skipped: file_path={transfer.file_path}, firewall={self.firewall is not None}")
 
-        # Broadcast completion to UI (sender side)
-        if self.local_api and transfer.direction == "upload":
-            import time
-            message_id = hashlib.sha256(
-                f"user:file-sent:{transfer_id}:{int(time.time() * 1000)}".encode()
-            ).hexdigest()[:16]
-
-            size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
-
-            # Build attachment
-            attachment = {
-                "type": "image" if is_image else "file",
-                "filename": transfer.filename,
-                "size_bytes": transfer.size_bytes,
-                "size_mb": size_mb,
-                "hash": transfer.hash,
-                "mime_type": transfer.mime_type,
-                "transfer_id": transfer.transfer_id,
-                "status": "completed"
-            }
-
-            # Add image-specific fields
-            if is_image and transfer.file_path:
-                attachment["file_path"] = str(transfer.file_path)
-                if transfer.image_metadata:
-                    attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
-                    attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
-
-            # Broadcast as chat message (so sender sees it in their chat history)
-            await self.local_api.broadcast_event("new_p2p_message", {
-                "sender_node_id": "user",
-                "sender_name": "You",
-                "text": f"{transfer.filename} ({size_mb} MB)",
-                "message_id": message_id,
-                "attachments": [attachment]
-            })
-            logger.debug(f"Broadcasted {'image' if is_image else 'file'} sent message to UI: {transfer.filename}")
-
-            # Also broadcast completion event to hide active transfer panel
-            await self.local_api.broadcast_event("file_transfer_complete", {
-                "transfer_id": transfer_id,
-                "node_id": node_id,
-                "filename": transfer.filename,
-                "direction": "upload",
-                "status": "completed"
-            })
+        # Note: FileCompleteHandler broadcasts new_p2p_message and file_transfer_complete
+        # for upload direction, so we don't duplicate broadcasts here
 
         # Cleanup
         del self.active_transfers[transfer_id]  # Remove from active transfers
