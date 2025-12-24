@@ -876,7 +876,7 @@
             node_id: activeChatId,
             image_base64: imageData.dataUrl,
             filename: imageData.filename,
-            text: currentInput.trim()  // Include user caption with screenshot
+            text: text  // Include user caption with screenshot
           });
 
           // Success - backend will broadcast new_p2p_message when transfer completes
@@ -889,10 +889,7 @@
           showFileOfferToast = true;
           setTimeout(() => showFileOfferToast = false, 5000);
         }
-
-        // Clear pending image
-        pendingImage = null;
-        currentInput = ''; // Clear text input
+        // Note: currentInput and pendingImage already cleared at top of function
       }
       return;
     }
