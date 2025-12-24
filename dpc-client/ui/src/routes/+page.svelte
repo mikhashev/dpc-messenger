@@ -209,6 +209,7 @@
   // UI collapse states
   let contextPanelCollapsed = $state(false);  // Context toggle panel collapsible
   let modeSectionCollapsed = $state(true);  // Mode section collapsible (collapsed by default)
+  let chatHeaderCollapsed = $state(false);  // Chat header collapsible
 
   // Notification state
   let windowFocused = $state(true);
@@ -1945,14 +1946,24 @@
     <div class="chat-panel" style="height: {chatPanelHeight}px;">
       <div class="chat-header">
         <div class="chat-title-section">
-          <h2>
-            {#if $aiChats.has(activeChatId)}
-              {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
-            {:else}
-              Chat with {getPeerDisplayName(activeChatId)}
-            {/if}
-          </h2>
+          <button
+            type="button"
+            class="chat-header-toggle"
+            onclick={() => chatHeaderCollapsed = !chatHeaderCollapsed}
+            aria-expanded={!chatHeaderCollapsed}
+          >
+            <h2>
+              <span class="collapse-indicator">{chatHeaderCollapsed ? '▶' : '▼'}</span>
+              {#if $aiChats.has(activeChatId)}
+                {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
+              {:else}
+                Chat with {getPeerDisplayName(activeChatId)}
+              {/if}
+            </h2>
+          </button>
+        </div>
 
+        {#if !chatHeaderCollapsed}
           {#if $aiChats.has(activeChatId) && $providersList.length > 0}
             <div class="provider-selector-header">
               <!-- AI Host Selector (Phase 2: Remote Vision) -->
@@ -2000,7 +2011,6 @@
               </div>
             </div>
           {/if}
-        </div>
 
         {#if $aiChats.has(activeChatId) && currentTokenUsage.limit > 0}
           <div class="token-counter">
@@ -2036,6 +2046,7 @@
             </button>
           {/if}
         </div>
+        {/if}
       </div>
 
       <div class="chat-window" bind:this={chatWindow}>
@@ -3075,6 +3086,33 @@
     margin: 0;
     border: none;
     padding: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .chat-header-toggle {
+    width: 100%;
+    text-align: left;
+    cursor: pointer;
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    transition: opacity 0.2s ease;
+  }
+
+  .chat-header-toggle:hover {
+    opacity: 0.7;
+  }
+
+  .collapse-indicator {
+    font-size: 0.8em;
+    color: #666;
+    transition: transform 0.2s ease;
+    display: inline-block;
+    min-width: 1em;
   }
 
   /* Dual Provider Selector in Header (Phase 1) */
