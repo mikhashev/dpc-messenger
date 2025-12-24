@@ -872,52 +872,19 @@
           }
 
           // Send screenshot to peer via backend
-          const response = await sendCommand("send_p2p_image", {
+          await sendCommand("send_p2p_image", {
             node_id: activeChatId,
             image_base64: imageData.dataUrl,
             filename: imageData.filename
           });
 
-          if (response.success) {
-            console.log("Screenshot sent successfully:", response.data);
-
-            // Optimistic UI: Show image immediately in chat
-            chatHistories.update(histories => {
-              const newMap = new Map(histories);
-              const history = newMap.get(activeChatId) || [];
-              const optimisticMsg: Message = {
-                id: `temp-${Date.now()}`,
-                sender: 'user',
-                senderName: 'You',
-                text: text || '', // Include caption if user typed one
-                timestamp: Date.now(),
-                attachments: [{
-                  type: 'image' as const,
-                  filename: imageData.filename,
-                  file_path: response.data.file_path,  // For full-size display
-                  size_bytes: response.data.size_bytes,
-                  transfer_id: response.data.transfer_id,
-                  status: 'uploading',
-                  dimensions: {
-                    width: response.data.width,
-                    height: response.data.height
-                  },
-                  thumbnail: response.data.thumbnail_base64
-                }]
-              };
-              newMap.set(activeChatId, [...history, optimisticMsg]);
-              return newMap;
-            });
-
-            autoScroll();
-          } else {
-            fileOfferToastMessage = `Failed to send screenshot: ${response.error}`;
-            showFileOfferToast = true;
-            setTimeout(() => showFileOfferToast = false, 5000);
-          }
+          // Success - backend will broadcast new_p2p_message when transfer completes
+          console.log("Screenshot transfer initiated successfully");
         } catch (error) {
           console.error('Error sending screenshot:', error);
-          fileOfferToastMessage = `Error sending screenshot: ${error}`;
+          // Extract error message from Error object
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          fileOfferToastMessage = `Failed to send screenshot: ${errorMsg}`;
           showFileOfferToast = true;
           setTimeout(() => showFileOfferToast = false, 5000);
         }

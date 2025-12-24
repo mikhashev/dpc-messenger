@@ -214,9 +214,15 @@ export function connectToCoreService() {
 
                 // Check if this is a response to a pending command
                 if (message.id && pendingCommands.has(message.id)) {
-                    const { resolve } = pendingCommands.get(message.id)!;
+                    const { resolve, reject } = pendingCommands.get(message.id)!;
                     pendingCommands.delete(message.id);
-                    resolve(message.payload);
+
+                    // Check for error responses
+                    if (message.status === "ERROR") {
+                        reject(new Error(message.payload?.message || "Command failed"));
+                    } else {
+                        resolve(message.payload);
+                    }
                 }
 
                 if (message.event === "status_update" ||
@@ -575,6 +581,7 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'query_ollama_model_info',
             'toggle_auto_knowledge_detection',
             'send_file',
+            'send_p2p_image',  // Screenshot sending
             'accept_file_transfer',
             'cancel_file_transfer',
             'get_conversation_history'  // v0.11.2 - backend→frontend sync

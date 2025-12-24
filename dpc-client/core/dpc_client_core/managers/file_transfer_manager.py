@@ -706,7 +706,9 @@ class FileTransferManager:
 
             # Add image-specific fields
             if is_image:
-                attachment["file_path"] = str(file_path)
+                # Only include file_path if file was actually saved to disk
+                if save_to_disk:
+                    attachment["file_path"] = str(file_path)
                 if transfer.image_metadata:
                     attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
                     attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
@@ -763,10 +765,13 @@ class FileTransferManager:
         if is_image and transfer.file_path and self.firewall:
             img_rules = self.firewall.rules.get("image_transfer", {})
             save_to_disk = img_rules.get("save_screenshots_to_disk", True)
+            logger.debug(f"Screenshot cleanup check: save_to_disk={save_to_disk}, file_exists={transfer.file_path.exists()}")
 
             if not save_to_disk and transfer.file_path.exists():
                 transfer.file_path.unlink()  # Delete the screenshot file
                 logger.info(f"Deleted screenshot after upload (save_screenshots_to_disk=false): {transfer.file_path}")
+        elif is_image:
+            logger.debug(f"Screenshot cleanup skipped: file_path={transfer.file_path}, firewall={self.firewall is not None}")
 
         # Broadcast completion to UI (sender side)
         if self.local_api and transfer.direction == "upload":
