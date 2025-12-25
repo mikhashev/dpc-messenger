@@ -84,6 +84,14 @@ All notable changes to D-PC Messenger will be documented in this file.
 
 ### Fixed
 
+#### CRITICAL: Node ID Validation Bug in HELLO Handshake
+- **Bug:** Peers connecting with stale cached node IDs bypassed identity validation
+- **Impact:** File transfer permissions failed when peer regenerated identity (fresh install)
+- **Root Cause:** HELLO_ACK didn't include node_id; client never validated actual peer identity
+- **Security Risk:** Connections tracked under wrong node_id, breaking firewall rules
+- **Fix:** Include node_id in HELLO_ACK, validate and update on mismatch, log warnings for stale cache
+- **Files:** [p2p_manager.py:445,604-642](dpc-client/core/dpc_client_core/p2p_manager.py#L445)
+
 #### CRITICAL: Multiple Infinite Loop Fixes (v0.11.3)
 - Empty conversation history infinite loop
 - Multiple peers infinite loop

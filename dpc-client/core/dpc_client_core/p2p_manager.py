@@ -441,7 +441,8 @@ class P2PManager:
             ack = {
                 "command": "HELLO_ACK",
                 "status": "OK",
-                "name": self.display_name
+                "name": self.display_name,
+                "node_id": self.node_id  # Include actual node_id for validation
             }
             await write_message(writer, ack)
 
@@ -599,13 +600,26 @@ class P2PManager:
             if not response or response.get("status") != "OK":
                 raise ConnectionError(f"Peer did not acknowledge HELLO.")
 
+            # Extract actual node_id from HELLO_ACK (critical for security and cache correctness)
+            actual_node_id = response.get("node_id")
+            if not actual_node_id:
+                logger.warning("HELLO_ACK missing node_id field - using expected node_id from URI")
+                actual_node_id = target_node_id
+            elif actual_node_id != target_node_id:
+                logger.warning(
+                    "Node ID mismatch! Expected %s but peer reports %s. "
+                    "This usually means the peer regenerated identity or cache is stale. "
+                    "Using actual node_id from peer.",
+                    target_node_id, actual_node_id
+                )
+
             peer_name = response.get("name")
             if peer_name:
                 logger.info("Peer name: %s", peer_name)
                 if hasattr(self, '_core_service_ref') and self._core_service_ref:
-                    self._core_service_ref.set_peer_metadata(target_node_id, name=peer_name)
+                    self._core_service_ref.set_peer_metadata(actual_node_id, name=peer_name)
 
-            peer = PeerConnection(node_id=target_node_id, reader=reader, writer=writer)
+            peer = PeerConnection(node_id=actual_node_id, reader=reader, writer=writer)
 
             # Set strategy_used for outgoing direct connections (for UI display)
             sock = writer.get_extra_info('socket')
@@ -618,24 +632,29 @@ class P2PManager:
             else:
                 peer.strategy_used = "ipv4_direct"  # Default fallback
 
-            self.peers[target_node_id] = peer
+            # If node_id changed, remove stale entry
+            if actual_node_id != target_node_id and target_node_id in self.peers:
+                logger.info("Removing stale peer entry for %s", target_node_id)
+                del self.peers[target_node_id]
+
+            self.peers[actual_node_id] = peer
             await self._notify_peer_change()
-            logger.info("Direct connection established with %s", target_node_id)
+            logger.info("Direct connection established with %s", actual_node_id)
 
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())
 
             # Start listener task and track it for graceful shutdown
             task = asyncio.create_task(self._listen_to_peer(peer))
-            self._peer_listener_tasks[target_node_id] = task
+            self._peer_listener_tasks[actual_node_id] = task
 
             # Auto-discover peer's available AI providers
             from dpc_protocol.protocol import create_get_providers_message
             try:
-                await self.send_message_to_peer(target_node_id, create_get_providers_message())
-                logger.debug("Requested AI providers from %s", target_node_id)
+                await self.send_message_to_peer(actual_node_id, create_get_providers_message())
+                logger.debug("Requested AI providers from %s", actual_node_id)
             except Exception as e:
-                logger.warning("Failed to request providers from %s: %s", target_node_id, e)
+                logger.warning("Failed to request providers from %s: %s", actual_node_id, e)
 
         except asyncio.TimeoutError:
             error_msg = (
@@ -661,6 +680,7 @@ class P2PManager:
             logger.error(error_msg)
             raise ConnectionError(error_msg)
         except Exception as e:
+            # Use target_node_id in error since actual_node_id may not be set yet
             logger.error("Failed to establish direct connection with %s: %s", target_node_id, e, exc_info=True)
             raise
 
