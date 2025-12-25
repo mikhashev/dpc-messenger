@@ -198,6 +198,11 @@
   let fileOfferToastMessage = $state("");
   let showFileOfferToast = $state(false);
 
+  // Connection state (Phase 2: UX improvements)
+  let isConnecting = $state(false);
+  let connectionError = $state("");
+  let showConnectionError = $state(false);
+
   // Send file confirmation dialog
   let showSendFileDialog = $state(false);
   let pendingFileSend = $state<{ filePath: string, fileName: string, recipientId: string, recipientName: string } | null>(null);
@@ -979,25 +984,46 @@
   
   // --- PEER CONNECTION FUNCTIONS ---
   // Connection strategy: Direct TLS (if dpc:// URI) or DHT-first (if node_id)
-  function handleConnectPeer() {
+  async function handleConnectPeer() {
     if (!peerInput.trim()) return;
 
     const input = peerInput.trim();
     console.log("Connecting to peer:", input);
 
-    // Detect if input is a dpc:// URI (Direct TLS) or just a node_id (DHT-first)
-    if (input.startsWith('dpc://')) {
-      // Direct TLS connection (manual IP/port)
-      console.log("Using Direct TLS connection");
-      sendCommand("connect_to_peer", { uri: input });
-    } else {
-      // DHT-first connection (automatic discovery)
-      // Tries: DHT lookup → Peer cache → Hub WebRTC
-      console.log("Using DHT-first discovery strategy");
-      sendCommand("connect_via_dht", { node_id: input });
-    }
+    // Show connecting state
+    isConnecting = true;
+    connectionError = "";
+    showConnectionError = false;
 
-    peerInput = "";
+    try {
+      let result;
+      // Detect if input is a dpc:// URI (Direct TLS) or just a node_id (DHT-first)
+      if (input.startsWith('dpc://')) {
+        // Direct TLS connection (manual IP/port)
+        console.log("Using Direct TLS connection");
+        result = await sendCommand("connect_to_peer", { uri: input });
+      } else {
+        // DHT-first connection (automatic discovery)
+        // Tries: DHT lookup → Peer cache → Hub WebRTC
+        console.log("Using DHT-first discovery strategy");
+        result = await sendCommand("connect_via_dht", { node_id: input });
+      }
+
+      // Check result
+      if (result && result.status === 'error') {
+        connectionError = result.message || "Connection failed";
+        showConnectionError = true;
+      } else {
+        // Success - clear input
+        peerInput = "";
+      }
+    } catch (error: any) {
+      console.error('Connection error:', error);
+      connectionError = error.message || "Connection failed - check backend logs";
+      showConnectionError = true;
+    } finally {
+      isConnecting = false;
+    }
   }
   
   function handleDisconnectPeer(nodeId: string) {
@@ -1807,7 +1833,12 @@
             placeholder="node_id or dpc://IP:port?node_id=..."
             onkeydown={(e) => e.key === 'Enter' && handleConnectPeer()}
           />
-          <button onclick={handleConnectPeer}>Connect</button>
+          <button
+            onclick={handleConnectPeer}
+            disabled={isConnecting || !peerInput.trim()}
+          >
+            {isConnecting ? '🔄 Connecting...' : 'Connect'}
+          </button>
 
           <!-- Connection Methods Help (Collapsible) -->
           <details class="connection-methods-details">
@@ -2409,6 +2440,20 @@
     onClick={() => {
       showVoteResultDialog = true;
       showCommitResultToast = false;
+    }}
+  />
+{/if}
+
+<!-- Connection Error Toast -->
+{#if showConnectionError}
+  <Toast
+    message={connectionError}
+    type="error"
+    duration={8000}
+    dismissible={true}
+    onDismiss={() => {
+      showConnectionError = false;
+      connectionError = "";
     }}
   />
 {/if}

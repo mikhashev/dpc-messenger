@@ -577,8 +577,8 @@ class P2PManager:
         logger.debug("Pre-flight check passed - port %d is accessible", port)
 
         ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        ssl_context.check_hostname = False  # We validate manually via CN
+        ssl_context.verify_mode = ssl.CERT_REQUIRED  # Require peer certificate
 
         try:
             # Add timeout to prevent long hangs
@@ -586,6 +586,38 @@ class P2PManager:
                 asyncio.open_connection(host, port, ssl=ssl_context),
                 timeout=timeout
             )
+
+            # Extract and validate peer certificate (TLS layer security)
+            ssl_object = writer.get_extra_info('ssl_object')
+            if not ssl_object:
+                error_msg = "TLS connection established but no SSL object available"
+                logger.error(error_msg)
+                writer.close()
+                await writer.wait_closed()
+                raise ConnectionError(error_msg)
+
+            peer_cert = self._extract_peer_certificate(ssl_object)
+            if not peer_cert:
+                error_msg = "Failed to extract peer certificate - rejecting connection"
+                logger.error(error_msg)
+                writer.close()
+                await writer.wait_closed()
+                raise ConnectionError(error_msg)
+
+            if not self._validate_peer_certificate(peer_cert, target_node_id):
+                error_msg = (
+                    f"Certificate validation failed for {target_node_id}. "
+                    f"This means either:\n"
+                    f"  1. Peer regenerated identity - Get fresh URI from peer\n"
+                    f"  2. Connecting to wrong peer\n"
+                    f"  3. MITM attack detected"
+                )
+                logger.error(error_msg)
+                writer.close()
+                await writer.wait_closed()
+                raise ConnectionError(error_msg)
+
+            logger.info("TLS certificate validated successfully for %s", target_node_id)
 
             hello = {
                 "command": "HELLO",
@@ -688,6 +720,78 @@ class P2PManager:
             # Use target_node_id in error since actual_node_id may not be set yet
             logger.error("Failed to establish direct connection with %s: %s", target_node_id, e, exc_info=True)
             raise
+
+    def _extract_peer_certificate(self, ssl_object) -> Optional[Any]:
+        """
+        Extract peer's X.509 certificate from TLS connection.
+
+        Args:
+            ssl_object: SSL object from writer.get_extra_info('ssl_object')
+
+        Returns:
+            Certificate object if available, None otherwise
+        """
+        try:
+            # Get binary DER-encoded certificate
+            cert_bin = ssl_object.getpeercert(binary_form=True)
+            if not cert_bin:
+                logger.error("No peer certificate available")
+                return None
+
+            # Parse with cryptography library
+            from cryptography import x509
+            from cryptography.hazmat.backends import default_backend
+
+            cert = x509.load_der_x509_certificate(cert_bin, default_backend())
+            return cert
+
+        except Exception as e:
+            logger.error("Failed to extract peer certificate: %s", e)
+            return None
+
+    def _validate_peer_certificate(
+        self,
+        cert: Any,
+        expected_node_id: str
+    ) -> bool:
+        """
+        Validate peer certificate matches expected node_id.
+
+        Args:
+            cert: Peer's X.509 certificate
+            expected_node_id: Expected node ID from URI
+
+        Returns:
+            True if valid, False otherwise
+        """
+        try:
+            from cryptography import x509
+
+            # Extract Common Name from certificate subject
+            cn = None
+            for attribute in cert.subject:
+                if attribute.oid == x509.oid.NameOID.COMMON_NAME:
+                    cn = attribute.value
+                    break
+
+            if not cn:
+                logger.error("Certificate has no Common Name")
+                return False
+
+            # Verify CN matches expected node_id
+            if cn != expected_node_id:
+                logger.error(
+                    "Certificate validation failed: CN='%s' but expected node_id='%s'",
+                    cn, expected_node_id
+                )
+                return False
+
+            logger.info("Certificate validated: node_id=%s", cn)
+            return True
+
+        except Exception as e:
+            logger.error("Certificate validation error: %s", e)
+            return False
 
     async def _listen_to_peer(self, peer: PeerConnection):
         """Background task to listen for messages from a TLS peer."""

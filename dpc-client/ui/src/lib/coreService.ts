@@ -590,7 +590,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'send_p2p_image',  // Screenshot sending
             'accept_file_transfer',
             'cancel_file_transfer',
-            'get_conversation_history'  // v0.11.2 - backend→frontend sync
+            'get_conversation_history',  // v0.11.2 - backend→frontend sync
+            'connect_to_peer',  // v0.12.0 - async connection with error handling
+            'connect_via_dht'   // v0.12.0 - async connection with error handling
         ].includes(command);
 
         if (expectsResponse) {

@@ -84,13 +84,54 @@ All notable changes to D-PC Messenger will be documented in this file.
 
 ### Fixed
 
-#### CRITICAL: Node ID Validation Bug in HELLO Handshake
-- **Bug:** Peers connecting with stale cached node IDs bypassed identity validation
-- **Impact:** File transfer permissions failed when peer regenerated identity (fresh install)
-- **Root Cause:** HELLO_ACK didn't include node_id; client never validated actual peer identity
-- **Security Risk:** Connections tracked under wrong node_id, breaking firewall rules
-- **Fix:** Include node_id in HELLO_ACK, validate and update on mismatch, log warnings for stale cache
-- **Files:** [p2p_manager.py:445,604-642](dpc-client/core/dpc_client_core/p2p_manager.py#L445)
+#### CRITICAL: TLS Certificate Validation + Node ID Security
+
+**Security Issues Fixed:**
+
+1. **TLS Certificate Validation Disabled**
+   - **Bug:** Direct TLS connections had `ssl.CERT_NONE` (no certificate verification)
+   - **Impact:** Vulnerable to MITM attacks, anyone could impersonate any peer
+   - **Attack Vectors:** Man-in-the-middle attacks, peer impersonation, wrong peer connection
+   - **Fix:** Enable `ssl.CERT_REQUIRED`, extract peer certificate, validate CN == node_id
+   - **Defense in Depth:** Certificate validation at TLS layer + HELLO_ACK validation at application layer
+   - **Files:**
+     - [p2p_manager.py:579-581](dpc-client/core/dpc_client_core/p2p_manager.py#L579) - TLS context configuration
+     - [p2p_manager.py:590-620](dpc-client/core/dpc_client_core/p2p_manager.py#L590) - Post-handshake validation
+     - [p2p_manager.py:692-762](dpc-client/core/dpc_client_core/p2p_manager.py#L692) - Certificate extraction helpers
+
+2. **Node ID Mismatch Handling**
+   - **Bug:** Application layer accepted mismatched node_id with warning only
+   - **Impact:** Could connect to wrong peer or stale cached identity
+   - **Security Risk:** Connections tracked under wrong node_id, breaking firewall rules
+   - **Fix:** Reject connection on node_id mismatch (both TLS cert CN and HELLO_ACK validation)
+   - **User Guidance:** Clear error messages explaining how to get fresh URI from peer
+   - **Files:**
+     - [p2p_manager.py:445](dpc-client/core/dpc_client_core/p2p_manager.py#L445) - Include node_id in HELLO_ACK
+     - [p2p_manager.py:634-655](dpc-client/core/dpc_client_core/p2p_manager.py#L634) - Application layer validation
+
+**Security Flow:**
+1. TLS handshake with `ssl.CERT_REQUIRED`
+2. Extract peer certificate from TLS connection
+3. Validate certificate CN matches expected node_id
+4. Reject if mismatch (before sending HELLO)
+5. Continue with HELLO handshake
+6. Validate HELLO_ACK node_id (defense in depth)
+
+#### UX: Connection Status & Error Messages
+
+**Improvements:**
+- **"Connecting..." State**: Button shows 🔄 spinner during connection attempt
+- **Disabled State**: Button disabled when connecting or input empty
+- **Error Toasts**: Clear error messages when connection fails (8-second display)
+- **User Guidance**: Helpful messages explaining why connection failed
+- **Async Command Handling**: `connect_to_peer` and `connect_via_dht` now return Promises
+
+**Files:**
+- [+page.svelte:201-204](dpc-client/ui/src/routes/+page.svelte#L201) - Connection state variables
+- [+page.svelte:987-1027](dpc-client/ui/src/routes/+page.svelte#L987) - Async connection handler
+- [+page.svelte:1836-1841](dpc-client/ui/src/routes/+page.svelte#L1836) - Loading state button
+- [+page.svelte:2447-2459](dpc-client/ui/src/routes/+page.svelte#L2447) - Error toast component
+- [coreService.ts:594-595](dpc-client/ui/src/lib/coreService.ts#L594) - Promise-based commands
 
 #### CRITICAL: Multiple Infinite Loop Fixes (v0.11.3)
 - Empty conversation history infinite loop
