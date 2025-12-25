@@ -2948,14 +2948,16 @@ class CoreService:
             result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use, images=images, return_metadata=True)
             logger.info("Inference completed successfully for %s", peer_id)
 
-            # Send success response with token metadata
+            # Send success response with token and model metadata
             success_response = create_remote_inference_response(
                 request_id=request_id,
                 response=result["response"],
                 tokens_used=result.get("tokens_used"),
                 prompt_tokens=result.get("prompt_tokens"),
                 response_tokens=result.get("response_tokens"),
-                model_max_tokens=result.get("model_max_tokens")
+                model_max_tokens=result.get("model_max_tokens"),
+                model=result.get("model"),
+                provider=result.get("provider")
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)

@@ -62,17 +62,23 @@ class RemoteInferenceResponseHandler(MessageHandler):
         prompt_tokens = payload.get("prompt_tokens")
         response_tokens = payload.get("response_tokens")
 
+        # Extract model and provider metadata (v0.12.0+)
+        model = payload.get("model")
+        provider = payload.get("provider")
+
         if request_id in self.service._pending_inference_requests:
             future = self.service._pending_inference_requests[request_id]
             if not future.done():
                 if status == "success":
-                    # Return dict with response and token metadata
+                    # Return dict with response, token, and model metadata
                     result_data = {
                         "response": response,
                         "tokens_used": tokens_used,
                         "model_max_tokens": model_max_tokens,
                         "prompt_tokens": prompt_tokens,
-                        "response_tokens": response_tokens
+                        "response_tokens": response_tokens,
+                        "model": model,
+                        "provider": provider
                     }
                     future.set_result(result_data)
                 else:
