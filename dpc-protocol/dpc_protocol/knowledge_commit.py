@@ -8,7 +8,7 @@ Inspired by Personal Context Manager and cognitive bias research.
 import logging
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric import rsa

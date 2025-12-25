@@ -160,6 +160,20 @@ All notable changes to D-PC Messenger will be documented in this file.
   - [service.py:2959-2960](dpc-client/core/dpc_client_core/service.py#L2959) - Pass metadata
   - [inference_handler.py:66-82](dpc-client/core/dpc_client_core/message_handlers/inference_handler.py#L66) - Extract metadata
 
+#### CRITICAL: Missing timezone Import (2 Files)
+- **Bug:** `NameError: name 'timezone' is not defined` when ending conversation and saving knowledge
+- **Impact:** Complete failure of knowledge commit system and markdown export (crashes on any attempt)
+- **Symptoms:** Users see error when clicking "End conversation and save knowledge" or exporting to markdown
+- **Root Cause:** Two protocol files imported `datetime` but not `timezone`, then used `datetime.now(timezone.utc)`
+- **Affected Files:**
+  1. `knowledge_commit.py` - 5 locations (lines 41, 83, 102, 126, 154)
+  2. `markdown_manager.py` - 3 locations (lines 663, 687, 776)
+- **Fix:** Add `timezone` to imports from datetime module in both files
+- **Audit:** Checked all 23 files using `timezone.utc` - only these 2 had missing imports
+- **Files:**
+  - [knowledge_commit.py:11](dpc-protocol/dpc_protocol/knowledge_commit.py#L11)
+  - [markdown_manager.py:15](dpc-protocol/dpc_protocol/markdown_manager.py#L15)
+
 #### CRITICAL: Multiple Infinite Loop Fixes (v0.11.3)
 - Empty conversation history infinite loop
 - Multiple peers infinite loop
