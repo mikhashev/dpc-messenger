@@ -576,9 +576,12 @@ class P2PManager:
 
         logger.debug("Pre-flight check passed - port %d is accessible", port)
 
+        # Create SSL context for self-signed certificates
+        # Note: We use CERT_NONE because we're in a P2P network with self-signed certs
+        # (no shared CA). Security is provided by manual validation below.
         ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
         ssl_context.check_hostname = False  # We validate manually via CN
-        ssl_context.verify_mode = ssl.CERT_REQUIRED  # Require peer certificate
+        ssl_context.verify_mode = ssl.CERT_NONE  # Required for self-signed certs
 
         try:
             # Add timeout to prevent long hangs

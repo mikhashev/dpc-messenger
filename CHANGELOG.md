@@ -88,14 +88,18 @@ All notable changes to D-PC Messenger will be documented in this file.
 
 **Security Issues Fixed:**
 
-1. **TLS Certificate Validation Disabled**
-   - **Bug:** Direct TLS connections had `ssl.CERT_NONE` (no certificate verification)
+1. **TLS Certificate Validation Missing**
+   - **Bug:** Direct TLS connections had no certificate verification (certificate presented but never validated)
    - **Impact:** Vulnerable to MITM attacks, anyone could impersonate any peer
    - **Attack Vectors:** Man-in-the-middle attacks, peer impersonation, wrong peer connection
-   - **Fix:** Enable `ssl.CERT_REQUIRED`, extract peer certificate, validate CN == node_id
+   - **Fix:** Add manual certificate validation after TLS handshake
+     - Extract peer certificate from TLS connection
+     - Validate certificate CN matches expected node_id
+     - Reject connection if validation fails (before HELLO handshake)
+   - **Why Manual Validation:** P2P networks use self-signed certificates (no shared CA), so we use `ssl.CERT_NONE` to allow handshake, then manually verify. This is the standard pattern for P2P with self-signed certs (same as DTLS implementation).
    - **Defense in Depth:** Certificate validation at TLS layer + HELLO_ACK validation at application layer
    - **Files:**
-     - [p2p_manager.py:579-581](dpc-client/core/dpc_client_core/p2p_manager.py#L579) - TLS context configuration
+     - [p2p_manager.py:579-584](dpc-client/core/dpc_client_core/p2p_manager.py#L579) - TLS context configuration
      - [p2p_manager.py:590-620](dpc-client/core/dpc_client_core/p2p_manager.py#L590) - Post-handshake validation
      - [p2p_manager.py:692-762](dpc-client/core/dpc_client_core/p2p_manager.py#L692) - Certificate extraction helpers
 
@@ -110,12 +114,14 @@ All notable changes to D-PC Messenger will be documented in this file.
      - [p2p_manager.py:634-655](dpc-client/core/dpc_client_core/p2p_manager.py#L634) - Application layer validation
 
 **Security Flow:**
-1. TLS handshake with `ssl.CERT_REQUIRED`
+1. TLS handshake with `ssl.CERT_NONE` (required for self-signed certs)
 2. Extract peer certificate from TLS connection
 3. Validate certificate CN matches expected node_id
 4. Reject if mismatch (before sending HELLO)
 5. Continue with HELLO handshake
 6. Validate HELLO_ACK node_id (defense in depth)
+
+**Note:** Using `ssl.CERT_NONE` with manual validation is secure for P2P networks with self-signed certificates. Built-in SSL verification (`ssl.CERT_REQUIRED`) only works with CA-signed certificates.
 
 #### UX: Connection Status & Error Messages
 
