@@ -597,10 +597,13 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
 
         if (expectsResponse) {
             return new Promise((resolve, reject) => {
-                // Calculate dynamic timeout for file operations
+                // Calculate dynamic timeout for file operations and connections
                 let timeout = 10000;  // Default: 10s
 
-                if (command === 'send_file') {
+                if (command === 'connect_to_peer' || command === 'connect_via_dht') {
+                    // Connection timeout: 30s (includes pre-flight check + TLS handshake + HELLO)
+                    timeout = 30000;
+                } else if (command === 'send_file') {
                     // Dynamic timeout based on file size (v0.11.2+)
                     const fileSizeBytes = payload.file_size_bytes || 0;
                     const fileSizeGB = fileSizeBytes / (1024 * 1024 * 1024);
