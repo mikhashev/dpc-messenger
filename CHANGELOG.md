@@ -138,6 +138,14 @@ All notable changes to D-PC Messenger will be documented in this file.
 - [+page.svelte:1836-1841](dpc-client/ui/src/routes/+page.svelte#L1836) - Loading state button
 - [+page.svelte:2447-2459](dpc-client/ui/src/routes/+page.svelte#L2447) - Error toast component
 - [coreService.ts:594-595](dpc-client/ui/src/lib/coreService.ts#L594) - Promise-based commands
+- [coreService.ts:603-605](dpc-client/ui/src/lib/coreService.ts#L603) - 30s timeout for connections
+
+#### Peer Name Update Infinite Loop
+- **Bug:** Infinite reactive loop when peer updates their name in personal context
+- **Error:** `effect_update_depth_exceeded` - Maximum update depth exceeded
+- **Cause:** Reactive statement updated `peerContextHashes` without checking if value changed
+- **Fix:** Add guard to only update Map if hash is different from current value
+- **Files:** [+page.svelte:528-530](dpc-client/ui/src/routes/+page.svelte#L528)
 
 #### CRITICAL: Multiple Infinite Loop Fixes (v0.11.3)
 - Empty conversation history infinite loop
