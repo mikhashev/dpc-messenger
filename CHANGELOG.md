@@ -2,75 +2,146 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
-## [Unreleased] - 2025-12-24
+## [0.12.0] - 2025-12-25
 
-### BREAKING: Migration Code Removed (No Active Users)
+### MAJOR FEATURES
 
-**Rationale:** Since there are no active users, all migration code has been removed for a cleaner codebase.
+#### Vision & Image Support (Production-Ready)
+- **Screenshot Sharing** - Paste screenshots with Ctrl+V, instant preview
+- **Remote Vision Inference** - Use peer's GPU for image analysis
+  - Ollama vision (llava, bakllava, moondream)
+  - OpenAI vision (gpt-4-vision, gpt-4o)
+  - Anthropic vision (claude-3-opus, claude-3-sonnet)
+- **P2P Image Transfer** - Send images with thumbnails, firewall-gated
+- **Dual Provider Dropdowns** - Separate text/vision model selection
+- Files: ImageMessage.svelte, image_handler.py, image_utils.py, llm_manager.py
 
-#### Removed
-- **Migration functions:**
-  - `migrate_instructions_from_personal_context()` - v1→v2 instruction migration
-  - `_migrate_from_old_filename()` - firewall filename migration
-  - `_migrate_from_toml_if_needed()` - TOML→JSON provider migration
-  - `_migrate_or_recreate_config()` - old config format migration
-- **Migration files:**
-  - `dpc-protocol/migrate_pcm.py` - standalone migration script
-  - `dpc-protocol/tests/test_pcm_compatibility.py` - v1.0 compatibility tests
+#### Session Management (v0.11.3)
+- **Mutual Approval Voting** - All participants vote before history clear
+- **Prevents Data Loss** - No accidental clearing in multi-party chats
+- **New DPTP Commands:** PROPOSE_NEW_SESSION, VOTE_NEW_SESSION, NEW_SESSION_RESULT
+- Files: session_manager.py, session_handler.py, NewSessionDialog.svelte
 
-#### Changed
-- **PersonalContext dataclass:** Removed `instruction` field (now separate in `instructions.json`)
-- **from_dict():** Removed v1.0 compatibility, only supports v2.0 format
-- **service.py:** Fixed to use `self.instructions` (from `instructions.json`) instead of `context.instruction`
-- **settings.py:** Simplified `_migrate_or_recreate_config()` → `_recreate_config_with_backup()` (error recovery only)
+#### Chat History Synchronization (v0.11.3)
+- **Auto-Sync on Reconnect** - Never lose conversation context
+- **Backend→Frontend Sync** - Survives page refresh
+- **New DPTP Commands:** REQUEST_CHAT_HISTORY, CHAT_HISTORY_RESPONSE
+- Files: chat_history_handlers.py
 
-#### Added
-- **Auto-create instructions.json:** Now created automatically on first load with default settings
+---
 
-#### Architecture (v2.0 Clean)
+### BREAKING CHANGES
+
+#### Migration Code Removed (v2.0 Clean Architecture)
+**Rationale:** No active users, cleaner codebase for v2.0
+
+**Removed:**
+- `migrate_instructions_from_personal_context()` - v1→v2 migration
+- `_migrate_from_old_filename()` - firewall filename migration
+- `_migrate_from_toml_if_needed()` - TOML→JSON provider migration
+- `dpc-protocol/migrate_pcm.py` - standalone migration script
+- `dpc-protocol/tests/test_pcm_compatibility.py` - v1.0 tests
+
+**Changed:**
+- PersonalContext dataclass: Removed `instruction` field (now in instructions.json)
+- from_dict(): Only supports v2.0 format
+- Auto-create instructions.json on first load
+
+**Architecture (v2.0):**
 ```
 ~/.dpc/
-├── personal.json          # Profile, knowledge, metadata (NO instruction field)
-├── instructions.json      # AI behavior rules (separate file, auto-created)
-├── device_context.json    # Hardware/software specs
-├── privacy_rules.json     # Firewall access rules
-├── providers.json         # AI provider configs
-└── config.ini            # Service configuration
+├── personal.json         # NO instruction field
+├── instructions.json     # AI behavior rules (auto-created)
+├── device_context.json
+├── privacy_rules.json
+├── providers.json
+└── config.ini
 ```
 
-#### Migration from Old Installations
-If you have an old installation with `instruction` field in `personal.json`:
-1. Manually extract the `instruction` block
-2. Save it to `~/.dpc/instructions.json`
-3. Remove the `instruction` field from `personal.json`
+#### Provider Configuration Changes
+- **New required field:** `vision_provider` in providers.json
+- Example: `"vision_provider": true` for vision-capable providers
 
-Or simply delete `~/.dpc/` folder for a fresh v2.0 install.
+#### Firewall Schema Changes
+- File transfer section: Nested groups/nodes objects
+- New `image_transfer` permissions section
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-## [Unreleased]
-
-### Changed
-- **Firewall Configuration Structure** - Simplified file_transfer permissions schema
-  - Replaced flat structure (allow_nodes, allow_groups, max_size_mb, allowed_mime_types) with nested groups/nodes objects
-  - Aligns file_transfer section with context sharing permission patterns
-  - Files: [firewall.py](dpc-client/core/dpc_client_core/firewall.py)
-
-- **Enhanced Firewall Default Rules** - Improved examples and documentation
-  - Added realistic examples for all sections (node_groups, file_groups, compute, nodes, groups, ai_scopes, device_sharing)
-  - Better comments explaining each section's purpose
-  - Real-world group names (friends, colleagues, family) instead of _example_ prefixes
-  - Multi-tier access examples (friends vs colleagues vs family)
-  - Files: [firewall.py](dpc-client/core/dpc_client_core/firewall.py)
+---
 
 ### Added
-- **File Transfer UI Management** - Add/remove groups and nodes in Firewall Editor
-  - "+ Add Group" button in File Transfer tab
-  - "+ Add Node" button in File Transfer tab
-  - Delete buttons (trash icons) for groups and nodes
-  - Duplicate detection when adding groups/nodes
-  - Files: [FirewallEditor.svelte](dpc-client/ui/src/lib/components/FirewallEditor.svelte)
+
+#### UI/UX Enhancements
+- Collapsible chat header with dual provider dropdowns
+- Native desktop notifications (OS permission integration)
+- File transfer UI management (add/delete buttons for groups/nodes)
+- Smart button states (disabled when peer offline)
+
+#### Backend Features
+- Vision config settings in config.ini
+- Bidirectional inference fallback for knowledge extraction
+
+---
+
+### Fixed
+
+#### CRITICAL: Multiple Infinite Loop Fixes (v0.11.3)
+- Empty conversation history infinite loop
+- Multiple peers infinite loop
+- Window focus tracking infinite loops
+- Chat history loading reactive loops
+- Firewall editor reactive loop
+
+#### Screenshot Bugs (11 Critical Fixes)
+- Empty text captions fixed
+- Duplicate messages on sender side fixed
+- Preview issues on receiver side fixed
+- save_screenshots_to_disk setting fixed
+- Path handling (Path objects vs strings)
+- Peer discovery (get_connected_peers)
+
+#### Session Management Fixes (v0.11.3)
+- Frontend chat clearing for non-initiator participants
+- History clearing for all participants on approval
+- node_id attribute references corrected
+- AI chats handling in propose_new_session()
+
+#### File Transfer Improvements (v0.11.3)
+- Dynamic timeout/keepalive for large file prep
+- Show sent file in sender's chat history
+- Accept file_size_bytes parameter
+- Replace deprecated datetime.utcnow()
+
+#### Other Fixes
+- LLM Manager: Renamed ram_requirements → vram_requirements
+- Peer context inclusion when checkbox checked
+- Handle None profile when firewall blocks
+- Trigger Svelte reactivity when deleting firewall rules
+
+---
+
+### Changed
+
+- Moved Available Features dropdown to Connect to Peer section
+- Status bar moved to sidebar, hidden when backend connected
+- Enhanced firewall default rules with realistic examples
+- Enabled Tauri asset protocol for ~/.dpc/** files
+
+---
+
+### Performance
+- Reduced UI freeze scenarios (infinite loop fixes)
+- Improved file transfer for large files (dynamic timeouts)
+- Optimized chat history loading for multiple peers
+
+---
+
+### Protocol Updates
+- **DPTP v1.1 → v1.2**
+  - New: SEND_IMAGE (vision inference)
+  - New: PROPOSE_NEW_SESSION, VOTE_NEW_SESSION, NEW_SESSION_RESULT
+  - New: REQUEST_CHAT_HISTORY, CHAT_HISTORY_RESPONSE
+  - Enhanced: FILE_OFFER with image_metadata field
+  - See specs/dptp_v1.md
 
 ---
 

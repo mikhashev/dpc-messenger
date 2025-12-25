@@ -230,6 +230,7 @@
     if (!config) return;
     editMode = true;
     editedConfig = JSON.parse(JSON.stringify(config));
+    if (!editedConfig) return; // Guard against null
     // Track original aliases
     originalAliases.clear();
     editedConfig.providers.forEach((p, i) => {

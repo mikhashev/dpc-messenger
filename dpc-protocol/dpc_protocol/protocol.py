@@ -95,6 +95,159 @@ def create_providers_response(providers: list) -> Dict[str, Any]:
     """
     return {"command": "PROVIDERS_RESPONSE", "payload": {"providers": providers}}
 
+def create_send_image_message(
+    request_id: str,
+    prompt: str,
+    images: list,
+    model: str = None,
+    provider: str = None
+) -> Dict[str, Any]:
+    """Creates a SEND_IMAGE message for remote vision inference.
+
+    Args:
+        request_id: Unique identifier for this request
+        prompt: Text prompt for vision model
+        images: List of image dicts with keys: path, base64, mime_type
+        model: Optional vision model name
+        provider: Optional provider alias
+
+    Returns:
+        SEND_IMAGE message dict
+    """
+    payload = {
+        "request_id": request_id,
+        "prompt": prompt,
+        "images": images
+    }
+    if model:
+        payload["model"] = model
+    if provider:
+        payload["provider"] = provider
+    return {"command": "SEND_IMAGE", "payload": payload}
+
+
+def create_propose_new_session_message(
+    proposal_id: str,
+    conversation_id: str,
+    proposer_node_id: str
+) -> Dict[str, Any]:
+    """Creates a PROPOSE_NEW_SESSION message for collaborative session reset.
+
+    Args:
+        proposal_id: Unique proposal identifier
+        conversation_id: Conversation to reset
+        proposer_node_id: Node ID of proposer
+
+    Returns:
+        PROPOSE_NEW_SESSION message dict
+    """
+    from datetime import datetime, timezone
+    return {
+        "command": "PROPOSE_NEW_SESSION",
+        "payload": {
+            "proposal_id": proposal_id,
+            "conversation_id": conversation_id,
+            "proposer_node_id": proposer_node_id,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    }
+
+
+def create_vote_new_session_message(
+    proposal_id: str,
+    voter_node_id: str,
+    vote: str
+) -> Dict[str, Any]:
+    """Creates a VOTE_NEW_SESSION message.
+
+    Args:
+        proposal_id: Proposal being voted on
+        voter_node_id: Node ID of voter
+        vote: "approve" or "reject"
+
+    Returns:
+        VOTE_NEW_SESSION message dict
+    """
+    from datetime import datetime, timezone
+    return {
+        "command": "VOTE_NEW_SESSION",
+        "payload": {
+            "proposal_id": proposal_id,
+            "voter_node_id": voter_node_id,
+            "vote": vote,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    }
+
+
+def create_new_session_result_message(
+    proposal_id: str,
+    status: str,
+    votes: list
+) -> Dict[str, Any]:
+    """Creates a NEW_SESSION_RESULT message.
+
+    Args:
+        proposal_id: Proposal identifier
+        status: "approved" or "rejected"
+        votes: List of vote dicts with keys: node_id, vote
+
+    Returns:
+        NEW_SESSION_RESULT message dict
+    """
+    from datetime import datetime, timezone
+    return {
+        "command": "NEW_SESSION_RESULT",
+        "payload": {
+            "proposal_id": proposal_id,
+            "status": status,
+            "votes": votes,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    }
+
+
+def create_request_chat_history_message(
+    conversation_id: str,
+    since_timestamp: str = None
+) -> Dict[str, Any]:
+    """Creates a REQUEST_CHAT_HISTORY message.
+
+    Args:
+        conversation_id: Conversation ID to sync
+        since_timestamp: Optional ISO 8601 timestamp to filter messages
+
+    Returns:
+        REQUEST_CHAT_HISTORY message dict
+    """
+    payload = {"conversation_id": conversation_id}
+    if since_timestamp:
+        payload["since_timestamp"] = since_timestamp
+    return {"command": "REQUEST_CHAT_HISTORY", "payload": payload}
+
+
+def create_chat_history_response_message(
+    conversation_id: str,
+    messages: list
+) -> Dict[str, Any]:
+    """Creates a CHAT_HISTORY_RESPONSE message.
+
+    Args:
+        conversation_id: Conversation ID
+        messages: List of message dicts with keys: role, text, timestamp, sender_node_id (optional)
+
+    Returns:
+        CHAT_HISTORY_RESPONSE message dict
+    """
+    return {
+        "command": "CHAT_HISTORY_RESPONSE",
+        "payload": {
+            "conversation_id": conversation_id,
+            "messages": messages
+        }
+    }
+
+
 async def read_message(reader: asyncio.StreamReader) -> dict | None:
     try:
         header = await reader.readexactly(10)
