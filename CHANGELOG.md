@@ -147,6 +147,19 @@ All notable changes to D-PC Messenger will be documented in this file.
 - **Fix:** Add guard to only update Map if hash is different from current value
 - **Files:** [+page.svelte:528-530](dpc-client/ui/src/routes/+page.svelte#L528)
 
+#### Remote Inference Model Name Missing
+- **Bug:** AI model displays as "(unknown)" when using remote peer for inference
+- **Impact:** Users can't see which model was used for remote inference queries
+- **Root Cause:** REMOTE_INFERENCE_RESPONSE didn't include model/provider fields
+- **Fix:** Include model and provider metadata in remote inference response
+  - Add model/provider parameters to protocol function
+  - Pass model/provider from LLM query result
+  - Extract model/provider in response handler
+- **Files:**
+  - [protocol.py:66-87](dpc-protocol/dpc_protocol/protocol.py#L66) - Add parameters
+  - [service.py:2959-2960](dpc-client/core/dpc_client_core/service.py#L2959) - Pass metadata
+  - [inference_handler.py:66-82](dpc-client/core/dpc_client_core/message_handlers/inference_handler.py#L66) - Extract metadata
+
 #### CRITICAL: Multiple Infinite Loop Fixes (v0.11.3)
 - Empty conversation history infinite loop
 - Multiple peers infinite loop
