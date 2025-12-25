@@ -600,26 +600,36 @@ class P2PManager:
             if not response or response.get("status") != "OK":
                 raise ConnectionError(f"Peer did not acknowledge HELLO.")
 
-            # Extract actual node_id from HELLO_ACK (critical for security and cache correctness)
+            # Extract actual node_id from HELLO_ACK (critical for security validation)
             actual_node_id = response.get("node_id")
             if not actual_node_id:
-                logger.warning("HELLO_ACK missing node_id field - using expected node_id from URI")
-                actual_node_id = target_node_id
-            elif actual_node_id != target_node_id:
-                logger.warning(
-                    "Node ID mismatch! Expected %s but peer reports %s. "
-                    "This usually means the peer regenerated identity or cache is stale. "
-                    "Using actual node_id from peer.",
-                    target_node_id, actual_node_id
+                error_msg = "HELLO_ACK missing node_id field - rejecting connection for security"
+                logger.error(error_msg)
+                writer.close()
+                await writer.wait_closed()
+                raise ConnectionError(error_msg)
+
+            if actual_node_id != target_node_id:
+                error_msg = (
+                    f"Node ID mismatch! Expected {target_node_id} but peer reports {actual_node_id}. "
+                    f"This means either:\n"
+                    f"  1. Peer regenerated identity (fresh install) - Get fresh connection URI from peer\n"
+                    f"  2. Connecting to wrong peer - Verify you have correct URI\n"
+                    f"  3. Potential MITM attack - Connection rejected for security"
                 )
+                logger.error(error_msg)
+                writer.close()
+                await writer.wait_closed()
+                raise ConnectionError(error_msg)
 
             peer_name = response.get("name")
             if peer_name:
                 logger.info("Peer name: %s", peer_name)
                 if hasattr(self, '_core_service_ref') and self._core_service_ref:
-                    self._core_service_ref.set_peer_metadata(actual_node_id, name=peer_name)
+                    self._core_service_ref.set_peer_metadata(target_node_id, name=peer_name)
 
-            peer = PeerConnection(node_id=actual_node_id, reader=reader, writer=writer)
+            # actual_node_id is guaranteed to equal target_node_id after validation above
+            peer = PeerConnection(node_id=target_node_id, reader=reader, writer=writer)
 
             # Set strategy_used for outgoing direct connections (for UI display)
             sock = writer.get_extra_info('socket')
@@ -632,29 +642,24 @@ class P2PManager:
             else:
                 peer.strategy_used = "ipv4_direct"  # Default fallback
 
-            # If node_id changed, remove stale entry
-            if actual_node_id != target_node_id and target_node_id in self.peers:
-                logger.info("Removing stale peer entry for %s", target_node_id)
-                del self.peers[target_node_id]
-
-            self.peers[actual_node_id] = peer
+            self.peers[target_node_id] = peer
             await self._notify_peer_change()
-            logger.info("Direct connection established with %s", actual_node_id)
+            logger.info("Direct connection established with %s", target_node_id)
 
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())
 
             # Start listener task and track it for graceful shutdown
             task = asyncio.create_task(self._listen_to_peer(peer))
-            self._peer_listener_tasks[actual_node_id] = task
+            self._peer_listener_tasks[target_node_id] = task
 
             # Auto-discover peer's available AI providers
             from dpc_protocol.protocol import create_get_providers_message
             try:
-                await self.send_message_to_peer(actual_node_id, create_get_providers_message())
-                logger.debug("Requested AI providers from %s", actual_node_id)
+                await self.send_message_to_peer(target_node_id, create_get_providers_message())
+                logger.debug("Requested AI providers from %s", target_node_id)
             except Exception as e:
-                logger.warning("Failed to request providers from %s: %s", actual_node_id, e)
+                logger.warning("Failed to request providers from %s: %s", target_node_id, e)
 
         except asyncio.TimeoutError:
             error_msg = (
