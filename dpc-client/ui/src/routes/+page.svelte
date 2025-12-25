@@ -525,9 +525,13 @@
     if ($peerContextUpdated) {
       const { node_id, context_hash } = $peerContextUpdated;
       if (node_id && context_hash) {
-        peerContextHashes = new Map(peerContextHashes);
-        peerContextHashes.set(node_id, context_hash);
-        console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
+        // Guard: Only update if hash actually changed (prevent infinite loop)
+        const currentHash = peerContextHashes.get(node_id);
+        if (currentHash !== context_hash) {
+          peerContextHashes = new Map(peerContextHashes);
+          peerContextHashes.set(node_id, context_hash);
+          console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
+        }
       }
     }
   });
