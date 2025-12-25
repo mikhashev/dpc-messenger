@@ -6,7 +6,7 @@ import ssl
 import json
 import logging
 import platform
-from typing import Dict, Any, Callable, Tuple, Union
+from typing import Dict, Any, Callable, Tuple, Union, Optional
 
 from cryptography import x509
 import websockets
