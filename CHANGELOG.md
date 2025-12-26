@@ -147,6 +147,14 @@ All notable changes to D-PC Messenger will be documented in this file.
 - **Fix:** Add guard to only update Map if hash is different from current value
 - **Files:** [+page.svelte:528-530](dpc-client/ui/src/routes/+page.svelte#L528)
 
+#### Personal Context Update Infinite Loop
+- **Bug:** Infinite reactive loop when user queries about device info with context enabled
+- **Error:** `effect_update_depth_exceeded` - Maximum update depth exceeded (browser console)
+- **Cause:** `contextUpdated` reactive statement updated `currentContextHash` without checking if value changed
+- **Impact:** UI freezes, browser console spams errors, app becomes unusable
+- **Fix:** Add guard to only update hash if it actually changed (same pattern as peer context)
+- **Files:** [+page.svelte:517-521](dpc-client/ui/src/routes/+page.svelte#L517)
+
 #### Remote Inference Model Name Missing
 - **Bug:** AI model displays as "(unknown)" when using remote peer for inference
 - **Impact:** Users can't see which model was used for remote inference queries

@@ -514,8 +514,11 @@
     if ($contextUpdated) {
       const { context_hash } = $contextUpdated;
       if (context_hash) {
-        currentContextHash = context_hash;
-        console.log(`[Context Updated] New hash: ${context_hash.slice(0, 8)}...`);
+        // Guard: Only update if hash actually changed (prevent infinite loop)
+        if (currentContextHash !== context_hash) {
+          currentContextHash = context_hash;
+          console.log(`[Context Updated] New hash: ${context_hash.slice(0, 8)}...`);
+        }
       }
     }
   });
