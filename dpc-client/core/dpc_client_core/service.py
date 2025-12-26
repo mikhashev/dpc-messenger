@@ -129,6 +129,16 @@ class CoreService:
         self.instructions = load_instructions()
         logger.info("AI instructions loaded from instructions.json")
 
+        # Update personal.json with instructions.json reference (if not already present)
+        try:
+            context = self.pcm_core.load_context()
+            if not self._has_instructions_reference(context):
+                context = self._add_instructions_reference(context)
+                self.pcm_core.save_context(context)
+                logger.info("Added instructions.json reference to personal.json metadata")
+        except Exception as e:
+            logger.warning("Failed to add instructions.json reference: %s", e)
+
         # Auto-collect device context on startup (if enabled)
         self.device_context = None
         if self.settings.get_auto_collect_device_info():
@@ -250,6 +260,31 @@ class CoreService:
         # Initialize message router and register handlers
         self.message_router = MessageRouter()
         self._register_message_handlers()
+
+    def _has_instructions_reference(self, context: PersonalContext) -> bool:
+        """Check if personal.json has instructions.json reference in metadata."""
+        if not hasattr(context, 'metadata') or context.metadata is None:
+            return False
+        external_contexts = context.metadata.get('external_contexts', {})
+        return 'instructions' in external_contexts
+
+    def _add_instructions_reference(self, context: PersonalContext) -> PersonalContext:
+        """Add instructions.json reference to personal.json metadata."""
+        from datetime import datetime, timezone
+
+        if not hasattr(context, 'metadata') or context.metadata is None:
+            context.metadata = {}
+
+        if 'external_contexts' not in context.metadata:
+            context.metadata['external_contexts'] = {}
+
+        context.metadata['external_contexts']['instructions'] = {
+            "file": "instructions.json",
+            "description": "AI behavior instructions",
+            "last_updated": datetime.now(timezone.utc).isoformat()
+        }
+
+        return context
 
     def _register_message_handlers(self):
         """Register all P2P message handlers with the router."""
@@ -3478,6 +3513,17 @@ class CoreService:
             # Always include device context when checkbox is checked
             if self.device_context:
                 device_context_data = self.device_context
+                # Apply AI Scope filtering to device context if specified
+                if ai_scope:
+                    try:
+                        device_context_data = self.firewall.filter_device_context_for_ai_scope(
+                            device_context_data, ai_scope
+                        )
+                        logger.debug("AI Scope filtering applied to device context")
+                    except Exception as e:
+                        logger.error("Error applying AI Scope filtering to device context: %s", e, exc_info=True)
+                        # Fall back to unfiltered device context if filtering fails
+                        logger.warning("Falling back to unfiltered device context due to filtering error")
         else:
             logger.debug("User disabled context inclusion")
 

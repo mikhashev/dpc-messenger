@@ -2,6 +2,52 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
+## [0.12.1] - 2025-12-26
+
+### NEW FEATURES
+
+#### AI Scope Field-Level Filtering for Device Context
+- **Device Context Privacy Control** - device_context.json now supports AI scope filtering
+- **Granular Hardware Filtering** - Hide GPU specs, CPU details, memory info per AI scope
+- **4 Example Scopes** - work (full hardware), personal (hide GPU), basic (minimal), research (full access)
+- **Privacy Patterns** - `device_context.json:hardware.gpu.*: deny` to hide GPU from AI
+- Files: firewall.py (filter_device_context_for_ai_scope), service.py
+
+### ENHANCEMENTS
+
+#### Pure Mode AI Chat (Zero System Instructions)
+- **Completely Pure Conversations** - When "Include personal context" unchecked → NO system instruction sent to AI
+- **Privacy-Focused Default** - Pure mode sends only conversation history (no instructions, no context)
+- **Before:** Sent "You are a helpful AI assistant." even when context disabled
+- **After:** Empty system instruction for true pure mode
+- File: managers/prompt_manager.py (_build_system_instruction)
+
+#### Personal Context Metadata Structure Improvements
+- **Auto-Reference instructions.json** - Automatically added to personal.json metadata on startup
+- **Consistent Structure** - Both device_context and instructions use same format (file, description, last_updated)
+- **Semantic Categorization** - external_contexts (AI prompt files) vs external_files (knowledge/data files)
+- **Removed schema_version** - Stored in files themselves, not in references
+- Files: service.py, device_context_collector.py, personal_context_example.json
+
+### BUG FIXES
+
+#### Peer Context Selection Counter (Svelte 5 Reactivity)
+- **Fixed Counter Not Updating** - "(0 selected)" now updates correctly when checking peer contexts
+- **Root Cause:** Svelte 5 $state() requires new Set instance to detect changes
+- **Solution:** `new Set(selectedPeerContexts)` triggers reactivity properly
+- File: ui/src/routes/+page.svelte (togglePeerContext, peer disconnect cleanup)
+
+### DOCUMENTATION
+
+#### Privacy Rules Configuration
+- **Updated Examples** - privacy_rules.example.json now showcases device context filtering
+- **4 AI Scope Examples** - work, personal, basic, research with comprehensive comments
+- **Firewall Template** - Updated default template in firewall.py with AI scope examples
+- **UI Info Messages** - Updated FirewallEditor.svelte to mention field-level filtering
+- Files: privacy_rules.example.json, firewall.py, FirewallEditor.svelte
+
+---
+
 ## [0.12.0] - 2025-12-25
 
 ### MAJOR FEATURES

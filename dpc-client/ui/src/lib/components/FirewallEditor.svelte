@@ -908,7 +908,7 @@
 
             {#if !editMode}
               <div class="info-box">
-                <strong>Info:</strong> AI scopes allow you to restrict what context your local AI can access in different modes. Use @file_group:* notation (e.g., @work:*, @personal:*) to reference file groups.
+                <strong>Info:</strong> AI scopes allow you to restrict what context your local AI can access in different modes. Supports file groups (@work:*, @personal:*) AND field-level filtering (personal.json:profile.name, device_context.json:hardware.gpu.*). NEW in v0.12.1: Device context filtering.
               </div>
             {/if}
           </div>

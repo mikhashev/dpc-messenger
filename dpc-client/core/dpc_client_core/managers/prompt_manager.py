@@ -116,7 +116,7 @@ class PromptManager:
         """Build system instruction based on context inclusion state.
 
         Args:
-            include_context: If True, use instructions.json; if False, use minimal prompt
+            include_context: If True, use instructions.json; if False, pure mode (no instruction)
 
         Returns:
             System instruction text
@@ -125,8 +125,8 @@ class PromptManager:
             # User enabled context - use instructions from instructions.json
             return self.instructions.primary if self.instructions.primary else ""
         else:
-            # User disabled context - use minimal generic instruction
-            return "You are a helpful AI assistant."
+            # User disabled context - pure mode (no system instruction)
+            return ""
 
     def _build_personal_context_blocks(self, contexts: Dict[str, Any]) -> List[str]:
         """Build personal context XML blocks.

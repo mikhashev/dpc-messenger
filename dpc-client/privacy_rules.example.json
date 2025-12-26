@@ -22,14 +22,38 @@
   },
 
   "ai_scopes": {
-    "_comment": "Control what your local AI can access in different modes",
+    "_comment": "AI Scope Filtering - Control what your LOCAL AI can access in different modes. NEW in v0.12.1: Field-level filtering for personal.json AND device_context.json",
+    "_examples": "Supports both file groups (@work) and field-level filtering (device_context.json:hardware.gpu.*)",
     "work": {
+      "_comment": "Work mode - Access work files + hardware specs for dev assistance",
       "@work:*": "allow",
-      "@personal:*": "deny"
+      "@personal:*": "deny",
+      "personal.json:knowledge.work_projects.*": "allow",
+      "personal.json:knowledge.professional_skills.*": "allow",
+      "device_context.json:hardware.gpu.*": "allow",
+      "device_context.json:hardware.cpu.*": "allow",
+      "device_context.json:software.dev_tools.*": "allow",
+      "device_context.json:software.ai_models.*": "allow"
     },
     "personal": {
+      "_comment": "Personal mode - Access personal files, hide work context and GPU specs",
       "@personal:*": "allow",
-      "@work:*": "deny"
+      "@work:*": "deny",
+      "device_context.json:hardware.gpu.*": "deny",
+      "device_context.json:software.os.*": "allow",
+      "device_context.json:software.runtime.*": "allow"
+    },
+    "basic": {
+      "_comment": "Basic mode - Minimal context (profile only), no hardware details",
+      "personal.json:profile.name": "allow",
+      "personal.json:profile.description": "allow",
+      "device_context.json:hardware.*": "deny",
+      "device_context.json:software.os.*": "allow"
+    },
+    "research": {
+      "_comment": "Research mode - Full hardware access for performance optimization queries",
+      "personal.json:knowledge.technical_interests.*": "allow",
+      "device_context.json:*": "allow"
     }
   },
 

@@ -667,7 +667,8 @@
         }
       }
       if (needsUpdate) {
-        selectedPeerContexts = selectedPeerContexts;
+        // Trigger reactivity by creating new Set instance (required for Svelte 5 $state)
+        selectedPeerContexts = new Set(selectedPeerContexts);
       }
     }
   });
@@ -758,8 +759,8 @@
     } else {
       selectedPeerContexts.add(peerId);
     }
-    // Trigger reactivity
-    selectedPeerContexts = selectedPeerContexts;
+    // Trigger reactivity by creating new Set instance (required for Svelte 5 $state)
+    selectedPeerContexts = new Set(selectedPeerContexts);
   }
 
   // --- CHAT PANEL RESIZE HANDLERS ---

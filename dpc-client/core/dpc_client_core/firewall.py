@@ -142,12 +142,28 @@ class ContextFirewall:
                     }
                 },
                 "ai_scopes": {
-                    "_comment": "AI scope access rules - Control which scoped contexts peers can access",
+                    "_comment": "AI Scope Filtering - Control what your LOCAL AI can access. NEW in v0.12.1: Field-level filtering for device_context.json",
+                    "_examples": "Supports file groups (@work) and field-level filtering (device_context.json:hardware.gpu.*)",
                     "work": {
-                        "@work:*": "allow"
+                        "_comment": "Work mode - Work files + hardware specs",
+                        "@work:*": "allow",
+                        "personal.json:knowledge.work_projects.*": "allow",
+                        "device_context.json:hardware.gpu.*": "allow",
+                        "device_context.json:software.dev_tools.*": "allow"
                     },
                     "personal": {
-                        "@personal:*": "deny"
+                        "_comment": "Personal mode - Personal files, hide GPU specs",
+                        "@personal:*": "allow",
+                        "@work:*": "deny",
+                        "device_context.json:hardware.gpu.*": "deny",
+                        "device_context.json:software.os.*": "allow"
+                    },
+                    "basic": {
+                        "_comment": "Basic mode - Profile only, no hardware",
+                        "personal.json:profile.name": "allow",
+                        "personal.json:profile.description": "allow",
+                        "device_context.json:hardware.*": "deny",
+                        "device_context.json:software.os.*": "allow"
                     }
                 },
                 "device_sharing": {
@@ -477,6 +493,69 @@ class ContextFirewall:
         # Create new PersonalContext from filtered fields
         # This preserves the original dataclass instances (InstructionBlock, etc.)
         return PersonalContext(**filtered_kwargs)
+
+    def filter_device_context_for_ai_scope(self, device_context: Dict, scope_name: str) -> Dict:
+        """
+        Filters device context based on AI scope rules, removing fields that the AI scope cannot access.
+
+        Args:
+            device_context: The device context dict to filter
+            scope_name: The AI scope name (e.g., "work", "personal")
+
+        Returns:
+            Filtered device context dict with only allowed fields
+        """
+        def filter_nested_dict(data: Dict, path_prefix: str) -> Dict:
+            """Recursively filter nested dict based on AI scope rules."""
+            if not isinstance(data, dict):
+                return data
+
+            filtered = {}
+            for key, value in data.items():
+                current_path = f"{path_prefix}.{key}" if path_prefix else key
+                resource_path = f"device_context.json:{current_path}"
+
+                # Build the requester identity for AI scope
+                requester_identity = f"ai_scope:{scope_name}"
+
+                # Check for specific rule first
+                specific_rule = self._get_rule_for_resource('ai_scopes', scope_name, resource_path)
+
+                # If there's a specific rule, use it - don't fall back to wildcard
+                if specific_rule:
+                    logger.debug(f"AI Scope filter: Specific rule for {resource_path}: {specific_rule}")
+                    if specific_rule.lower() == 'allow':
+                        if isinstance(value, dict):
+                            # Allow access - but still recursively filter in case there are deny rules below
+                            filtered[key] = filter_nested_dict(value, current_path)
+                            # If nothing was allowed in the subtree, use the whole value
+                            if not filtered[key] and value:
+                                filtered[key] = deepcopy(value)
+                        else:
+                            # Leaf node - allow access
+                            filtered[key] = deepcopy(value)
+                    # else: specific deny - don't include this key
+                else:
+                    # No specific rule - check for wildcard access
+                    wildcard_path = f"device_context.json:{current_path}.*"
+                    has_wildcard_access = self.can_access(requester_identity, wildcard_path)
+                    logger.debug(f"AI Scope filter: Checking wildcard {wildcard_path}: {has_wildcard_access}")
+                    if has_wildcard_access:
+                        if isinstance(value, dict):
+                            # Has wildcard access - include the whole subtree
+                            filtered[key] = deepcopy(value)
+                        else:
+                            filtered[key] = deepcopy(value)
+                    elif isinstance(value, dict):
+                        # No direct access, but might have access to nested fields
+                        nested_filtered = filter_nested_dict(value, current_path)
+                        if nested_filtered:  # Only include if not empty
+                            filtered[key] = nested_filtered
+
+            return filtered
+
+        # Start filtering from root level
+        return filter_nested_dict(device_context, "")
 
     def can_request_inference(self, requester_node_id: str, model: str = None) -> bool:
         """
