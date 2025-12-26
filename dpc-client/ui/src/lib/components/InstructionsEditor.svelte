@@ -64,6 +64,18 @@
   let selectedTemplate: Template | null = null;
   let newSetName: string = '';
 
+  // AI Wizard state
+  let showCreationModeDialog: boolean = false;
+  let showWizardDialog: boolean = false;
+  let wizardQuestions: Array<any> = [];
+  let currentQuestionIndex: number = 0;
+  let wizardResponses: Record<string, string> = {};
+  let wizardCurrentAnswer: string = '';
+  let wizardNewSetName: string = '';
+  let selectedWizardProvider: string = 'ollama';
+  let selectedWizardModel: string | null = null;
+  let isGenerating: boolean = false;
+
   // Load instruction sets when modal opens
   $: if (open && !instructionSets) {
     loadInstructionSets();
@@ -166,8 +178,13 @@
     }
   }
 
-  // Create new instruction set
-  async function createNewSet() {
+  // Show creation mode choice dialog
+  function createNewSet() {
+    showCreationModeDialog = true;
+  }
+
+  // Create empty instruction set (from scratch)
+  async function createFromScratch() {
     const name = prompt('Enter name for new instruction set:');
     if (!name) return;
 
@@ -184,6 +201,9 @@
       if (result && result.status === 'success') {
         saveMessage = result.message;
         saveMessageType = 'success';
+
+        // Close choice dialog
+        showCreationModeDialog = false;
 
         // Reload instruction sets to get the new one
         await loadInstructionSets();
@@ -270,6 +290,127 @@
     showTemplateDialog = false;
     selectedTemplate = null;
     newSetName = '';
+  }
+
+  // AI Wizard functions
+  async function startWizard() {
+    // Close choice dialog
+    showCreationModeDialog = false;
+
+    // Ask for instruction set name first
+    const name = prompt('Enter name for new instruction set:');
+    if (!name) return;
+
+    wizardNewSetName = name;
+
+    // Load wizard template
+    try {
+      const result = await sendCommand('get_wizard_template', {});
+
+      if (result && result.status === 'success' && result.wizard) {
+        wizardQuestions = result.wizard.question_sequence;
+        currentQuestionIndex = 0;
+        wizardResponses = {};
+        wizardCurrentAnswer = '';
+
+        // Show wizard dialog
+        showWizardDialog = true;
+      } else {
+        alert('Failed to load wizard template');
+      }
+    } catch (error) {
+      console.error('Error loading wizard:', error);
+      alert(`Error loading wizard: ${error}`);
+    }
+  }
+
+  async function submitWizardAnswer() {
+    if (!wizardCurrentAnswer.trim()) {
+      alert('Please provide an answer');
+      return;
+    }
+
+    // Save answer
+    wizardResponses[wizardQuestions[currentQuestionIndex].id] = wizardCurrentAnswer;
+
+    // Move to next question or finish
+    if (currentQuestionIndex < wizardQuestions.length - 1) {
+      currentQuestionIndex++;
+      wizardCurrentAnswer = '';
+    } else {
+      // All questions answered, generate instruction set
+      await finishWizard();
+    }
+  }
+
+  async function finishWizard() {
+    isGenerating = true;
+
+    try {
+      // Generate instruction set using AI
+      const result = await sendCommand('ai_assisted_instruction_creation', {
+        user_responses: wizardResponses,
+        provider: selectedWizardProvider,
+        model: selectedWizardModel
+      });
+
+      if (result && result.status === 'success') {
+        // Create instruction set with generated data
+        const instructionData = result.instruction_data;
+        const key = wizardNewSetName.toLowerCase().replace(/\s+/g, '-');
+
+        const createResult = await sendCommand('save_instructions', {
+          set_key: key,
+          instructions_dict: {
+            ...instructionData,
+            name: wizardNewSetName  // Use user-provided name
+          }
+        });
+
+        if (createResult && createResult.status === 'success') {
+          saveMessage = 'Instruction set created successfully via AI wizard!';
+          saveMessageType = 'success';
+
+          // Close wizard
+          showWizardDialog = false;
+
+          // Reload and switch to new set
+          await loadInstructionSets();
+          currentSetKey = key;
+
+          setTimeout(() => {
+            saveMessage = '';
+            saveMessageType = '';
+          }, 3000);
+        } else {
+          saveMessage = createResult?.message || 'Failed to save instruction set';
+          saveMessageType = 'error';
+        }
+      } else {
+        saveMessage = result?.message || 'Failed to generate instruction set';
+        saveMessageType = 'error';
+      }
+    } catch (error) {
+      console.error('Error in wizard:', error);
+      saveMessage = `Error: ${error}`;
+      saveMessageType = 'error';
+    } finally {
+      isGenerating = false;
+    }
+  }
+
+  function closeWizardDialog() {
+    if (confirm('Are you sure you want to cancel the wizard? Your progress will be lost.')) {
+      showWizardDialog = false;
+      wizardResponses = {};
+      currentQuestionIndex = 0;
+      wizardCurrentAnswer = '';
+      wizardNewSetName = '';
+    }
+  }
+
+  function closeCreationModeDialog() {
+    showCreationModeDialog = false;
   }
 
   // Delete instruction set
@@ -752,6 +893,119 @@
             >
               Import Template
             </button>
+          </div>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Creation Mode Choice Dialog -->
+{#if showCreationModeDialog}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="modal-overlay" on:click={closeCreationModeDialog} role="presentation">
+    <div class="choice-dialog" on:click|stopPropagation role="dialog" aria-labelledby="choice-dialog-title" tabindex="-1">
+      <div class="modal-header">
+        <h2 id="choice-dialog-title">Create New Instruction Set</h2>
+        <button class="close-btn" on:click={closeCreationModeDialog} aria-label="Close">×</button>
+      </div>
+
+      <div class="choice-dialog-body">
+        <p class="choice-help">Choose how you'd like to create your new instruction set:</p>
+
+        <div class="choice-options">
+          <button class="choice-option" on:click={createFromScratch}>
+            <div class="choice-icon">📝</div>
+            <div class="choice-info">
+              <strong>Create from Scratch</strong>
+              <p>Start with an empty instruction set and customize it manually.</p>
+            </div>
+          </button>
+
+          <button class="choice-option" on:click={startWizard}>
+            <div class="choice-icon">🤖</div>
+            <div class="choice-info">
+              <strong>Use AI Wizard</strong>
+              <p>Let an AI interview you and generate a custom instruction set tailored to your needs.</p>
+            </div>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- AI Wizard Dialog -->
+{#if showWizardDialog}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="modal-overlay" on:click={() => {}} role="presentation">
+    <div class="wizard-dialog" on:click|stopPropagation role="dialog" aria-labelledby="wizard-dialog-title" tabindex="-1">
+      <div class="modal-header">
+        <h2 id="wizard-dialog-title">AI Instruction Set Wizard</h2>
+        <button class="close-btn" on:click={closeWizardDialog} aria-label="Close">×</button>
+      </div>
+
+      <div class="wizard-dialog-body">
+        {#if !isGenerating}
+          <!-- Progress indicator -->
+          <div class="wizard-progress">
+            <div class="wizard-progress-text">
+              Question {currentQuestionIndex + 1} of {wizardQuestions.length}
+            </div>
+            <div class="wizard-progress-bar">
+              <div class="wizard-progress-fill" style="width: {((currentQuestionIndex + 1) / wizardQuestions.length) * 100}%"></div>
+            </div>
+          </div>
+
+          <!-- Current question -->
+          {#if wizardQuestions[currentQuestionIndex]}
+            <div class="wizard-question">
+              <div class="wizard-question-text">
+                {wizardQuestions[currentQuestionIndex].question}
+              </div>
+            </div>
+
+            <!-- Answer input -->
+            <div class="wizard-answer">
+              <textarea
+                class="wizard-textarea"
+                placeholder="Type your answer here..."
+                bind:value={wizardCurrentAnswer}
+                rows="6"
+              ></textarea>
+            </div>
+
+            <!-- Navigation buttons -->
+            <div class="wizard-actions">
+              {#if currentQuestionIndex > 0}
+                <button
+                  class="btn btn-cancel"
+                  on:click={() => {
+                    currentQuestionIndex--;
+                    wizardCurrentAnswer = wizardResponses[wizardQuestions[currentQuestionIndex].id] || '';
+                  }}
+                >
+                  ← Previous
+                </button>
+              {/if}
+
+              <button
+                class="btn btn-save"
+                disabled={!wizardCurrentAnswer.trim()}
+                on:click={submitWizardAnswer}
+              >
+                {currentQuestionIndex === wizardQuestions.length - 1 ? 'Generate Instruction Set' : 'Next →'}
+              </button>
+            </div>
+          {/if}
+        {:else}
+          <!-- Generating state -->
+          <div class="wizard-generating">
+            <div class="wizard-spinner"></div>
+            <p>Generating your custom instruction set...</p>
+            <p class="wizard-generating-sub">This may take a moment. The AI is analyzing your responses and creating tailored instructions.</p>
           </div>
         {/if}
       </div>
@@ -1255,5 +1509,196 @@
   .tabs-actions {
     display: flex;
     gap: 0.5rem;
+  }
+
+  /* Choice Dialog Styles */
+  .choice-dialog {
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    width: 90%;
+    max-width: 550px;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  }
+
+  .choice-dialog-body {
+    padding: 1.5rem;
+  }
+
+  .choice-help {
+    margin: 0 0 1.5rem 0;
+    color: #aaa;
+    font-size: 0.95rem;
+  }
+
+  .choice-options {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .choice-option {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    padding: 1.5rem;
+    background: #252525;
+    border: 2px solid #3a3a3a;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-align: left;
+  }
+
+  .choice-option:hover {
+    background: #2a2a2a;
+    border-color: #007acc;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 122, 204, 0.2);
+  }
+
+  .choice-icon {
+    font-size: 3rem;
+    line-height: 1;
+  }
+
+  .choice-info {
+    flex: 1;
+  }
+
+  .choice-info strong {
+    display: block;
+    color: #fff;
+    font-size: 1.1rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .choice-info p {
+    margin: 0;
+    color: #aaa;
+    font-size: 0.9rem;
+    line-height: 1.4;
+  }
+
+  /* Wizard Dialog Styles */
+  .wizard-dialog {
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    width: 90%;
+    max-width: 700px;
+    max-height: 85vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  }
+
+  .wizard-dialog-body {
+    padding: 2rem;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .wizard-progress {
+    margin-bottom: 2rem;
+  }
+
+  .wizard-progress-text {
+    color: #aaa;
+    font-size: 0.9rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .wizard-progress-bar {
+    height: 6px;
+    background: #2a2a2a;
+    border-radius: 3px;
+    overflow: hidden;
+  }
+
+  .wizard-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #007acc, #00a8ff);
+    transition: width 0.3s ease;
+  }
+
+  .wizard-question {
+    margin-bottom: 1.5rem;
+  }
+
+  .wizard-question-text {
+    font-size: 1.1rem;
+    color: #fff;
+    line-height: 1.6;
+    white-space: pre-wrap;
+  }
+
+  .wizard-answer {
+    margin-bottom: 1.5rem;
+  }
+
+  .wizard-textarea {
+    width: 100%;
+    padding: 1rem;
+    background: #1a1a1a;
+    border: 2px solid #3a3a3a;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 1rem;
+    font-family: inherit;
+    line-height: 1.5;
+    resize: vertical;
+    min-height: 150px;
+    transition: border-color 0.2s;
+  }
+
+  .wizard-textarea:focus {
+    outline: none;
+    border-color: #007acc;
+    box-shadow: 0 0 0 3px rgba(0, 122, 204, 0.1);
+  }
+
+  .wizard-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    padding-top: 1rem;
+    border-top: 1px solid #333;
+  }
+
+  .wizard-generating {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem 2rem;
+    text-align: center;
+  }
+
+  .wizard-spinner {
+    width: 50px;
+    height: 50px;
+    border: 4px solid #2a2a2a;
+    border-top-color: #007acc;
+    border-radius: 50%;
+    animation: wizard-spin 1s linear infinite;
+    margin-bottom: 1.5rem;
+  }
+
+  @keyframes wizard-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .wizard-generating p {
+    color: #fff;
+    font-size: 1.1rem;
+    margin: 0 0 0.5rem 0;
+  }
+
+  .wizard-generating-sub {
+    color: #aaa !important;
+    font-size: 0.9rem !important;
   }
 </style>
