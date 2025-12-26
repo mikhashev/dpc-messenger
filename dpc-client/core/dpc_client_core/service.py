@@ -2001,6 +2001,64 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def get_available_templates(self) -> Dict[str, Any]:
+        """Get list of available instruction set templates.
+
+        UI Integration: Called to populate template picker dialog.
+
+        Returns:
+            Dict with status and list of templates with metadata
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            # Get templates directory
+            templates_dir = Path(__file__).parent / "templates" / "instructions"
+
+            if not templates_dir.exists():
+                logger.warning("Templates directory not found: %s", templates_dir)
+                return {
+                    "status": "success",
+                    "templates": []
+                }
+
+            templates = []
+
+            # Scan for JSON template files (exclude README.md)
+            for template_file in templates_dir.glob("*.json"):
+                try:
+                    with open(template_file, 'r', encoding='utf-8') as f:
+                        template_data = json.load(f)
+
+                    templates.append({
+                        "file": str(template_file),
+                        "filename": template_file.name,
+                        "key": template_file.stem,  # filename without extension
+                        "name": template_data.get("name", template_file.stem),
+                        "description": template_data.get("description", ""),
+                    })
+
+                except Exception as e:
+                    logger.warning("Error reading template %s: %s", template_file, e)
+                    continue
+
+            # Sort templates by name
+            templates.sort(key=lambda t: t["name"])
+
+            return {
+                "status": "success",
+                "templates": templates
+            }
+
+        except Exception as e:
+            logger.error("Error listing templates: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "templates": []
+            }
+
     async def send_p2p_image(self, node_id: str, image_base64: str, filename: str = None, text: str = "") -> dict:
         """
         Send screenshot/image to peer via file transfer with inline preview support.
