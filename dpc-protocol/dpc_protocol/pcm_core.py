@@ -120,6 +120,12 @@ class BiasAwareness:
 class InstructionBlock:
     """AI behavior instructions - from Personal Context Manager"""
 
+    # Metadata (NEW for v2.0 - multi-set support)
+    name: str = "General Purpose"
+    description: str = "Default instructions for general conversations"
+    created: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    last_updated: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+
     # Core instructions
     primary: str = "Use this context to provide personalized assistance"
     context_update: str = "Suggest updates when new insights emerge"
@@ -147,6 +153,74 @@ class InstructionBlock:
     consensus_required: bool = True
     ai_curation_enabled: bool = True
     dissent_encouraged: bool = True  # NEW: Require devil's advocate
+
+@dataclass
+class InstructionSet:
+    """Container for multiple named instruction sets (v2.0)"""
+
+    schema_version: str = "2.0"
+    default: str = "general"  # Default instruction set key
+    sets: Dict[str, InstructionBlock] = field(default_factory=dict)
+
+    def get_default(self) -> Optional[InstructionBlock]:
+        """Get the default instruction set"""
+        return self.sets.get(self.default, self.sets.get("general"))
+
+    def get_set(self, name: str) -> Optional[InstructionBlock]:
+        """Get a specific instruction set by name"""
+        return self.sets.get(name)
+
+    def create_set(self, key: str, name: str, description: str = "") -> InstructionBlock:
+        """Create a new empty instruction set"""
+        instruction_block = InstructionBlock(
+            name=name,
+            description=description,
+            created=datetime.now(timezone.utc).isoformat(),
+            last_updated=datetime.now(timezone.utc).isoformat()
+        )
+        self.sets[key] = instruction_block
+        return instruction_block
+
+    def delete_set(self, key: str) -> bool:
+        """Delete an instruction set (protect 'general')"""
+        if key == "general":
+            logger.warning("Cannot delete the 'general' instruction set")
+            return False
+        if key not in self.sets:
+            logger.warning(f"Instruction set '{key}' not found")
+            return False
+        del self.sets[key]
+        # If deleted set was default, reset to 'general'
+        if self.default == key:
+            self.default = "general"
+        return True
+
+    def rename_set(self, old_key: str, new_key: str, new_name: str) -> bool:
+        """Rename an instruction set"""
+        if old_key == "general":
+            logger.warning("Cannot rename the 'general' instruction set")
+            return False
+        if old_key not in self.sets:
+            logger.warning(f"Instruction set '{old_key}' not found")
+            return False
+        if new_key in self.sets and new_key != old_key:
+            logger.warning(f"Instruction set '{new_key}' already exists")
+            return False
+
+        # Update the instruction block
+        instruction_block = self.sets[old_key]
+        instruction_block.name = new_name
+        instruction_block.last_updated = datetime.now(timezone.utc).isoformat()
+
+        # Move to new key if key changed
+        if new_key != old_key:
+            self.sets[new_key] = instruction_block
+            del self.sets[old_key]
+            # Update default if needed
+            if self.default == old_key:
+                self.default = new_key
+
+        return True
 
 @dataclass
 class CognitiveProfile:
@@ -377,9 +451,181 @@ class PCMCore:
 
 # --- 3. Instructions Management (separate from personal.json) ---
 
+class InstructionSetManager:
+    """Manages loading, saving, and operations on instruction sets (v2.0)"""
+
+    def __init__(self, config_dir: Path | None = None):
+        """
+        Initialize the instruction set manager.
+
+        Args:
+            config_dir: Directory containing instructions.json. Defaults to ~/.dpc/
+        """
+        if config_dir is None:
+            config_dir = DPC_HOME_DIR
+        else:
+            config_dir = Path(config_dir)
+
+        self.instructions_file = config_dir / "instructions.json"
+        self.instruction_set: Optional[InstructionSet] = None
+
+    def load(self) -> InstructionSet:
+        """
+        Load instruction sets from file, create default if missing.
+
+        Returns:
+            InstructionSet instance
+        """
+        if not self.instructions_file.exists():
+            logger.info("Instructions file not found at %s. Creating default instruction set", self.instructions_file)
+            return self._create_default()
+
+        try:
+            with open(self.instructions_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            # Load v2.0 format directly (no migration needed since no existing users)
+            instruction_set = self._load_from_dict(data)
+            self.instruction_set = instruction_set
+            return instruction_set
+
+        except Exception as e:
+            logger.error("Error loading instructions from %s: %s", self.instructions_file, e, exc_info=True)
+            logger.info("Creating default instruction set")
+            return self._create_default()
+
+    def _load_from_dict(self, data: dict) -> InstructionSet:
+        """Load InstructionSet from dictionary data"""
+        schema_version = data.get('schema_version', '2.0')
+        default = data.get('default', 'general')
+        sets_data = data.get('sets', {})
+
+        # Convert each set dict to InstructionBlock
+        sets = {}
+        for key, inst_data in sets_data.items():
+            sets[key] = InstructionBlock(
+                name=inst_data.get('name', 'General Purpose'),
+                description=inst_data.get('description', ''),
+                created=inst_data.get('created', datetime.now(timezone.utc).isoformat()),
+                last_updated=inst_data.get('last_updated', datetime.now(timezone.utc).isoformat()),
+                primary=inst_data.get('primary', InstructionBlock().primary),
+                context_update=inst_data.get('context_update', InstructionBlock().context_update),
+                verification_protocol=inst_data.get('verification_protocol', InstructionBlock().verification_protocol),
+                learning_support=inst_data.get('learning_support', InstructionBlock().learning_support),
+                bias_mitigation=inst_data.get('bias_mitigation', InstructionBlock().bias_mitigation),
+                collaboration_mode=inst_data.get('collaboration_mode', 'individual'),
+                consensus_required=inst_data.get('consensus_required', True),
+                ai_curation_enabled=inst_data.get('ai_curation_enabled', True),
+                dissent_encouraged=inst_data.get('dissent_encouraged', True)
+            )
+
+        return InstructionSet(
+            schema_version=schema_version,
+            default=default,
+            sets=sets
+        )
+
+    def _create_default(self) -> InstructionSet:
+        """Create default instruction set with 'general' set"""
+        default_instruction = InstructionBlock(
+            name="General Purpose",
+            description="Default instructions for general conversations",
+            created=datetime.now(timezone.utc).isoformat(),
+            last_updated=datetime.now(timezone.utc).isoformat()
+        )
+
+        instruction_set = InstructionSet(
+            schema_version="2.0",
+            default="general",
+            sets={"general": default_instruction}
+        )
+
+        self.instruction_set = instruction_set
+        self.save(instruction_set)
+        return instruction_set
+
+    def save(self, instruction_set: InstructionSet):
+        """
+        Save instruction sets to file.
+
+        Args:
+            instruction_set: InstructionSet instance to save
+        """
+        # Ensure parent directory exists
+        self.instructions_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Convert to dict
+        data = {
+            "schema_version": instruction_set.schema_version,
+            "default": instruction_set.default,
+            "sets": {
+                key: asdict(inst)
+                for key, inst in instruction_set.sets.items()
+            }
+        }
+
+        with open(self.instructions_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+
+        logger.info("Instructions saved to %s (%d sets)", self.instructions_file, len(instruction_set.sets))
+        self.instruction_set = instruction_set
+
+    def import_template(self, template_file: Path, set_key: str, set_name: str):
+        """
+        Import instruction template from personal-context-manager format.
+
+        Args:
+            template_file: Path to template JSON file
+            set_key: Key for the new instruction set (e.g., "learning-math")
+            set_name: Display name for the instruction set
+        """
+        try:
+            with open(template_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+
+            # Extract ai_rules.instruction block
+            if "ai_rules" in data and "instruction" in data["ai_rules"]:
+                instruction_data = data["ai_rules"]["instruction"]
+            elif "instruction" in data:
+                instruction_data = data["instruction"]
+            else:
+                instruction_data = data  # Assume top-level is instruction
+
+            # Create InstructionBlock
+            instruction_block = InstructionBlock(
+                name=set_name,
+                description=instruction_data.get("description", ""),
+                primary=instruction_data.get("primary", InstructionBlock().primary),
+                context_update=instruction_data.get("context_update", InstructionBlock().context_update),
+                verification_protocol=instruction_data.get("verification_protocol", InstructionBlock().verification_protocol),
+                learning_support=instruction_data.get("learning_support", InstructionBlock().learning_support),
+                bias_mitigation=instruction_data.get("bias_mitigation", InstructionBlock().bias_mitigation),
+                collaboration_mode=instruction_data.get("collaboration_mode", "individual"),
+                consensus_required=instruction_data.get("consensus_required", True),
+                ai_curation_enabled=instruction_data.get("ai_curation_enabled", True),
+                dissent_encouraged=instruction_data.get("dissent_encouraged", True)
+            )
+
+            # Add to instruction set
+            if self.instruction_set is None:
+                self.instruction_set = self.load()
+
+            self.instruction_set.sets[set_key] = instruction_block
+            self.save(self.instruction_set)
+
+            logger.info("Imported template from %s as '%s'", template_file, set_key)
+
+        except Exception as e:
+            logger.error("Error importing template from %s: %s", template_file, e, exc_info=True)
+            raise
+
+
+# --- Legacy functions for backward compatibility ---
+
 def load_instructions(file_path: Path | None = None) -> InstructionBlock:
     """
-    Load AI instructions from instructions.json.
+    Load AI instructions from instructions.json (legacy function).
+    Returns the default instruction set from the v2.0 format.
 
     Args:
         file_path: Path to instructions.json. Defaults to ~/.dpc/instructions.json
@@ -387,63 +633,27 @@ def load_instructions(file_path: Path | None = None) -> InstructionBlock:
     Returns:
         InstructionBlock instance
     """
-    if file_path is None:
-        file_path = DPC_HOME_DIR / "instructions.json"
-    else:
-        file_path = Path(file_path)
-
-    # If instructions.json doesn't exist, create it with defaults
-    if not file_path.exists():
-        logger.info("Instructions file not found at %s. Creating default instructions", file_path)
-        default_instructions = InstructionBlock()
-        save_instructions(default_instructions, file_path)
-        return default_instructions
-
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-
-        # Handle nested bias_mitigation and learning_support dicts
-        return InstructionBlock(
-            primary=data.get('primary', InstructionBlock().primary),
-            context_update=data.get('context_update', InstructionBlock().context_update),
-            verification_protocol=data.get('verification_protocol', InstructionBlock().verification_protocol),
-            learning_support=data.get('learning_support', InstructionBlock().learning_support),
-            bias_mitigation=data.get('bias_mitigation', InstructionBlock().bias_mitigation),
-            collaboration_mode=data.get('collaboration_mode', 'individual'),
-            consensus_required=data.get('consensus_required', True),
-            ai_curation_enabled=data.get('ai_curation_enabled', True),
-            dissent_encouraged=data.get('dissent_encouraged', True)
-        )
-    except Exception as e:
-        logger.error("Error loading instructions from %s: %s", file_path, e, exc_info=True)
-        logger.info("Using default instructions")
-        return InstructionBlock()
+    manager = InstructionSetManager(file_path.parent if file_path else None)
+    instruction_set = manager.load()
+    return instruction_set.get_default() or InstructionBlock()
 
 
 def save_instructions(instructions: InstructionBlock, file_path: Path | None = None):
     """
-    Save AI instructions to instructions.json.
+    Save AI instructions to instructions.json (legacy function).
+    Saves as the default instruction set in v2.0 format.
 
     Args:
         instructions: InstructionBlock instance to save
         file_path: Path to instructions.json. Defaults to ~/.dpc/instructions.json
     """
-    if file_path is None:
-        file_path = DPC_HOME_DIR / "instructions.json"
-    else:
-        file_path = Path(file_path)
-
-    # Ensure parent directory exists
-    file_path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Convert to dict and save
-    data = asdict(instructions)
-
-    with open(file_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-
-    logger.info("Instructions saved to %s", file_path)
+    manager = InstructionSetManager(file_path.parent if file_path else None)
+    instruction_set = InstructionSet(
+        schema_version="2.0",
+        default="general",
+        sets={"general": instructions}
+    )
+    manager.save(instruction_set)
 
 
 # --- 4. Usage example (for self-testing the module) ---

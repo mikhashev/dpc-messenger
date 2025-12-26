@@ -30,14 +30,14 @@ class PromptManager:
     - Respect privacy settings (context checkbox state)
     """
 
-    def __init__(self, instructions, peer_metadata: Dict[str, Dict[str, Any]]):
+    def __init__(self, instruction_set, peer_metadata: Dict[str, Dict[str, Any]]):
         """Initialize PromptManager.
 
         Args:
-            instructions: InstructionBlock from instructions.json
+            instruction_set: InstructionSet from instructions.json (v2.0)
             peer_metadata: Dict of {node_id: {name, ...}} for peer labels
         """
-        self.instructions = instructions
+        self.instruction_set = instruction_set
         self.peer_metadata = peer_metadata
 
     def assemble_prompt(
@@ -47,7 +47,8 @@ class PromptManager:
         device_context: Optional[dict] = None,
         peer_device_contexts: Optional[Dict[str, dict]] = None,
         message_history: Optional[list] = None,
-        include_context: bool = True
+        include_context: bool = True,
+        instruction_set_name: Optional[str] = None
     ) -> str:
         """Assemble final prompt for the LLM with instruction processing.
 
@@ -61,13 +62,14 @@ class PromptManager:
             peer_device_contexts: Dict of {peer_id: device_context} for peers (optional)
             message_history: List of conversation messages (optional, for Phase 7)
             include_context: If True, include context blocks; if False, skip (Phase 7)
+            instruction_set_name: Name of instruction set to use (optional, defaults to default set)
 
         Returns:
             Complete prompt ready to send to LLM
         """
         # Build system instruction (ONLY from instructions.json when context enabled)
         # Fix: Don't leak instructions when checkbox is unchecked (v0.12.0)
-        system_instruction = self._build_system_instruction(include_context)
+        system_instruction = self._build_system_instruction(include_context, instruction_set_name)
 
         # Build context blocks (personal context + device context)
         context_blocks = []
@@ -112,18 +114,25 @@ class PromptManager:
 
         return final_prompt
 
-    def _build_system_instruction(self, include_context: bool) -> str:
+    def _build_system_instruction(self, include_context: bool, instruction_set_name: Optional[str] = None) -> str:
         """Build system instruction based on context inclusion state.
 
         Args:
             include_context: If True, use instructions.json; if False, pure mode (no instruction)
+            instruction_set_name: Name of instruction set to use (optional)
 
         Returns:
             System instruction text
         """
         if include_context:
-            # User enabled context - use instructions from instructions.json
-            return self.instructions.primary if self.instructions.primary else ""
+            # Get the instruction set to use
+            if instruction_set_name:
+                instructions = self.instruction_set.get_set(instruction_set_name)
+            else:
+                instructions = self.instruction_set.get_default()
+
+            # Return primary instruction
+            return instructions.primary if instructions and instructions.primary else ""
         else:
             # User disabled context - pure mode (no system instruction)
             return ""

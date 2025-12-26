@@ -68,8 +68,8 @@ from .managers.file_transfer_manager import FileTransferManager
 from .managers.prompt_manager import PromptManager
 from .session_manager import NewSessionProposalManager
 from dpc_protocol.pcm_core import (
-    PCMCore, PersonalContext, InstructionBlock,
-    load_instructions, save_instructions
+    PCMCore, PersonalContext, InstructionBlock, InstructionSet,
+    InstructionSetManager, load_instructions, save_instructions
 )
 from dpc_protocol.utils import parse_dpc_uri
 from datetime import datetime, timezone
@@ -125,9 +125,10 @@ class CoreService:
         # Knowledge Architecture components (Phase 1-6)
         self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
 
-        # Load AI instructions from instructions.json
-        self.instructions = load_instructions()
-        logger.info("AI instructions loaded from instructions.json")
+        # Load AI instruction sets from instructions.json (v2.0)
+        self.instruction_manager = InstructionSetManager(DPC_HOME_DIR)
+        self.instruction_set = self.instruction_manager.load()
+        logger.info("Loaded %d instruction set(s) from instructions.json", len(self.instruction_set.sets))
 
         # Update personal.json with instructions.json reference (if not already present)
         try:
@@ -237,7 +238,7 @@ class CoreService:
 
         # Prompt manager (assembles prompts with context and history) - v0.12.0 refactor
         self.prompt_manager = PromptManager(
-            instructions=self.instructions,
+            instruction_set=self.instruction_set,
             peer_metadata=self.peer_metadata
         )
 
