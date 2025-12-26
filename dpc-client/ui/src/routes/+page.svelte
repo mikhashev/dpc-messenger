@@ -168,6 +168,9 @@
   };
   let availableInstructionSets = $state<InstructionSets | null>(null);
 
+  // Selected instruction set for active chat (derived from aiChats metadata)
+  let selectedInstructionSet = $derived($aiChats.get(activeChatId)?.instruction_set_name || 'general');
+
   // Personal context inclusion toggle
   let includePersonalContext = $state(false);
 
@@ -780,6 +783,16 @@
     }
     // Trigger reactivity by creating new Set instance (required for Svelte 5 $state)
     selectedPeerContexts = new Set(selectedPeerContexts);
+  }
+
+  // Update instruction set for active chat
+  function updateInstructionSet(newInstructionSet: string) {
+    const chatMetadata = $aiChats.get(activeChatId);
+    if (chatMetadata) {
+      chatMetadata.instruction_set_name = newInstructionSet;
+      // Trigger reactivity by creating new Map instance
+      aiChats.update(map => new Map(map));
+    }
   }
 
   // --- CHAT PANEL RESIZE HANDLERS ---
@@ -2229,6 +2242,33 @@
                   {:else}
                     🔓 AI has full context access
                   {/if}
+                </span>
+              </div>
+            {/if}
+
+            <!-- Instruction Set Selector (show for all AI chats) -->
+            {#if activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
+              <div class="ai-scope-selector">
+                <label for="instruction-set-select">
+                  AI Instruction Set:
+                </label>
+                <select
+                  id="instruction-set-select"
+                  value={selectedInstructionSet}
+                  onchange={(e) => updateInstructionSet((e.target as HTMLSelectElement).value)}
+                >
+                  {#if availableInstructionSets}
+                    {#each Object.entries(availableInstructionSets.sets) as [key, set]}
+                      <option value={key}>
+                        {set.name} {availableInstructionSets.default === key ? '⭐' : ''}
+                      </option>
+                    {/each}
+                  {:else}
+                    <option value="general">General Purpose</option>
+                  {/if}
+                </select>
+                <span class="context-hint">
+                  Controls AI behavior and responses
                 </span>
               </div>
             {/if}
