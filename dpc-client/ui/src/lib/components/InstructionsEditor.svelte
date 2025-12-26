@@ -51,6 +51,19 @@
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
 
+  // Template import state
+  type Template = {
+    file: string;
+    filename: string;
+    key: string;
+    name: string;
+    description: string;
+  };
+  let showTemplateDialog: boolean = false;
+  let availableTemplates: Template[] = [];
+  let selectedTemplate: Template | null = null;
+  let newSetName: string = '';
+
   // Load instruction sets when modal opens
   $: if (open && !instructionSets) {
     loadInstructionSets();
@@ -189,6 +202,74 @@
       saveMessage = `Error: ${error}`;
       saveMessageType = 'error';
     }
+  }
+
+  // Template import functions
+  async function openTemplateDialog() {
+    showTemplateDialog = true;
+    selectedTemplate = null;
+    newSetName = '';
+
+    // Load available templates
+    try {
+      const result = await sendCommand('get_available_templates', {});
+      if (result && result.status === 'success') {
+        availableTemplates = result.templates || [];
+      } else {
+        console.error('Failed to load templates:', result?.message);
+        availableTemplates = [];
+      }
+    } catch (error) {
+      console.error('Error loading templates:', error);
+      availableTemplates = [];
+    }
+  }
+
+  async function importSelectedTemplate() {
+    if (!selectedTemplate || !newSetName.trim()) {
+      alert('Please select a template and enter a name for the new instruction set.');
+      return;
+    }
+
+    const key = newSetName.toLowerCase().replace(/\s+/g, '-');
+
+    try {
+      const result = await sendCommand('import_instruction_template', {
+        template_file: selectedTemplate.file,
+        set_key: key,
+        set_name: newSetName
+      });
+
+      if (result && result.status === 'success') {
+        saveMessage = result.message;
+        saveMessageType = 'success';
+
+        // Close dialog
+        showTemplateDialog = false;
+
+        // Reload instruction sets to get the new one
+        await loadInstructionSets();
+        currentSetKey = key;
+
+        setTimeout(() => {
+          saveMessage = '';
+          saveMessageType = '';
+        }, 2000);
+      } else {
+        saveMessage = result?.message || 'Import failed';
+        saveMessageType = 'error';
+      }
+    } catch (error) {
+      console.error('Error importing template:', error);
+      saveMessage = `Error: ${error}`;
+      saveMessageType = 'error';
+    }
+  }
+
+  function closeTemplateDialog() {
+    showTemplateDialog = false;
+    selectedTemplate = null;
+    newSetName = '';
   }
 
   // Delete instruction set
@@ -356,7 +437,10 @@
               </button>
             {/each}
           </div>
-          <button class="btn btn-new" on:click={createNewSet}>+ New</button>
+          <div class="tabs-actions">
+            <button class="btn btn-new" on:click={createNewSet}>+ New</button>
+            <button class="btn btn-import" on:click={openTemplateDialog}>📋 Import Template</button>
+          </div>
         </div>
       {/if}
 
@@ -606,6 +690,69 @@
           </div>
         {:else}
           <div class="loading">No instruction set selected</div>
+        {/if}
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Template Import Dialog -->
+{#if showTemplateDialog}
+  <!-- svelte-ignore a11y-click-events-have-key-events -->
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div class="modal-overlay" on:click={closeTemplateDialog} role="presentation">
+    <div class="template-dialog" on:click|stopPropagation role="dialog" aria-labelledby="template-dialog-title" tabindex="-1">
+      <div class="modal-header">
+        <h2 id="template-dialog-title">Import Instruction Template</h2>
+        <button class="close-btn" on:click={closeTemplateDialog} aria-label="Close">×</button>
+      </div>
+
+      <div class="template-dialog-body">
+        <p class="template-help">Select a template to create a new instruction set based on proven patterns.</p>
+
+        {#if availableTemplates.length === 0}
+          <div class="loading">No templates available</div>
+        {:else}
+          <div class="template-list">
+            {#each availableTemplates as template}
+              <label class="template-option" class:selected={selectedTemplate?.key === template.key}>
+                <input
+                  type="radio"
+                  name="template"
+                  value={template.key}
+                  on:change={() => selectedTemplate = template}
+                />
+                <div class="template-info">
+                  <strong>{template.name}</strong>
+                  <p class="template-description">{template.description}</p>
+                </div>
+              </label>
+            {/each}
+          </div>
+
+          <div class="template-name-input">
+            <label for="new-set-name">
+              <strong>Instruction Set Name:</strong>
+              <input
+                id="new-set-name"
+                type="text"
+                class="edit-input"
+                placeholder="e.g., My Learning Sessions"
+                bind:value={newSetName}
+              />
+            </label>
+          </div>
+
+          <div class="template-dialog-actions">
+            <button class="btn btn-cancel" on:click={closeTemplateDialog}>Cancel</button>
+            <button
+              class="btn btn-save"
+              disabled={!selectedTemplate || !newSetName.trim()}
+              on:click={importSelectedTemplate}
+            >
+              Import Template
+            </button>
+          </div>
         {/if}
       </div>
     </div>
@@ -988,5 +1135,125 @@
     text-align: center;
     color: #888;
     padding: 2rem;
+  }
+
+  /* Template Import Dialog Styles */
+  .template-dialog {
+    background: #1e1e1e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    width: 90%;
+    max-width: 600px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  }
+
+  .template-dialog-body {
+    padding: 1.5rem;
+    overflow-y: auto;
+    flex: 1;
+  }
+
+  .template-help {
+    margin: 0 0 1.5rem 0;
+    color: #aaa;
+    font-size: 0.95rem;
+  }
+
+  .template-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    margin-bottom: 1.5rem;
+  }
+
+  .template-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem;
+    padding: 1rem;
+    background: #252525;
+    border: 2px solid #3a3a3a;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .template-option:hover {
+    background: #2a2a2a;
+    border-color: #555;
+  }
+
+  .template-option.selected {
+    border-color: #007acc;
+    background: #2a2a2a;
+  }
+
+  .template-option input[type="radio"] {
+    margin-top: 0.25rem;
+    cursor: pointer;
+  }
+
+  .template-info {
+    flex: 1;
+  }
+
+  .template-info strong {
+    display: block;
+    color: #fff;
+    margin-bottom: 0.5rem;
+    font-size: 1rem;
+  }
+
+  .template-description {
+    margin: 0;
+    color: #aaa;
+    font-size: 0.9rem;
+    line-height: 1.4;
+  }
+
+  .template-name-input {
+    margin-bottom: 1.5rem;
+  }
+
+  .template-name-input label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .template-name-input strong {
+    color: #fff;
+    font-size: 0.95rem;
+  }
+
+  .template-dialog-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    padding-top: 1rem;
+    border-top: 1px solid #333;
+  }
+
+  .btn-import {
+    background: #007acc;
+    color: #fff;
+    border: 1px solid #007acc;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    white-space: nowrap;
+  }
+
+  .btn-import:hover {
+    background: #005a9e;
+  }
+
+  .tabs-actions {
+    display: flex;
+    gap: 0.5rem;
   }
 </style>
