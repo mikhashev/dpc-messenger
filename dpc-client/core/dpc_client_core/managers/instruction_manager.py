@@ -11,6 +11,7 @@ Manages AI instruction sets:
 Extracted to follow the manager pattern (consistent with LLMManager, P2PManager, etc.)
 """
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
@@ -134,10 +135,10 @@ class InstructionManager:
 
             # Broadcast event to UI
             if self.event_broadcaster:
-                self.event_broadcaster.broadcast_event("instruction_set_updated", {
+                asyncio.create_task(self.event_broadcaster.broadcast_event("instruction_set_updated", {
                     "set_key": set_key,
                     "set_name": inst_block.name
-                })
+                }))
 
             logger.info("Saved instruction set '%s'", set_key)
             return True
@@ -169,10 +170,10 @@ class InstructionManager:
 
             # Broadcast event to UI
             if self.event_broadcaster:
-                self.event_broadcaster.broadcast_event("instruction_set_created", {
+                asyncio.create_task(self.event_broadcaster.broadcast_event("instruction_set_created", {
                     "set_key": set_key,
                     "set_name": name
-                })
+                }))
 
             logger.info("Created instruction set '%s'", set_key)
             return asdict(inst_block)
@@ -203,9 +204,9 @@ class InstructionManager:
 
                 # Broadcast event to UI
                 if self.event_broadcaster:
-                    self.event_broadcaster.broadcast_event("instruction_set_deleted", {
+                    asyncio.create_task(self.event_broadcaster.broadcast_event("instruction_set_deleted", {
                         "set_key": set_key
-                    })
+                    }))
 
                 logger.info("Deleted instruction set '%s'", set_key)
 
@@ -239,11 +240,11 @@ class InstructionManager:
 
                 # Broadcast event to UI
                 if self.event_broadcaster:
-                    self.event_broadcaster.broadcast_event("instruction_set_renamed", {
+                    asyncio.create_task(self.event_broadcaster.broadcast_event("instruction_set_renamed", {
                         "old_key": old_key,
                         "new_key": new_key,
                         "new_name": new_name
-                    })
+                    }))
 
                 logger.info("Renamed instruction set '%s' to '%s'", old_key, new_key)
 
@@ -279,9 +280,9 @@ class InstructionManager:
 
             # Broadcast event to UI
             if self.event_broadcaster:
-                self.event_broadcaster.broadcast_event("default_instruction_set_changed", {
+                asyncio.create_task(self.event_broadcaster.broadcast_event("default_instruction_set_changed", {
                     "default": set_key
-                })
+                }))
 
             logger.info("Set default instruction set to '%s'", set_key)
             return True
@@ -313,11 +314,11 @@ class InstructionManager:
 
             # Broadcast event to UI
             if self.event_broadcaster:
-                self.event_broadcaster.broadcast_event("instruction_set_imported", {
+                asyncio.create_task(self.event_broadcaster.broadcast_event("instruction_set_imported", {
                     "set_key": set_key,
                     "set_name": set_name,
                     "template_file": str(template_file)
-                })
+                }))
 
             logger.info("Imported template from %s as '%s'", template_file, set_key)
             return asdict(inst_block) if inst_block else None
@@ -337,9 +338,9 @@ class InstructionManager:
 
             # Broadcast event to UI
             if self.event_broadcaster:
-                self.event_broadcaster.broadcast_event("instruction_sets_reloaded", {
+                asyncio.create_task(self.event_broadcaster.broadcast_event("instruction_sets_reloaded", {
                     "count": len(self.instruction_set.sets)
-                })
+                }))
 
             logger.info("Reloaded instruction sets from disk")
             return True
