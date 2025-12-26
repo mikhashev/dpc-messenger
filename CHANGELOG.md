@@ -174,6 +174,28 @@ All notable changes to D-PC Messenger will be documented in this file.
   - [knowledge_commit.py:11](dpc-protocol/dpc_protocol/knowledge_commit.py#L11)
   - [markdown_manager.py:15](dpc-protocol/dpc_protocol/markdown_manager.py#L15)
 
+#### CRITICAL: Hardcoded Instructions Leak When Checkbox Disabled
+- **Bug:** AI uses hardcoded multi-perspective instructions even when "Include Personal Context" checkbox is OFF
+- **Impact:** Privacy violation - users can't disable instructions, no transparency about hardcoded prompts
+- **User Report:** "Why does AI use instructions and other files when checkbox is disabled?"
+- **Root Cause:** System instruction builder had 122 lines of hardcoded prompt engineering that always ran
+- **Hardcoded Text Removed:**
+  - "You are a helpful AI assistant with strong bias-awareness training..." (base prompts)
+  - "BIAS MITIGATION RULES" section (multi-perspective, challenge status quo, cultural sensitivity)
+  - "COGNITIVE BIASES TO AVOID" list (status quo bias, anchoring, cultural bias, etc.)
+  - Cultural context extraction and formatting
+  - Evidence requirement rules (citations_preferred, citations_required)
+- **Fix:** Complete redesign of instruction system
+  - **Checkbox OFF**: Use minimal generic prompt ("You are a helpful AI assistant.")
+  - **Checkbox ON**: Use ONLY `self.instructions.primary` from `~/.dpc/instructions.json`
+  - Removed entire `_build_bias_aware_system_instruction()` method (122 lines)
+  - Users now have full control and transparency
+- **User Benefit:**
+  - Checkbox state correctly controls ALL instructions (not just context data)
+  - Users can customize all AI behavior via instructions.json (no hidden hardcoded prompts)
+  - Privacy mode works correctly (minimal instruction when context disabled)
+- **Files:** [service.py:3772-3779](dpc-client/core/dpc_client_core/service.py#L3772) - Simplified instruction loading
+
 #### CRITICAL: Multiple Infinite Loop Fixes (v0.11.3)
 - Empty conversation history infinite loop
 - Multiple peers infinite loop
