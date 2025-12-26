@@ -1,5 +1,5 @@
 <!-- InstructionsEditor.svelte -->
-<!-- View and manage AI instructions (separate from personal context) -->
+<!-- View and manage multiple AI instruction sets (v2.0) -->
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
@@ -10,6 +10,10 @@
   const dispatch = createEventDispatcher();
 
   type InstructionBlock = {
+    name: string;
+    description: string;
+    created: string;
+    last_updated: string;
     primary: string;
     context_update: string;
     verification_protocol: string;
@@ -32,7 +36,14 @@
     dissent_encouraged: boolean;
   };
 
-  let instructions: InstructionBlock | null = null;
+  type InstructionSets = {
+    schema_version: string;
+    default: string;
+    sets: Record<string, InstructionBlock>;
+  };
+
+  let instructionSets: InstructionSets | null = null;
+  let currentSetKey: string = "general";
   let editMode: boolean = false;
   let editedInstructions: InstructionBlock | null = null;
   let isSaving: boolean = false;
@@ -40,34 +51,53 @@
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
 
-  // Load instructions when modal opens
-  $: if (open && !instructions) {
-    loadInstructions();
+  // Load instruction sets when modal opens
+  $: if (open && !instructionSets) {
+    loadInstructionSets();
   }
 
-  async function loadInstructions() {
+  // Get current instruction set to display
+  $: currentInstructions = instructionSets?.sets[currentSetKey] || null;
+  $: displayInstructions = editMode && editedInstructions ? editedInstructions : currentInstructions;
+
+  async function loadInstructionSets() {
     isLoading = true;
     try {
       const result = await sendCommand('get_instructions', {});
-      // sendCommand resolves with the payload directly, so result = {status, instructions}
       if (result && result.status === 'success') {
-        instructions = result.instructions;
+        instructionSets = result.instruction_sets;
+        // Set current set to default if not already set
+        if (instructionSets && !instructionSets.sets[currentSetKey]) {
+          currentSetKey = instructionSets.default || "general";
+        }
       } else {
-        console.error('Failed to load instructions:', result?.message || 'Unknown error');
+        console.error('Failed to load instruction sets:', result?.message || 'Unknown error');
       }
     } catch (error) {
-      console.error('Error loading instructions:', error);
+      console.error('Error loading instruction sets:', error);
     } finally {
       isLoading = false;
     }
   }
 
+  // Switch to a different instruction set
+  function switchSet(setKey: string) {
+    if (editMode) {
+      const confirmed = confirm('You have unsaved changes. Discard them and switch sets?');
+      if (!confirmed) return;
+      editMode = false;
+      editedInstructions = null;
+    }
+    currentSetKey = setKey;
+    saveMessage = '';
+    saveMessageType = '';
+  }
+
   // Enter edit mode
   function startEditing() {
-    if (!instructions) return;
+    if (!currentInstructions) return;
     editMode = true;
-    // Deep copy the instructions for editing
-    editedInstructions = JSON.parse(JSON.stringify(instructions));
+    editedInstructions = JSON.parse(JSON.stringify(currentInstructions));
   }
 
   // Cancel editing
@@ -88,16 +118,18 @@
 
     try {
       const result = await sendCommand('save_instructions', {
+        set_key: currentSetKey,
         instructions_dict: editedInstructions
       });
 
-      // sendCommand resolves with the payload directly, so result = {status, message}
       if (result && result.status === 'success') {
         saveMessage = result.message;
         saveMessageType = 'success';
 
-        // Update the displayed instructions
-        instructions = editedInstructions;
+        // Update the instruction sets in memory
+        if (instructionSets) {
+          instructionSets.sets[currentSetKey] = editedInstructions;
+        }
 
         // Exit edit mode immediately
         editMode = false;
@@ -113,11 +145,120 @@
         saveMessageType = 'error';
       }
     } catch (error) {
-      console.error('Error saving instructions:', error);
+      console.error('Error saving instruction set:', error);
       saveMessage = `Error: ${error}`;
       saveMessageType = 'error';
     } finally {
       isSaving = false;
+    }
+  }
+
+  // Create new instruction set
+  async function createNewSet() {
+    const name = prompt('Enter name for new instruction set:');
+    if (!name) return;
+
+    const key = name.toLowerCase().replace(/\s+/g, '-');
+    const description = prompt('Enter description (optional):') || '';
+
+    try {
+      const result = await sendCommand('create_instruction_set', {
+        set_key: key,
+        name: name,
+        description: description
+      });
+
+      if (result && result.status === 'success') {
+        saveMessage = result.message;
+        saveMessageType = 'success';
+
+        // Reload instruction sets to get the new one
+        await loadInstructionSets();
+        currentSetKey = key;
+
+        setTimeout(() => {
+          saveMessage = '';
+          saveMessageType = '';
+        }, 2000);
+      } else {
+        saveMessage = result?.message || 'Create failed';
+        saveMessageType = 'error';
+      }
+    } catch (error) {
+      console.error('Error creating instruction set:', error);
+      saveMessage = `Error: ${error}`;
+      saveMessageType = 'error';
+    }
+  }
+
+  // Delete instruction set
+  async function deleteSet() {
+    if (currentSetKey === 'general') {
+      alert('Cannot delete the default "general" instruction set.');
+      return;
+    }
+
+    const confirmed = confirm(`Delete instruction set "${currentInstructions?.name}"? This cannot be undone.`);
+    if (!confirmed) return;
+
+    try {
+      const result = await sendCommand('delete_instruction_set', {
+        set_key: currentSetKey
+      });
+
+      if (result && result.status === 'success') {
+        saveMessage = result.message;
+        saveMessageType = 'success';
+
+        // Reload and switch to default
+        await loadInstructionSets();
+        if (instructionSets) {
+          currentSetKey = instructionSets.default || "general";
+        }
+
+        setTimeout(() => {
+          saveMessage = '';
+          saveMessageType = '';
+        }, 2000);
+      } else {
+        saveMessage = result?.message || 'Delete failed';
+        saveMessageType = 'error';
+      }
+    } catch (error) {
+      console.error('Error deleting instruction set:', error);
+      saveMessage = `Error: ${error}`;
+      saveMessageType = 'error';
+    }
+  }
+
+  // Set as default
+  async function setAsDefault() {
+    try {
+      const result = await sendCommand('set_default_instruction_set', {
+        set_key: currentSetKey
+      });
+
+      if (result && result.status === 'success') {
+        saveMessage = result.message;
+        saveMessageType = 'success';
+
+        // Update default in memory
+        if (instructionSets) {
+          instructionSets.default = currentSetKey;
+        }
+
+        setTimeout(() => {
+          saveMessage = '';
+          saveMessageType = '';
+        }, 2000);
+      } else {
+        saveMessage = result?.message || 'Failed to set default';
+        saveMessageType = 'error';
+      }
+    } catch (error) {
+      console.error('Error setting default instruction set:', error);
+      saveMessage = `Error: ${error}`;
+      saveMessageType = 'error';
     }
   }
 
@@ -127,8 +268,8 @@
     try {
       const result = await sendCommand('reload_instructions', {});
       if (result.status === 'success') {
-        instructions = result.instructions;
-        saveMessage = 'Instructions reloaded from disk';
+        instructionSets = result.instruction_sets;
+        saveMessage = 'Instruction sets reloaded from disk';
         saveMessageType = 'success';
         setTimeout(() => {
           saveMessage = '';
@@ -139,7 +280,7 @@
         saveMessageType = 'error';
       }
     } catch (error) {
-      console.error('Error reloading instructions:', error);
+      console.error('Error reloading instruction sets:', error);
       saveMessage = `Error: ${error}`;
       saveMessageType = 'error';
     } finally {
@@ -166,9 +307,6 @@
       }
     }
   }
-
-  // Get the instructions to display (edited or original)
-  $: displayInstructions = editMode && editedInstructions ? editedInstructions : instructions;
 </script>
 
 {#if open}
@@ -201,10 +339,73 @@
         </div>
       {/if}
 
+      <!-- Tab Navigation -->
+      {#if instructionSets}
+        <div class="tabs-container">
+          <div class="tabs">
+            {#each Object.entries(instructionSets.sets) as [key, set]}
+              <button
+                class="tab"
+                class:active={currentSetKey === key}
+                on:click={() => switchSet(key)}
+              >
+                {set.name}
+                {#if instructionSets.default === key}
+                  <span class="default-badge">⭐</span>
+                {/if}
+              </button>
+            {/each}
+          </div>
+          <button class="btn btn-new" on:click={createNewSet}>+ New</button>
+        </div>
+      {/if}
+
       <div class="modal-body">
-        {#if isLoading && !instructions}
-          <div class="loading">Loading instructions...</div>
+        {#if isLoading && !instructionSets}
+          <div class="loading">Loading instruction sets...</div>
         {:else if displayInstructions}
+          <!-- Set Metadata -->
+          <div class="section">
+            <h3>Instruction Set Details</h3>
+            {#if editMode && editedInstructions}
+              <div class="metadata-edit">
+                <label>
+                  <strong>Name:</strong>
+                  <input
+                    type="text"
+                    class="edit-input"
+                    bind:value={editedInstructions.name}
+                  />
+                </label>
+                <label>
+                  <strong>Description:</strong>
+                  <input
+                    type="text"
+                    class="edit-input"
+                    bind:value={editedInstructions.description}
+                  />
+                </label>
+              </div>
+            {:else}
+              <div class="metadata-display">
+                <p><strong>Name:</strong> {displayInstructions.name}</p>
+                <p><strong>Description:</strong> {displayInstructions.description || 'No description'}</p>
+              </div>
+            {/if}
+
+            <!-- Set Management Actions -->
+            {#if !editMode}
+              <div class="set-actions">
+                {#if instructionSets && instructionSets.default !== currentSetKey}
+                  <button class="btn btn-default" on:click={setAsDefault}>Set as Default</button>
+                {/if}
+                {#if currentSetKey !== 'general'}
+                  <button class="btn btn-delete" on:click={deleteSet}>Delete</button>
+                {/if}
+              </div>
+            {/if}
+          </div>
+
           <!-- Primary Instruction -->
           <div class="section">
             <h3>Primary Instruction</h3>
@@ -404,7 +605,7 @@
             </div>
           </div>
         {:else}
-          <div class="loading">No instructions loaded</div>
+          <div class="loading">No instruction set selected</div>
         {/if}
       </div>
     </div>
@@ -430,7 +631,7 @@
     border: 1px solid #333;
     border-radius: 8px;
     width: 90%;
-    max-width: 800px;
+    max-width: 900px;
     max-height: 90vh;
     display: flex;
     flex-direction: column;
@@ -489,6 +690,68 @@
     color: #f78181;
   }
 
+  .tabs-container {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.75rem 1.5rem;
+    background: #252525;
+    border-bottom: 1px solid #333;
+    overflow-x: auto;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 0.5rem;
+    flex: 1;
+    overflow-x: auto;
+  }
+
+  .tab {
+    padding: 0.5rem 1rem;
+    background: #1e1e1e;
+    border: 1px solid #444;
+    border-radius: 4px 4px 0 0;
+    color: #aaa;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .tab:hover {
+    background: #2a2a2a;
+    color: #fff;
+  }
+
+  .tab.active {
+    background: #1e1e1e;
+    border-color: #007acc;
+    color: #fff;
+    border-bottom-color: #1e1e1e;
+  }
+
+  .default-badge {
+    font-size: 0.9rem;
+  }
+
+  .btn-new {
+    background: #007acc;
+    color: #fff;
+    border: 1px solid #007acc;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    white-space: nowrap;
+  }
+
+  .btn-new:hover {
+    background: #005a9e;
+  }
+
   .modal-body {
     padding: 1.5rem;
     overflow-y: auto;
@@ -516,6 +779,53 @@
     font-size: 0.9rem;
     color: #999;
     line-height: 1.4;
+  }
+
+  .metadata-display p {
+    margin: 0.5rem 0;
+    color: #e0e0e0;
+  }
+
+  .metadata-edit {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .metadata-edit label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .metadata-edit strong {
+    color: #90caf9;
+  }
+
+  .set-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 1rem;
+  }
+
+  .btn-default {
+    background: #007acc;
+    color: #fff;
+    border: 1px solid #007acc;
+  }
+
+  .btn-default:hover {
+    background: #005a9e;
+  }
+
+  .btn-delete {
+    background: #dc3545;
+    color: #fff;
+    border: 1px solid #dc3545;
+  }
+
+  .btn-delete:hover {
+    background: #c82333;
   }
 
   .instruction-text {
