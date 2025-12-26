@@ -120,9 +120,9 @@
   // Store provider selection per chat (chatId -> provider alias)
   const chatProviders = writable<Map<string, string>>(new Map());
 
-  // Store AI chat metadata (chatId -> {name: string, provider: string})
-  const aiChats = writable<Map<string, {name: string, provider: string}>>(
-    new Map([['local_ai', {name: 'Local AI Chat', provider: ''}]])
+  // Store AI chat metadata (chatId -> {name: string, provider: string, instruction_set_name?: string})
+  const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string}>>(
+    new Map([['local_ai', {name: 'Local AI Chat', provider: '', instruction_set_name: 'general'}]])
   );
 
   // Track which chat each AI command belongs to (commandId -> chatId)
@@ -158,6 +158,15 @@
   // Add AI Chat dialog state
   let showAddAIChatDialog = $state(false);
   let selectedProviderForNewChat = $state("");
+  let selectedInstructionSetForNewChat = $state("general");
+
+  // Instruction Sets state
+  type InstructionSets = {
+    schema_version: string;
+    default: string;
+    sets: Record<string, {name: string, description: string}>;
+  };
+  let availableInstructionSets = $state<InstructionSets | null>(null);
 
   // Personal context inclusion toggle
   let includePersonalContext = $state(false);
@@ -243,6 +252,16 @@
       } catch (error) {
         console.error('[Notifications] Failed to set up window tracking:', error);
       }
+    }
+
+    // Load instruction sets for conversation creation dialog
+    try {
+      const result = await sendCommand('get_instructions', {});
+      if (result && result.status === 'success') {
+        availableInstructionSets = result.instruction_sets;
+      }
+    } catch (error) {
+      console.error('Failed to load instruction sets:', error);
     }
   });
 
@@ -942,12 +961,16 @@
         return newMap;
       });
 
+      // Get chat metadata for instruction set
+      const chatMetadata = $aiChats.get(activeChatId);
+
       // Prepare AI query payload with optional compute host and provider/model
       const payload: any = {
         prompt: text,
         include_context: includePersonalContext,  // Add context inclusion flag
         conversation_id: activeChatId,  // Phase 7: Pass conversation ID for history tracking
-        ai_scope: selectedAIScope || null  // AI Scope for filtering (null = no filtering)
+        ai_scope: selectedAIScope || null,  // AI Scope for filtering (null = no filtering)
+        instruction_set_name: chatMetadata?.instruction_set_name || 'general'  // Instruction set for this conversation
       };
 
       // Add peer contexts if any are selected
@@ -1187,8 +1210,9 @@
       return;
     }
 
-    // Set default selection and show dialog
+    // Set default selections and show dialog
     selectedProviderForNewChat = $availableProviders.default_provider;
+    selectedInstructionSetForNewChat = availableInstructionSets?.default || "general";
     showAddAIChatDialog = true;
   }
 
@@ -1209,7 +1233,11 @@
     // Add to aiChats
     aiChats.update(chats => {
       const newMap = new Map(chats);
-      newMap.set(chatId, { name: chatName, provider: selectedProviderForNewChat });
+      newMap.set(chatId, {
+        name: chatName,
+        provider: selectedProviderForNewChat,
+        instruction_set_name: selectedInstructionSetForNewChat
+      });
       return newMap;
     });
 
@@ -2611,6 +2639,21 @@
               {provider.alias} - {provider.model}
             </option>
           {/each}
+        </select>
+      </div>
+
+      <div class="dialog-provider-selector">
+        <label for="new-chat-instruction-set">Instruction Set:</label>
+        <select id="new-chat-instruction-set" bind:value={selectedInstructionSetForNewChat}>
+          {#if availableInstructionSets}
+            {#each Object.entries(availableInstructionSets.sets) as [key, set]}
+              <option value={key}>
+                {set.name} {availableInstructionSets.default === key ? '⭐' : ''}
+              </option>
+            {/each}
+          {:else}
+            <option value="general">General Purpose</option>
+          {/if}
         </select>
       </div>
 
