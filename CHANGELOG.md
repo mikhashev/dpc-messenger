@@ -196,6 +196,21 @@ All notable changes to D-PC Messenger will be documented in this file.
   - Privacy mode works correctly (minimal instruction when context disabled)
 - **Files:** [service.py:3772-3779](dpc-client/core/dpc_client_core/service.py#L3772) - Simplified instruction loading
 
+#### Refactoring: Extract Prompt Assembly to PromptManager
+- **Motivation:** service.py was 4000+ lines, violating Single Responsibility Principle
+- **Change:** Extracted prompt building logic (160 lines) to new `managers/prompt_manager.py`
+- **Benefits:**
+  - Service.py reduced from 4000+ to ~3850 lines
+  - Better separation of concerns (service orchestrates, manager implements)
+  - Improved testability (prompt building can be tested in isolation)
+  - Reusability (other components can use PromptManager)
+  - Removed legacy `_build_combined_prompt()` method (unused)
+- **Files:**
+  - [prompt_manager.py](dpc-client/core/dpc_client_core/managers/prompt_manager.py) - New manager class (230 lines)
+  - [service.py:68](dpc-client/core/dpc_client_core/service.py#L68) - Import PromptManager
+  - [service.py:228-232](dpc-client/core/dpc_client_core/service.py#L228) - Initialize PromptManager
+  - [service.py:3557-3564](dpc-client/core/dpc_client_core/service.py#L3557) - Use PromptManager
+
 #### CRITICAL: Multiple Infinite Loop Fixes (v0.11.3)
 - Empty conversation history infinite loop
 - Multiple peers infinite loop

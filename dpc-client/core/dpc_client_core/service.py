@@ -65,6 +65,7 @@ from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
 )
 from .managers.file_transfer_manager import FileTransferManager
+from .managers.prompt_manager import PromptManager
 from .session_manager import NewSessionProposalManager
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock,
@@ -223,6 +224,12 @@ class CoreService:
         
         # Store peer metadata (names, profiles, etc.)
         self.peer_metadata: Dict[str, Dict[str, Any]] = {}
+
+        # Prompt manager (assembles prompts with context and history) - v0.12.0 refactor
+        self.prompt_manager = PromptManager(
+            instructions=self.instructions,
+            peer_metadata=self.peer_metadata
+        )
 
         # Track pending inference requests (for request-response matching)
         self._pending_inference_requests: Dict[str, asyncio.Future] = {}
@@ -3547,13 +3554,13 @@ class CoreService:
         # Assemble final prompt (with or without context, message history always included)
         # Phase 7: Include context blocks if local checkbox OR any peer checkboxes are checked
         include_full_context = include_context or bool(aggregated_contexts)
-        final_prompt = self._assemble_final_prompt(
+        final_prompt = self.prompt_manager.assemble_prompt(
+            query=prompt,
             contexts=aggregated_contexts,
-            clean_prompt=prompt,
             device_context=device_context_data,
             peer_device_contexts=peer_device_contexts,
             message_history=message_history,
-            include_full_context=include_full_context
+            include_context=include_full_context
         )
 
         response_payload = {}
@@ -3754,167 +3761,6 @@ class CoreService:
         context_dict = asdict(context_obj)
         context_json = json.dumps(context_dict, sort_keys=True)
         return hashlib.sha256(context_json.encode('utf-8')).hexdigest()
-
-    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str, device_context: dict = None, peer_device_contexts: dict = None, message_history: list = None, include_full_context: bool = True) -> str:
-        """Helper method to assemble the final prompt for the LLM with instruction processing.
-
-        Phase 2: Incorporates InstructionBlock and bias mitigation from PCM v2.0
-        Phase 7: Supports conversation history and context optimization
-
-        Args:
-            contexts: Dict of {source_id: PersonalContext} (only if include_full_context=True)
-            clean_prompt: The user's query (current message)
-            device_context: Local device context (optional, only if include_full_context=True)
-            peer_device_contexts: Dict of {peer_id: device_context} for peers (optional)
-            message_history: List of conversation messages (optional, for Phase 7)
-            include_full_context: If True, include context blocks; if False, skip (Phase 7)
-        """
-        # Build system instruction (ONLY from instructions.json when context enabled)
-        # Fix: Don't leak instructions when checkbox is unchecked (v0.12.0)
-        if include_full_context:
-            # User enabled context - use instructions from instructions.json
-            system_instruction = self.instructions.primary if self.instructions.primary else ""
-        else:
-            # User disabled context - use minimal generic instruction
-            system_instruction = "You are a helpful AI assistant."
-
-        # Build context blocks
-        context_blocks = []
-        for source_id, context_obj in contexts.items():
-            context_dict = asdict(context_obj)
-            json_string = json.dumps(context_dict, indent=2, ensure_ascii=False)
-
-            # Add peer name if available
-            source_label = source_id
-            if source_id != 'local' and source_id in self.peer_metadata:
-                peer_name = self.peer_metadata[source_id].get('name')
-                if peer_name:
-                    source_label = f"{peer_name} ({source_id})"
-
-            block = f'<CONTEXT source="{source_label}">\n{json_string}\n</CONTEXT>'
-            context_blocks.append(block)
-
-        # Add device context if available (local)
-        if device_context:
-            # Extract special instructions if present (schema v1.1+)
-            special_instructions_text = ""
-            if "special_instructions" in device_context:
-                instructions_obj = device_context["special_instructions"]
-                special_instructions_text = "\nDEVICE CONTEXT INTERPRETATION RULES:\n"
-
-                if "interpretation" in instructions_obj:
-                    special_instructions_text += "\nInterpretation Guidelines:\n"
-                    for key, value in instructions_obj["interpretation"].items():
-                        special_instructions_text += f"  - {key}: {value}\n"
-
-                if "privacy" in instructions_obj:
-                    special_instructions_text += "\nPrivacy Rules:\n"
-                    for key, value in instructions_obj["privacy"].items():
-                        special_instructions_text += f"  - {key}: {value}\n"
-
-                if "update_protocol" in instructions_obj:
-                    special_instructions_text += "\nUpdate Protocol:\n"
-                    for key, value in instructions_obj["update_protocol"].items():
-                        special_instructions_text += f"  - {key}: {value}\n"
-
-                if "usage_scenarios" in instructions_obj:
-                    special_instructions_text += "\nUsage Scenarios:\n"
-                    for key, value in instructions_obj["usage_scenarios"].items():
-                        special_instructions_text += f"  - {key}: {value}\n"
-
-                special_instructions_text += "\n"
-
-            device_json = json.dumps(device_context, indent=2, ensure_ascii=False)
-            device_block = f'<DEVICE_CONTEXT source="local">{special_instructions_text}{device_json}\n</DEVICE_CONTEXT>'
-            context_blocks.append(device_block)
-
-        # Add peer device contexts if available
-        if peer_device_contexts:
-            for peer_id, peer_device_ctx in peer_device_contexts.items():
-                # Add peer name if available
-                source_label = peer_id
-                if peer_id in self.peer_metadata:
-                    peer_name = self.peer_metadata[peer_id].get('name')
-                    if peer_name:
-                        source_label = f"{peer_name} ({peer_id})"
-
-                # Extract special instructions if present (schema v1.1+)
-                special_instructions_text = ""
-                if "special_instructions" in peer_device_ctx:
-                    instructions_obj = peer_device_ctx["special_instructions"]
-                    special_instructions_text = "\nDEVICE CONTEXT INTERPRETATION RULES:\n"
-
-                    if "interpretation" in instructions_obj:
-                        special_instructions_text += "\nInterpretation Guidelines:\n"
-                        for key, value in instructions_obj["interpretation"].items():
-                            special_instructions_text += f"  - {key}: {value}\n"
-
-                    if "privacy" in instructions_obj:
-                        special_instructions_text += "\nPrivacy Rules:\n"
-                        for key, value in instructions_obj["privacy"].items():
-                            special_instructions_text += f"  - {key}: {value}\n"
-
-                    if "update_protocol" in instructions_obj:
-                        special_instructions_text += "\nUpdate Protocol:\n"
-                        for key, value in instructions_obj["update_protocol"].items():
-                            special_instructions_text += f"  - {key}: {value}\n"
-
-                    if "usage_scenarios" in instructions_obj:
-                        special_instructions_text += "\nUsage Scenarios:\n"
-                        for key, value in instructions_obj["usage_scenarios"].items():
-                            special_instructions_text += f"  - {key}: {value}\n"
-
-                    special_instructions_text += "\n"
-
-                peer_device_json = json.dumps(peer_device_ctx, indent=2, ensure_ascii=False)
-                peer_device_block = f'<DEVICE_CONTEXT source="{source_label}">{special_instructions_text}{peer_device_json}\n</DEVICE_CONTEXT>'
-                context_blocks.append(peer_device_block)
-
-        # Phase 7: Build prompt with optional context and conversation history
-        if include_full_context and context_blocks:
-            # Include full context (first message or context changed)
-            final_prompt = (
-                f"{system_instruction}\n\n"
-                f"--- CONTEXTUAL DATA ---\n"
-                f'{"\n\n".join(context_blocks)}\n'
-                f"--- END OF CONTEXTUAL DATA ---\n\n"
-            )
-        else:
-            # No context or context already included in previous messages
-            final_prompt = f"{system_instruction}\n\n"
-
-        # Phase 7: Add conversation history if provided
-        if message_history and len(message_history) > 0:
-            # Build conversation history section
-            history_lines = []
-            for msg in message_history:
-                role = msg.get('role', 'unknown').upper()
-                content = msg.get('content', '')
-                history_lines.append(f"{role}: {content}")
-
-            final_prompt += "--- CONVERSATION HISTORY ---\n"
-            final_prompt += "\n\n".join(history_lines)
-            final_prompt += "\n--- END OF CONVERSATION HISTORY ---\n\n"
-        else:
-            # No history, just the current query
-            final_prompt += f"USER QUERY: {clean_prompt}"
-
-        return final_prompt
-
-    def _build_combined_prompt(self, query: str, contexts: Dict[str, PersonalContext]) -> str:
-        """Build a prompt that combines the query with multiple contexts."""
-        prompt_parts = ["Context information:"]
-        
-        for node_id, context in contexts.items():
-            source = "You" if node_id == self.p2p_manager.node_id else f"Peer {node_id}"
-            prompt_parts.append(f"\n[From {source}]")
-            prompt_parts.append(f"Name: {context.profile.get('name', 'Unknown')}")
-            if context.profile.get('description'):
-                prompt_parts.append(f"Description: {context.profile['description']}")
-        
-        prompt_parts.append(f"\nUser Query: {query}")
-        
-        return "\n".join(prompt_parts)
 
     # --- Hub Methods ---
 
