@@ -66,6 +66,7 @@ from .message_handlers.session_handler import (
 )
 from .managers.file_transfer_manager import FileTransferManager
 from .managers.prompt_manager import PromptManager
+from .managers.instruction_manager import InstructionManager
 from .session_manager import NewSessionProposalManager
 from dpc_protocol.pcm_core import (
     PCMCore, PersonalContext, InstructionBlock, InstructionSet,
@@ -126,9 +127,15 @@ class CoreService:
         self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
 
         # Load AI instruction sets from instructions.json (v2.0)
-        self.instruction_manager = InstructionSetManager(DPC_HOME_DIR)
-        self.instruction_set = self.instruction_manager.load()
+        self.instruction_manager = InstructionManager(
+            config_dir=DPC_HOME_DIR,
+            event_broadcaster=None  # Will be set after LocalApiServer is initialized
+        )
+        self.instruction_set = self.instruction_manager.instruction_set
         logger.info("Loaded %d instruction set(s) from instructions.json", len(self.instruction_set.sets))
+
+        # Set event broadcaster now that LocalApiServer is initialized
+        self.instruction_manager.event_broadcaster = self.local_api
 
         # Update personal.json with instructions.json reference (if not already present)
         try:
@@ -1679,99 +1686,316 @@ class CoreService:
             }
 
     async def get_instructions(self) -> Dict[str, Any]:
-        """Load and return AI instructions for UI display.
+        """Load and return all AI instruction sets for UI display (v2.0).
 
         UI Integration: Called when user opens InstructionsEditor component.
-        Returns the InstructionBlock with all settings.
+        Returns all instruction sets with schema version and default set.
         """
         try:
-            instructions = load_instructions()
+            instruction_sets = self.instruction_manager.get_all()
             return {
                 "status": "success",
-                "instructions": asdict(instructions)
+                "instruction_sets": instruction_sets
             }
         except Exception as e:
-            logger.error("Error loading instructions: %s", e, exc_info=True)
+            logger.error("Error loading instruction sets: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
             }
 
-    async def save_instructions(self, instructions_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Save updated AI instructions from UI editor.
+    async def save_instructions(self, set_key: str, instructions_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Save updated AI instruction set from UI editor (v2.0).
 
         UI Integration: Called when user clicks 'Save' in InstructionsEditor.
 
         Args:
+            set_key: Key of the instruction set to save
             instructions_dict: Dictionary representation of InstructionBlock
 
         Returns:
             Dict with status and message
         """
         try:
-            # Create InstructionBlock from dict
-            instructions = InstructionBlock(
-                primary=instructions_dict.get('primary', InstructionBlock().primary),
-                context_update=instructions_dict.get('context_update', InstructionBlock().context_update),
-                verification_protocol=instructions_dict.get('verification_protocol', InstructionBlock().verification_protocol),
-                learning_support=instructions_dict.get('learning_support', InstructionBlock().learning_support),
-                bias_mitigation=instructions_dict.get('bias_mitigation', InstructionBlock().bias_mitigation),
-                collaboration_mode=instructions_dict.get('collaboration_mode', 'individual'),
-                consensus_required=instructions_dict.get('consensus_required', True),
-                ai_curation_enabled=instructions_dict.get('ai_curation_enabled', True),
-                dissent_encouraged=instructions_dict.get('dissent_encouraged', True)
-            )
+            success = self.instruction_manager.save_set(set_key, instructions_dict)
 
-            # Save to disk
-            save_instructions(instructions)
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
 
-            # Update in memory
-            self.instructions = instructions
+                # Update PromptManager with new instruction set
+                self.prompt_manager.instruction_set = self.instruction_set
 
-            # Emit event to UI
-            await self.local_api.broadcast_event("instructions_updated", {
-                "message": "AI instructions saved successfully"
-            })
-
-            return {
-                "status": "success",
-                "message": "AI instructions saved successfully"
-            }
+                return {
+                    "status": "success",
+                    "message": f"Instruction set '{set_key}' saved successfully"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to save instruction set '{set_key}'"
+                }
 
         except Exception as e:
-            logger.error("Error saving instructions: %s", e, exc_info=True)
+            logger.error("Error saving instruction set '%s': %s", set_key, e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
             }
 
     async def reload_instructions(self) -> Dict[str, Any]:
-        """Reload AI instructions from disk.
+        """Reload AI instruction sets from disk (v2.0).
 
         UI Integration: Called when user clicks 'Reload' or when external changes detected.
 
         Returns:
-            Dict with status, message, and updated instructions
+            Dict with status, message, and updated instruction sets
         """
         try:
-            instructions = load_instructions()
+            success = self.instruction_manager.reload()
 
-            # Update in memory
-            self.instructions = instructions
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
 
-            # Emit event to UI
-            await self.local_api.broadcast_event("instructions_reloaded", {
-                "instructions": asdict(instructions)
-            })
+                # Update PromptManager with new instruction set
+                self.prompt_manager.instruction_set = self.instruction_set
 
-            return {
-                "status": "success",
-                "message": "AI instructions reloaded from disk",
-                "instructions": asdict(instructions)
-            }
+                return {
+                    "status": "success",
+                    "message": "AI instruction sets reloaded from disk",
+                    "instruction_sets": self.instruction_manager.get_all()
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": "Failed to reload instruction sets"
+                }
 
         except Exception as e:
-            logger.error("Error reloading instructions: %s", e, exc_info=True)
+            logger.error("Error reloading instruction sets: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_instruction_set(self, set_key: str) -> Dict[str, Any]:
+        """Get a specific instruction set.
+
+        Args:
+            set_key: Key of the instruction set to retrieve
+
+        Returns:
+            Dict with status and instruction set data
+        """
+        try:
+            instruction_set = self.instruction_manager.get_set(set_key)
+
+            if instruction_set:
+                return {
+                    "status": "success",
+                    "instruction_set": instruction_set
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Instruction set '{set_key}' not found"
+                }
+
+        except Exception as e:
+            logger.error("Error getting instruction set '%s': %s", set_key, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def create_instruction_set(self, set_key: str, name: str, description: str = "") -> Dict[str, Any]:
+        """Create a new instruction set.
+
+        UI Integration: Called when user creates a new instruction set.
+
+        Args:
+            set_key: Unique key for the instruction set (kebab-case)
+            name: Display name for the instruction set
+            description: Optional description
+
+        Returns:
+            Dict with status, message, and created instruction set
+        """
+        try:
+            instruction_set = self.instruction_manager.create_set(set_key, name, description)
+
+            if instruction_set:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Instruction set '{name}' created successfully",
+                    "instruction_set": instruction_set
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to create instruction set '{name}'"
+                }
+
+        except Exception as e:
+            logger.error("Error creating instruction set '%s': %s", set_key, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def delete_instruction_set(self, set_key: str) -> Dict[str, Any]:
+        """Delete an instruction set.
+
+        UI Integration: Called when user deletes an instruction set.
+
+        Args:
+            set_key: Key of the instruction set to delete
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            success = self.instruction_manager.delete_set(set_key)
+
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Instruction set '{set_key}' deleted successfully"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to delete instruction set '{set_key}' (may be protected)"
+                }
+
+        except Exception as e:
+            logger.error("Error deleting instruction set '%s': %s", set_key, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def rename_instruction_set(self, old_key: str, new_key: str, new_name: str) -> Dict[str, Any]:
+        """Rename an instruction set.
+
+        UI Integration: Called when user renames an instruction set.
+
+        Args:
+            old_key: Current key of the instruction set
+            new_key: New key for the instruction set
+            new_name: New display name
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            success = self.instruction_manager.rename_set(old_key, new_key, new_name)
+
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Instruction set renamed from '{old_key}' to '{new_key}'"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to rename instruction set '{old_key}'"
+                }
+
+        except Exception as e:
+            logger.error("Error renaming instruction set '%s': %s", old_key, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def set_default_instruction_set(self, set_key: str) -> Dict[str, Any]:
+        """Set the default instruction set.
+
+        UI Integration: Called when user sets a default instruction set.
+
+        Args:
+            set_key: Key of the instruction set to make default
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            success = self.instruction_manager.set_default(set_key)
+
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Default instruction set changed to '{set_key}'"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to set default instruction set to '{set_key}'"
+                }
+
+        except Exception as e:
+            logger.error("Error setting default instruction set: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def import_instruction_template(self, template_file: str, set_key: str, set_name: str) -> Dict[str, Any]:
+        """Import instruction template from file.
+
+        UI Integration: Called when user imports a template.
+
+        Args:
+            template_file: Path to template JSON file
+            set_key: Key for the new instruction set
+            set_name: Display name for the new instruction set
+
+        Returns:
+            Dict with status, message, and imported instruction set
+        """
+        try:
+            from pathlib import Path
+            template_path = Path(template_file)
+
+            if not template_path.exists():
+                return {
+                    "status": "error",
+                    "message": f"Template file not found: {template_file}"
+                }
+
+            instruction_set = self.instruction_manager.import_template(template_path, set_key, set_name)
+
+            if instruction_set:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Template imported as '{set_name}'",
+                    "instruction_set": instruction_set
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to import template from {template_file}"
+                }
+
+        except Exception as e:
+            logger.error("Error importing template: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -2150,11 +2374,12 @@ class CoreService:
         """
         await self.p2p_coordinator.broadcast_to_peers(message)
 
-    def _get_or_create_conversation_monitor(self, conversation_id: str) -> ConversationMonitor:
+    def _get_or_create_conversation_monitor(self, conversation_id: str, instruction_set_name: str = None) -> ConversationMonitor:
         """Get or create a conversation monitor for a conversation/peer.
 
         Args:
             conversation_id: Identifier for the conversation (peer node_id or "local_ai")
+            instruction_set_name: Optional instruction set to use for this conversation (defaults to "general")
 
         Returns:
             ConversationMonitor instance
@@ -2194,9 +2419,10 @@ class CoreService:
                 knowledge_threshold=0.7,  # 70% confidence threshold
                 settings=self.settings,  # Pass settings for config (e.g., cultural_perspectives_enabled)
                 ai_query_func=self.send_ai_query,  # Enable both local and remote inference for knowledge detection
-                auto_detect=self.auto_knowledge_detection_enabled  # Pass auto-detection setting
+                auto_detect=self.auto_knowledge_detection_enabled,  # Pass auto-detection setting
+                instruction_set_name=instruction_set_name or self.instruction_set.default  # Use provided or default instruction set
             )
-            logger.info("Created conversation monitor for %s with %d participant(s) (auto_detect=%s)", conversation_id, len(participants), self.auto_knowledge_detection_enabled)
+            logger.info("Created conversation monitor for %s with %d participant(s) (auto_detect=%s, instruction_set=%s)", conversation_id, len(participants), self.auto_knowledge_detection_enabled, instruction_set_name or self.instruction_set.default)
 
         return self.conversation_monitors[conversation_id]
 
@@ -3451,7 +3677,7 @@ class CoreService:
 
     # --- AI Query Methods ---
 
-    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, **kwargs):
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
 
@@ -3464,6 +3690,7 @@ class CoreService:
             provider: Optional provider alias to use
             include_context: If True, includes personal context, device context, and AI instructions (default: True)
             ai_scope: Optional AI scope name for filtering what the AI can access (None = no filtering)
+            instruction_set_name: Optional instruction set key to use for this query (None = use conversation's default or global default)
             **kwargs: Additional arguments (including conversation_id)
         """
         logger.info("Orchestrating AI query for command_id %s: '%s...'", command_id, prompt[:50])
@@ -3471,10 +3698,11 @@ class CoreService:
         logger.debug("Model: %s", model or 'default')
         logger.debug("Include context: %s", include_context)
         logger.debug("AI Scope: %s", ai_scope or 'None (full access)')
+        logger.debug("Instruction Set: %s", instruction_set_name or 'default')
 
         # Phase 7: Get or create conversation monitor early for history tracking
         conversation_id = kwargs.get("conversation_id", "local_ai")
-        monitor = self._get_or_create_conversation_monitor(conversation_id)
+        monitor = self._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
 
         # Phase 7: Check if context window is full (hard limit enforcement)
         if monitor.token_limit > 0:
@@ -3601,13 +3829,16 @@ class CoreService:
         # Assemble final prompt (with or without context, message history always included)
         # Phase 7: Include context blocks if local checkbox OR any peer checkboxes are checked
         include_full_context = include_context or bool(aggregated_contexts)
+        # Use instruction set from conversation monitor (which has the per-conversation instruction set)
+        effective_instruction_set = instruction_set_name or monitor.instruction_set_name
         final_prompt = self.prompt_manager.assemble_prompt(
             query=prompt,
             contexts=aggregated_contexts,
             device_context=device_context_data,
             peer_device_contexts=peer_device_contexts,
             message_history=message_history,
-            include_context=include_full_context
+            include_context=include_full_context,
+            instruction_set_name=effective_instruction_set
         )
 
         response_payload = {}
