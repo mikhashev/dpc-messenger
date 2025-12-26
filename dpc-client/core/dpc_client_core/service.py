@@ -2059,6 +2059,149 @@ class CoreService:
                 "templates": []
             }
 
+    async def get_wizard_template(self) -> Dict[str, Any]:
+        """Get wizard template configuration for AI-assisted instruction creation.
+
+        UI Integration: Called when user starts the AI wizard to get question sequence
+        and system instructions.
+
+        Returns:
+            Dict with wizard configuration (system_instruction, question_sequence, etc.)
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            # Load wizard template
+            wizard_file = Path(__file__).parent / "templates" / "wizard_template.json"
+
+            if not wizard_file.exists():
+                logger.error("Wizard template not found: %s", wizard_file)
+                return {
+                    "status": "error",
+                    "message": "Wizard template configuration not found"
+                }
+
+            with open(wizard_file, 'r', encoding='utf-8') as f:
+                wizard_config = json.load(f)
+
+            return {
+                "status": "success",
+                "wizard": wizard_config
+            }
+
+        except Exception as e:
+            logger.error("Error loading wizard template: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def ai_assisted_instruction_creation(
+        self,
+        user_responses: Dict[str, str],
+        provider: str = "ollama",
+        model: str = None
+    ) -> Dict[str, Any]:
+        """Generate instruction set using AI based on user responses.
+
+        UI Integration: Called after wizard collects user's answers to questions.
+        Uses AI to generate a custom instruction set tailored to user's needs.
+
+        Args:
+            user_responses: Dict mapping question IDs to user's answers
+            provider: AI provider to use (ollama, openai, anthropic)
+            model: Model name (optional, uses provider default if not specified)
+
+        Returns:
+            Dict with generated instruction set data or error
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            # Load wizard template for generation prompt
+            wizard_file = Path(__file__).parent / "templates" / "wizard_template.json"
+            with open(wizard_file, 'r', encoding='utf-8') as f:
+                wizard_config = json.load(f)
+
+            # Build prompt using template
+            generation_prompt = wizard_config["generation_prompt_template"].format(
+                use_case=user_responses.get("use_case", "general conversation"),
+                learning_style=user_responses.get("learning_style", "adaptive"),
+                ai_behaviors=user_responses.get("ai_behaviors", "helpful and clear"),
+                challenges=user_responses.get("challenges", "none specified"),
+                verification=user_responses.get("verification", "provide reasoning")
+            )
+
+            # Add system instruction
+            system_instruction = wizard_config["system_instruction"]
+            full_prompt = f"{system_instruction}\n\n{generation_prompt}"
+
+            # Execute AI query to generate instruction set
+            logger.info("Generating instruction set via AI wizard (provider=%s, model=%s)", provider, model)
+
+            result = await self.llm_manager.execute_query(
+                prompt=full_prompt,
+                provider=provider,
+                model=model,
+                temperature=0.7,
+                use_conversation_history=False  # Fresh query, no history
+            )
+
+            # Parse AI response (should be JSON)
+            response_text = result.get("response", "")
+
+            # Extract JSON from response (handle markdown code blocks)
+            if "```json" in response_text:
+                # Extract from markdown code block
+                start = response_text.find("```json") + 7
+                end = response_text.find("```", start)
+                json_text = response_text[start:end].strip()
+            elif "```" in response_text:
+                # Generic code block
+                start = response_text.find("```") + 3
+                end = response_text.find("```", start)
+                json_text = response_text[start:end].strip()
+            else:
+                # Assume entire response is JSON
+                json_text = response_text.strip()
+
+            # Parse JSON
+            try:
+                instruction_data = json.loads(json_text)
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse AI response as JSON: %s", e)
+                logger.debug("AI response: %s", response_text[:500])
+                return {
+                    "status": "error",
+                    "message": f"Failed to parse AI response: {e}",
+                    "raw_response": response_text
+                }
+
+            # Validate required fields
+            required_fields = ["name", "description", "primary"]
+            missing_fields = [f for f in required_fields if f not in instruction_data]
+            if missing_fields:
+                return {
+                    "status": "error",
+                    "message": f"Generated instruction set missing required fields: {missing_fields}",
+                    "instruction_data": instruction_data
+                }
+
+            return {
+                "status": "success",
+                "instruction_data": instruction_data,
+                "message": "Instruction set generated successfully"
+            }
+
+        except Exception as e:
+            logger.error("Error in AI-assisted instruction creation: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
     async def send_p2p_image(self, node_id: str, image_base64: str, filename: str = None, text: str = "") -> dict:
         """
         Send screenshot/image to peer via file transfer with inline preview support.
