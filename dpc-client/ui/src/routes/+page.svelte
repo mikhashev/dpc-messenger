@@ -2246,8 +2246,8 @@
               </div>
             {/if}
 
-            <!-- Instruction Set Selector (show for all AI chats) -->
-            {#if activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
+            <!-- Instruction Set Selector (only show when context is enabled) -->
+            {#if includePersonalContext && (activeChatId === 'local_ai' || activeChatId.startsWith('ai_'))}
               <div class="ai-scope-selector">
                 <label for="instruction-set-select">
                   AI Instruction Set:
