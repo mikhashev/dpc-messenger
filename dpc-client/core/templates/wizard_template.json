@@ -36,7 +36,7 @@
     },
     {
       "id": "verification",
-      "question": "How should the AI handle evidence and reasoning? For example:\n- Always cite sources when making factual claims\n- Explain reasoning steps explicitly\n- Acknowledge uncertainty and knowledge limitations\n- Provide multiple perspectives on controversial topics\n- Challenge assumptions and status quo thinking\n\nWhat's important to you regarding evidence and reasoning?",
+      "question": "How should the AI handle evidence and reasoning? For example:\n- Always cite sources when making factual claims\n- Explain reasoning steps explicitly\n- Acknowledge uncertainty and knowledge limitations\n- Honestly admit when lacking sufficient knowledge or information\n- Provide multiple perspectives on controversial topics\n- Challenge assumptions and status quo thinking\n\nWhat's important to you regarding evidence and reasoning?",
       "follow_ups": [
         "How important is it to see diverse perspectives?",
         "Should the AI be more cautious or more exploratory?"

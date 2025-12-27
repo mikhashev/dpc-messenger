@@ -2202,6 +2202,106 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def ai_assisted_instruction_creation_remote(
+        self,
+        user_responses: Dict[str, str],
+        peer_node_id: str
+    ) -> Dict[str, Any]:
+        """Generate instruction set using AI via remote inference.
+
+        UI Integration: Called when user selects "Remote Inference" in wizard.
+        Uses a peer's AI to generate the instruction set.
+
+        Args:
+            user_responses: Dict mapping question IDs to user's answers
+            peer_node_id: Node ID of peer to use for remote inference
+
+        Returns:
+            Dict with generated instruction set data or error
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            # Load wizard template for generation prompt
+            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
+            with open(wizard_file, 'r', encoding='utf-8') as f:
+                wizard_config = json.load(f)
+
+            # Build prompt using template
+            generation_prompt = wizard_config["generation_prompt_template"].format(
+                use_case=user_responses.get("use_case", "general conversation"),
+                learning_style=user_responses.get("learning_style", "adaptive"),
+                ai_behaviors=user_responses.get("ai_behaviors", "helpful and clear"),
+                challenges=user_responses.get("challenges", "none specified"),
+                verification=user_responses.get("verification", "provide reasoning")
+            )
+
+            # Add system instruction
+            system_instruction = wizard_config["system_instruction"]
+            full_prompt = f"{system_instruction}\n\n{generation_prompt}"
+
+            # Execute AI query via remote inference
+            logger.info("Generating instruction set via remote AI wizard (peer=%s)", peer_node_id)
+
+            result = await self.inference_orchestrator.execute_inference(
+                prompt=full_prompt,
+                compute_host=peer_node_id
+            )
+
+            # Parse AI response (should be JSON)
+            response_text = result.get("response", "")
+
+            # Extract JSON from response (handle markdown code blocks)
+            if "```json" in response_text:
+                # Extract from markdown code block
+                start = response_text.find("```json") + 7
+                end = response_text.find("```", start)
+                json_text = response_text[start:end].strip()
+            elif "```" in response_text:
+                # Generic code block
+                start = response_text.find("```") + 3
+                end = response_text.find("```", start)
+                json_text = response_text[start:end].strip()
+            else:
+                # Assume entire response is JSON
+                json_text = response_text.strip()
+
+            # Parse JSON
+            try:
+                instruction_data = json.loads(json_text)
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse AI response as JSON: %s", e)
+                logger.debug("AI response: %s", response_text[:500])
+                return {
+                    "status": "error",
+                    "message": f"Failed to parse AI response: {e}",
+                    "raw_response": response_text
+                }
+
+            # Validate required fields
+            required_fields = ["name", "description", "primary"]
+            missing_fields = [f for f in required_fields if f not in instruction_data]
+            if missing_fields:
+                return {
+                    "status": "error",
+                    "message": f"Generated instruction set missing required fields: {missing_fields}",
+                    "instruction_data": instruction_data
+                }
+
+            return {
+                "status": "success",
+                "instruction_data": instruction_data,
+                "message": "Instruction set generated successfully via remote inference"
+            }
+
+        except Exception as e:
+            logger.error("Error in AI-assisted instruction creation (remote): %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
     async def send_p2p_image(self, node_id: str, image_base64: str, filename: str = None, text: str = "") -> dict:
         """
         Send screenshot/image to peer via file transfer with inline preview support.

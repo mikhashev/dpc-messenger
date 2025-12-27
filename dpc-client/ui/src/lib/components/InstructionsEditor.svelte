@@ -3,9 +3,10 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand } from '$lib/coreService';
+  import { sendCommand, nodeStatus, peerProviders } from '$lib/coreService';
 
-  export let open: boolean = false;
+  // Svelte 5 runes mode - use $props() instead of export let
+  let { open = $bindable(false) }: { open: boolean } = $props();
 
   const dispatch = createEventDispatcher();
 
@@ -42,14 +43,14 @@
     sets: Record<string, InstructionBlock>;
   };
 
-  let instructionSets: InstructionSets | null = null;
-  let currentSetKey: string = "general";
-  let editMode: boolean = false;
-  let editedInstructions: InstructionBlock | null = null;
-  let isSaving: boolean = false;
-  let isLoading: boolean = false;
-  let saveMessage: string = '';
-  let saveMessageType: 'success' | 'error' | '' = '';
+  let instructionSets = $state<InstructionSets | null>(null);
+  let currentSetKey = $state<string>("general");
+  let editMode = $state<boolean>(false);
+  let editedInstructions = $state<InstructionBlock | null>(null);
+  let isSaving = $state<boolean>(false);
+  let isLoading = $state<boolean>(false);
+  let saveMessage = $state<string>('');
+  let saveMessageType = $state<'success' | 'error' | ''>('');
 
   // Template import state
   type Template = {
@@ -59,31 +60,60 @@
     name: string;
     description: string;
   };
-  let showTemplateDialog: boolean = false;
-  let availableTemplates: Template[] = [];
-  let selectedTemplate: Template | null = null;
-  let newSetName: string = '';
+  let showTemplateDialog = $state<boolean>(false);
+  let availableTemplates = $state<Template[]>([]);
+  let selectedTemplate = $state<Template | null>(null);
+  let newSetName = $state<string>('');
 
   // AI Wizard state
-  let showCreationModeDialog: boolean = false;
-  let showWizardDialog: boolean = false;
-  let wizardQuestions: Array<any> = [];
-  let currentQuestionIndex: number = 0;
-  let wizardResponses: Record<string, string> = {};
-  let wizardCurrentAnswer: string = '';
-  let wizardNewSetName: string = '';
-  let selectedWizardProvider: string = 'ollama';
-  let selectedWizardModel: string | null = null;
-  let isGenerating: boolean = false;
+  let showCreationModeDialog = $state<boolean>(false);
+  let showWizardDialog = $state<boolean>(false);
+  let wizardQuestions = $state<Array<any>>([]);
+  let currentQuestionIndex = $state<number>(0);
+  let wizardResponses = $state<Record<string, string>>({});
+  let wizardCurrentAnswer = $state<string>('');
+  let wizardNewSetName = $state<string>('');
+  let wizardComputeHost = $state<string>('local');  // "local" or node_id for remote inference
+  let wizardSelectedProvider = $state<string>('');  // Selected provider alias
+  let wizardLocalProviders = $state<Array<any>>([]);  // Cached local providers
+  let isGenerating = $state<boolean>(false);
+
+  // Merged providers (local + remote based on selected host) - matches Local AI chat pattern
+  let wizardMergedProviders = $derived.by(() => {
+    const local = wizardLocalProviders.map((p: any) => ({
+      ...p,
+      source: 'local' as const,
+      displayText: `${p.alias} - ${p.model} - local`,
+      uniqueId: `local:${p.alias}`
+    }));
+
+    if (wizardComputeHost === 'local') {
+      return local;
+    }
+
+    // When remote host selected, add remote providers
+    const remotePeerProviders = $peerProviders.get(wizardComputeHost) || [];
+    const remote = remotePeerProviders.map((p: any) => ({
+      ...p,
+      source: 'remote' as const,
+      displayText: `${p.alias} - ${p.model} - remote`,
+      uniqueId: `remote:${wizardComputeHost}:${p.alias}`,
+      nodeId: wizardComputeHost
+    }));
+
+    return [...local, ...remote];
+  });
 
   // Load instruction sets when modal opens
-  $: if (open && !instructionSets) {
-    loadInstructionSets();
-  }
+  $effect(() => {
+    if (open && !instructionSets) {
+      loadInstructionSets();
+    }
+  });
 
   // Get current instruction set to display
-  $: currentInstructions = instructionSets?.sets[currentSetKey] || null;
-  $: displayInstructions = editMode && editedInstructions ? editedInstructions : currentInstructions;
+  let currentInstructions = $derived(instructionSets?.sets[currentSetKey] || null);
+  let displayInstructions = $derived(editMode && editedInstructions ? editedInstructions : currentInstructions);
 
   async function loadInstructionSets() {
     isLoading = true;
@@ -303,26 +333,57 @@
 
     wizardNewSetName = name;
 
-    // Load wizard template
+    // Load wizard template and available providers
     try {
-      const result = await sendCommand('get_wizard_template', {});
+      const [wizardResult, providersResult] = await Promise.all([
+        sendCommand('get_wizard_template', {}),
+        sendCommand('get_providers_list', {})
+      ]);
 
-      if (result && result.status === 'success' && result.wizard) {
-        wizardQuestions = result.wizard.question_sequence;
+      if (wizardResult && wizardResult.status === 'success' && wizardResult.wizard) {
+        wizardQuestions = wizardResult.wizard.question_sequence;
         currentQuestionIndex = 0;
         wizardResponses = {};
         wizardCurrentAnswer = '';
 
+        // Load available providers (cache local providers)
+        wizardLocalProviders = [];
+        if (providersResult && providersResult.providers && providersResult.providers.length > 0) {
+          wizardLocalProviders = [...providersResult.providers];
+        }
+
+        // Set defaults: local host, first provider
+        wizardComputeHost = 'local';
+        if (wizardLocalProviders.length > 0) {
+          wizardSelectedProvider = `local:${wizardLocalProviders[0].alias}`;
+        }
+
         // Show wizard dialog
         showWizardDialog = true;
       } else {
-        console.error('Failed to load wizard template:', result);
+        console.error('Failed to load wizard template:', wizardResult);
         alert('Failed to load wizard template');
       }
     } catch (error) {
       console.error('Error loading wizard:', error);
       alert(`Error loading wizard: ${error}`);
     }
+  }
+
+  // Helper function to parse provider selection (matches Local AI chat pattern)
+  function parseProviderSelection(uniqueId: string): { source: 'local' | 'remote', alias: string, nodeId?: string } {
+    if (!uniqueId) return { source: 'local', alias: '' };
+
+    if (uniqueId.startsWith('remote:')) {
+      const parts = uniqueId.split(':');
+      return {
+        source: 'remote',
+        nodeId: parts[1],  // Extract node_id
+        alias: parts.slice(2).join(':')  // Rejoin alias (in case it contains ':')
+      };
+    }
+
+    return { source: 'local', alias: uniqueId.replace('local:', '') };
   }
 
   async function submitWizardAnswer() {
@@ -348,12 +409,24 @@
     isGenerating = true;
 
     try {
-      // Generate instruction set using AI
-      const result = await sendCommand('ai_assisted_instruction_creation', {
-        user_responses: wizardResponses,
-        provider: selectedWizardProvider,
-        model: selectedWizardModel
-      });
+      // Parse provider selection
+      const provider = parseProviderSelection(wizardSelectedProvider);
+      let result;
+
+      if (provider.source === 'remote' && provider.nodeId) {
+        // Generate instruction set using remote inference
+        result = await sendCommand('ai_assisted_instruction_creation_remote', {
+          user_responses: wizardResponses,
+          peer_node_id: provider.nodeId
+        });
+      } else {
+        // Generate instruction set using local AI
+        result = await sendCommand('ai_assisted_instruction_creation', {
+          user_responses: wizardResponses,
+          provider: provider.alias
+          // model is optional - provider already has a configured model
+        });
+      }
 
       if (result && result.status === 'success') {
         // Create instruction set with generated data
@@ -533,26 +606,26 @@
 </script>
 
 {#if open}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={close} on:keydown={handleKeydown} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="instructions-dialog-title" tabindex="-1">
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-overlay" onclick={close} onkeydown={handleKeydown} role="presentation">
+    <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="instructions-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="instructions-dialog-title">AI Instructions</h2>
         <div class="header-actions">
           {#if !editMode}
-            <button class="btn btn-reload" on:click={reloadInstructions} disabled={isLoading}>
+            <button class="btn btn-reload" onclick={reloadInstructions} disabled={isLoading}>
               {isLoading ? 'Loading...' : 'Reload from Disk'}
             </button>
-            <button class="btn btn-edit" on:click={startEditing}>Edit</button>
+            <button class="btn btn-edit" onclick={startEditing}>Edit</button>
           {:else}
-            <button class="btn btn-save" on:click={saveChanges} disabled={isSaving}>
+            <button class="btn btn-save" onclick={saveChanges} disabled={isSaving}>
               {isSaving ? 'Saving...' : 'Save'}
             </button>
-            <button class="btn btn-cancel" on:click={cancelEditing}>Cancel</button>
+            <button class="btn btn-cancel" onclick={cancelEditing}>Cancel</button>
           {/if}
         </div>
-        <button class="close-btn" on:click={close}>&times;</button>
+        <button class="close-btn" onclick={close}>&times;</button>
       </div>
 
       <!-- Save Message -->
@@ -570,7 +643,7 @@
               <button
                 class="tab"
                 class:active={currentSetKey === key}
-                on:click={() => switchSet(key)}
+                onclick={() => switchSet(key)}
               >
                 {set.name}
                 {#if instructionSets.default === key}
@@ -580,8 +653,8 @@
             {/each}
           </div>
           <div class="tabs-actions">
-            <button class="btn btn-new" on:click={createNewSet}>+ New</button>
-            <button class="btn btn-import" on:click={openTemplateDialog}>📋 Import Template</button>
+            <button class="btn btn-new" onclick={createNewSet}>+ New</button>
+            <button class="btn btn-import" onclick={openTemplateDialog}>📋 Import Template</button>
           </div>
         </div>
       {/if}
@@ -623,10 +696,10 @@
             {#if !editMode}
               <div class="set-actions">
                 {#if instructionSets && instructionSets.default !== currentSetKey}
-                  <button class="btn btn-default" on:click={setAsDefault}>Set as Default</button>
+                  <button class="btn btn-default" onclick={setAsDefault}>Set as Default</button>
                 {/if}
                 {#if currentSetKey !== 'general'}
-                  <button class="btn btn-delete" on:click={deleteSet}>Delete</button>
+                  <button class="btn btn-delete" onclick={deleteSet}>Delete</button>
                 {/if}
               </div>
             {/if}
@@ -840,13 +913,13 @@
 
 <!-- Template Import Dialog -->
 {#if showTemplateDialog}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={closeTemplateDialog} role="presentation">
-    <div class="template-dialog" on:click|stopPropagation role="dialog" aria-labelledby="template-dialog-title" tabindex="-1">
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-overlay" onclick={closeTemplateDialog} role="presentation">
+    <div class="template-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="template-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="template-dialog-title">Import Instruction Template</h2>
-        <button class="close-btn" on:click={closeTemplateDialog} aria-label="Close">×</button>
+        <button class="close-btn" onclick={closeTemplateDialog} aria-label="Close">×</button>
       </div>
 
       <div class="template-dialog-body">
@@ -862,7 +935,7 @@
                   type="radio"
                   name="template"
                   value={template.key}
-                  on:change={() => selectedTemplate = template}
+                  onchange={() => selectedTemplate = template}
                 />
                 <div class="template-info">
                   <strong>{template.name}</strong>
@@ -886,11 +959,11 @@
           </div>
 
           <div class="template-dialog-actions">
-            <button class="btn btn-cancel" on:click={closeTemplateDialog}>Cancel</button>
+            <button class="btn btn-cancel" onclick={closeTemplateDialog}>Cancel</button>
             <button
               class="btn btn-save"
               disabled={!selectedTemplate || !newSetName.trim()}
-              on:click={importSelectedTemplate}
+              onclick={importSelectedTemplate}
             >
               Import Template
             </button>
@@ -903,29 +976,27 @@
 
 <!-- Creation Mode Choice Dialog -->
 {#if showCreationModeDialog}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={closeCreationModeDialog} role="presentation">
-    <div class="choice-dialog" on:click|stopPropagation role="dialog" aria-labelledby="choice-dialog-title" tabindex="-1">
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-overlay" onclick={closeCreationModeDialog} role="presentation">
+    <div class="choice-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="choice-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="choice-dialog-title">Create New Instruction Set</h2>
-        <button class="close-btn" on:click={closeCreationModeDialog} aria-label="Close">×</button>
+        <button class="close-btn" onclick={closeCreationModeDialog} aria-label="Close">×</button>
       </div>
 
       <div class="choice-dialog-body">
         <p class="choice-help">Choose how you'd like to create your new instruction set:</p>
 
         <div class="choice-options">
-          <button class="choice-option" on:click={createFromScratch}>
-            <div class="choice-icon">📝</div>
+          <button class="choice-option" onclick={createFromScratch}>
             <div class="choice-info">
               <strong>Create from Scratch</strong>
               <p>Start with an empty instruction set and customize it manually.</p>
             </div>
           </button>
 
-          <button class="choice-option" on:click={startWizard}>
-            <div class="choice-icon">🤖</div>
+          <button class="choice-option" onclick={startWizard}>
             <div class="choice-info">
               <strong>Use AI Wizard</strong>
               <p>Let an AI interview you and generate a custom instruction set tailored to your needs.</p>
@@ -939,36 +1010,56 @@
 
 <!-- AI Wizard Dialog -->
 {#if showWizardDialog}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={() => {}} role="presentation">
-    <div class="wizard-dialog" on:click|stopPropagation role="dialog" aria-labelledby="wizard-dialog-title" tabindex="-1">
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="modal-overlay" onclick={() => {}} role="presentation">
+    <div class="wizard-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="wizard-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="wizard-dialog-title">AI Instruction Set Wizard</h2>
-        <button class="close-btn" on:click={closeWizardDialog} aria-label="Close">×</button>
+        <button class="close-btn" onclick={closeWizardDialog} aria-label="Close">×</button>
       </div>
 
       <div class="wizard-dialog-body">
         {#if !isGenerating}
-          <!-- AI Model Selection -->
+          <!-- AI Host & Model Selection (matches Local AI chat pattern) -->
           <div class="wizard-model-selection">
-            <label for="wizard-provider">
-              <strong>AI Provider:</strong>
-              <select id="wizard-provider" bind:value={selectedWizardProvider} class="wizard-select">
-                <option value="ollama">Ollama (Local)</option>
-                <option value="openai">OpenAI</option>
-                <option value="anthropic">Anthropic (Claude)</option>
+            <!-- AI Host Dropdown -->
+            <label for="wizard-host">
+              <strong>AI Host:</strong>
+              <select
+                id="wizard-host"
+                bind:value={wizardComputeHost}
+                class="wizard-select"
+              >
+                <option value="local">Local</option>
+                {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
+                  {#each $nodeStatus.peer_info as peer}
+                    <option value={peer.node_id}>
+                      {peer.name || `${peer.node_id.slice(0, 20)}...`}
+                    </option>
+                  {/each}
+                {/if}
               </select>
             </label>
-            <label for="wizard-model">
-              <strong>Model (Optional):</strong>
-              <input
+
+            <!-- Text Model Dropdown (filtered based on selected host) -->
+            <label for="wizard-model" style="margin-top: 1rem;">
+              <strong>Text Model:</strong>
+              <select
                 id="wizard-model"
-                type="text"
-                class="wizard-input"
-                placeholder="Leave empty for default model"
-                bind:value={selectedWizardModel}
-              />
+                bind:value={wizardSelectedProvider}
+                class="wizard-select"
+              >
+                {#if wizardMergedProviders.length === 0}
+                  <option value="" disabled>No providers available</option>
+                {:else}
+                  {#each wizardMergedProviders as provider}
+                    <option value={provider.uniqueId}>
+                      {provider.displayText}
+                    </option>
+                  {/each}
+                {/if}
+              </select>
             </label>
           </div>
 
@@ -1005,7 +1096,7 @@
               {#if currentQuestionIndex > 0}
                 <button
                   class="btn btn-cancel"
-                  on:click={() => {
+                  onclick={() => {
                     currentQuestionIndex--;
                     wizardCurrentAnswer = wizardResponses[wizardQuestions[currentQuestionIndex].id] || '';
                   }}
@@ -1017,7 +1108,7 @@
               <button
                 class="btn btn-save"
                 disabled={!wizardCurrentAnswer.trim()}
-                on:click={submitWizardAnswer}
+                onclick={submitWizardAnswer}
               >
                 {currentQuestionIndex === wizardQuestions.length - 1 ? 'Generate Instruction Set' : 'Next →'}
               </button>
@@ -1582,11 +1673,6 @@
     box-shadow: 0 4px 12px rgba(0, 122, 204, 0.2);
   }
 
-  .choice-icon {
-    font-size: 3rem;
-    line-height: 1;
-  }
-
   .choice-info {
     flex: 1;
   }
@@ -1645,8 +1731,7 @@
     font-weight: 500;
   }
 
-  .wizard-select,
-  .wizard-input {
+  .wizard-select {
     padding: 0.75rem;
     background: #1a1a1a;
     border: 2px solid #3a3a3a;
@@ -1657,8 +1742,7 @@
     transition: border-color 0.2s;
   }
 
-  .wizard-select:focus,
-  .wizard-input:focus {
+  .wizard-select:focus {
     outline: none;
     border-color: #007acc;
     box-shadow: 0 0 0 3px rgba(0, 122, 204, 0.1);
