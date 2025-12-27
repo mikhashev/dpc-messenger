@@ -2013,8 +2013,8 @@ class CoreService:
             from pathlib import Path
             import json
 
-            # Get templates directory
-            templates_dir = Path(__file__).parent / "templates" / "instructions"
+            # Get templates directory (go up to dpc-client/core/)
+            templates_dir = Path(__file__).parent.parent / "templates" / "instructions"
 
             if not templates_dir.exists():
                 logger.warning("Templates directory not found: %s", templates_dir)
@@ -2072,8 +2072,8 @@ class CoreService:
             from pathlib import Path
             import json
 
-            # Load wizard template
-            wizard_file = Path(__file__).parent / "templates" / "wizard_template.json"
+            # Load wizard template (go up to dpc-client/core/)
+            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
 
             if not wizard_file.exists():
                 logger.error("Wizard template not found: %s", wizard_file)
@@ -2120,8 +2120,8 @@ class CoreService:
             from pathlib import Path
             import json
 
-            # Load wizard template for generation prompt
-            wizard_file = Path(__file__).parent / "templates" / "wizard_template.json"
+            # Load wizard template for generation prompt (go up to dpc-client/core/)
+            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
             with open(wizard_file, 'r', encoding='utf-8') as f:
                 wizard_config = json.load(f)
 
