@@ -997,11 +997,11 @@
       if (textProvider.source === 'remote' && textProvider.nodeId) {
         // Remote inference - send compute_host and provider alias
         payload.compute_host = textProvider.nodeId;
-        payload.provider_alias = textProvider.alias;
+        payload.provider = textProvider.alias;
       } else {
         // Local inference - pass provider alias
         if (textProvider.alias) {
-          payload.provider_alias = textProvider.alias;
+          payload.provider = textProvider.alias;
         }
       }
 
