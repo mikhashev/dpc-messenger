@@ -444,7 +444,11 @@ class LLMManager:
         self.providers: Dict[str, AIProvider] = {}
         self.default_provider: str | None = None
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
-        self._tokenizer_cache: Dict[str, Any] = {}  # Cache HuggingFace tokenizers by model name
+
+        # Token counting manager (Phase 4 refactor - v0.12.1)
+        from dpc_client_core.managers.token_count_manager import TokenCountManager
+        self.token_count_manager = TokenCountManager()
+
         self._load_providers_from_config()
 
     def _ensure_config_exists(self):
@@ -700,32 +704,11 @@ class LLMManager:
                 return alias
         return None
 
-    # Map Ollama model families to HuggingFace tokenizers for accurate token counting
-    # NOTE: Using publicly accessible models to avoid gated repository access issues
-    OLLAMA_TOKENIZER_MAP = {
-        # Llama family - use GPT-2 tokenizer (public, similar BPE tokenization)
-        "llama": "gpt2",
-        "llama2": "gpt2",
-        "llama3": "gpt2",
-        "llama3.1": "gpt2",
-        "llama3.2": "gpt2",
-        "codellama": "gpt2",
-        # Mistral family - use public Instruct variant
-        "mistral": "mistralai/Mistral-7B-Instruct-v0.2",
-        "mixtral": "mistralai/Mistral-7B-Instruct-v0.2",
-        # Qwen family - publicly accessible
-        "qwen": "Qwen/Qwen-7B",
-        "qwen2": "Qwen/Qwen2-7B",
-        "qwen2.5": "Qwen/Qwen2.5-7B",
-        # Gemma - use smaller public variant
-        "gemma": "google/gemma-2b",
-        # Phi - publicly accessible
-        "phi": "microsoft/phi-2",
-    }
-
     def count_tokens(self, text: str, model: str) -> int:
-        """
-        Count tokens in text for a given model.
+        """Count tokens in text for a given model.
+
+        REFACTORED (Phase 4 - v0.12.1): Delegates to TokenCountManager
+        for better separation of concerns and centralized token counting logic.
 
         Uses:
         - tiktoken for OpenAI/Anthropic (accurate BPE)
@@ -739,73 +722,7 @@ class LLMManager:
         Returns:
             Token count
         """
-        if not text:
-            return 0
-
-        # Try tiktoken for OpenAI/Anthropic models (existing logic - KEEP)
-        if TIKTOKEN_AVAILABLE:
-            try:
-                if "gpt-4" in model or "gpt-3.5" in model:
-                    encoding = tiktoken.encoding_for_model(model.split()[0] if " " in model else model)
-                    return len(encoding.encode(text))
-                elif "claude" in model:
-                    encoding = tiktoken.get_encoding("cl100k_base")
-                    return len(encoding.encode(text))
-            except Exception as e:
-                logger.warning("tiktoken failed for '%s': %s", model, e)
-
-        # NEW: Try HuggingFace tokenizer for Ollama models
-        if ":" in model:  # Ollama models use "model:tag" format
-            tokenizer = self._get_tokenizer_for_ollama(model)
-            if tokenizer:
-                try:
-                    tokens = tokenizer.encode(text, add_special_tokens=False)
-                    count = len(tokens)
-                    logger.debug("Accurate token count for %s: %d tokens", model, count)
-                    return count
-                except Exception as e:
-                    logger.warning("Tokenizer encode failed for %s: %s", model, e)
-
-        # Fallback: Character estimation (unchanged)
-        logger.debug("Using character estimation for %s", model)
-        return len(text) // 4
-
-    def _get_tokenizer_for_ollama(self, model: str):
-        """Get HuggingFace tokenizer for Ollama model.
-
-        Args:
-            model: Ollama model name (e.g., "llama3.1:8b")
-
-        Returns:
-            Tokenizer object or None if unavailable
-        """
-        # Check cache first
-        if model in self._tokenizer_cache:
-            return self._tokenizer_cache[model]
-
-        try:
-            from transformers import AutoTokenizer
-
-            # Extract model family from "llama3.1:8b" -> "llama3.1"
-            model_family = model.split(":")[0].lower()
-
-            # Find matching tokenizer
-            for family, hf_model in self.OLLAMA_TOKENIZER_MAP.items():
-                if model_family.startswith(family):
-                    logger.info("Loading tokenizer for %s: %s", model, hf_model)
-                    tokenizer = AutoTokenizer.from_pretrained(hf_model)
-                    self._tokenizer_cache[model] = tokenizer
-                    return tokenizer
-
-            logger.warning("No tokenizer mapping for model family: %s", model_family)
-            return None
-
-        except ImportError:
-            logger.warning("transformers library not available - using character estimation")
-            return None
-        except Exception as e:
-            logger.warning("Failed to load tokenizer for %s: %s", model, e)
-            return None
+        return self.token_count_manager.count_tokens(text, model)
 
     def get_context_window(self, model: str) -> int:
         """

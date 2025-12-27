@@ -2,6 +2,7 @@
 import pytest
 from dpc_client_core.llm_manager import LLMManager
 from dpc_client_core.conversation_monitor import ConversationMonitor
+from dpc_client_core.managers.token_count_manager import TokenCountManager
 
 
 class TestConversationTokenCounting:
@@ -103,8 +104,8 @@ class TestOllamaTokenization:
 
         assert count1 == count2, "Should return same count for same input"
 
-        # Check cache exists (may be empty if transformers not available)
-        assert hasattr(llm_manager, "_tokenizer_cache")
+        # Check cache exists in TokenCountManager (Phase 4 refactor)
+        assert hasattr(llm_manager.token_count_manager, "_tokenizer_cache")
 
 
 class TestModelFamilyDetection:
@@ -259,3 +260,142 @@ class TestTokenCountingFallback:
 
             assert count == expected
             assert count > 0, "Should always return positive count for non-empty text"
+
+
+class TestTokenCountManagerDirectly:
+    """Test TokenCountManager class directly (Phase 4 refactor)."""
+
+    @pytest.fixture
+    def token_manager(self):
+        """Create TokenCountManager instance for tests."""
+        return TokenCountManager()
+
+    def test_count_tokens_delegation(self, token_manager):
+        """Verify TokenCountManager counts tokens correctly."""
+        text = "The quick brown fox jumps over the lazy dog"
+
+        # Count tokens for different models
+        llama_count = token_manager.count_tokens(text, "llama3.1:8b")
+        gpt_count = token_manager.count_tokens(text, "gpt-4")
+        claude_count = token_manager.count_tokens(text, "claude-3-5-sonnet-20241022")
+
+        # All should return reasonable counts
+        assert 5 <= llama_count <= 20
+        assert 5 <= gpt_count <= 20
+        assert 5 <= claude_count <= 20
+
+    def test_validate_prompt_success(self, token_manager):
+        """Test validate_prompt when prompt fits in context window."""
+        prompt = "Hello world, this is a short prompt"
+        model = "llama3.1:8b"
+        context_window = 16384
+
+        is_valid, error_msg = token_manager.validate_prompt(
+            prompt=prompt,
+            model=model,
+            context_window=context_window,
+            buffer_percent=0.2
+        )
+
+        assert is_valid is True
+        assert error_msg is None
+
+    def test_validate_prompt_failure(self, token_manager):
+        """Test validate_prompt when prompt too large."""
+        # Create a very long prompt (simulate 10,000 tokens)
+        prompt = "word " * 10000  # ~10,000 tokens (4 chars/token estimate)
+        model = "llama3.1:8b"
+        context_window = 1000  # Small window for testing
+
+        is_valid, error_msg = token_manager.validate_prompt(
+            prompt=prompt,
+            model=model,
+            context_window=context_window,
+            buffer_percent=0.2
+        )
+
+        assert is_valid is False
+        assert error_msg is not None
+        assert "Prompt too large" in error_msg
+        assert "Suggestions:" in error_msg
+
+    def test_validate_prompt_no_limit(self, token_manager):
+        """Test validate_prompt with no context window limit."""
+        prompt = "Any length prompt"
+        model = "llama3.1:8b"
+        context_window = 0  # No limit
+
+        is_valid, error_msg = token_manager.validate_prompt(
+            prompt=prompt,
+            model=model,
+            context_window=context_window
+        )
+
+        assert is_valid is True
+        assert error_msg is None
+
+    def test_get_conversation_usage(self, token_manager):
+        """Test conversation usage calculation (prevents double-counting)."""
+        usage = token_manager.get_conversation_usage(
+            prompt_tokens=5000,
+            response_tokens=500,
+            message_count=10
+        )
+
+        assert usage["current_prompt_size"] == 5000
+        assert usage["latest_response_tokens"] == 500
+        assert usage["message_count"] == 10
+
+        # Verify we're NOT adding response_tokens to prompt_tokens
+        # (that would be double-counting)
+        assert "total_tokens" not in usage or usage.get("total_tokens") != 5500
+
+    def test_tokenizer_map_coverage(self, token_manager):
+        """Verify OLLAMA_TOKENIZER_MAP covers expected model families."""
+        expected_families = [
+            "llama", "llama2", "llama3", "llama3.1", "llama3.2", "codellama",
+            "mistral", "mixtral",
+            "qwen", "qwen2", "qwen2.5",
+            "gemma", "phi"
+        ]
+
+        for family in expected_families:
+            assert family in token_manager.OLLAMA_TOKENIZER_MAP, \
+                f"Model family '{family}' should be in OLLAMA_TOKENIZER_MAP"
+
+
+class TestLLMManagerWithTokenCountManager:
+    """Test LLMManager delegates to TokenCountManager correctly."""
+
+    @pytest.fixture
+    def llm_manager(self):
+        """Create LLMManager instance for tests."""
+        return LLMManager()
+
+    def test_llm_manager_has_token_count_manager(self, llm_manager):
+        """Verify LLMManager creates TokenCountManager instance."""
+        assert hasattr(llm_manager, "token_count_manager")
+        assert isinstance(llm_manager.token_count_manager, TokenCountManager)
+
+    def test_count_tokens_delegates(self, llm_manager):
+        """Verify LLMManager.count_tokens() delegates to TokenCountManager."""
+        text = "Hello world"
+        model = "llama3.1:8b"
+
+        # Count via LLMManager
+        llm_count = llm_manager.count_tokens(text, model)
+
+        # Count via TokenCountManager directly
+        direct_count = llm_manager.token_count_manager.count_tokens(text, model)
+
+        # Should be identical
+        assert llm_count == direct_count
+
+    def test_tokenizer_cache_shared(self, llm_manager):
+        """Verify tokenizer cache is maintained by TokenCountManager."""
+        # Count tokens twice for same model
+        llm_manager.count_tokens("Hello", "llama3.1:8b")
+        llm_manager.count_tokens("World", "llama3.1:8b")
+
+        # Cache should exist in TokenCountManager
+        assert hasattr(llm_manager.token_count_manager, "_tokenizer_cache")
