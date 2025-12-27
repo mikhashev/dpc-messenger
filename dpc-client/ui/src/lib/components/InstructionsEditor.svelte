@@ -307,6 +307,12 @@
     try {
       const result = await sendCommand('get_wizard_template', {});
 
+      // Debug logging
+      console.log('get_wizard_template result:', result);
+      console.log('result.status:', result?.status);
+      console.log('result.wizard:', result?.wizard);
+      console.log('result.wizard.question_sequence:', result?.wizard?.question_sequence);
+
       if (result && result.status === 'success' && result.wizard) {
         wizardQuestions = result.wizard.question_sequence;
         currentQuestionIndex = 0;
@@ -316,6 +322,10 @@
         // Show wizard dialog
         showWizardDialog = true;
       } else {
+        console.error('Wizard load failed - condition not met');
+        console.error('result exists?', !!result);
+        console.error('result.status === "success"?', result?.status === 'success');
+        console.error('result.wizard exists?', !!result?.wizard);
         alert('Failed to load wizard template');
       }
     } catch (error) {

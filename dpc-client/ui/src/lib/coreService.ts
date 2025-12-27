@@ -592,7 +592,16 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'cancel_file_transfer',
             'get_conversation_history',  // v0.11.2 - backend→frontend sync
             'connect_to_peer',  // v0.12.0 - async connection with error handling
-            'connect_via_dht'   // v0.12.0 - async connection with error handling
+            'connect_via_dht',   // v0.12.0 - async connection with error handling
+            'get_wizard_template',  // AI wizard - load wizard configuration
+            'ai_assisted_instruction_creation',  // AI wizard - generate instruction set
+            'get_available_templates',  // Template import - list templates
+            'import_instruction_template',  // Template import - import template
+            'create_instruction_set',  // Instruction management
+            'delete_instruction_set',  // Instruction management
+            'rename_instruction_set',  // Instruction management
+            'set_default_instruction_set',  // Instruction management
+            'get_instruction_set'  // Instruction management
         ].includes(command);
 
         if (expectsResponse) {

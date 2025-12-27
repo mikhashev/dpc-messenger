@@ -2075,8 +2075,15 @@ class CoreService:
             # Load wizard template (go up to dpc-client/core/)
             wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
 
+            # Debug logging
+            logger.debug("__file__ = %s", Path(__file__).resolve())
+            logger.debug("parent = %s", Path(__file__).parent.resolve())
+            logger.debug("parent.parent = %s", Path(__file__).parent.parent.resolve())
+            logger.debug("wizard_file = %s", wizard_file.resolve())
+            logger.debug("wizard_file exists? %s", wizard_file.exists())
+
             if not wizard_file.exists():
-                logger.error("Wizard template not found: %s", wizard_file)
+                logger.error("Wizard template not found: %s", wizard_file.resolve())
                 return {
                     "status": "error",
                     "message": "Wizard template configuration not found"
