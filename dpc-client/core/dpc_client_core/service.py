@@ -4142,6 +4142,35 @@ class CoreService:
             instruction_set_name=effective_instruction_set
         )
 
+        # Phase 2: Pre-query validation - Count tokens BEFORE sending to LLM
+        if monitor.token_limit > 0:
+            # Count tokens in the assembled prompt
+            model_name = model or self.llm_manager.get_active_model_name()
+            estimated_prompt_tokens = self.llm_manager.count_tokens(final_prompt, model_name)
+
+            # Reserve 20% of context window for AI response
+            response_buffer_tokens = int(monitor.token_limit * 0.2)
+            max_allowed_prompt_tokens = monitor.token_limit - response_buffer_tokens
+
+            # Block if prompt alone exceeds limit (minus buffer)
+            if estimated_prompt_tokens > max_allowed_prompt_tokens:
+                error_msg = (
+                    f"Prompt too large: {estimated_prompt_tokens:,} tokens "
+                    f"(limit: {max_allowed_prompt_tokens:,} after reserving 20% for response).\n\n"
+                    f"Context window: {monitor.token_limit:,} tokens total.\n\n"
+                    f"Suggestions:\n"
+                    f"  1. Disable context checkboxes to reduce token usage\n"
+                    f"  2. End session to save knowledge and clear history\n"
+                    f"  3. Use a model with larger context window"
+                )
+                logger.warning("BLOCKED (pre-query validation): %s", error_msg)
+                raise RuntimeError(error_msg)
+
+            logger.debug(
+                "Pre-query validation passed: %d prompt tokens + %d buffer < %d limit",
+                estimated_prompt_tokens, response_buffer_tokens, monitor.token_limit
+            )
+
         response_payload = {}
         status = "OK"
 
