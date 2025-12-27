@@ -701,19 +701,25 @@ class LLMManager:
         return None
 
     # Map Ollama model families to HuggingFace tokenizers for accurate token counting
+    # NOTE: Using publicly accessible models to avoid gated repository access issues
     OLLAMA_TOKENIZER_MAP = {
-        "llama": "meta-llama/Llama-2-7b-hf",
-        "llama2": "meta-llama/Llama-2-7b-hf",
-        "llama3": "meta-llama/Meta-Llama-3-8B",
-        "llama3.1": "meta-llama/Meta-Llama-3.1-8B",
-        "llama3.2": "meta-llama/Llama-3.2-1B",
-        "codellama": "meta-llama/CodeLlama-7b-hf",
-        "mistral": "mistralai/Mistral-7B-v0.1",
-        "mixtral": "mistralai/Mixtral-8x7B-v0.1",
+        # Llama family - use GPT-2 tokenizer (public, similar BPE tokenization)
+        "llama": "gpt2",
+        "llama2": "gpt2",
+        "llama3": "gpt2",
+        "llama3.1": "gpt2",
+        "llama3.2": "gpt2",
+        "codellama": "gpt2",
+        # Mistral family - use public Instruct variant
+        "mistral": "mistralai/Mistral-7B-Instruct-v0.2",
+        "mixtral": "mistralai/Mistral-7B-Instruct-v0.2",
+        # Qwen family - publicly accessible
         "qwen": "Qwen/Qwen-7B",
         "qwen2": "Qwen/Qwen2-7B",
         "qwen2.5": "Qwen/Qwen2.5-7B",
-        "gemma": "google/gemma-7b",
+        # Gemma - use smaller public variant
+        "gemma": "google/gemma-2b",
+        # Phi - publicly accessible
         "phi": "microsoft/phi-2",
     }
 
