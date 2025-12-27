@@ -1018,8 +1018,19 @@ PARTICIPANTS' CULTURAL CONTEXTS:
     def set_token_count(self, tokens: int):
         """Set the current token count (replaces instead of adding)
 
+        IMPORTANT: Use this method for prompt tokens, NOT update_token_count(),
+        to avoid double-counting conversation history!
+
+        The prompt_tokens from LLM already includes:
+        - System instructions
+        - Personal/device contexts
+        - FULL conversation history
+        - Current query
+
+        So we REPLACE the count, not ADD to it.
+
         Args:
-            tokens: Total tokens in the conversation
+            tokens: Total prompt tokens (from LLM metadata)
         """
         self.current_token_count = tokens
 

@@ -4179,7 +4179,10 @@ class CoreService:
                     monitor.set_token_limit(result["model_max_tokens"])
 
                 # Update token count
-                monitor.update_token_count(result["tokens_used"])
+                # IMPORTANT: Use set_token_count() with prompt_tokens, NOT update_token_count() with tokens_used!
+                # prompt_tokens already includes the full conversation history, so we REPLACE the count (no double-counting)
+                # Using update_token_count(tokens_used) would add prompt+response tokens cumulatively, causing exponential growth
+                monitor.set_token_count(result["prompt_tokens"])
 
                 # Check if we should warn about approaching limit
                 if monitor.should_suggest_extraction():
