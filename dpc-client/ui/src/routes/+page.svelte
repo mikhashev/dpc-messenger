@@ -2257,6 +2257,7 @@
                   value={selectedInstructionSet}
                   onchange={(e) => updateInstructionSet((e.target as HTMLSelectElement).value)}
                 >
+                  <option value="none">None (No Instructions)</option>
                   {#if availableInstructionSets}
                     {#each Object.entries(availableInstructionSets.sets) as [key, set]}
                       <option value={key}>
@@ -2685,6 +2686,7 @@
       <div class="dialog-provider-selector">
         <label for="new-chat-instruction-set">Instruction Set:</label>
         <select id="new-chat-instruction-set" bind:value={selectedInstructionSetForNewChat}>
+          <option value="none">None (No Instructions)</option>
           {#if availableInstructionSets}
             {#each Object.entries(availableInstructionSets.sets) as [key, set]}
               <option value={key}>

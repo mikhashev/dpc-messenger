@@ -119,11 +119,15 @@ class PromptManager:
 
         Args:
             include_context: If True, use instructions.json; if False, pure mode (no instruction)
-            instruction_set_name: Name of instruction set to use (optional)
+            instruction_set_name: Name of instruction set to use (optional, use "none" for no instructions)
 
         Returns:
             System instruction text
         """
+        # Check for explicit "none" option - no instructions at all
+        if instruction_set_name and instruction_set_name.lower() in ("none", "empty"):
+            return ""
+
         if include_context:
             # Get the instruction set to use
             if instruction_set_name:
