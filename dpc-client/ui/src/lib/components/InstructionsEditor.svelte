@@ -307,12 +307,6 @@
     try {
       const result = await sendCommand('get_wizard_template', {});
 
-      // Debug logging
-      console.log('get_wizard_template result:', result);
-      console.log('result.status:', result?.status);
-      console.log('result.wizard:', result?.wizard);
-      console.log('result.wizard.question_sequence:', result?.wizard?.question_sequence);
-
       if (result && result.status === 'success' && result.wizard) {
         wizardQuestions = result.wizard.question_sequence;
         currentQuestionIndex = 0;
@@ -322,10 +316,7 @@
         // Show wizard dialog
         showWizardDialog = true;
       } else {
-        console.error('Wizard load failed - condition not met');
-        console.error('result exists?', !!result);
-        console.error('result.status === "success"?', result?.status === 'success');
-        console.error('result.wizard exists?', !!result?.wizard);
+        console.error('Failed to load wizard template:', result);
         alert('Failed to load wizard template');
       }
     } catch (error) {
@@ -959,6 +950,28 @@
 
       <div class="wizard-dialog-body">
         {#if !isGenerating}
+          <!-- AI Model Selection -->
+          <div class="wizard-model-selection">
+            <label for="wizard-provider">
+              <strong>AI Provider:</strong>
+              <select id="wizard-provider" bind:value={selectedWizardProvider} class="wizard-select">
+                <option value="ollama">Ollama (Local)</option>
+                <option value="openai">OpenAI</option>
+                <option value="anthropic">Anthropic (Claude)</option>
+              </select>
+            </label>
+            <label for="wizard-model">
+              <strong>Model (Optional):</strong>
+              <input
+                id="wizard-model"
+                type="text"
+                class="wizard-input"
+                placeholder="Leave empty for default model"
+                bind:value={selectedWizardModel}
+              />
+            </label>
+          </div>
+
           <!-- Progress indicator -->
           <div class="wizard-progress">
             <div class="wizard-progress-text">
@@ -1609,6 +1622,46 @@
     padding: 2rem;
     overflow-y: auto;
     flex: 1;
+  }
+
+  .wizard-model-selection {
+    display: flex;
+    gap: 1rem;
+    margin-bottom: 2rem;
+    padding-bottom: 2rem;
+    border-bottom: 1px solid #333;
+  }
+
+  .wizard-model-selection label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    flex: 1;
+  }
+
+  .wizard-model-selection strong {
+    color: #aaa;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+
+  .wizard-select,
+  .wizard-input {
+    padding: 0.75rem;
+    background: #1a1a1a;
+    border: 2px solid #3a3a3a;
+    border-radius: 6px;
+    color: #e0e0e0;
+    font-size: 0.95rem;
+    font-family: inherit;
+    transition: border-color 0.2s;
+  }
+
+  .wizard-select:focus,
+  .wizard-input:focus {
+    outline: none;
+    border-color: #007acc;
+    box-shadow: 0 0 0 3px rgba(0, 122, 204, 0.1);
   }
 
   .wizard-progress {

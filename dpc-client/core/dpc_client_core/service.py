@@ -2075,15 +2075,8 @@ class CoreService:
             # Load wizard template (go up to dpc-client/core/)
             wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
 
-            # Debug logging
-            logger.debug("__file__ = %s", Path(__file__).resolve())
-            logger.debug("parent = %s", Path(__file__).parent.resolve())
-            logger.debug("parent.parent = %s", Path(__file__).parent.parent.resolve())
-            logger.debug("wizard_file = %s", wizard_file.resolve())
-            logger.debug("wizard_file exists? %s", wizard_file.exists())
-
             if not wizard_file.exists():
-                logger.error("Wizard template not found: %s", wizard_file.resolve())
+                logger.error("Wizard template not found: %s", wizard_file)
                 return {
                     "status": "error",
                     "message": "Wizard template configuration not found"
@@ -2148,12 +2141,12 @@ class CoreService:
             # Execute AI query to generate instruction set
             logger.info("Generating instruction set via AI wizard (provider=%s, model=%s)", provider, model)
 
-            result = await self.llm_manager.execute_query(
+            result = await self.llm_manager.query(
                 prompt=full_prompt,
-                provider=provider,
+                provider_alias=provider,
+                return_metadata=True,
                 model=model,
-                temperature=0.7,
-                use_conversation_history=False  # Fresh query, no history
+                temperature=0.7
             )
 
             # Parse AI response (should be JSON)
