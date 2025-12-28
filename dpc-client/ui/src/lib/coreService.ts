@@ -613,6 +613,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                 if (command === 'connect_to_peer' || command === 'connect_via_dht') {
                     // Connection timeout: 30s (includes pre-flight check + TLS handshake + HELLO)
                     timeout = 30000;
+                } else if (command === 'ai_assisted_instruction_creation_remote') {
+                    // AI instruction creation timeout: 60s (remote LLM processing can take time)
+                    timeout = 60000;
                 } else if (command === 'send_file') {
                     // Dynamic timeout based on file size (v0.11.2+)
                     const fileSizeBytes = payload.file_size_bytes || 0;
