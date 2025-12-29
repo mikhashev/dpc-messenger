@@ -2,53 +2,7 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
-## [0.12.1] - 2025-12-26
-
-### NEW FEATURES
-
-#### AI Scope Field-Level Filtering for Device Context
-- **Device Context Privacy Control** - device_context.json now supports AI scope filtering
-- **Granular Hardware Filtering** - Hide GPU specs, CPU details, memory info per AI scope
-- **4 Example Scopes** - work (full hardware), personal (hide GPU), basic (minimal), research (full access)
-- **Privacy Patterns** - `device_context.json:hardware.gpu.*: deny` to hide GPU from AI
-- Files: firewall.py (filter_device_context_for_ai_scope), service.py
-
-### ENHANCEMENTS
-
-#### Pure Mode AI Chat (Zero System Instructions)
-- **Completely Pure Conversations** - When "Include personal context" unchecked → NO system instruction sent to AI
-- **Privacy-Focused Default** - Pure mode sends only conversation history (no instructions, no context)
-- **Before:** Sent "You are a helpful AI assistant." even when context disabled
-- **After:** Empty system instruction for true pure mode
-- File: managers/prompt_manager.py (_build_system_instruction)
-
-#### Personal Context Metadata Structure Improvements
-- **Auto-Reference instructions.json** - Automatically added to personal.json metadata on startup
-- **Consistent Structure** - Both device_context and instructions use same format (file, description, last_updated)
-- **Semantic Categorization** - external_contexts (AI prompt files) vs external_files (knowledge/data files)
-- **Removed schema_version** - Stored in files themselves, not in references
-- Files: service.py, device_context_collector.py, personal_context_example.json
-
-### BUG FIXES
-
-#### Peer Context Selection Counter (Svelte 5 Reactivity)
-- **Fixed Counter Not Updating** - "(0 selected)" now updates correctly when checking peer contexts
-- **Root Cause:** Svelte 5 $state() requires new Set instance to detect changes
-- **Solution:** `new Set(selectedPeerContexts)` triggers reactivity properly
-- File: ui/src/routes/+page.svelte (togglePeerContext, peer disconnect cleanup)
-
-### DOCUMENTATION
-
-#### Privacy Rules Configuration
-- **Updated Examples** - privacy_rules.example.json now showcases device context filtering
-- **4 AI Scope Examples** - work, personal, basic, research with comprehensive comments
-- **Firewall Template** - Updated default template in firewall.py with AI scope examples
-- **UI Info Messages** - Updated FirewallEditor.svelte to mention field-level filtering
-- Files: privacy_rules.example.json, firewall.py, FirewallEditor.svelte
-
----
-
-## [0.12.0] - 2025-12-25
+## [0.12.0] - 2025-12-29
 
 ### MAJOR FEATURES
 
@@ -62,17 +16,36 @@ All notable changes to D-PC Messenger will be documented in this file.
 - **Dual Provider Dropdowns** - Separate text/vision model selection
 - Files: ImageMessage.svelte, image_handler.py, image_utils.py, llm_manager.py
 
-#### Session Management (v0.11.3)
+#### Session Management
 - **Mutual Approval Voting** - All participants vote before history clear
 - **Prevents Data Loss** - No accidental clearing in multi-party chats
 - **New DPTP Commands:** PROPOSE_NEW_SESSION, VOTE_NEW_SESSION, NEW_SESSION_RESULT
 - Files: session_manager.py, session_handler.py, NewSessionDialog.svelte
 
-#### Chat History Synchronization (v0.11.3)
+#### Chat History Synchronization
 - **Auto-Sync on Reconnect** - Never lose conversation context
 - **Backend→Frontend Sync** - Survives page refresh
 - **New DPTP Commands:** REQUEST_CHAT_HISTORY, CHAT_HISTORY_RESPONSE
 - Files: chat_history_handlers.py
+
+#### Token Counting System (Phase 3-4)
+- **Pre-Query Validation** - Check context window usage before sending query
+- **TokenCountManager** - Centralized token management for all AI providers
+- **20% Response Buffer** - Safety margin to prevent context overflow
+- **Accurate Tokenization** - HuggingFace tokenizers for precise counting
+- **Critical Fix:** Double-counting bug resolved (Ollama tokenization)
+- **Comprehensive Tests** - Unit tests for Phase 3 token counting
+- Files: TokenCountManager, token_counting/*, tests/test_token_counting.py
+
+#### AI Instruction Sets & Wizard (Phase 1-4 Complete)
+- **Multi-Instruction Set Support** - Multiple AI behavior profiles
+- **AI Wizard** - Create instruction sets with AI assistance and templates
+- **Template System** - Import/export instruction sets
+- **"None" Instruction Set** - Raw AI chat without system instructions
+- **Per-Conversation Selection** - Choose instruction set per conversation (Phase 4)
+- **Backend Commands** - Full CRUD support for instruction management
+- **UI Components** - InstructionsEditor, template import dialog
+- Files: InstructionsEditor.svelte, instruction handlers, template system
 
 ---
 
@@ -114,7 +87,28 @@ All notable changes to D-PC Messenger will be documented in this file.
 
 ---
 
-### Added
+### ENHANCEMENTS
+
+#### AI Scope Field-Level Filtering for Device Context
+- **Device Context Privacy Control** - device_context.json now supports AI scope filtering
+- **Granular Hardware Filtering** - Hide GPU specs, CPU details, memory info per AI scope
+- **4 Example Scopes** - work (full hardware), personal (hide GPU), basic (minimal), research (full access)
+- **Privacy Patterns** - `device_context.json:hardware.gpu.*: deny` to hide GPU from AI
+- Files: firewall.py (filter_device_context_for_ai_scope), service.py
+
+#### Pure Mode AI Chat (Zero System Instructions)
+- **Completely Pure Conversations** - When "Include personal context" unchecked → NO system instruction sent to AI
+- **Privacy-Focused Default** - Pure mode sends only conversation history (no instructions, no context)
+- **Before:** Sent "You are a helpful AI assistant." even when context disabled
+- **After:** Empty system instruction for true pure mode
+- File: managers/prompt_manager.py (_build_system_instruction)
+
+#### Personal Context Metadata Structure Improvements
+- **Auto-Reference instructions.json** - Automatically added to personal.json metadata on startup
+- **Consistent Structure** - Both device_context and instructions use same format (file, description, last_updated)
+- **Semantic Categorization** - external_contexts (AI prompt files) vs external_files (knowledge/data files)
+- **Removed schema_version** - Stored in files themselves, not in references
+- Files: service.py, device_context_collector.py, personal_context_example.json
 
 #### UI/UX Enhancements
 - Collapsible chat header with dual provider dropdowns
@@ -125,10 +119,11 @@ All notable changes to D-PC Messenger will be documented in this file.
 #### Backend Features
 - Vision config settings in config.ini
 - Bidirectional inference fallback for knowledge extraction
+- PromptManager extraction (reduced service.py complexity)
 
 ---
 
-### Fixed
+### BUG FIXES
 
 #### CRITICAL: TLS Certificate Validation + Node ID Security
 
@@ -142,130 +137,69 @@ All notable changes to D-PC Messenger will be documented in this file.
      - Extract peer certificate from TLS connection
      - Validate certificate CN matches expected node_id
      - Reject connection if validation fails (before HELLO handshake)
-   - **Why Manual Validation:** P2P networks use self-signed certificates (no shared CA), so we use `ssl.CERT_NONE` to allow handshake, then manually verify. This is the standard pattern for P2P with self-signed certs (same as DTLS implementation).
+   - **Why Manual Validation:** P2P networks use self-signed certificates (no shared CA), so we use `ssl.CERT_NONE` to allow handshake, then manually verify
    - **Defense in Depth:** Certificate validation at TLS layer + HELLO_ACK validation at application layer
-   - **Files:**
-     - [p2p_manager.py:579-584](dpc-client/core/dpc_client_core/p2p_manager.py#L579) - TLS context configuration
-     - [p2p_manager.py:590-620](dpc-client/core/dpc_client_core/p2p_manager.py#L590) - Post-handshake validation
-     - [p2p_manager.py:692-762](dpc-client/core/dpc_client_core/p2p_manager.py#L692) - Certificate extraction helpers
+   - Files: p2p_manager.py (TLS context, post-handshake validation, certificate extraction)
 
 2. **Node ID Mismatch Handling**
    - **Bug:** Application layer accepted mismatched node_id with warning only
    - **Impact:** Could connect to wrong peer or stale cached identity
    - **Security Risk:** Connections tracked under wrong node_id, breaking firewall rules
    - **Fix:** Reject connection on node_id mismatch (both TLS cert CN and HELLO_ACK validation)
-   - **User Guidance:** Clear error messages explaining how to get fresh URI from peer
-   - **Files:**
-     - [p2p_manager.py:445](dpc-client/core/dpc_client_core/p2p_manager.py#L445) - Include node_id in HELLO_ACK
-     - [p2p_manager.py:634-655](dpc-client/core/dpc_client_core/p2p_manager.py#L634) - Application layer validation
+   - Files: p2p_manager.py (HELLO_ACK validation)
 
-**Security Flow:**
-1. TLS handshake with `ssl.CERT_NONE` (required for self-signed certs)
-2. Extract peer certificate from TLS connection
-3. Validate certificate CN matches expected node_id
-4. Reject if mismatch (before sending HELLO)
-5. Continue with HELLO handshake
-6. Validate HELLO_ACK node_id (defense in depth)
+#### CRITICAL: Hardcoded Instructions Leak
+- **Bug:** 122 lines of hardcoded AI instructions in service.py
+- **Impact:** Privacy/security leak, instructions sent regardless of user settings
+- **Fix:** Removed all hardcoded instructions, use only instructions.json
+- **File:** service.py (122 lines removed)
 
-**Note:** Using `ssl.CERT_NONE` with manual validation is secure for P2P networks with self-signed certificates. Built-in SSL verification (`ssl.CERT_REQUIRED`) only works with CA-signed certificates.
+#### CRITICAL: Missing Timezone Imports
+- **Bug:** 2 protocol files missing timezone imports
+- **Impact:** Crashes when creating timestamps
+- **Fix:** Added `from datetime import timezone` to protocol files
+- **Files:** dpc-protocol (2 files)
 
 #### UX: Connection Status & Error Messages
-
 **Improvements:**
 - **"Connecting..." State**: Button shows 🔄 spinner during connection attempt
 - **Disabled State**: Button disabled when connecting or input empty
 - **Error Toasts**: Clear error messages when connection fails (8-second display)
 - **User Guidance**: Helpful messages explaining why connection failed
 - **Async Command Handling**: `connect_to_peer` and `connect_via_dht` now return Promises
-
-**Files:**
-- [+page.svelte:201-204](dpc-client/ui/src/routes/+page.svelte#L201) - Connection state variables
-- [+page.svelte:987-1027](dpc-client/ui/src/routes/+page.svelte#L987) - Async connection handler
-- [+page.svelte:1836-1841](dpc-client/ui/src/routes/+page.svelte#L1836) - Loading state button
-- [+page.svelte:2447-2459](dpc-client/ui/src/routes/+page.svelte#L2447) - Error toast component
-- [coreService.ts:594-595](dpc-client/ui/src/lib/coreService.ts#L594) - Promise-based commands
-- [coreService.ts:603-605](dpc-client/ui/src/lib/coreService.ts#L603) - 30s timeout for connections
+- Files: +page.svelte (connection state, async handler, error toast), coreService.ts (Promise-based commands)
 
 #### Peer Name Update Infinite Loop
 - **Bug:** Infinite reactive loop when peer updates their name in personal context
 - **Error:** `effect_update_depth_exceeded` - Maximum update depth exceeded
 - **Cause:** Reactive statement updated `peerContextHashes` without checking if value changed
 - **Fix:** Add guard to only update Map if hash is different from current value
-- **Files:** [+page.svelte:528-530](dpc-client/ui/src/routes/+page.svelte#L528)
+- **Files:** +page.svelte
 
 #### Personal Context Update Infinite Loop
 - **Bug:** Infinite reactive loop when user queries about device info with context enabled
-- **Error:** `effect_update_depth_exceeded` - Maximum update depth exceeded (browser console)
-- **Cause:** `contextUpdated` reactive statement updated `currentContextHash` without checking if value changed
-- **Impact:** UI freezes, browser console spams errors, app becomes unusable
-- **Fix:** Add guard to only update hash if it actually changed (same pattern as peer context)
-- **Files:** [+page.svelte:517-521](dpc-client/ui/src/routes/+page.svelte#L517)
+- **Error:** `effect_update_depth_exceeded` - Maximum update depth exceeded
+- **Cause:** Reactive statement updated `currentContextHash` without checking if value changed
+- **Fix:** Add guard to only update state if hash is different
+- **Files:** +page.svelte
 
-#### Remote Inference Model Name Missing
-- **Bug:** AI model displays as "(unknown)" when using remote peer for inference
-- **Impact:** Users can't see which model was used for remote inference queries
-- **Root Cause:** REMOTE_INFERENCE_RESPONSE didn't include model/provider fields
-- **Fix:** Include model and provider metadata in remote inference response
-  - Add model/provider parameters to protocol function
-  - Pass model/provider from LLM query result
-  - Extract model/provider in response handler
-- **Files:**
-  - [protocol.py:66-87](dpc-protocol/dpc_protocol/protocol.py#L66) - Add parameters
-  - [service.py:2959-2960](dpc-client/core/dpc_client_core/service.py#L2959) - Pass metadata
-  - [inference_handler.py:66-82](dpc-client/core/dpc_client_core/message_handlers/inference_handler.py#L66) - Extract metadata
+#### Peer Context Selection Counter (Svelte 5 Reactivity)
+- **Fixed Counter Not Updating** - "(0 selected)" now updates correctly when checking peer contexts
+- **Root Cause:** Svelte 5 $state() requires new Set instance to detect changes
+- **Solution:** `new Set(selectedPeerContexts)` triggers reactivity properly
+- **File:** +page.svelte (togglePeerContext, peer disconnect cleanup)
 
-#### CRITICAL: Missing timezone Import (2 Files)
-- **Bug:** `NameError: name 'timezone' is not defined` when ending conversation and saving knowledge
-- **Impact:** Complete failure of knowledge commit system and markdown export (crashes on any attempt)
-- **Symptoms:** Users see error when clicking "End conversation and save knowledge" or exporting to markdown
-- **Root Cause:** Two protocol files imported `datetime` but not `timezone`, then used `datetime.now(timezone.utc)`
-- **Affected Files:**
-  1. `knowledge_commit.py` - 5 locations (lines 41, 83, 102, 126, 154)
-  2. `markdown_manager.py` - 3 locations (lines 663, 687, 776)
-- **Fix:** Add `timezone` to imports from datetime module in both files
-- **Audit:** Checked all 23 files using `timezone.utc` - only these 2 had missing imports
-- **Files:**
-  - [knowledge_commit.py:11](dpc-protocol/dpc_protocol/knowledge_commit.py#L11)
-  - [markdown_manager.py:15](dpc-protocol/dpc_protocol/markdown_manager.py#L15)
+#### Remote Inference
+- **Bug:** Model name missing from remote inference requests
+- **Fix:** Include model name in REMOTE_INFERENCE_REQUEST payload
+- **File:** inference handlers
 
-#### CRITICAL: Hardcoded Instructions Leak When Checkbox Disabled
-- **Bug:** AI uses hardcoded multi-perspective instructions even when "Include Personal Context" checkbox is OFF
-- **Impact:** Privacy violation - users can't disable instructions, no transparency about hardcoded prompts
-- **User Report:** "Why does AI use instructions and other files when checkbox is disabled?"
-- **Root Cause:** System instruction builder had 122 lines of hardcoded prompt engineering that always ran
-- **Hardcoded Text Removed:**
-  - "You are a helpful AI assistant with strong bias-awareness training..." (base prompts)
-  - "BIAS MITIGATION RULES" section (multi-perspective, challenge status quo, cultural sensitivity)
-  - "COGNITIVE BIASES TO AVOID" list (status quo bias, anchoring, cultural bias, etc.)
-  - Cultural context extraction and formatting
-  - Evidence requirement rules (citations_preferred, citations_required)
-- **Fix:** Complete redesign of instruction system
-  - **Checkbox OFF**: Use minimal generic prompt ("You are a helpful AI assistant.")
-  - **Checkbox ON**: Use ONLY `self.instructions.primary` from `~/.dpc/instructions.json`
-  - Removed entire `_build_bias_aware_system_instruction()` method (122 lines)
-  - Users now have full control and transparency
-- **User Benefit:**
-  - Checkbox state correctly controls ALL instructions (not just context data)
-  - Users can customize all AI behavior via instructions.json (no hidden hardcoded prompts)
-  - Privacy mode works correctly (minimal instruction when context disabled)
-- **Files:** [service.py:3772-3779](dpc-client/core/dpc_client_core/service.py#L3772) - Simplified instruction loading
+#### UI Provider Parameters
+- **Bug:** Incorrect provider parameters in UI dropdowns
+- **Fix:** Corrected vision provider parameters
+- **File:** +page.svelte
 
-#### Refactoring: Extract Prompt Assembly to PromptManager
-- **Motivation:** service.py was 4000+ lines, violating Single Responsibility Principle
-- **Change:** Extracted prompt building logic (160 lines) to new `managers/prompt_manager.py`
-- **Benefits:**
-  - Service.py reduced from 4000+ to ~3850 lines
-  - Better separation of concerns (service orchestrates, manager implements)
-  - Improved testability (prompt building can be tested in isolation)
-  - Reusability (other components can use PromptManager)
-  - Removed legacy `_build_combined_prompt()` method (unused)
-- **Files:**
-  - [prompt_manager.py](dpc-client/core/dpc_client_core/managers/prompt_manager.py) - New manager class (230 lines)
-  - [service.py:68](dpc-client/core/dpc_client_core/service.py#L68) - Import PromptManager
-  - [service.py:228-232](dpc-client/core/dpc_client_core/service.py#L228) - Initialize PromptManager
-  - [service.py:3557-3564](dpc-client/core/dpc_client_core/service.py#L3557) - Use PromptManager
-
-#### CRITICAL: Multiple Infinite Loop Fixes (v0.11.3)
+#### CRITICAL: Multiple Infinite Loop Fixes
 - Empty conversation history infinite loop
 - Multiple peers infinite loop
 - Window focus tracking infinite loops
@@ -280,13 +214,13 @@ All notable changes to D-PC Messenger will be documented in this file.
 - Path handling (Path objects vs strings)
 - Peer discovery (get_connected_peers)
 
-#### Session Management Fixes (v0.11.3)
+#### Session Management Fixes
 - Frontend chat clearing for non-initiator participants
 - History clearing for all participants on approval
 - node_id attribute references corrected
 - AI chats handling in propose_new_session()
 
-#### File Transfer Improvements (v0.11.3)
+#### File Transfer Improvements
 - Dynamic timeout/keepalive for large file prep
 - Show sent file in sender's chat history
 - Accept file_size_bytes parameter
@@ -297,6 +231,25 @@ All notable changes to D-PC Messenger will be documented in this file.
 - Peer context inclusion when checkbox checked
 - Handle None profile when firewall blocks
 - Trigger Svelte reactivity when deleting firewall rules
+
+---
+
+### TESTING
+
+#### Token Counting Tests
+- **Comprehensive Unit Tests** - Full coverage for Phase 3 token counting
+- **Files:** tests/test_token_counting.py
+
+---
+
+### DOCUMENTATION
+
+#### Privacy Rules Configuration
+- **Updated Examples** - privacy_rules.example.json now showcases device context filtering
+- **4 AI Scope Examples** - work, personal, basic, research with comprehensive comments
+- **Firewall Template** - Updated default template in firewall.py with AI scope examples
+- **UI Info Messages** - Updated FirewallEditor.svelte to mention field-level filtering
+- Files: privacy_rules.example.json, firewall.py, FirewallEditor.svelte
 
 ---
 

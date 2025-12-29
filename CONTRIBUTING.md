@@ -122,15 +122,19 @@ chore: maintenance tasks (dependencies, config)
 
 ### Example: Current State
 
-**Current Status (2025-12-25):**
-- `main`: Stable v0.12.0 (Vision & Image Support complete)
+**Current Status (2025-12-29):**
+- `main`: Stable v0.12.0 (Vision, Token Counting, AI Instruction Wizard)
 - `dev`: v0.12.1+ development (future features)
 
 **Release v0.12.0 includes:**
 - Vision/Image support (screenshot sharing, remote vision inference)
 - Session management with voting
 - Chat history synchronization
-- 11 critical bug fixes
+- Token counting system (Phase 3-4) with pre-query validation
+- AI instruction sets & wizard (multi-phase complete)
+- AI scope field-level filtering for device context
+- Pure mode AI chat (zero system instructions)
+- 30+ bug fixes (including critical TLS validation, hardcoded instructions leak)
 - Breaking changes (migration code removed, provider schema)
 
 ## Code Style
