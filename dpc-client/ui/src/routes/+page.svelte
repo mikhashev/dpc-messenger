@@ -2978,7 +2978,7 @@
     width: 100%;
     padding: 0.75rem 1rem;
     margin-bottom: 0.5rem;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: #5a67d8;
     color: white;
     border: none;
     border-radius: 6px;
@@ -2990,15 +2990,18 @@
     align-items: center;
     justify-content: center;
     gap: 0.5rem;
+    box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
   }
 
   .btn-context:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    background: #4c51bf;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4);
   }
 
   .btn-context:active {
     transform: translateY(0);
+    box-shadow: 0 1px 4px rgba(90, 103, 216, 0.2);
   }
 
   /* Knowledge Architecture - Auto-Detection Toggle */
@@ -3082,7 +3085,7 @@
 
   .btn-add-chat {
     padding: 0.3rem 0.6rem;
-    background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+    background: #4CAF50;
     color: white;
     border: none;
     border-radius: 4px;
@@ -3090,7 +3093,7 @@
     font-size: 0.75rem;
     font-weight: 600;
     transition: all 0.2s;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 2px 4px rgba(76, 175, 80, 0.3);
     white-space: nowrap;
     flex-shrink: 0;
     width: fit-content;
@@ -3098,14 +3101,14 @@
   }
 
   .btn-add-chat:hover {
-    background: linear-gradient(135deg, #45a049 0%, #4CAF50 100%);
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    background: #45a049;
+    box-shadow: 0 4px 8px rgba(76, 175, 80, 0.4);
     transform: translateY(-1px);
   }
 
   .btn-add-chat:active {
     transform: translateY(0);
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 1px 3px rgba(76, 175, 80, 0.2);
   }
 
   .chat-list ul {
@@ -3338,7 +3341,7 @@
 
   .btn-new-chat {
     padding: 0.6rem 1rem;
-    background: linear-gradient(135deg, #6c757d 0%, #5a6268 100%);
+    background: #6c757d;
     color: white;
     border: none;
     border-radius: 6px;
@@ -3347,20 +3350,23 @@
     cursor: pointer;
     transition: all 0.2s;
     white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(108, 117, 125, 0.3);
   }
 
   .btn-new-chat:hover {
-    transform: translateY(-1px);
+    background: #5a6268;
+    transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(108, 117, 125, 0.4);
   }
 
   .btn-new-chat:active {
     transform: translateY(0);
+    box-shadow: 0 1px 4px rgba(108, 117, 125, 0.2);
   }
 
   .btn-end-session {
     padding: 0.6rem 1rem;
-    background: linear-gradient(135deg, #28a745 0%, #20c997 100%);
+    background: #28a745;
     color: white;
     border: none;
     border-radius: 6px;
@@ -3369,20 +3375,23 @@
     cursor: pointer;
     transition: all 0.2s;
     white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(40, 167, 69, 0.3);
   }
 
   .btn-end-session:hover {
-    transform: translateY(-1px);
+    background: #20c997;
+    transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
   }
 
   .btn-end-session:active {
     transform: translateY(0);
+    box-shadow: 0 1px 4px rgba(40, 167, 69, 0.2);
   }
 
   .btn-markdown-toggle {
     padding: 0.6rem 1rem;
-    background: linear-gradient(135deg, #6c757d 0%, #5a6268 100%);
+    background: #6c757d;
     color: white;
     border: none;
     border-radius: 6px;
@@ -3392,24 +3401,30 @@
     transition: all 0.2s;
     white-space: nowrap;
     opacity: 0.7;
+    box-shadow: 0 2px 8px rgba(108, 117, 125, 0.3);
   }
 
   .btn-markdown-toggle.active {
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: #17a2b8;
     opacity: 1;
+    box-shadow: 0 2px 8px rgba(23, 162, 184, 0.3);
   }
 
   .btn-markdown-toggle:hover {
-    transform: translateY(-1px);
+    background: #5a6268;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(108, 117, 125, 0.4);
     opacity: 1;
   }
 
   .btn-markdown-toggle.active:hover {
-    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    background: #138496;
+    box-shadow: 0 4px 12px rgba(23, 162, 184, 0.4);
   }
 
   .btn-markdown-toggle:active {
     transform: translateY(0);
+    box-shadow: 0 1px 4px rgba(108, 117, 125, 0.2);
   }
 
   .chat-window {
@@ -3647,7 +3662,7 @@
   }
 
   .status-badge.updated {
-    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+    background: #10b981;
     color: white;
     box-shadow: 0 2px 4px rgba(16, 185, 129, 0.3);
     animation: pulse-badge 2s ease-in-out infinite;
@@ -4106,20 +4121,20 @@
   }
 
   .btn-confirm {
-    background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+    background: #4CAF50;
     color: white;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 2px 4px rgba(76, 175, 80, 0.3);
   }
 
   .btn-confirm:hover {
-    background: linear-gradient(135deg, #45a049 0%, #4CAF50 100%);
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    background: #45a049;
+    box-shadow: 0 4px 8px rgba(76, 175, 80, 0.4);
     transform: translateY(-1px);
   }
 
   .btn-confirm:active {
     transform: translateY(0);
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    box-shadow: 0 1px 3px rgba(76, 175, 80, 0.2);
   }
 
   /* Prevent text selection during resize */
@@ -4135,15 +4150,17 @@
     font-size: 18px;
     margin-right: 8px;
     cursor: pointer;
-    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background: #5a67d8;
     border: none;
     border-radius: 4px;
     transition: all 0.2s;
+    box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
   }
 
   .file-button:hover:not(:disabled) {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    background: #4c51bf;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4);
   }
 
   .file-button:disabled {
@@ -4191,33 +4208,39 @@
   .accept-button {
     flex: 1;
     padding: 10px;
-    background: linear-gradient(135deg, #4CAF50 0%, #45a049 100%);
+    background: #4CAF50;
     color: white;
     border: none;
     border-radius: 4px;
     cursor: pointer;
     font-weight: 500;
+    box-shadow: 0 2px 8px rgba(76, 175, 80, 0.3);
+    transition: all 0.2s;
   }
 
   .accept-button:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    background: #45a049;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4);
   }
 
   .reject-button {
     flex: 1;
     padding: 10px;
-    background: linear-gradient(135deg, #f44336 0%, #d32f2f 100%);
+    background: #f44336;
     color: white;
     border: none;
     border-radius: 4px;
     cursor: pointer;
     font-weight: 500;
+    box-shadow: 0 2px 8px rgba(244, 67, 54, 0.3);
+    transition: all 0.2s;
   }
 
   .reject-button:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
+    background: #d32f2f;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(244, 67, 54, 0.4);
   }
 
   .active-transfers-panel {
@@ -4311,7 +4334,7 @@
 
   .progress-fill {
     height: 100%;
-    background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+    background: #17a2b8;
     transition: width 0.3s ease;
   }
 
