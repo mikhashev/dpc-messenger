@@ -3,6 +3,25 @@
 
 import { writable, get } from 'svelte/store';
 
+// TypeScript types for dual provider system
+export interface ProviderInfo {
+    alias: string;
+    model: string;
+    type: string;
+    supports_vision: boolean;
+}
+
+export interface DefaultProvidersResponse {
+    default_provider: string;
+    vision_provider: string;
+}
+
+export interface ProvidersListResponse {
+    providers: ProviderInfo[];
+    default_provider: string;
+    vision_provider: string;
+}
+
 export const connectionStatus = writable<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
 export const nodeStatus = writable<any>(null);
 export const coreMessages = writable<any>(null);
@@ -19,8 +38,12 @@ export const tokenWarning = writable<any>(null);
 // Knowledge extraction failure store (Phase 4)
 export const extractionFailure = writable<any>(null);
 
-// AI Providers store
+// AI Providers store (legacy)
 export const availableProviders = writable<any>(null);
+
+// Dual Provider Stores (Phase 1: Dual Dropdowns)
+export const defaultProviders = writable<DefaultProvidersResponse | null>(null);
+export const providersList = writable<ProviderInfo[]>([]);
 
 // Peer Providers store (node_id -> provider list)
 export const peerProviders = writable<Map<string, any[]>>(new Map());
@@ -46,6 +69,9 @@ export const fileTransferOffer = writable<any>(null);  // Incoming file offer no
 export const fileTransferProgress = writable<any>(null);  // Progress updates
 export const fileTransferComplete = writable<any>(null);  // Completed transfers
 export const fileTransferCancelled = writable<any>(null);  // Cancelled transfers
+
+// Vision/Image stores (Phase 2)
+export const aiResponseWithImage = writable<any>(null);  // AI vision analysis responses
 
 // Track active file transfers (transfer_id -> {node_id, filename, direction, progress, status})
 export const activeFileTransfers = writable<Map<string, any>>(new Map());
@@ -171,6 +197,8 @@ export function connectToCoreService() {
             reconnectAttempts = 0;
             sendCommand("get_status");
             sendCommand("list_providers");
+            sendCommand("get_default_providers");  // Fetch default text/vision providers
+            sendCommand("get_providers_list");     // Fetch full provider list with vision flags
 
             // Stop polling
             if (pollingInterval) {
@@ -186,9 +214,15 @@ export function connectToCoreService() {
 
                 // Check if this is a response to a pending command
                 if (message.id && pendingCommands.has(message.id)) {
-                    const { resolve } = pendingCommands.get(message.id)!;
+                    const { resolve, reject } = pendingCommands.get(message.id)!;
                     pendingCommands.delete(message.id);
-                    resolve(message.payload);
+
+                    // Check for error responses
+                    if (message.status === "ERROR") {
+                        reject(new Error(message.payload?.message || "Command failed"));
+                    } else {
+                        resolve(message.payload);
+                    }
                 }
 
                 if (message.event === "status_update" ||
@@ -290,10 +324,25 @@ export function connectToCoreService() {
                         personalContext.set(message.payload.context);
                     }
                 }
-                // Handle list_providers response
+                // Handle list_providers response (legacy)
                 else if (message.command === "list_providers" && message.status === "OK") {
                     console.log("Available providers loaded:", message.payload);
                     availableProviders.set(message.payload);
+                }
+                // Handle get_default_providers response
+                else if (message.command === "get_default_providers" && message.status === "OK") {
+                    console.log("Default providers loaded:", message.payload);
+                    defaultProviders.set(message.payload);
+                }
+                // Handle get_providers_list response
+                else if (message.command === "get_providers_list" && message.status === "OK") {
+                    console.log("Providers list loaded:", message.payload);
+                    providersList.set(message.payload.providers);
+                    // Also update defaults in case they changed
+                    defaultProviders.set({
+                        default_provider: message.payload.default_provider,
+                        vision_provider: message.payload.vision_provider
+                    });
                 }
                 // Handle peer_providers_updated event
                 else if (message.event === "peer_providers_updated") {
@@ -305,6 +354,12 @@ export function connectToCoreService() {
                         return newMap;
                     });
                 }
+                // Handle providers_updated event (when user edits their own providers)
+                else if (message.event === "providers_updated") {
+                    console.log("Providers configuration updated, reloading provider list");
+                    sendCommand("get_providers_list");     // Reload full provider list
+                    sendCommand("get_default_providers");  // Reload defaults
+                }
                 // Handle firewall_rules_updated event
                 // NOTE: This event is triggered when user saves firewall rules via FirewallEditor.
                 // It allows UI components to reload data from privacy_rules.json without page refresh.
@@ -314,6 +369,11 @@ export function connectToCoreService() {
                 else if (message.event === "firewall_rules_updated") {
                     console.log("Firewall rules updated, triggering AI scope reload");
                     firewallRulesUpdated.set(message.payload);
+                }
+                // Handle AI vision response (Phase 2)
+                else if (message.event === "ai_response_with_image") {
+                    console.log("AI vision response received:", message.payload);
+                    aiResponseWithImage.set(message.payload);
                 }
                 // File transfer event handlers (Week 1)
                 else if (message.event === "file_transfer_offered") {
@@ -380,6 +440,42 @@ export function connectToCoreService() {
                         newMap.delete(message.payload.transfer_id);
                         return newMap;
                     });
+                }
+                else if (message.event === "image_offer_received") {
+                    console.log("Image offer received:", message.payload);
+
+                    // Get auto-accept threshold from firewall rules (default 25MB)
+                    const autoAcceptThresholdMB = 25; // TODO: Read from firewall rules store
+                    const sizeMB = message.payload.size_bytes / (1024 * 1024);
+
+                    if (sizeMB <= autoAcceptThresholdMB) {
+                        // Auto-accept small images
+                        console.log(`Auto-accepting image (${sizeMB.toFixed(2)} MB ≤ ${autoAcceptThresholdMB} MB)`);
+
+                        // Immediately accept transfer
+                        sendCommand("accept_file_transfer", {
+                            transfer_id: message.payload.transfer_id
+                        });
+
+                        // Add to active transfers for progress tracking
+                        activeFileTransfers.update(map => {
+                            const newMap = new Map(map);
+                            newMap.set(message.payload.transfer_id, {
+                                ...message.payload,
+                                status: "downloading",
+                                progress: 0,
+                                auto_accepted: true
+                            });
+                            return newMap;
+                        });
+
+                        // Log for user notification (optional)
+                        console.log(`Auto-downloading image from ${message.payload.sender_name}: ${message.payload.filename}`);
+                    } else {
+                        // Large image: Show acceptance dialog
+                        console.log(`Large image (${sizeMB.toFixed(2)} MB), prompting user`);
+                        fileTransferOffer.set(message.payload); // Reuse existing dialog
+                    }
                 }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)
@@ -486,20 +582,41 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'validate_firewall_rules',
             'get_providers_config',
             'save_providers_config',
+            'get_default_providers',  // Dual provider system
+            'get_providers_list',     // Dual provider system
             'query_ollama_model_info',
             'toggle_auto_knowledge_detection',
             'send_file',
+            'send_p2p_image',  // Screenshot sending
             'accept_file_transfer',
             'cancel_file_transfer',
-            'get_conversation_history'  // v0.11.2 - backend→frontend sync
+            'get_conversation_history',  // v0.11.2 - backend→frontend sync
+            'connect_to_peer',  // v0.12.0 - async connection with error handling
+            'connect_via_dht',   // v0.12.0 - async connection with error handling
+            'get_wizard_template',  // AI wizard - load wizard configuration
+            'ai_assisted_instruction_creation',  // AI wizard - generate instruction set (local)
+            'ai_assisted_instruction_creation_remote',  // AI wizard - generate instruction set (remote)
+            'get_available_templates',  // Template import - list templates
+            'import_instruction_template',  // Template import - import template
+            'create_instruction_set',  // Instruction management
+            'delete_instruction_set',  // Instruction management
+            'rename_instruction_set',  // Instruction management
+            'set_default_instruction_set',  // Instruction management
+            'get_instruction_set'  // Instruction management
         ].includes(command);
 
         if (expectsResponse) {
             return new Promise((resolve, reject) => {
-                // Calculate dynamic timeout for file operations
+                // Calculate dynamic timeout for file operations and connections
                 let timeout = 10000;  // Default: 10s
 
-                if (command === 'send_file') {
+                if (command === 'connect_to_peer' || command === 'connect_via_dht') {
+                    // Connection timeout: 30s (includes pre-flight check + TLS handshake + HELLO)
+                    timeout = 30000;
+                } else if (command === 'ai_assisted_instruction_creation_remote') {
+                    // AI instruction creation timeout: 60s (remote LLM processing can take time)
+                    timeout = 60000;
+                } else if (command === 'send_file') {
                     // Dynamic timeout based on file size (v0.11.2+)
                     const fileSizeBytes = payload.file_size_bytes || 0;
                     const fileSizeGB = fileSizeBytes / (1024 * 1024 * 1024);

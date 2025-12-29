@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "dpc-client-core"
-version = "0.11.3"
+version = "0.12.0"
 description = ""
 authors = ["Mike Shevchenko <legoogmiha@gmail.com>"]
 readme = "README.md"
@@ -18,7 +18,10 @@ httpx = ">=0.27.0,<0.28.0"
 aiortc = ">=1.6.0,<2.0.0"
 certifi = ">=2024.0.0"
 psutil = ">=5.9.0,<6.0.0"
+Pillow = ">=10.0.0,<11.0.0"
 fastapi = { version = "*", optional = true }
+transformers = ">=4.44.0,<5.0.0"
+sentencepiece = ">=0.2.0,<0.3.0"
 
 # Dependency from local library dpc-protocol
 dpc-protocol = { path = "../../dpc-protocol", develop = true }

@@ -5,10 +5,68 @@ import logging
 from logging.handlers import RotatingFileHandler
 import platform  # Import the platform module to check the OS
 import sys
+import re
 from dpc_client_core.service import CoreService
 from dpc_client_core.__version__ import __version__
 
 logger = logging.getLogger(__name__)
+
+
+class Base64TruncatingFilter(logging.Filter):
+    """
+    Logging filter that truncates base64 encoded data in log messages.
+
+    This prevents huge base64 strings (like images) from cluttering logs.
+    """
+
+    def __init__(self, max_length=30):
+        super().__init__()
+        self.max_length = max_length
+        # Multiple patterns to match base64 data in various formats:
+        # Pattern 1: 'data': 'iVBORw0KG...'  (Anthropic SDK format)
+        # Pattern 2: "data": "iVBORw0KG..."  (double quotes)
+        # Pattern 3: 'image_base64': 'data:image/png;base64,iVBORw0KG...'
+        self.patterns = [
+            re.compile(r"('data'\s*:\s*')([A-Za-z0-9+/=]{30,})"),  # Single quotes, data field
+            re.compile(r'("data"\s*:\s*")([A-Za-z0-9+/=]{30,})'),  # Double quotes, data field
+            re.compile(r"('image_base64'\s*:\s*')([A-Za-z0-9+/:;=,]{30,})"),  # Single quotes, image_base64 field
+            re.compile(r'("image_base64"\s*:\s*")([A-Za-z0-9+/:;=,]{30,})'),  # Double quotes, image_base64 field
+        ]
+
+    def filter(self, record):
+        """Truncate base64 data in the log message."""
+        # Apply patterns to the format string
+        if isinstance(record.msg, str):
+            for pattern in self.patterns:
+                record.msg = pattern.sub(
+                    lambda m: f"{m.group(1)}{m.group(2)[:self.max_length]}... (base64 truncated, ~{len(m.group(2))} chars)",
+                    record.msg
+                )
+
+        # Apply patterns to arguments (only if they're string or dict - leave other types alone)
+        if record.args:
+            if isinstance(record.args, dict):
+                # Single dict arg - convert to string and truncate
+                arg_str = str(record.args)
+                for pattern in self.patterns:
+                    arg_str = pattern.sub(
+                        lambda m: f"{m.group(1)}{m.group(2)[:self.max_length]}... (base64 truncated, ~{len(m.group(2))} chars)",
+                        arg_str
+                    )
+                record.args = (arg_str,)
+            elif isinstance(record.args, tuple):
+                # Tuple of args - only process if it contains exactly one dict
+                if len(record.args) == 1 and isinstance(record.args[0], dict):
+                    arg_str = str(record.args[0])
+                    for pattern in self.patterns:
+                        arg_str = pattern.sub(
+                            lambda m: f"{m.group(1)}{m.group(2)[:self.max_length]}... (base64 truncated, ~{len(m.group(2))} chars)",
+                            arg_str
+                        )
+                    record.args = (arg_str,)
+                # Otherwise, leave tuple unchanged (e.g., websocket.remote_address tuple)
+
+        return True
 
 
 def setup_logging(settings):
@@ -21,6 +79,9 @@ def setup_logging(settings):
     root_logger = logging.getLogger()
     root_logger.setLevel(getattr(logging, settings.get_log_level()))
 
+    # Create base64 truncating filter (applies to all handlers)
+    base64_filter = Base64TruncatingFilter(max_length=30)
+
     # File handler with rotation
     file_handler = RotatingFileHandler(
         log_file,
@@ -32,6 +93,7 @@ def setup_logging(settings):
     file_handler.setFormatter(logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     ))
+    file_handler.addFilter(base64_filter)  # Add base64 truncating filter
     root_logger.addHandler(file_handler)
 
     # Console handler (optional)
@@ -41,6 +103,7 @@ def setup_logging(settings):
         console_handler.setFormatter(logging.Formatter(
             '%(levelname)-8s %(message)s'
         ))
+        console_handler.addFilter(base64_filter)  # Add base64 truncating filter
         root_logger.addHandler(console_handler)
 
     # Per-module overrides

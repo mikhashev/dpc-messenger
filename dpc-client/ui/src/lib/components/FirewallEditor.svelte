@@ -26,6 +26,13 @@
       groups?: Record<string, any>;
       nodes?: Record<string, any>;
     };
+    image_transfer?: {
+      _comment?: string;
+      auto_accept_threshold_mb: number;
+      allowed_sources: string[];
+      max_size_mb: number;
+      save_screenshots_to_disk: boolean;
+    };
     notifications?: {
       _comment?: string;
       enabled: boolean;
@@ -38,7 +45,7 @@
   };
 
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'notifications' | 'peers' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'peers' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -184,16 +191,17 @@
   function addNodeToGroup(groupName: string) {
     if (!editedRules || !editedRules.node_groups) return;
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
-    if (nodeId && nodeId.startsWith('dpc-node-')) {
+    const trimmedNodeId = nodeId?.trim();
+    if (trimmedNodeId && trimmedNodeId.startsWith('dpc-node-')) {
       // Check for duplicates
-      if (editedRules.node_groups[groupName].includes(nodeId)) {
+      if (editedRules.node_groups[groupName].includes(trimmedNodeId)) {
         alert('This node is already in the group');
         return;
       }
       // Use immutable update to trigger Svelte reactivity
       editedRules.node_groups[groupName] = [
         ...editedRules.node_groups[groupName],
-        nodeId
+        trimmedNodeId
       ];
     } else if (nodeId) {
       alert('Node ID must start with "dpc-node-"');
@@ -209,14 +217,15 @@
   function addNodePermission() {
     if (!editedRules) return;
     const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
-    if (nodeId && nodeId.startsWith('dpc-node-')) {
+    const trimmedNodeId = nodeId?.trim();
+    if (trimmedNodeId && trimmedNodeId.startsWith('dpc-node-')) {
       if (!editedRules.nodes) editedRules.nodes = {};
       // Check for duplicates
-      if (editedRules.nodes[nodeId]) {
+      if (editedRules.nodes[trimmedNodeId]) {
         alert('This node already has permission rules');
         return;
       }
-      editedRules.nodes[nodeId] = {};
+      editedRules.nodes[trimmedNodeId] = {};
     } else if (nodeId) {
       alert('Node ID must start with "dpc-node-"');
     }
@@ -409,6 +418,60 @@
     delete editedRules.device_sharing[presetName][path];
     editedRules = editedRules;  // Trigger Svelte reactivity
   }
+
+  // File Transfer Management Functions
+  function addFileTransferGroup() {
+    if (!editedRules) return;
+    const groupName = prompt('Enter group name (e.g., friends, colleagues):');
+    if (groupName) {
+      if (!editedRules.file_transfer) editedRules.file_transfer = { groups: {}, nodes: {} };
+      if (!editedRules.file_transfer.groups) editedRules.file_transfer.groups = {};
+      // Check for duplicates
+      if (editedRules.file_transfer.groups[groupName]) {
+        alert('This group already has file transfer settings');
+        return;
+      }
+      editedRules.file_transfer.groups[groupName] = {
+        'file_transfer.allow': 'deny',
+        'file_transfer.max_size_mb': 100,
+        'file_transfer.allowed_mime_types': ['*']
+      };
+    }
+  }
+
+  function removeFileTransferGroup(groupName: string) {
+    if (!editedRules?.file_transfer?.groups) return;
+    delete editedRules.file_transfer.groups[groupName];
+    editedRules = editedRules;  // Trigger Svelte reactivity
+  }
+
+  function addFileTransferNode() {
+    if (!editedRules) return;
+    const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
+    const trimmedNodeId = nodeId?.trim();
+    if (trimmedNodeId && trimmedNodeId.startsWith('dpc-node-')) {
+      if (!editedRules.file_transfer) editedRules.file_transfer = { groups: {}, nodes: {} };
+      if (!editedRules.file_transfer.nodes) editedRules.file_transfer.nodes = {};
+      // Check for duplicates
+      if (editedRules.file_transfer.nodes[trimmedNodeId]) {
+        alert('This node already has file transfer settings');
+        return;
+      }
+      editedRules.file_transfer.nodes[trimmedNodeId] = {
+        'file_transfer.allow': 'deny',
+        'file_transfer.max_size_mb': 100,
+        'file_transfer.allowed_mime_types': ['*']
+      };
+    } else if (nodeId) {
+      alert('Node ID must start with "dpc-node-"');
+    }
+  }
+
+  function removeFileTransferNode(nodeId: string) {
+    if (!editedRules?.file_transfer?.nodes) return;
+    delete editedRules.file_transfer.nodes[nodeId];
+    editedRules = editedRules;  // Trigger Svelte reactivity
+  }
 </script>
 
 {#if open && rules}
@@ -488,6 +551,13 @@
           on:click={() => selectedTab = 'file-transfer'}
         >
           File Transfer
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'image-transfer'}
+          on:click={() => selectedTab = 'image-transfer'}
+        >
+          Image Transfer
         </button>
         <button
           class="tab"
@@ -838,7 +908,7 @@
 
             {#if !editMode}
               <div class="info-box">
-                <strong>Info:</strong> AI scopes allow you to restrict what context your local AI can access in different modes. Use @file_group:* notation (e.g., @work:*, @personal:*) to reference file groups.
+                <strong>Info:</strong> AI scopes allow you to restrict what context your local AI can access in different modes. Supports file groups (@work:*, @personal:*) AND field-level filtering (personal.json:profile.name, device_context.json:hardware.gpu.*). NEW in v0.12.1: Device context filtering.
               </div>
             {/if}
           </div>
@@ -918,13 +988,22 @@
 
             {#if displayRules?.file_transfer}
               <!-- Group Permissions Section -->
+              <h4>Group Permissions</h4>
+              {#if editMode && editedRules}
+                <button class="btn btn-add" on:click={addFileTransferGroup}>+ Add Group</button>
+              {/if}
+
               {#if displayRules.file_transfer.groups && Object.keys(displayRules.file_transfer.groups).length > 0}
-                <h4>Group Permissions</h4>
                 {#each Object.entries(displayRules.file_transfer.groups) as [groupName, groupSettings]}
                   {#if !groupName.startsWith('_')}
                     <div class="peer-card">
                       <div class="group-header">
                         <h5>Group: {groupName}</h5>
+                        {#if editMode}
+                          <button class="btn-icon" on:click={() => removeFileTransferGroup(groupName)} title="Delete group">
+                            🗑️
+                          </button>
+                        {/if}
                       </div>
                       <div class="subsection">
                         <div class="setting-item">
@@ -987,13 +1066,22 @@
               {/if}
 
               <!-- Node Permissions Section -->
+              <h4>Individual Node Permissions</h4>
+              {#if editMode && editedRules}
+                <button class="btn btn-add" on:click={addFileTransferNode}>+ Add Node</button>
+              {/if}
+
               {#if displayRules.file_transfer.nodes && Object.keys(displayRules.file_transfer.nodes).length > 0}
-                <h4>Individual Node Permissions</h4>
                 {#each Object.entries(displayRules.file_transfer.nodes) as [nodeId, nodeSettings]}
                   {#if !nodeId.startsWith('_')}
                     <div class="peer-card">
                       <div class="group-header">
                         <h5>{nodeId}</h5>
+                        {#if editMode}
+                          <button class="btn-icon" on:click={() => removeFileTransferNode(nodeId)} title="Delete node">
+                            🗑️
+                          </button>
+                        {/if}
                       </div>
                       <div class="subsection">
                         <div class="setting-item">
@@ -1061,6 +1149,124 @@
             {#if !editMode}
               <div class="info-box">
                 <strong>Info:</strong> File transfer permissions control who can send you files and what types/sizes are allowed. Supports per-node and per-group settings with MIME type wildcards (e.g., "image/*", "application/pdf"). Use Edit mode to modify permissions.
+              </div>
+            {/if}
+          </div>
+
+        {:else if selectedTab === 'image-transfer'}
+          <div class="section">
+            <h3>Image Transfer Settings</h3>
+            <p class="help-text">Configure screenshot/image transfer behavior for P2P chats (Ctrl+V clipboard paste).</p>
+
+            {#if displayRules?.image_transfer}
+              <div class="compute-settings">
+                <div class="setting-item">
+                  <span><strong>Auto-Accept Threshold (MB):</strong></span>
+                  {#if editMode && editedRules?.image_transfer}
+                    <input
+                      type="number"
+                      min="0"
+                      max="1000"
+                      bind:value={editedRules.image_transfer.auto_accept_threshold_mb}
+                      placeholder="25"
+                    />
+                  {:else}
+                    <span class="value">{displayRules.image_transfer.auto_accept_threshold_mb} MB</span>
+                  {/if}
+                </div>
+                <p class="help-text-small">Images smaller than this will be auto-accepted and displayed inline. Larger images will show an acceptance dialog.</p>
+
+                <div class="setting-item">
+                  <span><strong>Max Image Size (MB):</strong></span>
+                  {#if editMode && editedRules?.image_transfer}
+                    <input
+                      type="number"
+                      min="1"
+                      max="10000"
+                      bind:value={editedRules.image_transfer.max_size_mb}
+                      placeholder="100"
+                    />
+                  {:else}
+                    <span class="value">{displayRules.image_transfer.max_size_mb} MB</span>
+                  {/if}
+                </div>
+                <p class="help-text-small">Maximum allowed image size. Images larger than this will be rejected.</p>
+
+                <div class="subsection">
+                  <h4>Allowed Sources</h4>
+                  <p class="help-text-small">Control which image sources are permitted for transfer.</p>
+                  <div class="notification-events">
+                    {#each ['clipboard', 'file', 'camera'] as source}
+                      <div class="notification-event-item">
+                        {#if editMode && editedRules?.image_transfer}
+                          <label for="source-{source}">
+                            <input
+                              type="checkbox"
+                              id="source-{source}"
+                              checked={editedRules.image_transfer.allowed_sources.includes(source)}
+                              on:change={(e) => {
+                                if (editedRules?.image_transfer) {
+                                  const target = e.currentTarget as HTMLInputElement;
+                                  if (target.checked) {
+                                    if (!editedRules.image_transfer.allowed_sources.includes(source)) {
+                                      editedRules.image_transfer.allowed_sources = [
+                                        ...editedRules.image_transfer.allowed_sources,
+                                        source
+                                      ];
+                                    }
+                                  } else {
+                                    editedRules.image_transfer.allowed_sources =
+                                      editedRules.image_transfer.allowed_sources.filter(s => s !== source);
+                                  }
+                                }
+                              }}
+                            />
+                            <span class="event-name">{source}</span>
+                          </label>
+                        {:else}
+                          <label for="source-{source}">
+                            <input
+                              type="checkbox"
+                              id="source-{source}"
+                              checked={displayRules.image_transfer.allowed_sources.includes(source)}
+                              disabled
+                            />
+                            <span class="event-name">{source}</span>
+                          </label>
+                        {/if}
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+
+                <div class="setting-item" style="margin-top: 1rem;">
+                  <label>
+                    {#if editMode && editedRules?.image_transfer}
+                      <input
+                        type="checkbox"
+                        id="save-screenshots"
+                        bind:checked={editedRules.image_transfer.save_screenshots_to_disk}
+                      />
+                    {:else}
+                      <input
+                        type="checkbox"
+                        id="save-screenshots-display"
+                        checked={displayRules.image_transfer.save_screenshots_to_disk}
+                        disabled
+                      />
+                    {/if}
+                    <strong>Save Screenshots to Disk</strong>
+                  </label>
+                </div>
+                <p class="help-text-small">When disabled (default), screenshots are sent/received but not permanently saved. Only thumbnails are kept for display.</p>
+              </div>
+            {:else}
+              <p class="empty">Image transfer settings not configured.</p>
+            {/if}
+
+            {#if !editMode}
+              <div class="info-box" style="margin-top: 1.5rem;">
+                <strong>Info:</strong> Image transfer settings control screenshot/image sharing behavior in P2P chats. Auto-accept threshold determines which images are displayed inline vs. requiring user approval. When "Save Screenshots to Disk" is disabled, images are transmitted but not stored permanently (privacy-conscious default).
               </div>
             {/if}
           </div>

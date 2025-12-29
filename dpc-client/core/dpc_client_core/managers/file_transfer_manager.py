@@ -38,7 +38,7 @@ import base64
 import uuid
 import zlib  # For CRC32 checksums
 from pathlib import Path
-from typing import Optional, Dict, Callable, List, TYPE_CHECKING
+from typing import Optional, Dict, Callable, List, Any, TYPE_CHECKING
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -102,6 +102,7 @@ class FileTransfer:
     chunks_failed: Optional[set] = None  # Failed chunk indices
     retry_count: Optional[dict] = None   # Chunk index -> retry count
     max_retries: int = 3                 # Max retries per chunk
+    image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.)
 
 
 class FileTransferManager:
@@ -347,7 +348,8 @@ class FileTransferManager:
         self,
         node_id: str,
         file_path: Path,
-        progress_callback: Optional[Callable[[str, int, int], None]] = None
+        progress_callback: Optional[Callable[[str, int, int], None]] = None,
+        image_metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -356,6 +358,11 @@ class FileTransferManager:
             node_id: Target peer node ID
             file_path: Path to file to send
             progress_callback: Optional callback(transfer_id, chunks_sent, total_chunks)
+            image_metadata: Optional image metadata (for image transfers only):
+                - dimensions: {width: int, height: int}
+                - thumbnail_base64: str (data URL)
+                - source: str (e.g., "clipboard")
+                - captured_at: str (ISO timestamp)
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -425,22 +432,29 @@ class FileTransferManager:
             total_chunks=total_chunks,
             file_path=file_path,
             progress_callback=progress_callback,
-            chunk_hashes=chunk_hashes  # v0.11.1: Store for retry requests
+            chunk_hashes=chunk_hashes,  # v0.11.1: Store for retry requests
+            image_metadata=image_metadata  # Store image metadata for screenshots
         )
         self.active_transfers[transfer_id] = transfer
 
-        # Send FILE_OFFER
+        # Send FILE_OFFER (with optional image_metadata for Phase 2.3)
+        payload = {
+            "transfer_id": transfer_id,
+            "filename": transfer.filename,
+            "size_bytes": file_size,
+            "hash": file_hash,
+            "mime_type": mime_type,
+            "chunk_size": self.chunk_size,
+            "chunk_hashes": chunk_hashes  # v0.11.1: CRC32 per chunk for integrity
+        }
+
+        # Add image metadata if provided (Phase 2.3: Vision + P2P Image Transfer)
+        if image_metadata:
+            payload["image_metadata"] = image_metadata
+
         await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_OFFER",
-            "payload": {
-                "transfer_id": transfer_id,
-                "filename": transfer.filename,
-                "size_bytes": file_size,
-                "hash": file_hash,
-                "mime_type": mime_type,
-                "chunk_size": self.chunk_size,
-                "chunk_hashes": chunk_hashes  # v0.11.1: CRC32 per chunk for integrity
-            }
+            "payload": payload
         })
 
         logger.info(f"File transfer initiated: {file_path.name} ({file_size} bytes) to {node_id}")
@@ -625,17 +639,32 @@ class FileTransferManager:
             # Compute hash for FILE_COMPLETE even if verification disabled
             computed_hash = hashlib.sha256(assembled_data).hexdigest()
 
-        # Save file
-        storage_path = self._get_peer_storage_path(node_id, "files")
+        # Detect if this is an image transfer
+        is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
+                   and transfer.image_metadata is not None)
+
+        # Save file - use screenshots subdirectory for images
+        subdir = "files/screenshots" if is_image else "files"
+        storage_path = self._get_peer_storage_path(node_id, subdir)
         # Use hash in filename to avoid collisions
         safe_filename = f"{transfer.filename.replace('/', '_')}"
         file_path = storage_path / safe_filename
 
-        with open(file_path, 'wb') as f:
-            f.write(assembled_data)
+        # Check privacy settings - allow disabling screenshot storage
+        save_to_disk = True
+        if is_image and self.firewall:
+            img_rules = self.firewall.rules.get("image_transfer", {})
+            save_to_disk = img_rules.get("save_screenshots_to_disk", True)
 
-        transfer.status = TransferStatus.COMPLETED
-        logger.info(f"File saved: {file_path}")
+        if save_to_disk:
+            with open(file_path, 'wb') as f:
+                f.write(assembled_data)
+            transfer.status = TransferStatus.COMPLETED
+            logger.info(f"{'Screenshot' if is_image else 'File'} saved: {file_path}")
+        else:
+            # Don't save to disk - use thumbnail for display only
+            transfer.status = TransferStatus.COMPLETED
+            logger.info(f"Screenshot received but not saved to disk (save_screenshots_to_disk=false): {transfer.filename}")
 
         # Send FILE_COMPLETE
         await self.p2p_manager.send_message_to_peer(node_id, {
@@ -660,23 +689,44 @@ class FileTransferManager:
 
             size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
 
+            # Detect if this is an image transfer
+            is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
+                       and transfer.image_metadata is not None)
+
+            # Build attachment
+            attachment = {
+                "type": "image" if is_image else "file",
+                "filename": transfer.filename,
+                "size_bytes": transfer.size_bytes,
+                "size_mb": size_mb,
+                "hash": transfer.hash,
+                "mime_type": transfer.mime_type,
+                "transfer_id": transfer.transfer_id,
+                "status": "completed"
+            }
+
+            # Add image-specific fields
+            if is_image:
+                # Only include file_path if file was actually saved to disk
+                if save_to_disk:
+                    attachment["file_path"] = str(file_path)
+                if transfer.image_metadata:
+                    attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
+                    attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
+
+            # Extract text caption from image_metadata if available
+            caption_text = ""
+            if is_image and transfer.image_metadata:
+                caption_text = transfer.image_metadata.get("text", "")
+
             await self.local_api.broadcast_event("new_p2p_message", {
                 "sender_node_id": node_id,
                 "sender_name": sender_name,
-                "text": f"{transfer.filename} ({size_mb} MB)",
+                "text": caption_text,  # Sender's caption (empty if not provided)
                 "message_id": message_id,
-                "attachments": [{
-                    "type": "file",
-                    "filename": transfer.filename,
-                    "size_bytes": transfer.size_bytes,
-                    "size_mb": size_mb,
-                    "hash": transfer.hash,
-                    "mime_type": transfer.mime_type,
-                    "transfer_id": transfer.transfer_id,
-                    "status": "completed"
-                }]
+                "attachments": [attachment]
             })
-            logger.debug(f"Broadcasted file received message to UI: {transfer.filename}")
+            logger.debug(f"Broadcasted {'image' if is_image else 'file'} received message to UI: {transfer.filename}")
 
             # Broadcast completion event to hide active transfer panel
             await self.local_api.broadcast_event("file_transfer_complete", {
@@ -713,15 +763,24 @@ class FileTransferManager:
         transfer.status = TransferStatus.COMPLETED
         logger.info(f"File transfer completed: {transfer.filename}")
 
-        # Broadcast completion to UI (sender side)
-        if self.local_api and transfer.direction == "upload":
-            await self.local_api.broadcast_event("file_transfer_complete", {
-                "transfer_id": transfer_id,
-                "node_id": node_id,
-                "filename": transfer.filename,
-                "direction": "upload",
-                "status": "completed"
-            })
+        # Detect if this is an image transfer
+        is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
+                   and transfer.image_metadata is not None)
+
+        # Check privacy settings - delete screenshot if save_screenshots_to_disk is false
+        if is_image and transfer.file_path and self.firewall:
+            img_rules = self.firewall.rules.get("image_transfer", {})
+            save_to_disk = img_rules.get("save_screenshots_to_disk", True)
+            logger.debug(f"Screenshot cleanup check: save_to_disk={save_to_disk}, file_exists={transfer.file_path.exists()}")
+
+            if not save_to_disk and transfer.file_path.exists():
+                transfer.file_path.unlink()  # Delete the screenshot file
+                logger.info(f"Deleted screenshot after upload (save_screenshots_to_disk=false): {transfer.file_path}")
+        elif is_image:
+            logger.debug(f"Screenshot cleanup skipped: file_path={transfer.file_path}, firewall={self.firewall is not None}")
+
+        # Note: FileCompleteHandler broadcasts new_p2p_message and file_transfer_complete
+        # for upload direction, so we don't duplicate broadcasts here
 
         # Cleanup
         del self.active_transfers[transfer_id]  # Remove from active transfers

@@ -59,15 +59,18 @@ from .message_handlers.file_chunk_handler import FileChunkHandler
 from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
+from .message_handlers.image_handler import ImageOfferHandler
 from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
 from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
 )
 from .managers.file_transfer_manager import FileTransferManager
+from .managers.prompt_manager import PromptManager
+from .managers.instruction_manager import InstructionManager
 from .session_manager import NewSessionProposalManager
 from dpc_protocol.pcm_core import (
-    PCMCore, PersonalContext, InstructionBlock,
-    load_instructions, save_instructions, migrate_instructions_from_personal_context
+    PCMCore, PersonalContext, InstructionBlock, InstructionSet,
+    InstructionSetManager, load_instructions, save_instructions
 )
 from dpc_protocol.utils import parse_dpc_uri
 from datetime import datetime, timezone
@@ -123,12 +126,26 @@ class CoreService:
         # Knowledge Architecture components (Phase 1-6)
         self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
 
-        # Migrate instructions to separate file (one-time operation)
-        migrate_instructions_from_personal_context()
+        # Load AI instruction sets from instructions.json (v2.0)
+        self.instruction_manager = InstructionManager(
+            config_dir=DPC_HOME_DIR,
+            event_broadcaster=None  # Will be set after LocalApiServer is initialized
+        )
+        self.instruction_set = self.instruction_manager.instruction_set
+        logger.info("Loaded %d instruction set(s) from instructions.json", len(self.instruction_set.sets))
 
-        # Load AI instructions from instructions.json
-        self.instructions = load_instructions()
-        logger.info("AI instructions loaded from instructions.json")
+        # Set event broadcaster now that LocalApiServer is initialized
+        self.instruction_manager.event_broadcaster = self.local_api
+
+        # Update personal.json with instructions.json reference (if not already present)
+        try:
+            context = self.pcm_core.load_context()
+            if not self._has_instructions_reference(context):
+                context = self._add_instructions_reference(context)
+                self.pcm_core.save_context(context)
+                logger.info("Added instructions.json reference to personal.json metadata")
+        except Exception as e:
+            logger.warning("Failed to add instructions.json reference: %s", e)
 
         # Auto-collect device context on startup (if enabled)
         self.device_context = None
@@ -226,6 +243,12 @@ class CoreService:
         # Store peer metadata (names, profiles, etc.)
         self.peer_metadata: Dict[str, Dict[str, Any]] = {}
 
+        # Prompt manager (assembles prompts with context and history) - v0.12.0 refactor
+        self.prompt_manager = PromptManager(
+            instruction_set=self.instruction_set,
+            peer_metadata=self.peer_metadata
+        )
+
         # Track pending inference requests (for request-response matching)
         self._pending_inference_requests: Dict[str, asyncio.Future] = {}
 
@@ -245,6 +268,31 @@ class CoreService:
         # Initialize message router and register handlers
         self.message_router = MessageRouter()
         self._register_message_handlers()
+
+    def _has_instructions_reference(self, context: PersonalContext) -> bool:
+        """Check if personal.json has instructions.json reference in metadata."""
+        if not hasattr(context, 'metadata') or context.metadata is None:
+            return False
+        external_contexts = context.metadata.get('external_contexts', {})
+        return 'instructions' in external_contexts
+
+    def _add_instructions_reference(self, context: PersonalContext) -> PersonalContext:
+        """Add instructions.json reference to personal.json metadata."""
+        from datetime import datetime, timezone
+
+        if not hasattr(context, 'metadata') or context.metadata is None:
+            context.metadata = {}
+
+        if 'external_contexts' not in context.metadata:
+            context.metadata['external_contexts'] = {}
+
+        context.metadata['external_contexts']['instructions'] = {
+            "file": "instructions.json",
+            "description": "AI behavior instructions",
+            "last_updated": datetime.now(timezone.utc).isoformat()
+        }
+
+        return context
 
     def _register_message_handlers(self):
         """Register all P2P message handlers with the router."""
@@ -283,8 +331,8 @@ class CoreService:
         self.message_router.register_handler(RelayMessageHandler(self))  # Message forwarding
         self.message_router.register_handler(RelayDisconnectHandler(self))  # Session cleanup
 
-        # File transfer handlers
-        self.message_router.register_handler(FileOfferHandler(self))
+        # File transfer handlers (v0.11.3: ImageOfferHandler replaces FileOfferHandler, handles both files and images)
+        self.message_router.register_handler(ImageOfferHandler(self))
         self.message_router.register_handler(FileAcceptHandler(self))
         self.message_router.register_handler(FileChunkHandler(self))
         self.message_router.register_handler(FileCompleteHandler(self))
@@ -1267,6 +1315,45 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def get_default_providers(self) -> Dict[str, Any]:
+        """
+        Get default provider configuration for UI initialization.
+
+        Returns:
+            Dictionary with:
+            - default_provider: str (text provider alias)
+            - vision_provider: str (vision provider alias)
+        """
+        return {
+            "default_provider": self.llm_manager.default_provider or "",
+            "vision_provider": self.llm_manager.vision_provider or ""
+        }
+
+    async def get_providers_list(self) -> Dict[str, Any]:
+        """
+        Get list of available providers for UI dropdowns.
+
+        Returns:
+            Dictionary with:
+            - providers: List of provider dicts with alias, model, type, supports_vision
+            - default_provider: Default text provider alias
+            - vision_provider: Default vision provider alias
+        """
+        providers_info = []
+        for alias, provider in self.llm_manager.providers.items():
+            providers_info.append({
+                "alias": alias,
+                "model": provider.model,
+                "type": provider.__class__.__name__.replace("Provider", ""),  # "Ollama", "OpenAICompatible", etc.
+                "supports_vision": provider.supports_vision()
+            })
+
+        return {
+            "providers": providers_info,
+            "default_provider": self.llm_manager.default_provider or "",
+            "vision_provider": self.llm_manager.vision_provider or ""
+        }
+
     async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
         Save and validate providers configuration.
@@ -1413,6 +1500,11 @@ class CoreService:
         if default and default not in provider_aliases:
             errors.append(f"Default provider '{default}' not found in providers list")
 
+        # Check vision_provider exists (optional field)
+        vision = config_dict.get("vision_provider")
+        if vision and vision not in provider_aliases:
+            errors.append(f"Vision provider '{vision}' not found in providers list")
+
         return errors
 
     def set_peer_metadata(self, node_id: str, **kwargs):
@@ -1504,9 +1596,6 @@ class CoreService:
             if "profile" in context_dict:
                 current.profile.__dict__.update(context_dict["profile"])
 
-            if "instruction" in context_dict:
-                current.instruction.__dict__.update(context_dict["instruction"])
-
             if "knowledge" in context_dict:
                 # For knowledge, we need to be more careful with the structure
                 # This is a simplified version - full implementation would handle topics properly
@@ -1597,103 +1686,761 @@ class CoreService:
             }
 
     async def get_instructions(self) -> Dict[str, Any]:
-        """Load and return AI instructions for UI display.
+        """Load and return all AI instruction sets for UI display (v2.0).
 
         UI Integration: Called when user opens InstructionsEditor component.
-        Returns the InstructionBlock with all settings.
+        Returns all instruction sets with schema version and default set.
         """
         try:
-            instructions = load_instructions()
+            instruction_sets = self.instruction_manager.get_all()
             return {
                 "status": "success",
-                "instructions": asdict(instructions)
+                "instruction_sets": instruction_sets
             }
         except Exception as e:
-            logger.error("Error loading instructions: %s", e, exc_info=True)
+            logger.error("Error loading instruction sets: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
             }
 
-    async def save_instructions(self, instructions_dict: Dict[str, Any]) -> Dict[str, Any]:
-        """Save updated AI instructions from UI editor.
+    async def save_instructions(self, set_key: str, instructions_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Save updated AI instruction set from UI editor (v2.0).
 
         UI Integration: Called when user clicks 'Save' in InstructionsEditor.
 
         Args:
+            set_key: Key of the instruction set to save
             instructions_dict: Dictionary representation of InstructionBlock
 
         Returns:
             Dict with status and message
         """
         try:
-            # Create InstructionBlock from dict
-            instructions = InstructionBlock(
-                primary=instructions_dict.get('primary', InstructionBlock().primary),
-                context_update=instructions_dict.get('context_update', InstructionBlock().context_update),
-                verification_protocol=instructions_dict.get('verification_protocol', InstructionBlock().verification_protocol),
-                learning_support=instructions_dict.get('learning_support', InstructionBlock().learning_support),
-                bias_mitigation=instructions_dict.get('bias_mitigation', InstructionBlock().bias_mitigation),
-                collaboration_mode=instructions_dict.get('collaboration_mode', 'individual'),
-                consensus_required=instructions_dict.get('consensus_required', True),
-                ai_curation_enabled=instructions_dict.get('ai_curation_enabled', True),
-                dissent_encouraged=instructions_dict.get('dissent_encouraged', True)
-            )
+            success = self.instruction_manager.save_set(set_key, instructions_dict)
 
-            # Save to disk
-            save_instructions(instructions)
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
 
-            # Update in memory
-            self.instructions = instructions
+                # Update PromptManager with new instruction set
+                self.prompt_manager.instruction_set = self.instruction_set
 
-            # Emit event to UI
-            await self.local_api.broadcast_event("instructions_updated", {
-                "message": "AI instructions saved successfully"
-            })
-
-            return {
-                "status": "success",
-                "message": "AI instructions saved successfully"
-            }
+                return {
+                    "status": "success",
+                    "message": f"Instruction set '{set_key}' saved successfully"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to save instruction set '{set_key}'"
+                }
 
         except Exception as e:
-            logger.error("Error saving instructions: %s", e, exc_info=True)
+            logger.error("Error saving instruction set '%s': %s", set_key, e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
             }
 
     async def reload_instructions(self) -> Dict[str, Any]:
-        """Reload AI instructions from disk.
+        """Reload AI instruction sets from disk (v2.0).
 
         UI Integration: Called when user clicks 'Reload' or when external changes detected.
 
         Returns:
-            Dict with status, message, and updated instructions
+            Dict with status, message, and updated instruction sets
         """
         try:
-            instructions = load_instructions()
+            success = self.instruction_manager.reload()
 
-            # Update in memory
-            self.instructions = instructions
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
 
-            # Emit event to UI
-            await self.local_api.broadcast_event("instructions_reloaded", {
-                "instructions": asdict(instructions)
-            })
+                # Update PromptManager with new instruction set
+                self.prompt_manager.instruction_set = self.instruction_set
 
-            return {
-                "status": "success",
-                "message": "AI instructions reloaded from disk",
-                "instructions": asdict(instructions)
-            }
+                return {
+                    "status": "success",
+                    "message": "AI instruction sets reloaded from disk",
+                    "instruction_sets": self.instruction_manager.get_all()
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": "Failed to reload instruction sets"
+                }
 
         except Exception as e:
-            logger.error("Error reloading instructions: %s", e, exc_info=True)
+            logger.error("Error reloading instruction sets: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
             }
+
+    async def get_instruction_set(self, set_key: str) -> Dict[str, Any]:
+        """Get a specific instruction set.
+
+        Args:
+            set_key: Key of the instruction set to retrieve
+
+        Returns:
+            Dict with status and instruction set data
+        """
+        try:
+            instruction_set = self.instruction_manager.get_set(set_key)
+
+            if instruction_set:
+                return {
+                    "status": "success",
+                    "instruction_set": instruction_set
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Instruction set '{set_key}' not found"
+                }
+
+        except Exception as e:
+            logger.error("Error getting instruction set '%s': %s", set_key, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def create_instruction_set(self, set_key: str, name: str, description: str = "") -> Dict[str, Any]:
+        """Create a new instruction set.
+
+        UI Integration: Called when user creates a new instruction set.
+
+        Args:
+            set_key: Unique key for the instruction set (kebab-case)
+            name: Display name for the instruction set
+            description: Optional description
+
+        Returns:
+            Dict with status, message, and created instruction set
+        """
+        try:
+            instruction_set = self.instruction_manager.create_set(set_key, name, description)
+
+            if instruction_set:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Instruction set '{name}' created successfully",
+                    "instruction_set": instruction_set
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to create instruction set '{name}'"
+                }
+
+        except Exception as e:
+            logger.error("Error creating instruction set '%s': %s", set_key, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def delete_instruction_set(self, set_key: str) -> Dict[str, Any]:
+        """Delete an instruction set.
+
+        UI Integration: Called when user deletes an instruction set.
+
+        Args:
+            set_key: Key of the instruction set to delete
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            success = self.instruction_manager.delete_set(set_key)
+
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Instruction set '{set_key}' deleted successfully"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to delete instruction set '{set_key}' (may be protected)"
+                }
+
+        except Exception as e:
+            logger.error("Error deleting instruction set '%s': %s", set_key, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def rename_instruction_set(self, old_key: str, new_key: str, new_name: str) -> Dict[str, Any]:
+        """Rename an instruction set.
+
+        UI Integration: Called when user renames an instruction set.
+
+        Args:
+            old_key: Current key of the instruction set
+            new_key: New key for the instruction set
+            new_name: New display name
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            success = self.instruction_manager.rename_set(old_key, new_key, new_name)
+
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Instruction set renamed from '{old_key}' to '{new_key}'"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to rename instruction set '{old_key}'"
+                }
+
+        except Exception as e:
+            logger.error("Error renaming instruction set '%s': %s", old_key, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def set_default_instruction_set(self, set_key: str) -> Dict[str, Any]:
+        """Set the default instruction set.
+
+        UI Integration: Called when user sets a default instruction set.
+
+        Args:
+            set_key: Key of the instruction set to make default
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            success = self.instruction_manager.set_default(set_key)
+
+            if success:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Default instruction set changed to '{set_key}'"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to set default instruction set to '{set_key}'"
+                }
+
+        except Exception as e:
+            logger.error("Error setting default instruction set: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def import_instruction_template(self, template_file: str, set_key: str, set_name: str) -> Dict[str, Any]:
+        """Import instruction template from file.
+
+        UI Integration: Called when user imports a template.
+
+        Args:
+            template_file: Path to template JSON file
+            set_key: Key for the new instruction set
+            set_name: Display name for the new instruction set
+
+        Returns:
+            Dict with status, message, and imported instruction set
+        """
+        try:
+            from pathlib import Path
+            template_path = Path(template_file)
+
+            if not template_path.exists():
+                return {
+                    "status": "error",
+                    "message": f"Template file not found: {template_file}"
+                }
+
+            instruction_set = self.instruction_manager.import_template(template_path, set_key, set_name)
+
+            if instruction_set:
+                # Update in-memory reference
+                self.instruction_set = self.instruction_manager.instruction_set
+
+                return {
+                    "status": "success",
+                    "message": f"Template imported as '{set_name}'",
+                    "instruction_set": instruction_set
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to import template from {template_file}"
+                }
+
+        except Exception as e:
+            logger.error("Error importing template: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_available_templates(self) -> Dict[str, Any]:
+        """Get list of available instruction set templates.
+
+        UI Integration: Called to populate template picker dialog.
+
+        Returns:
+            Dict with status and list of templates with metadata
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            # Get templates directory (go up to dpc-client/core/)
+            templates_dir = Path(__file__).parent.parent / "templates" / "instructions"
+
+            if not templates_dir.exists():
+                logger.warning("Templates directory not found: %s", templates_dir)
+                return {
+                    "status": "success",
+                    "templates": []
+                }
+
+            templates = []
+
+            # Scan for JSON template files (exclude README.md)
+            for template_file in templates_dir.glob("*.json"):
+                try:
+                    with open(template_file, 'r', encoding='utf-8') as f:
+                        template_data = json.load(f)
+
+                    templates.append({
+                        "file": str(template_file),
+                        "filename": template_file.name,
+                        "key": template_file.stem,  # filename without extension
+                        "name": template_data.get("name", template_file.stem),
+                        "description": template_data.get("description", ""),
+                    })
+
+                except Exception as e:
+                    logger.warning("Error reading template %s: %s", template_file, e)
+                    continue
+
+            # Sort templates by name
+            templates.sort(key=lambda t: t["name"])
+
+            return {
+                "status": "success",
+                "templates": templates
+            }
+
+        except Exception as e:
+            logger.error("Error listing templates: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "templates": []
+            }
+
+    async def get_wizard_template(self) -> Dict[str, Any]:
+        """Get wizard template configuration for AI-assisted instruction creation.
+
+        UI Integration: Called when user starts the AI wizard to get question sequence
+        and system instructions.
+
+        Returns:
+            Dict with wizard configuration (system_instruction, question_sequence, etc.)
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            # Load wizard template (go up to dpc-client/core/)
+            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
+
+            if not wizard_file.exists():
+                logger.error("Wizard template not found: %s", wizard_file)
+                return {
+                    "status": "error",
+                    "message": "Wizard template configuration not found"
+                }
+
+            with open(wizard_file, 'r', encoding='utf-8') as f:
+                wizard_config = json.load(f)
+
+            return {
+                "status": "success",
+                "wizard": wizard_config
+            }
+
+        except Exception as e:
+            logger.error("Error loading wizard template: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def ai_assisted_instruction_creation(
+        self,
+        user_responses: Dict[str, str],
+        provider: str = "ollama",
+        model: str = None
+    ) -> Dict[str, Any]:
+        """Generate instruction set using AI based on user responses.
+
+        UI Integration: Called after wizard collects user's answers to questions.
+        Uses AI to generate a custom instruction set tailored to user's needs.
+
+        Args:
+            user_responses: Dict mapping question IDs to user's answers
+            provider: AI provider to use (ollama, openai, anthropic)
+            model: Model name (optional, uses provider default if not specified)
+
+        Returns:
+            Dict with generated instruction set data or error
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            # Load wizard template for generation prompt (go up to dpc-client/core/)
+            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
+            with open(wizard_file, 'r', encoding='utf-8') as f:
+                wizard_config = json.load(f)
+
+            # Build prompt using template
+            generation_prompt = wizard_config["generation_prompt_template"].format(
+                use_case=user_responses.get("use_case", "general conversation"),
+                learning_style=user_responses.get("learning_style", "adaptive"),
+                ai_behaviors=user_responses.get("ai_behaviors", "helpful and clear"),
+                challenges=user_responses.get("challenges", "none specified"),
+                verification=user_responses.get("verification", "provide reasoning")
+            )
+
+            # Add system instruction
+            system_instruction = wizard_config["system_instruction"]
+            full_prompt = f"{system_instruction}\n\n{generation_prompt}"
+
+            # Execute AI query to generate instruction set
+            logger.info("Generating instruction set via AI wizard (provider=%s, model=%s)", provider, model)
+
+            result = await self.llm_manager.query(
+                prompt=full_prompt,
+                provider_alias=provider,
+                return_metadata=True,
+                model=model,
+                temperature=0.7
+            )
+
+            # Parse AI response (should be JSON)
+            response_text = result.get("response", "")
+
+            # Extract JSON from response (handle markdown code blocks)
+            if "```json" in response_text:
+                # Extract from markdown code block
+                start = response_text.find("```json") + 7
+                end = response_text.find("```", start)
+                json_text = response_text[start:end].strip()
+            elif "```" in response_text:
+                # Generic code block
+                start = response_text.find("```") + 3
+                end = response_text.find("```", start)
+                json_text = response_text[start:end].strip()
+            else:
+                # Assume entire response is JSON
+                json_text = response_text.strip()
+
+            # Parse JSON
+            try:
+                instruction_data = json.loads(json_text)
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse AI response as JSON: %s", e)
+                logger.debug("AI response: %s", response_text[:500])
+                return {
+                    "status": "error",
+                    "message": f"Failed to parse AI response: {e}",
+                    "raw_response": response_text
+                }
+
+            # Validate required fields
+            required_fields = ["name", "description", "primary"]
+            missing_fields = [f for f in required_fields if f not in instruction_data]
+            if missing_fields:
+                return {
+                    "status": "error",
+                    "message": f"Generated instruction set missing required fields: {missing_fields}",
+                    "instruction_data": instruction_data
+                }
+
+            return {
+                "status": "success",
+                "instruction_data": instruction_data,
+                "message": "Instruction set generated successfully"
+            }
+
+        except Exception as e:
+            logger.error("Error in AI-assisted instruction creation: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def ai_assisted_instruction_creation_remote(
+        self,
+        user_responses: Dict[str, str],
+        peer_node_id: str
+    ) -> Dict[str, Any]:
+        """Generate instruction set using AI via remote inference.
+
+        UI Integration: Called when user selects "Remote Inference" in wizard.
+        Uses a peer's AI to generate the instruction set.
+
+        Args:
+            user_responses: Dict mapping question IDs to user's answers
+            peer_node_id: Node ID of peer to use for remote inference
+
+        Returns:
+            Dict with generated instruction set data or error
+        """
+        try:
+            from pathlib import Path
+            import json
+
+            # Load wizard template for generation prompt
+            wizard_file = Path(__file__).parent.parent / "templates" / "wizard_template.json"
+            with open(wizard_file, 'r', encoding='utf-8') as f:
+                wizard_config = json.load(f)
+
+            # Build prompt using template
+            generation_prompt = wizard_config["generation_prompt_template"].format(
+                use_case=user_responses.get("use_case", "general conversation"),
+                learning_style=user_responses.get("learning_style", "adaptive"),
+                ai_behaviors=user_responses.get("ai_behaviors", "helpful and clear"),
+                challenges=user_responses.get("challenges", "none specified"),
+                verification=user_responses.get("verification", "provide reasoning")
+            )
+
+            # Add system instruction
+            system_instruction = wizard_config["system_instruction"]
+            full_prompt = f"{system_instruction}\n\n{generation_prompt}"
+
+            # Execute AI query via remote inference
+            logger.info("Generating instruction set via remote AI wizard (peer=%s)", peer_node_id)
+
+            result = await self.inference_orchestrator.execute_inference(
+                prompt=full_prompt,
+                compute_host=peer_node_id
+            )
+
+            # Parse AI response (should be JSON)
+            response_text = result.get("response", "")
+
+            # Extract JSON from response (handle markdown code blocks)
+            if "```json" in response_text:
+                # Extract from markdown code block
+                start = response_text.find("```json") + 7
+                end = response_text.find("```", start)
+                json_text = response_text[start:end].strip()
+            elif "```" in response_text:
+                # Generic code block
+                start = response_text.find("```") + 3
+                end = response_text.find("```", start)
+                json_text = response_text[start:end].strip()
+            else:
+                # Assume entire response is JSON
+                json_text = response_text.strip()
+
+            # Parse JSON
+            try:
+                instruction_data = json.loads(json_text)
+            except json.JSONDecodeError as e:
+                logger.error("Failed to parse AI response as JSON: %s", e)
+                logger.debug("AI response: %s", response_text[:500])
+                return {
+                    "status": "error",
+                    "message": f"Failed to parse AI response: {e}",
+                    "raw_response": response_text
+                }
+
+            # Validate required fields
+            required_fields = ["name", "description", "primary"]
+            missing_fields = [f for f in required_fields if f not in instruction_data]
+            if missing_fields:
+                return {
+                    "status": "error",
+                    "message": f"Generated instruction set missing required fields: {missing_fields}",
+                    "instruction_data": instruction_data
+                }
+
+            return {
+                "status": "success",
+                "instruction_data": instruction_data,
+                "message": "Instruction set generated successfully via remote inference"
+            }
+
+        except Exception as e:
+            logger.error("Error in AI-assisted instruction creation (remote): %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def send_p2p_image(self, node_id: str, image_base64: str, filename: str = None, text: str = "") -> dict:
+        """
+        Send screenshot/image to peer via file transfer with inline preview support.
+
+        Args:
+            node_id: Target peer node ID
+            image_base64: Base64 data URL (data:image/png;base64,...)
+            filename: Optional filename (auto-generated: screenshot_TIMESTAMP.png)
+            text: Optional text caption to display with the image
+
+        Returns:
+            dict with transfer_id, file_path, thumbnail_base64, size_bytes, width, height, mime_type
+
+        Raises:
+            ValueError: Invalid data URL, peer not connected, or privacy rules violation
+        """
+        from datetime import datetime, timezone
+        import base64
+        import re
+        from pathlib import Path
+        from PIL import Image
+
+        # 1. Validate peer connection
+        connected_peers = self.p2p_coordinator.get_connected_peers()
+        if node_id not in connected_peers:
+            raise ValueError(f"Peer {node_id} not connected")
+
+        # 2. Parse data URL
+        if not image_base64.startswith("data:image/"):
+            raise ValueError("Invalid data URL format (must start with 'data:image/')")
+
+        match = re.match(r'data:([^;]+);base64,(.+)', image_base64)
+        if not match:
+            raise ValueError("Invalid data URL format (expected 'data:MIME;base64,DATA')")
+
+        mime_type = match.group(1)  # e.g., "image/png"
+        encoded_data = match.group(2)
+        extension = mime_type.split("/")[1]  # e.g., "png"
+
+        # 3. Decode image data
+        try:
+            image_data = base64.b64decode(encoded_data)
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 data: {e}")
+
+        # 4. Check privacy rules
+        img_rules = self.firewall.rules.get("image_transfer", {})
+        max_size_mb = img_rules.get("max_size_mb", 100)
+        allowed_sources = img_rules.get("allowed_sources", ["clipboard", "file", "camera"])
+
+        # Validate size
+        size_mb = len(image_data) / (1024 * 1024)
+        if size_mb > max_size_mb:
+            raise ValueError(f"Image too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+
+        # Validate source (clipboard is the current source)
+        if "clipboard" not in allowed_sources:
+            raise ValueError("Clipboard image sharing disabled in privacy rules")
+
+        # 5. Generate filename
+        if not filename:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            filename = f"screenshot_{timestamp}.{extension}"
+
+        # 6. Create screenshots directory
+        peer_files_dir = DPC_HOME_DIR / "conversations" / node_id / "files" / "screenshots"
+        peer_files_dir.mkdir(parents=True, exist_ok=True)
+
+        # 7. Save image file
+        file_path = peer_files_dir / filename
+
+        # Handle filename collisions
+        if file_path.exists():
+            stem = file_path.stem
+            suffix = file_path.suffix
+            counter = 1
+            while file_path.exists():
+                file_path = peer_files_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+        try:
+            with open(file_path, "wb") as f:
+                f.write(image_data)
+            logger.info(f"Saved P2P screenshot: {file_path} ({len(image_data)} bytes)")
+        except Exception as e:
+            raise ValueError(f"Failed to save image file: {e}")
+
+        # 8. Validate image format and get dimensions
+        try:
+            with Image.open(file_path) as img:
+                # Validate format
+                if img.format not in ["PNG", "JPEG", "GIF", "WEBP"]:
+                    file_path.unlink()  # Clean up
+                    raise ValueError(f"Unsupported image format: {img.format}")
+
+                width, height = img.size
+        except Exception as e:
+            # Clean up file if image is invalid
+            if file_path.exists():
+                file_path.unlink()
+            raise ValueError(f"Invalid image file: {e}")
+
+        # 9. Generate thumbnail (reuse existing utility)
+        from .utils.image_utils import generate_thumbnail
+        try:
+            thumbnail_base64 = generate_thumbnail(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to generate thumbnail: {e}")
+            thumbnail_base64 = ""  # Continue without thumbnail
+
+        # 10. Send via file transfer with image_metadata
+        try:
+            transfer_id = await self.file_transfer_manager.send_file(
+                node_id=node_id,
+                file_path=file_path,
+                image_metadata={
+                    "dimensions": {"width": width, "height": height},
+                    "thumbnail_base64": thumbnail_base64,
+                    "source": "clipboard",
+                    "captured_at": datetime.now(timezone.utc).isoformat(),
+                    "text": text  # Store user caption
+                }
+            )
+        except Exception as e:
+            # Clean up file if transfer fails to start
+            if file_path.exists():
+                file_path.unlink()
+            raise ValueError(f"Failed to start file transfer: {e}")
+
+        # 11. Return details for frontend
+        return {
+            "transfer_id": transfer_id,
+            "file_path": str(file_path),
+            "thumbnail_base64": thumbnail_base64,
+            "size_bytes": len(image_data),
+            "width": width,
+            "height": height,
+            "mime_type": mime_type
+        }
 
     async def get_token_usage(self, conversation_id: str) -> Dict[str, Any]:
         """Get token usage statistics for a conversation
@@ -1928,11 +2675,12 @@ class CoreService:
         """
         await self.p2p_coordinator.broadcast_to_peers(message)
 
-    def _get_or_create_conversation_monitor(self, conversation_id: str) -> ConversationMonitor:
+    def _get_or_create_conversation_monitor(self, conversation_id: str, instruction_set_name: str = None) -> ConversationMonitor:
         """Get or create a conversation monitor for a conversation/peer.
 
         Args:
             conversation_id: Identifier for the conversation (peer node_id or "local_ai")
+            instruction_set_name: Optional instruction set to use for this conversation (defaults to "general")
 
         Returns:
             ConversationMonitor instance
@@ -1972,9 +2720,10 @@ class CoreService:
                 knowledge_threshold=0.7,  # 70% confidence threshold
                 settings=self.settings,  # Pass settings for config (e.g., cultural_perspectives_enabled)
                 ai_query_func=self.send_ai_query,  # Enable both local and remote inference for knowledge detection
-                auto_detect=self.auto_knowledge_detection_enabled  # Pass auto-detection setting
+                auto_detect=self.auto_knowledge_detection_enabled,  # Pass auto-detection setting
+                instruction_set_name=instruction_set_name or self.instruction_set.default  # Use provided or default instruction set
             )
-            logger.info("Created conversation monitor for %s with %d participant(s) (auto_detect=%s)", conversation_id, len(participants), self.auto_knowledge_detection_enabled)
+            logger.info("Created conversation monitor for %s with %d participant(s) (auto_detect=%s, instruction_set=%s)", conversation_id, len(participants), self.auto_knowledge_detection_enabled, instruction_set_name or self.instruction_set.default)
 
         return self.conversation_monitors[conversation_id]
 
@@ -2464,6 +3213,153 @@ class CoreService:
             "size_bytes": file.stat().st_size
         }
 
+    async def send_image(self, conversation_id: str, image_base64: str, filename: str, caption: str = "", provider_alias: str = None, compute_host: str = None):
+        """
+        Send an image from clipboard paste (Phase 2.3: Vision + Remote Vision).
+
+        Handles two cases:
+        - AI Chat (local_ai): Save image, run vision analysis (local or remote), broadcast result
+        - P2P Chat: Generate thumbnail, send FILE_OFFER with image_metadata
+
+        Args:
+            conversation_id: 'local_ai' for AI chat, or node_id for P2P chat
+            image_base64: Data URL (e.g., "data:image/png;base64,...")
+            filename: Suggested filename (e.g., "screenshot_1234567890.png")
+            caption: Optional text caption (will be included in vision query for AI chat)
+            provider_alias: Optional provider to use for vision analysis (overrides vision_provider config)
+            compute_host: Optional node_id of peer to use for remote vision (Phase 2.3)
+
+        Returns:
+            Dict with status and metadata
+        """
+        import base64
+        import tempfile
+        import mimetypes
+        from pathlib import Path
+        from datetime import datetime, timezone
+        from .utils.image_utils import generate_thumbnail, get_image_dimensions, validate_image_format
+
+        # Parse data URL
+        if not image_base64.startswith("data:"):
+            raise ValueError("Invalid image data URL")
+
+        # Extract mime type and base64 data
+        header, data = image_base64.split(",", 1)
+        mime_type = header.split(";")[0].split(":")[1]
+
+        # Decode base64
+        image_bytes = base64.b64decode(data)
+        size_bytes = len(image_bytes)
+
+        # Check size limit (5MB default from privacy_rules.json vision settings)
+        max_size_mb = 5  # TODO: Read from settings.vision_max_size_mb
+        if size_bytes > max_size_mb * 1024 * 1024:
+            raise ValueError(f"Image too large ({round(size_bytes / (1024 * 1024), 2)}MB). Max: {max_size_mb}MB")
+
+        # Save to temporary file for processing
+        suffix = Path(filename).suffix or ".png"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+            tmp_file.write(image_bytes)
+            tmp_path = Path(tmp_file.name)
+
+        try:
+            # Validate image format
+            if not validate_image_format(tmp_path):
+                raise ValueError(f"Invalid image format: {filename}")
+
+            # Extract dimensions
+            dimensions = get_image_dimensions(tmp_path)
+
+            if conversation_id == "local_ai":
+                # AI Chat: Run vision analysis
+                logger.info(f"AI chat vision analysis: {filename} ({dimensions['width']}x{dimensions['height']})")
+
+                # Build query with caption (if provided)
+                query = caption if caption else "What's in this image?"
+
+                # Prepare image for vision API
+                images = [{
+                    "path": str(tmp_path),
+                    "mime_type": mime_type,
+                    "base64": data  # Pass base64 data directly (already encoded)
+                }]
+
+                # Run vision query (Phase 2.3: Support remote vision via compute_host)
+                response_metadata = await self.inference_orchestrator.execute_inference(
+                    prompt=query,
+                    images=images,
+                    provider=provider_alias,  # Pass UI selection (or None for auto-selection)
+                    compute_host=compute_host  # Pass compute_host for remote vision
+                )
+
+                # Broadcast AI response to UI
+                await self.local_api.broadcast_event("ai_response_with_image", {
+                    "conversation_id": "local_ai",
+                    "query": query,
+                    "response": response_metadata["response"],
+                    "provider": response_metadata["provider"],
+                    "model": response_metadata["model"],
+                    "image_filename": filename,
+                    "image_dimensions": dimensions,
+                    "vision_used": True
+                })
+
+                return {
+                    "status": "analyzed",
+                    "conversation_id": "local_ai",
+                    "filename": filename,
+                    "dimensions": dimensions
+                }
+
+            else:
+                # P2P Chat: Send FILE_OFFER with image_metadata
+                logger.info(f"P2P image transfer: {filename} to {conversation_id}")
+
+                # Generate thumbnail
+                thumbnail_base64 = generate_thumbnail(tmp_path)
+
+                # Move file to peer-specific storage
+                peer_storage = DPC_HOME_DIR / "conversations" / conversation_id / "files"
+                peer_storage.mkdir(parents=True, exist_ok=True)
+                final_path = peer_storage / filename
+
+                # Handle duplicate filenames
+                if final_path.exists():
+                    stem = final_path.stem
+                    suffix = final_path.suffix
+                    counter = 1
+                    while final_path.exists():
+                        final_path = peer_storage / f"{stem}_{counter}{suffix}"
+                        counter += 1
+
+                tmp_path.rename(final_path)
+
+                # Initiate file transfer with image_metadata
+                transfer_id = await self.file_transfer_manager.send_file(
+                    conversation_id,
+                    final_path,
+                    image_metadata={
+                        "dimensions": dimensions,
+                        "thumbnail_base64": thumbnail_base64,
+                        "source": "clipboard",
+                        "captured_at": datetime.now(timezone.utc).isoformat()
+                    }
+                )
+
+                return {
+                    "status": "sending",
+                    "conversation_id": conversation_id,
+                    "transfer_id": transfer_id,
+                    "filename": filename,
+                    "dimensions": dimensions,
+                    "size_bytes": size_bytes
+                }
+
+        finally:
+            # Cleanup temp file (if not moved to peer storage)
+            if tmp_path.exists():
+                tmp_path.unlink()
+
     async def accept_file_transfer(self, transfer_id: str):
         """
         Accept an incoming file transfer offer.
@@ -2570,14 +3466,22 @@ class CoreService:
         """
         await self.context_coordinator.handle_device_context_request(peer_id, request_id)
 
-    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None):
+    async def _handle_inference_request(self, peer_id: str, request_id: str, prompt: str, model: str = None, provider: str = None, images: list = None):
         """
         Handle incoming remote inference request from a peer.
         Check firewall permissions, run inference, and send response.
+
+        Args:
+            peer_id: Node ID of the requesting peer
+            request_id: Unique request identifier
+            prompt: Text prompt for the model
+            model: Optional model name
+            provider: Optional provider alias
+            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
         """
         from dpc_protocol.protocol import create_remote_inference_response
 
-        logger.debug("Handling inference request from %s (request_id: %s)", peer_id, request_id)
+        logger.debug("Handling inference request from %s (request_id: %s, images: %s)", peer_id, request_id, "yes" if images else "no")
 
         # Check if peer is allowed to request inference
         if not self.firewall.can_request_inference(peer_id, model):
@@ -2611,17 +3515,19 @@ class CoreService:
                 else:
                     raise ValueError(f"No provider found for model '{model}'")
 
-            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use, return_metadata=True)
+            result = await self.llm_manager.query(prompt, provider_alias=provider_alias_to_use, images=images, return_metadata=True)
             logger.info("Inference completed successfully for %s", peer_id)
 
-            # Send success response with token metadata
+            # Send success response with token and model metadata
             success_response = create_remote_inference_response(
                 request_id=request_id,
                 response=result["response"],
                 tokens_used=result.get("tokens_used"),
                 prompt_tokens=result.get("prompt_tokens"),
                 response_tokens=result.get("response_tokens"),
-                model_max_tokens=result.get("model_max_tokens")
+                model_max_tokens=result.get("model_max_tokens"),
+                model=result.get("model"),
+                provider=result.get("provider")
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)
@@ -2668,7 +3574,8 @@ class CoreService:
             all_providers.append({
                 "alias": alias,
                 "model": model,
-                "type": provider_type
+                "type": provider_type,
+                "supports_vision": provider.supports_vision()  # Phase 2: Add vision capability flag
             })
             all_models.append(model)
 
@@ -2970,7 +3877,7 @@ class CoreService:
         """
         return await self.context_coordinator.request_device_context(peer_id)
 
-    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, timeout: float = 60.0) -> str:
+    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 60.0) -> str:
         """
         Request remote inference from a specific peer.
         Uses async request-response pattern with Future.
@@ -2980,6 +3887,7 @@ class CoreService:
             prompt: The prompt to send for inference
             model: Optional model name to use
             provider: Optional provider alias to use
+            images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
             timeout: Timeout in seconds (default 60s for inference)
 
         Returns:
@@ -2992,7 +3900,7 @@ class CoreService:
         """
         from dpc_protocol.protocol import create_remote_inference_request
 
-        logger.debug("Requesting inference from peer: %s", peer_id)
+        logger.debug("Requesting inference from peer: %s (images: %s)", peer_id, 'yes' if images else 'no')
 
         if peer_id not in self.p2p_manager.peers:
             raise ConnectionError(f"Peer {peer_id} is not connected")
@@ -3005,12 +3913,13 @@ class CoreService:
             response_future = asyncio.Future()
             self._pending_inference_requests[request_id] = response_future
 
-            # Create inference request message
+            # Create inference request message (Phase 2: includes images)
             request_message = create_remote_inference_request(
                 request_id=request_id,
                 prompt=prompt,
                 model=model,
-                provider=provider
+                provider=provider,
+                images=images
             )
 
             # Send request
@@ -3069,7 +3978,7 @@ class CoreService:
 
     # --- AI Query Methods ---
 
-    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, **kwargs):
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
 
@@ -3082,6 +3991,7 @@ class CoreService:
             provider: Optional provider alias to use
             include_context: If True, includes personal context, device context, and AI instructions (default: True)
             ai_scope: Optional AI scope name for filtering what the AI can access (None = no filtering)
+            instruction_set_name: Optional instruction set key to use for this query (None = use conversation's default or global default)
             **kwargs: Additional arguments (including conversation_id)
         """
         logger.info("Orchestrating AI query for command_id %s: '%s...'", command_id, prompt[:50])
@@ -3089,10 +3999,11 @@ class CoreService:
         logger.debug("Model: %s", model or 'default')
         logger.debug("Include context: %s", include_context)
         logger.debug("AI Scope: %s", ai_scope or 'None (full access)')
+        logger.debug("Instruction Set: %s", instruction_set_name or 'default')
 
         # Phase 7: Get or create conversation monitor early for history tracking
         conversation_id = kwargs.get("conversation_id", "local_ai")
-        monitor = self._get_or_create_conversation_monitor(conversation_id)
+        monitor = self._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
 
         # Phase 7: Check if context window is full (hard limit enforcement)
         if monitor.token_limit > 0:
@@ -3132,6 +4043,17 @@ class CoreService:
             # Always include device context when checkbox is checked
             if self.device_context:
                 device_context_data = self.device_context
+                # Apply AI Scope filtering to device context if specified
+                if ai_scope:
+                    try:
+                        device_context_data = self.firewall.filter_device_context_for_ai_scope(
+                            device_context_data, ai_scope
+                        )
+                        logger.debug("AI Scope filtering applied to device context")
+                    except Exception as e:
+                        logger.error("Error applying AI Scope filtering to device context: %s", e, exc_info=True)
+                        # Fall back to unfiltered device context if filtering fails
+                        logger.warning("Falling back to unfiltered device context due to filtering error")
         else:
             logger.debug("User disabled context inclusion")
 
@@ -3208,14 +4130,34 @@ class CoreService:
         # Assemble final prompt (with or without context, message history always included)
         # Phase 7: Include context blocks if local checkbox OR any peer checkboxes are checked
         include_full_context = include_context or bool(aggregated_contexts)
-        final_prompt = self._assemble_final_prompt(
+        # Use instruction set from conversation monitor (which has the per-conversation instruction set)
+        effective_instruction_set = instruction_set_name or monitor.instruction_set_name
+        final_prompt = self.prompt_manager.assemble_prompt(
+            query=prompt,
             contexts=aggregated_contexts,
-            clean_prompt=prompt,
             device_context=device_context_data,
             peer_device_contexts=peer_device_contexts,
             message_history=message_history,
-            include_full_context=include_full_context
+            include_context=include_full_context,
+            instruction_set_name=effective_instruction_set
         )
+
+        # Phase 2: Pre-query validation - Count tokens BEFORE sending to LLM
+        # REFACTORED (Phase 4 - v0.12.1): Uses TokenCountManager for validation
+        if monitor.token_limit > 0:
+            model_name = model or self.llm_manager.get_active_model_name()
+
+            # Validate prompt fits in context window (with 20% response buffer)
+            is_valid, error_msg = self.llm_manager.token_count_manager.validate_prompt(
+                prompt=final_prompt,
+                model=model_name,
+                context_window=monitor.token_limit,
+                buffer_percent=0.2
+            )
+
+            if not is_valid:
+                logger.warning("BLOCKED (pre-query validation): %s", error_msg)
+                raise RuntimeError(error_msg)
 
         response_payload = {}
         status = "OK"
@@ -3254,7 +4196,10 @@ class CoreService:
                     monitor.set_token_limit(result["model_max_tokens"])
 
                 # Update token count
-                monitor.update_token_count(result["tokens_used"])
+                # IMPORTANT: Use set_token_count() with prompt_tokens, NOT update_token_count() with tokens_used!
+                # prompt_tokens already includes the full conversation history, so we REPLACE the count (no double-counting)
+                # Using update_token_count(tokens_used) would add prompt+response tokens cumulatively, causing exponential growth
+                monitor.set_token_count(result["prompt_tokens"])
 
                 # Check if we should warn about approaching limit
                 if monitor.should_suggest_extraction():
@@ -3415,315 +4360,6 @@ class CoreService:
         context_dict = asdict(context_obj)
         context_json = json.dumps(context_dict, sort_keys=True)
         return hashlib.sha256(context_json.encode('utf-8')).hexdigest()
-
-    def _assemble_final_prompt(self, contexts: dict, clean_prompt: str, device_context: dict = None, peer_device_contexts: dict = None, message_history: list = None, include_full_context: bool = True) -> str:
-        """Helper method to assemble the final prompt for the LLM with instruction processing.
-
-        Phase 2: Incorporates InstructionBlock and bias mitigation from PCM v2.0
-        Phase 7: Supports conversation history and context optimization
-
-        Args:
-            contexts: Dict of {source_id: PersonalContext} (only if include_full_context=True)
-            clean_prompt: The user's query (current message)
-            device_context: Local device context (optional, only if include_full_context=True)
-            peer_device_contexts: Dict of {peer_id: device_context} for peers (optional)
-            message_history: List of conversation messages (optional, for Phase 7)
-            include_full_context: If True, include context blocks; if False, skip (Phase 7)
-        """
-        # Extract instruction blocks and bias settings from contexts
-        instruction_blocks = []
-        bias_mitigation_settings = []
-        cultural_contexts = []
-
-        for source_id, context_obj in contexts.items():
-            # Extract instruction block if present
-            if hasattr(context_obj, 'instruction') and context_obj.instruction:
-                instruction = context_obj.instruction
-                instruction_blocks.append({
-                    'source': source_id,
-                    'primary': instruction.primary,
-                    'verification_protocol': instruction.verification_protocol,
-                    'bias_mitigation': instruction.bias_mitigation
-                })
-                bias_mitigation_settings.append(instruction.bias_mitigation)
-
-            # Extract cultural context if present
-            if hasattr(context_obj, 'cognitive_profile') and context_obj.cognitive_profile:
-                if context_obj.cognitive_profile.cultural_background:
-                    cultural_contexts.append({
-                        'source': source_id,
-                        'background': context_obj.cognitive_profile.cultural_background
-                    })
-
-        # Build system instruction with bias mitigation
-        system_instruction = self._build_bias_aware_system_instruction(
-            instruction_blocks,
-            bias_mitigation_settings,
-            cultural_contexts,
-            include_full_context
-        )
-
-        # Build context blocks
-        context_blocks = []
-        for source_id, context_obj in contexts.items():
-            context_dict = asdict(context_obj)
-            json_string = json.dumps(context_dict, indent=2, ensure_ascii=False)
-
-            # Add peer name if available
-            source_label = source_id
-            if source_id != 'local' and source_id in self.peer_metadata:
-                peer_name = self.peer_metadata[source_id].get('name')
-                if peer_name:
-                    source_label = f"{peer_name} ({source_id})"
-
-            block = f'<CONTEXT source="{source_label}">\n{json_string}\n</CONTEXT>'
-            context_blocks.append(block)
-
-        # Add device context if available (local)
-        if device_context:
-            # Extract special instructions if present (schema v1.1+)
-            special_instructions_text = ""
-            if "special_instructions" in device_context:
-                instructions_obj = device_context["special_instructions"]
-                special_instructions_text = "\nDEVICE CONTEXT INTERPRETATION RULES:\n"
-
-                if "interpretation" in instructions_obj:
-                    special_instructions_text += "\nInterpretation Guidelines:\n"
-                    for key, value in instructions_obj["interpretation"].items():
-                        special_instructions_text += f"  - {key}: {value}\n"
-
-                if "privacy" in instructions_obj:
-                    special_instructions_text += "\nPrivacy Rules:\n"
-                    for key, value in instructions_obj["privacy"].items():
-                        special_instructions_text += f"  - {key}: {value}\n"
-
-                if "update_protocol" in instructions_obj:
-                    special_instructions_text += "\nUpdate Protocol:\n"
-                    for key, value in instructions_obj["update_protocol"].items():
-                        special_instructions_text += f"  - {key}: {value}\n"
-
-                if "usage_scenarios" in instructions_obj:
-                    special_instructions_text += "\nUsage Scenarios:\n"
-                    for key, value in instructions_obj["usage_scenarios"].items():
-                        special_instructions_text += f"  - {key}: {value}\n"
-
-                special_instructions_text += "\n"
-
-            device_json = json.dumps(device_context, indent=2, ensure_ascii=False)
-            device_block = f'<DEVICE_CONTEXT source="local">{special_instructions_text}{device_json}\n</DEVICE_CONTEXT>'
-            context_blocks.append(device_block)
-
-        # Add peer device contexts if available
-        if peer_device_contexts:
-            for peer_id, peer_device_ctx in peer_device_contexts.items():
-                # Add peer name if available
-                source_label = peer_id
-                if peer_id in self.peer_metadata:
-                    peer_name = self.peer_metadata[peer_id].get('name')
-                    if peer_name:
-                        source_label = f"{peer_name} ({peer_id})"
-
-                # Extract special instructions if present (schema v1.1+)
-                special_instructions_text = ""
-                if "special_instructions" in peer_device_ctx:
-                    instructions_obj = peer_device_ctx["special_instructions"]
-                    special_instructions_text = "\nDEVICE CONTEXT INTERPRETATION RULES:\n"
-
-                    if "interpretation" in instructions_obj:
-                        special_instructions_text += "\nInterpretation Guidelines:\n"
-                        for key, value in instructions_obj["interpretation"].items():
-                            special_instructions_text += f"  - {key}: {value}\n"
-
-                    if "privacy" in instructions_obj:
-                        special_instructions_text += "\nPrivacy Rules:\n"
-                        for key, value in instructions_obj["privacy"].items():
-                            special_instructions_text += f"  - {key}: {value}\n"
-
-                    if "update_protocol" in instructions_obj:
-                        special_instructions_text += "\nUpdate Protocol:\n"
-                        for key, value in instructions_obj["update_protocol"].items():
-                            special_instructions_text += f"  - {key}: {value}\n"
-
-                    if "usage_scenarios" in instructions_obj:
-                        special_instructions_text += "\nUsage Scenarios:\n"
-                        for key, value in instructions_obj["usage_scenarios"].items():
-                            special_instructions_text += f"  - {key}: {value}\n"
-
-                    special_instructions_text += "\n"
-
-                peer_device_json = json.dumps(peer_device_ctx, indent=2, ensure_ascii=False)
-                peer_device_block = f'<DEVICE_CONTEXT source="{source_label}">{special_instructions_text}{peer_device_json}\n</DEVICE_CONTEXT>'
-                context_blocks.append(peer_device_block)
-
-        # Phase 7: Build prompt with optional context and conversation history
-        if include_full_context and context_blocks:
-            # Include full context (first message or context changed)
-            final_prompt = (
-                f"{system_instruction}\n\n"
-                f"--- CONTEXTUAL DATA ---\n"
-                f'{"\n\n".join(context_blocks)}\n'
-                f"--- END OF CONTEXTUAL DATA ---\n\n"
-            )
-        else:
-            # No context or context already included in previous messages
-            final_prompt = f"{system_instruction}\n\n"
-
-        # Phase 7: Add conversation history if provided
-        if message_history and len(message_history) > 0:
-            # Build conversation history section
-            history_lines = []
-            for msg in message_history:
-                role = msg.get('role', 'unknown').upper()
-                content = msg.get('content', '')
-                history_lines.append(f"{role}: {content}")
-
-            final_prompt += "--- CONVERSATION HISTORY ---\n"
-            final_prompt += "\n\n".join(history_lines)
-            final_prompt += "\n--- END OF CONVERSATION HISTORY ---\n\n"
-        else:
-            # No history, just the current query
-            final_prompt += f"USER QUERY: {clean_prompt}"
-
-        return final_prompt
-
-    def _build_bias_aware_system_instruction(
-        self,
-        instruction_blocks: List[Dict[str, Any]],
-        bias_mitigation_settings: List[Dict[str, Any]],
-        cultural_contexts: List[Dict[str, str]],
-        include_full_context: bool = True
-    ) -> str:
-        """Build system instruction with bias mitigation and multi-perspective requirements.
-
-        Phase 2: Implements cognitive bias mitigation strategies from KNOWLEDGE_ARCHITECTURE.md
-        Phase 7: Context-aware instruction (adapts based on whether context is provided)
-        """
-        # Base instruction (context-aware)
-        if include_full_context:
-            base = (
-                "You are a helpful AI assistant with strong bias-awareness training. "
-                "Your task is to answer the user's query based on the provided JSON data blobs inside <CONTEXT> tags. "
-                "The 'source' attribute of each tag indicates who the context belongs to. The source 'local' refers to the user asking the query. "
-                "Other sources are peer nodes who have shared their context to help answer the query. "
-                "Analyze all provided contexts to formulate your answer. When relevant, cite which source provided specific information."
-            )
-        else:
-            base = (
-                "You are a helpful AI assistant with strong bias-awareness training. "
-                "Answer the user's query based on the conversation history and your general knowledge. "
-                "The user has chosen not to share their personal context or device specifications for this conversation."
-            )
-
-        # Add user-specific instructions
-        if instruction_blocks:
-            base += "\n\nUSER-SPECIFIC INSTRUCTIONS:"
-            for block in instruction_blocks:
-                source_label = "Local user" if block['source'] == 'local' else f"Peer {block['source']}"
-                base += f"\n[{source_label}] {block['primary']}"
-                if block.get('verification_protocol'):
-                    base += f" ({block['verification_protocol']})"
-
-        # Check if ANY context requires bias mitigation
-        requires_bias_mitigation = any(
-            settings.get('require_multi_perspective') or
-            settings.get('challenge_status_quo')
-            for settings in bias_mitigation_settings
-        ) if bias_mitigation_settings else False
-
-        # Add bias mitigation rules if required
-        if requires_bias_mitigation:
-            base += "\n\nBIAS MITIGATION RULES:"
-
-            # Multi-perspective requirement
-            if any(s.get('require_multi_perspective') for s in bias_mitigation_settings):
-                base += (
-                    "\n1. Multi-Perspective Analysis: Consider perspectives from at least 3 different cultural or methodological viewpoints"
-                    "\n   - Western individualistic approach"
-                    "\n   - Eastern collective approach"
-                    "\n   - Indigenous/holistic approach"
-                    "\n   - Or other relevant frameworks based on the query"
-                )
-
-            # Status quo challenge
-            if any(s.get('challenge_status_quo') for s in bias_mitigation_settings):
-                base += (
-                    "\n2. Challenge Status Quo: Always question existing approaches and common assumptions"
-                    "\n   - Don't favor solutions just because they're mentioned in context"
-                    "\n   - Consider alternatives to established methods"
-                    "\n   - Ask 'What if we approached this differently?'"
-                )
-
-            # Cultural sensitivity
-            cultural_sensitivity_settings = [
-                s.get('cultural_sensitivity')
-                for s in bias_mitigation_settings
-                if s.get('cultural_sensitivity')
-            ]
-            if cultural_sensitivity_settings:
-                base += f"\n3. Cultural Sensitivity: {cultural_sensitivity_settings[0]}"
-                if cultural_contexts:
-                    base += "\n   Cultural contexts to consider:"
-                    for ctx in cultural_contexts:
-                        base += f"\n   - [{ctx['source']}]: {ctx['background']}"
-
-            # Framing neutrality
-            if any(s.get('framing_neutrality') for s in bias_mitigation_settings):
-                base += (
-                    "\n4. Framing Neutrality: Present options without preference or bias"
-                    "\n   - Use neutral language"
-                    "\n   - Don't anchor on first-mentioned options"
-                    "\n   - Present pros and cons equally"
-                )
-
-            # Evidence requirement
-            evidence_requirements = [
-                s.get('evidence_requirement')
-                for s in bias_mitigation_settings
-                if s.get('evidence_requirement')
-            ]
-            if evidence_requirements:
-                evidence_level = evidence_requirements[0]
-                if evidence_level == 'citations_preferred':
-                    base += (
-                        "\n5. Evidence Requirement: Provide reasoning and sources for claims"
-                        "\n   - Cite which context provided specific information"
-                        "\n   - Distinguish between facts and opinions"
-                        "\n   - Note confidence levels when uncertain"
-                    )
-                elif evidence_level == 'citations_required':
-                    base += (
-                        "\n5. Evidence Requirement: MUST provide citations for all factual claims"
-                        "\n   - Every claim must be traceable to a context source"
-                        "\n   - Flag any unsourced information clearly"
-                    )
-
-            # Add cognitive biases to avoid
-            base += (
-                "\n\nCOGNITIVE BIASES TO AVOID:"
-                "\n- Status quo bias (favoring current/mentioned methods)"
-                "\n- Anchoring bias (overweighting information presented first)"
-                "\n- Cultural bias (assuming Western-centric solutions)"
-                "\n- Groupthink (consensus without critical evaluation)"
-                "\n- Primacy effect (favoring first-presented options)"
-                "\n- Confirmation bias (seeking info that confirms existing beliefs)"
-            )
-
-        return base
-
-    def _build_combined_prompt(self, query: str, contexts: Dict[str, PersonalContext]) -> str:
-        """Build a prompt that combines the query with multiple contexts."""
-        prompt_parts = ["Context information:"]
-        
-        for node_id, context in contexts.items():
-            source = "You" if node_id == self.p2p_manager.node_id else f"Peer {node_id}"
-            prompt_parts.append(f"\n[From {source}]")
-            prompt_parts.append(f"Name: {context.profile.get('name', 'Unknown')}")
-            if context.profile.get('description'):
-                prompt_parts.append(f"Description: {context.profile['description']}")
-        
-        prompt_parts.append(f"\nUser Query: {query}")
-        
-        return "\n".join(prompt_parts)
 
     # --- Hub Methods ---
 

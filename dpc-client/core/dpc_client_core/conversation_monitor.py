@@ -49,7 +49,8 @@ class ConversationMonitor:
         knowledge_threshold: float = 0.7,  # Minimum score to propose commit
         settings = None,  # Settings instance (optional, for config like cultural_perspectives_enabled)
         ai_query_func = None,  # Callable for AI queries (supports both local and remote inference)
-        auto_detect: bool = True  # Enable/disable automatic detection
+        auto_detect: bool = True,  # Enable/disable automatic detection
+        instruction_set_name: str = "general"  # NEW: Which instruction set to use for this conversation
     ):
         """Initialize conversation monitor
 
@@ -62,6 +63,7 @@ class ConversationMonitor:
             ai_query_func: Optional callable for AI queries. Signature: async (prompt, compute_host, model, provider) -> dict
                           If provided, enables remote inference for knowledge detection.
             auto_detect: If True, automatically detect and propose commits. If False, only buffer messages for manual extraction.
+            instruction_set_name: Key of the instruction set to use for AI queries in this conversation (default: "general")
         """
         self.conversation_id = conversation_id
         self.participants = participants
@@ -70,6 +72,7 @@ class ConversationMonitor:
         self.settings = settings
         self.ai_query_func = ai_query_func  # Enables both local and remote inference
         self.auto_detect = auto_detect  # Controls automatic detection vs manual-only
+        self.instruction_set_name = instruction_set_name  # NEW: Track instruction set for this conversation
 
         # Message buffer
         self.message_buffer: List[Message] = []  # Cleared after each extraction (for incremental auto-detect)
@@ -619,7 +622,7 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
                 return float(result.get('score', 0.0))
         except Exception as e:
             logger.error("Error calculating knowledge score: %s", e, exc_info=True)
-            logger.error("  LLM Response preview: %s...", response[:200] if 'response' in locals() else 'N/A')
+            logger.error("  LLM Response preview: %s...", response[:200] if 'response' in locals() and response is not None and isinstance(response, str) else 'N/A')
             return 0.0
 
     def _detect_consensus(self) -> bool:
@@ -1015,8 +1018,19 @@ PARTICIPANTS' CULTURAL CONTEXTS:
     def set_token_count(self, tokens: int):
         """Set the current token count (replaces instead of adding)
 
+        IMPORTANT: Use this method for prompt tokens, NOT update_token_count(),
+        to avoid double-counting conversation history!
+
+        The prompt_tokens from LLM already includes:
+        - System instructions
+        - Personal/device contexts
+        - FULL conversation history
+        - Current query
+
+        So we REPLACE the count, not ADD to it.
+
         Args:
-            tokens: Total tokens in the conversation
+            tokens: Total prompt tokens (from LLM metadata)
         """
         self.current_token_count = tokens
 

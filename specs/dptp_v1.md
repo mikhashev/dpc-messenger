@@ -1,7 +1,7 @@
-# DPTP Specification: D-PC Transfer Protocol v1.1
+# DPTP Specification: D-PC Transfer Protocol v1.2
 
-**Version:** 1.1
-**Status:** In Progress
+**Version:** 1.2
+**Status:** Stable
 **Date:** December 2025
 **License:** CC0 1.0 Universal (Public Domain)
 
@@ -718,6 +718,13 @@ Offers a file to the peer for transfer.
 - `mime_type` (string, required): MIME type of the file
 - `chunk_size` (integer, required): Bytes per chunk (typically 65536 = 64KB)
 - `chunk_hashes` (array of strings, optional): CRC32 hashes per chunk (v0.11.1+, 8-char hex strings)
+- `image_metadata` (object, optional): Metadata for image transfers (v0.12.0)
+  - `dimensions` (object, required): Image dimensions
+    - `width` (integer): Width in pixels
+    - `height` (integer): Height in pixels
+  - `thumbnail_base64` (string, required): Data URL of thumbnail (max 100KB)
+  - `source` (string, required): Source of image (e.g., "clipboard", "file", "screenshot")
+  - `captured_at` (string, optional): ISO 8601 timestamp when image was captured
 
 **Response:** FILE_ACCEPT (if accepted) or FILE_CANCEL (if rejected)
 
@@ -1139,6 +1146,225 @@ Clients select relays using weighted scoring:
 
 ---
 
+### 3.13 Vision & Image Messages (v0.12.0)
+
+Remote vision inference and image analysis capabilities.
+
+#### SEND_IMAGE
+
+Requests remote vision inference on one or more images.
+
+**Format:**
+```json
+{
+  "command": "SEND_IMAGE",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "prompt": "What's in this screenshot?",
+    "images": [
+      {
+        "path": "screenshot_20251225_103045.png",
+        "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg...",
+        "mime_type": "image/png"
+      }
+    ],
+    "model": "llava:13b",
+    "provider": "ollama"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): UUID for request/response correlation
+- `prompt` (string, required): Text prompt for vision model
+- `images` (array, required): List of image objects
+  - `path` (string, optional): Original filename
+  - `base64` (string, required): Base64-encoded image data (data URL format)
+  - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
+- `model` (string, optional): Specific vision model to use (e.g., llava:13b, gpt-4-vision)
+- `provider` (string, optional): AI provider (ollama, openai, anthropic)
+
+**Response:** REMOTE_INFERENCE_RESPONSE (reuses existing message type)
+
+**Use Cases:**
+- Screenshot analysis and OCR
+- Diagram/chart interpretation
+- Photo classification
+- Visual question answering
+- Remote GPU utilization for image processing
+
+**Security:** Peer may reject based on firewall rules (`privacy_rules.json` → `compute.enabled`)
+
+---
+
+### 3.14 Session Management Messages (v0.12.0)
+
+Collaborative session reset with voting to prevent accidental data loss in multi-party conversations.
+
+#### PROPOSE_NEW_SESSION
+
+Proposes ending current conversation and starting fresh session.
+
+**Format:**
+```json
+{
+  "command": "PROPOSE_NEW_SESSION",
+  "payload": {
+    "proposal_id": "prop-abc123",
+    "conversation_id": "conv-xyz789",
+    "proposer_node_id": "dpc-node-alice-123",
+    "timestamp": "2025-12-25T10:30:00Z"
+  }
+}
+```
+
+**Fields:**
+- `proposal_id` (string, required): Unique proposal identifier
+- `conversation_id` (string, required): Conversation to reset
+- `proposer_node_id` (string, required): Node ID of proposer
+- `timestamp` (string, required): ISO 8601 timestamp of proposal
+
+**Response:** VOTE_NEW_SESSION from each participant
+
+**UI Behavior:** Opens voting dialog showing proposal details and vote status from all participants
+
+---
+
+#### VOTE_NEW_SESSION
+
+Casts a vote on a session reset proposal.
+
+**Format:**
+```json
+{
+  "command": "VOTE_NEW_SESSION",
+  "payload": {
+    "proposal_id": "prop-abc123",
+    "voter_node_id": "dpc-node-bob-456",
+    "vote": "approve",
+    "timestamp": "2025-12-25T10:31:00Z"
+  }
+}
+```
+
+**Fields:**
+- `proposal_id` (string, required): Proposal being voted on
+- `voter_node_id` (string, required): Node ID of voter
+- `vote` (string, required): Vote choice - `"approve"` | `"reject"`
+- `timestamp` (string, required): ISO 8601 timestamp of vote
+
+**Response:** NEW_SESSION_RESULT (when all votes collected)
+
+---
+
+#### NEW_SESSION_RESULT
+
+Notifies all participants of voting outcome.
+
+**Format:**
+```json
+{
+  "command": "NEW_SESSION_RESULT",
+  "payload": {
+    "proposal_id": "prop-abc123",
+    "status": "approved",
+    "votes": [
+      {"node_id": "dpc-node-alice-123", "vote": "approve"},
+      {"node_id": "dpc-node-bob-456", "vote": "approve"}
+    ],
+    "timestamp": "2025-12-25T10:32:00Z"
+  }
+}
+```
+
+**Fields:**
+- `proposal_id` (string, required): Proposal identifier
+- `status` (string, required): Result - `"approved"` | `"rejected"`
+- `votes` (array, required): All participant votes
+  - `node_id` (string): Voter's node ID
+  - `vote` (string): Vote choice
+- `timestamp` (string, required): ISO 8601 timestamp of finalization
+
+**Behavior:**
+- **Unanimous approval required**: All participants must vote "approve"
+- **If approved**: All participants clear conversation history
+- **If rejected**: Conversation continues unchanged
+
+**UI Behavior:** Opens voting dialog showing proposal and real-time vote status from all participants
+
+---
+
+### 3.15 Chat History Synchronization (v0.12.0)
+
+Enables peers to synchronize conversation history after reconnection or page refresh.
+
+#### REQUEST_CHAT_HISTORY
+
+Requests conversation history from peer.
+
+**Format:**
+```json
+{
+  "command": "REQUEST_CHAT_HISTORY",
+  "payload": {
+    "conversation_id": "conv-xyz789",
+    "since_timestamp": "2025-12-25T10:00:00Z"
+  }
+}
+```
+
+**Fields:**
+- `conversation_id` (string, required): Conversation ID to sync
+- `since_timestamp` (string, optional): Only return messages after this timestamp (ISO 8601)
+
+**Response:** CHAT_HISTORY_RESPONSE
+
+---
+
+#### CHAT_HISTORY_RESPONSE
+
+Returns conversation history to requesting peer.
+
+**Format:**
+```json
+{
+  "command": "CHAT_HISTORY_RESPONSE",
+  "payload": {
+    "conversation_id": "conv-xyz789",
+    "messages": [
+      {
+        "role": "user",
+        "text": "Hello!",
+        "timestamp": "2025-12-25T10:15:00Z",
+        "sender_node_id": "dpc-node-alice-123"
+      },
+      {
+        "role": "assistant",
+        "text": "Hi there!",
+        "timestamp": "2025-12-25T10:15:05Z"
+      }
+    ]
+  }
+}
+```
+
+**Fields:**
+- `conversation_id` (string, required): Conversation ID
+- `messages` (array, required): List of message objects
+  - `role` (string, required): `"user"` | `"assistant"`
+  - `text` (string, required): Message content
+  - `timestamp` (string, required): ISO 8601 timestamp
+  - `sender_node_id` (string, optional): Sender node ID (for user messages)
+
+**Use Cases:**
+- **Automatic sync on reconnect**: Restore conversation after temporary disconnection
+- **Backend→frontend sync**: Reload chat history after page refresh
+- **Partial sync**: Request only recent messages using `since_timestamp`
+
+**Security:** History shared based on firewall rules (can be restricted per-peer)
+
+---
+
 ## 4. Node Identity System
 
 ### Node ID Format
@@ -1394,7 +1620,25 @@ DPTP is designed to be extensible. New commands can be added by:
 
 ## 9. Changelog
 
-### v1.1 (December 2025) - IN PROGRESS
+### v1.2 (December 2025)
+- **New message types: Vision & Image Support (v0.12.0)**
+  - SEND_IMAGE - Remote vision inference with image payload
+  - Reuses REMOTE_INFERENCE_RESPONSE for vision responses
+  - Enables screenshot analysis, OCR, diagram interpretation, visual Q&A
+- **New message types: Session Management (v0.12.0)**
+  - PROPOSE_NEW_SESSION, VOTE_NEW_SESSION, NEW_SESSION_RESULT
+  - Collaborative session reset with unanimous voting
+  - Prevents accidental data loss in multi-party conversations
+- **New message types: Chat History Synchronization (v0.12.0)**
+  - REQUEST_CHAT_HISTORY, CHAT_HISTORY_RESPONSE
+  - Automatic history sync on reconnect
+  - Backend→frontend sync for page refresh scenarios
+- **FILE_OFFER enhancement:**
+  - Added `image_metadata` field for image transfers (v0.12.0)
+  - Includes thumbnail, dimensions, source, captured_at timestamp
+  - Enables rich image preview before accepting transfer
+
+### v1.1 (December 2025)
 - **Node ID format updated**: 32 hex characters (was 16) for DHT compatibility
 - **Renamed commands**: GET_CONTEXT → REQUEST_CONTEXT, CONTEXT_DATA → CONTEXT_RESPONSE
 - **New message types**: REQUEST_DEVICE_CONTEXT, DEVICE_CONTEXT_RESPONSE (hardware/software context sharing)

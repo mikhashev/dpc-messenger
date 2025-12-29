@@ -25,27 +25,15 @@ class Settings:
                 # Validate that config has at least one section
                 if not self._config.sections():
                     print(f"Warning: Invalid config format in {self.config_file}")
-                    self._migrate_or_recreate_config()
+                    self._recreate_config_with_backup()
             except configparser.Error as e:
                 print(f"Warning: Failed to parse config file: {e}")
-                self._migrate_or_recreate_config()
+                self._recreate_config_with_backup()
         else:
             self._create_default_config()
 
-    def _migrate_or_recreate_config(self):
-        """Migrate old config format or recreate if invalid."""
-        # Try to read old hub URL if it exists
-        old_hub_url = None
-        try:
-            with open(self.config_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line.startswith('url =') or line.startswith('url='):
-                        old_hub_url = line.split('=', 1)[1].strip()
-                        break
-        except Exception:
-            pass
-
+    def _recreate_config_with_backup(self):
+        """Recreate config file after backing up the invalid one."""
         # Backup old config
         if self.config_file.exists():
             backup_file = self.config_file.with_suffix('.ini.bak')
@@ -56,13 +44,13 @@ class Settings:
             except Exception as e:
                 print(f"Warning: Could not backup config: {e}")
 
-        # Create new config with old URL if found
-        self._create_default_config(hub_url=old_hub_url)
+        # Create fresh config
+        self._create_default_config()
 
-    def _create_default_config(self, hub_url: Optional[str] = None):
+    def _create_default_config(self):
         """Create a default config file with common settings."""
         self._config['hub'] = {
-            'url': hub_url if hub_url else 'http://localhost:8000',
+            'url': 'http://localhost:8000',
             'auto_connect': 'false'
         }
 
@@ -185,6 +173,13 @@ class Settings:
             'preparation_timeout_per_gb': '40',  # Additional timeout per GB (40s/GB)
             'preparation_progress_interval_mb': '100',  # Emit progress every N MB during SHA256
             'preparation_progress_interval_chunks': '10000'  # Emit progress every N chunks during CRC32
+        }
+
+        self._config['vision'] = {
+            'enabled': 'true',  # Enable vision API features (screenshot paste, image analysis)
+            'default_provider': 'openai',  # Default AI provider for vision: 'openai' or 'anthropic'
+            'max_image_size_mb': '5',  # Maximum image size in MB (clipboard paste and uploads)
+            'thumbnail_quality': '85'  # Thumbnail JPEG quality (0-100)
         }
 
         self._config['logging'] = {
@@ -597,6 +592,23 @@ class Settings:
     def get_hole_punch_timeout(self) -> float:
         """Get hole punch connection timeout."""
         return self.get_connection_timeout('hole_punch')
+
+    # Vision API settings (Phase 2.6: Screenshot + Vision Integration)
+    def get_vision_enabled(self) -> bool:
+        """Get whether vision API features are enabled."""
+        return self.get('vision', 'enabled', 'true').lower() == 'true'
+
+    def get_vision_default_provider(self) -> str:
+        """Get default AI provider for vision analysis ('openai' or 'anthropic')."""
+        return self.get('vision', 'default_provider', 'openai')
+
+    def get_vision_max_image_size_mb(self) -> int:
+        """Get maximum image size in MB for clipboard paste and uploads."""
+        return int(self.get('vision', 'max_image_size_mb', '5'))
+
+    def get_vision_thumbnail_quality(self) -> int:
+        """Get thumbnail JPEG quality (0-100)."""
+        return int(self.get('vision', 'thumbnail_quality', '85'))
 
     def reload(self):
         """Reload configuration from file."""

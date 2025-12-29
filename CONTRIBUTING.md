@@ -122,17 +122,20 @@ chore: maintenance tasks (dependencies, config)
 
 ### Example: Current State
 
-**Current Status (2025-12-09):**
-- `main`: Stable v0.9.3 (Phase 5 - Knowledge Architecture complete)
-- `dev`: v0.10.1 development (Phase 6 complete + DTLS improvements)
-  - Includes v0.9.4, v0.9.5, v0.10.0, v0.10.1 (all documented, awaiting merge)
+**Current Status (2025-12-29):**
+- `main`: Stable v0.12.0 (Vision, Token Counting, AI Instruction Wizard)
+- `dev`: v0.12.1+ development (future features)
 
-**Next Steps:**
-1. Complete v0.10.1 documentation (CHANGELOG.md, RELEASE_NOTES) ✓
-2. Final testing of all changes (v0.9.4 → v0.10.1)
-3. When stable, merge `dev` → `main` (will jump from v0.9.3 to v0.10.1)
-4. Update CHANGELOG.md with actual release date
-5. Create GitHub release with full v0.9.4 → v0.10.1 notes
+**Release v0.12.0 includes:**
+- Vision/Image support (screenshot sharing, remote vision inference)
+- Session management with voting
+- Chat history synchronization
+- Token counting system (Phase 3-4) with pre-query validation
+- AI instruction sets & wizard (multi-phase complete)
+- AI scope field-level filtering for device context
+- Pure mode AI chat (zero system instructions)
+- 30+ bug fixes (including critical TLS validation, hardcoded instructions leak)
+- Breaking changes (migration code removed, provider schema)
 
 ## Code Style
 

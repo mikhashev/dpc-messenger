@@ -2,10 +2,280 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+## [0.12.0] - 2025-12-29
 
-## [Unreleased]
+### MAJOR FEATURES
+
+#### Vision & Image Support (Production-Ready)
+- **Screenshot Sharing** - Paste screenshots with Ctrl+V, instant preview
+- **Remote Vision Inference** - Use peer's GPU for image analysis
+  - Ollama vision (llava, bakllava, moondream)
+  - OpenAI vision (gpt-4-vision, gpt-4o)
+  - Anthropic vision (claude-3-opus, claude-3-sonnet)
+- **P2P Image Transfer** - Send images with thumbnails, firewall-gated
+- **Dual Provider Dropdowns** - Separate text/vision model selection
+- Files: ImageMessage.svelte, image_handler.py, image_utils.py, llm_manager.py
+
+#### Session Management
+- **Mutual Approval Voting** - All participants vote before history clear
+- **Prevents Data Loss** - No accidental clearing in multi-party chats
+- **New DPTP Commands:** PROPOSE_NEW_SESSION, VOTE_NEW_SESSION, NEW_SESSION_RESULT
+- Files: session_manager.py, session_handler.py, NewSessionDialog.svelte
+
+#### Chat History Synchronization
+- **Auto-Sync on Reconnect** - Never lose conversation context
+- **Backend→Frontend Sync** - Survives page refresh
+- **New DPTP Commands:** REQUEST_CHAT_HISTORY, CHAT_HISTORY_RESPONSE
+- Files: chat_history_handlers.py
+
+#### Token Counting System (Phase 3-4)
+- **Pre-Query Validation** - Check context window usage before sending query
+- **TokenCountManager** - Centralized token management for all AI providers
+- **20% Response Buffer** - Safety margin to prevent context overflow
+- **Accurate Tokenization** - HuggingFace tokenizers for precise counting
+- **Critical Fix:** Double-counting bug resolved (Ollama tokenization)
+- **Comprehensive Tests** - Unit tests for Phase 3 token counting
+- Files: TokenCountManager, token_counting/*, tests/test_token_counting.py
+
+#### AI Instruction Sets & Wizard (Phase 1-4 Complete)
+- **Multi-Instruction Set Support** - Multiple AI behavior profiles
+- **AI Wizard** - Create instruction sets with AI assistance and templates
+- **Template System** - Import/export instruction sets
+- **"None" Instruction Set** - Raw AI chat without system instructions
+- **Per-Conversation Selection** - Choose instruction set per conversation (Phase 4)
+- **Backend Commands** - Full CRUD support for instruction management
+- **UI Components** - InstructionsEditor, template import dialog
+- Files: InstructionsEditor.svelte, instruction handlers, template system
+
+---
+
+### BREAKING CHANGES
+
+#### Migration Code Removed (v2.0 Clean Architecture)
+**Rationale:** No active users, cleaner codebase for v2.0
+
+**Removed:**
+- `migrate_instructions_from_personal_context()` - v1→v2 migration
+- `_migrate_from_old_filename()` - firewall filename migration
+- `_migrate_from_toml_if_needed()` - TOML→JSON provider migration
+- `dpc-protocol/migrate_pcm.py` - standalone migration script
+- `dpc-protocol/tests/test_pcm_compatibility.py` - v1.0 tests
+
+**Changed:**
+- PersonalContext dataclass: Removed `instruction` field (now in instructions.json)
+- from_dict(): Only supports v2.0 format
+- Auto-create instructions.json on first load
+
+**Architecture (v2.0):**
+```
+~/.dpc/
+├── personal.json         # NO instruction field
+├── instructions.json     # AI behavior rules (auto-created)
+├── device_context.json
+├── privacy_rules.json
+├── providers.json
+└── config.ini
+```
+
+#### Provider Configuration Changes
+- **New required field:** `vision_provider` in providers.json
+- Example: `"vision_provider": true` for vision-capable providers
+
+#### Firewall Schema Changes
+- File transfer section: Nested groups/nodes objects
+- New `image_transfer` permissions section
+
+---
+
+### ENHANCEMENTS
+
+#### AI Scope Field-Level Filtering for Device Context
+- **Device Context Privacy Control** - device_context.json now supports AI scope filtering
+- **Granular Hardware Filtering** - Hide GPU specs, CPU details, memory info per AI scope
+- **4 Example Scopes** - work (full hardware), personal (hide GPU), basic (minimal), research (full access)
+- **Privacy Patterns** - `device_context.json:hardware.gpu.*: deny` to hide GPU from AI
+- Files: firewall.py (filter_device_context_for_ai_scope), service.py
+
+#### Pure Mode AI Chat (Zero System Instructions)
+- **Completely Pure Conversations** - When "Include personal context" unchecked → NO system instruction sent to AI
+- **Privacy-Focused Default** - Pure mode sends only conversation history (no instructions, no context)
+- **Before:** Sent "You are a helpful AI assistant." even when context disabled
+- **After:** Empty system instruction for true pure mode
+- File: managers/prompt_manager.py (_build_system_instruction)
+
+#### Personal Context Metadata Structure Improvements
+- **Auto-Reference instructions.json** - Automatically added to personal.json metadata on startup
+- **Consistent Structure** - Both device_context and instructions use same format (file, description, last_updated)
+- **Semantic Categorization** - external_contexts (AI prompt files) vs external_files (knowledge/data files)
+- **Removed schema_version** - Stored in files themselves, not in references
+- Files: service.py, device_context_collector.py, personal_context_example.json
+
+#### UI/UX Enhancements
+- Collapsible chat header with dual provider dropdowns
+- Native desktop notifications (OS permission integration)
+- File transfer UI management (add/delete buttons for groups/nodes)
+- Smart button states (disabled when peer offline)
+
+#### Backend Features
+- Vision config settings in config.ini
+- Bidirectional inference fallback for knowledge extraction
+- PromptManager extraction (reduced service.py complexity)
+
+---
+
+### BUG FIXES
+
+#### CRITICAL: TLS Certificate Validation + Node ID Security
+
+**Security Issues Fixed:**
+
+1. **TLS Certificate Validation Missing**
+   - **Bug:** Direct TLS connections had no certificate verification (certificate presented but never validated)
+   - **Impact:** Vulnerable to MITM attacks, anyone could impersonate any peer
+   - **Attack Vectors:** Man-in-the-middle attacks, peer impersonation, wrong peer connection
+   - **Fix:** Add manual certificate validation after TLS handshake
+     - Extract peer certificate from TLS connection
+     - Validate certificate CN matches expected node_id
+     - Reject connection if validation fails (before HELLO handshake)
+   - **Why Manual Validation:** P2P networks use self-signed certificates (no shared CA), so we use `ssl.CERT_NONE` to allow handshake, then manually verify
+   - **Defense in Depth:** Certificate validation at TLS layer + HELLO_ACK validation at application layer
+   - Files: p2p_manager.py (TLS context, post-handshake validation, certificate extraction)
+
+2. **Node ID Mismatch Handling**
+   - **Bug:** Application layer accepted mismatched node_id with warning only
+   - **Impact:** Could connect to wrong peer or stale cached identity
+   - **Security Risk:** Connections tracked under wrong node_id, breaking firewall rules
+   - **Fix:** Reject connection on node_id mismatch (both TLS cert CN and HELLO_ACK validation)
+   - Files: p2p_manager.py (HELLO_ACK validation)
+
+#### CRITICAL: Hardcoded Instructions Leak
+- **Bug:** 122 lines of hardcoded AI instructions in service.py
+- **Impact:** Privacy/security leak, instructions sent regardless of user settings
+- **Fix:** Removed all hardcoded instructions, use only instructions.json
+- **File:** service.py (122 lines removed)
+
+#### CRITICAL: Missing Timezone Imports
+- **Bug:** 2 protocol files missing timezone imports
+- **Impact:** Crashes when creating timestamps
+- **Fix:** Added `from datetime import timezone` to protocol files
+- **Files:** dpc-protocol (2 files)
+
+#### UX: Connection Status & Error Messages
+**Improvements:**
+- **"Connecting..." State**: Button shows 🔄 spinner during connection attempt
+- **Disabled State**: Button disabled when connecting or input empty
+- **Error Toasts**: Clear error messages when connection fails (8-second display)
+- **User Guidance**: Helpful messages explaining why connection failed
+- **Async Command Handling**: `connect_to_peer` and `connect_via_dht` now return Promises
+- Files: +page.svelte (connection state, async handler, error toast), coreService.ts (Promise-based commands)
+
+#### Peer Name Update Infinite Loop
+- **Bug:** Infinite reactive loop when peer updates their name in personal context
+- **Error:** `effect_update_depth_exceeded` - Maximum update depth exceeded
+- **Cause:** Reactive statement updated `peerContextHashes` without checking if value changed
+- **Fix:** Add guard to only update Map if hash is different from current value
+- **Files:** +page.svelte
+
+#### Personal Context Update Infinite Loop
+- **Bug:** Infinite reactive loop when user queries about device info with context enabled
+- **Error:** `effect_update_depth_exceeded` - Maximum update depth exceeded
+- **Cause:** Reactive statement updated `currentContextHash` without checking if value changed
+- **Fix:** Add guard to only update state if hash is different
+- **Files:** +page.svelte
+
+#### Peer Context Selection Counter (Svelte 5 Reactivity)
+- **Fixed Counter Not Updating** - "(0 selected)" now updates correctly when checking peer contexts
+- **Root Cause:** Svelte 5 $state() requires new Set instance to detect changes
+- **Solution:** `new Set(selectedPeerContexts)` triggers reactivity properly
+- **File:** +page.svelte (togglePeerContext, peer disconnect cleanup)
+
+#### Remote Inference
+- **Bug:** Model name missing from remote inference requests
+- **Fix:** Include model name in REMOTE_INFERENCE_REQUEST payload
+- **File:** inference handlers
+
+#### UI Provider Parameters
+- **Bug:** Incorrect provider parameters in UI dropdowns
+- **Fix:** Corrected vision provider parameters
+- **File:** +page.svelte
+
+#### CRITICAL: Multiple Infinite Loop Fixes
+- Empty conversation history infinite loop
+- Multiple peers infinite loop
+- Window focus tracking infinite loops
+- Chat history loading reactive loops
+- Firewall editor reactive loop
+
+#### Screenshot Bugs (11 Critical Fixes)
+- Empty text captions fixed
+- Duplicate messages on sender side fixed
+- Preview issues on receiver side fixed
+- save_screenshots_to_disk setting fixed
+- Path handling (Path objects vs strings)
+- Peer discovery (get_connected_peers)
+
+#### Session Management Fixes
+- Frontend chat clearing for non-initiator participants
+- History clearing for all participants on approval
+- node_id attribute references corrected
+- AI chats handling in propose_new_session()
+
+#### File Transfer Improvements
+- Dynamic timeout/keepalive for large file prep
+- Show sent file in sender's chat history
+- Accept file_size_bytes parameter
+- Replace deprecated datetime.utcnow()
+
+#### Other Fixes
+- LLM Manager: Renamed ram_requirements → vram_requirements
+- Peer context inclusion when checkbox checked
+- Handle None profile when firewall blocks
+- Trigger Svelte reactivity when deleting firewall rules
+
+---
+
+### TESTING
+
+#### Token Counting Tests
+- **Comprehensive Unit Tests** - Full coverage for Phase 3 token counting
+- **Files:** tests/test_token_counting.py
+
+---
+
+### DOCUMENTATION
+
+#### Privacy Rules Configuration
+- **Updated Examples** - privacy_rules.example.json now showcases device context filtering
+- **4 AI Scope Examples** - work, personal, basic, research with comprehensive comments
+- **Firewall Template** - Updated default template in firewall.py with AI scope examples
+- **UI Info Messages** - Updated FirewallEditor.svelte to mention field-level filtering
+- Files: privacy_rules.example.json, firewall.py, FirewallEditor.svelte
+
+---
+
+### Changed
+
+- Moved Available Features dropdown to Connect to Peer section
+- Status bar moved to sidebar, hidden when backend connected
+- Enhanced firewall default rules with realistic examples
+- Enabled Tauri asset protocol for ~/.dpc/** files
+
+---
+
+### Performance
+- Reduced UI freeze scenarios (infinite loop fixes)
+- Improved file transfer for large files (dynamic timeouts)
+- Optimized chat history loading for multiple peers
+
+---
+
+### Protocol Updates
+- **DPTP v1.1 → v1.2**
+  - New: SEND_IMAGE (vision inference)
+  - New: PROPOSE_NEW_SESSION, VOTE_NEW_SESSION, NEW_SESSION_RESULT
+  - New: REQUEST_CHAT_HISTORY, CHAT_HISTORY_RESPONSE
+  - Enhanced: FILE_OFFER with image_metadata field
+  - See specs/dptp_v1.md
 
 ---
 

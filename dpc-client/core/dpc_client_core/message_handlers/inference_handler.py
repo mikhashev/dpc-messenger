@@ -20,15 +20,16 @@ class RemoteInferenceRequestHandler(MessageHandler):
 
         Args:
             sender_node_id: Node ID of requester
-            payload: Contains "request_id", "prompt", "model", "provider"
+            payload: Contains "request_id", "prompt", "model", "provider", "images" (optional)
         """
         request_id = payload.get("request_id")
         prompt = payload.get("prompt")
         model = payload.get("model")
         provider = payload.get("provider")
+        images = payload.get("images")  # Phase 2: Remote Vision support
 
         await self.service._handle_inference_request(
-            sender_node_id, request_id, prompt, model, provider
+            sender_node_id, request_id, prompt, model, provider, images
         )
         return None
 
@@ -61,17 +62,23 @@ class RemoteInferenceResponseHandler(MessageHandler):
         prompt_tokens = payload.get("prompt_tokens")
         response_tokens = payload.get("response_tokens")
 
+        # Extract model and provider metadata (v0.12.0+)
+        model = payload.get("model")
+        provider = payload.get("provider")
+
         if request_id in self.service._pending_inference_requests:
             future = self.service._pending_inference_requests[request_id]
             if not future.done():
                 if status == "success":
-                    # Return dict with response and token metadata
+                    # Return dict with response, token, and model metadata
                     result_data = {
                         "response": response,
                         "tokens_used": tokens_used,
                         "model_max_tokens": model_max_tokens,
                         "prompt_tokens": prompt_tokens,
-                        "response_tokens": response_tokens
+                        "response_tokens": response_tokens,
+                        "model": model,
+                        "provider": provider
                     }
                     future.set_result(result_data)
                 else:

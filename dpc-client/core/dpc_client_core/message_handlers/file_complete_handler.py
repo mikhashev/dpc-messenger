@@ -66,8 +66,14 @@ class FileCompleteHandler(MessageHandler):
             ).hexdigest()[:16]
 
             size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
-            attachments = [{
-                "type": "file",
+
+            # Detect if this is an image transfer
+            is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
+                       and transfer.image_metadata is not None)
+
+            # Build attachment
+            attachment = {
+                "type": "image" if is_image else "file",
                 "filename": transfer.filename,
                 "size_bytes": transfer.size_bytes,
                 "size_mb": size_mb,
@@ -75,22 +81,36 @@ class FileCompleteHandler(MessageHandler):
                 "mime_type": transfer.mime_type,
                 "transfer_id": transfer_id,
                 "status": "completed"
-            }]
+            }
+
+            # Add image-specific fields
+            if is_image:
+                # Only include file_path if file still exists (not deleted by privacy settings)
+                if transfer.file_path and transfer.file_path.exists():
+                    attachment["file_path"] = str(transfer.file_path)
+                if transfer.image_metadata:
+                    attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
+                    attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
+
+            # Extract text caption from image_metadata if available
+            caption_text = ""
+            if is_image and transfer.image_metadata:
+                caption_text = transfer.image_metadata.get("text", "")
 
             await self.service.local_api.broadcast_event("new_p2p_message", {
                 "sender_node_id": "user",
                 "sender_name": "You",
-                "text": f"{transfer.filename} ({size_mb} MB)",
+                "text": caption_text,  # User's caption (empty if not provided)
                 "message_id": message_id,
-                "attachments": attachments
+                "attachments": [attachment]
             })
 
             # Add to conversation history
             conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
             if conversation_monitor:
-                message_content = f"Sent file: {transfer.filename} ({size_mb} MB)"
-                conversation_monitor.add_message("user", message_content, attachments)
-                self.logger.debug(f"Added file attachment to conversation history: {transfer.filename}")
+                message_content = f"Sent {'screenshot' if is_image else 'file'}: {transfer.filename} ({size_mb} MB)"
+                conversation_monitor.add_message("user", message_content, [attachment])
+                self.logger.debug(f"Added {'image' if is_image else 'file'} attachment to conversation history: {transfer.filename}")
 
         self.logger.debug(f"FILE_COMPLETE processed, transfer marked as completed: {transfer.filename}")
 

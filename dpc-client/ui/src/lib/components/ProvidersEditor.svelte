@@ -24,6 +24,7 @@
 
   type ProvidersConfig = {
     default_provider: string;
+    vision_provider?: string;  // Optional vision provider for image queries
     providers: Provider[];
   };
 
@@ -77,13 +78,6 @@
     } catch (error) {
       console.error('Error loading providers config:', error);
     }
-  }
-
-  // Enter edit mode
-  function startEditing() {
-    if (!config) return;
-    editMode = true;
-    editedConfig = JSON.parse(JSON.stringify(config));
   }
 
   // Cancel editing
@@ -179,6 +173,10 @@
       if (editedConfig.default_provider === provider.alias) {
         editedConfig.default_provider = editedConfig.providers[0]?.alias || '';
       }
+      // If deleted provider was vision default, reset vision default
+      if (editedConfig.vision_provider === provider.alias) {
+        editedConfig.vision_provider = editedConfig.providers[0]?.alias || '';
+      }
       editedConfig = editedConfig; // Trigger reactivity
     }
   }
@@ -188,6 +186,56 @@
     if (!editedConfig) return;
     editedConfig.default_provider = alias;
     editedConfig = editedConfig; // Trigger reactivity
+  }
+
+  // Set vision default provider
+  function setVisionDefault(alias: string) {
+    if (!editedConfig) return;
+    editedConfig.vision_provider = alias;
+    editedConfig = editedConfig; // Trigger reactivity
+  }
+
+  // Track original aliases to detect changes on blur
+  let originalAliases = new Map<number, string>();
+
+  // Handle alias change with auto-update of defaults (triggered on blur)
+  function handleAliasBlur(index: number) {
+    if (!editedConfig) return;
+    const newAlias = editedConfig.providers[index].alias;
+    const oldAlias = originalAliases.get(index);
+
+    // Only update if alias actually changed
+    if (!oldAlias || newAlias === oldAlias) {
+      originalAliases.set(index, newAlias);
+      return;
+    }
+
+    // Auto-update default_provider if this was the default
+    if (editedConfig.default_provider === oldAlias) {
+      editedConfig.default_provider = newAlias;
+    }
+
+    // Auto-update vision_provider if this was the vision default
+    if (editedConfig.vision_provider === oldAlias) {
+      editedConfig.vision_provider = newAlias;
+    }
+
+    // Update the tracked alias
+    originalAliases.set(index, newAlias);
+    editedConfig = editedConfig; // Trigger reactivity
+  }
+
+  // Initialize original aliases when entering edit mode
+  function startEditing() {
+    if (!config) return;
+    editMode = true;
+    editedConfig = JSON.parse(JSON.stringify(config));
+    if (!editedConfig) return; // Guard against null
+    // Track original aliases
+    originalAliases.clear();
+    editedConfig.providers.forEach((p, i) => {
+      originalAliases.set(i, p.alias);
+    });
   }
 
   // API key source switching
@@ -348,12 +396,13 @@
         {#if selectedTab === 'list'}
           <!-- Provider Cards -->
           <div class="providers-list">
-            {#each displayConfig.providers as provider, i (provider.alias)}
+            {#each displayConfig.providers as provider, i (i)}
               <div class="provider-card" class:default={provider.alias === displayConfig.default_provider}>
                 <div class="provider-header">
                   <h3>
                     {provider.alias}
-                    {#if provider.alias === displayConfig.default_provider}<span class="default-badge">⭐ Default</span>{/if}
+                    {#if provider.alias === displayConfig.default_provider}<span class="default-badge">⭐ Text Default</span>{/if}
+                    {#if provider.alias === displayConfig.vision_provider}<span class="default-badge vision-badge">👁️ Vision Default</span>{/if}
                   </h3>
                   {#if editMode}
                     <button class="btn-delete" on:click={() => deleteProvider(i)}>Delete</button>
@@ -369,8 +418,12 @@
                         id="alias-{i}"
                         type="text"
                         bind:value={editedConfig.providers[i].alias}
+                        on:blur={() => handleAliasBlur(i)}
                         placeholder="my_provider"
                       />
+                      {#if editedConfig.default_provider === provider.alias || editedConfig.vision_provider === provider.alias}
+                        <p class="help-text">💡 Renaming will automatically update default settings</p>
+                      {/if}
                     </div>
 
                     <div class="form-group">
@@ -510,11 +563,22 @@
                       {/if}
                     </div>
 
-                    {#if provider.alias !== displayConfig.default_provider}
-                      <button class="btn-set-default" on:click={() => setDefault(provider.alias)}>
-                        Set as Default
+                    <div class="default-buttons">
+                      <button
+                        class="btn-set-default"
+                        class:active={provider.alias === displayConfig.default_provider}
+                        on:click={() => setDefault(provider.alias)}
+                      >
+                        {provider.alias === displayConfig.default_provider ? '✓ Text Default' : 'Set as Text Default'}
                       </button>
-                    {/if}
+                      <button
+                        class="btn-set-default"
+                        class:active={provider.alias === displayConfig.vision_provider}
+                        on:click={() => setVisionDefault(provider.alias)}
+                      >
+                        {provider.alias === displayConfig.vision_provider ? '✓ Vision Default' : 'Set as Vision Default'}
+                      </button>
+                    </div>
                   </div>
                 {:else}
                   <!-- Display Mode -->

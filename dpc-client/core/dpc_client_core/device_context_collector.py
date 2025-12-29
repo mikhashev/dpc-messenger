@@ -723,7 +723,7 @@ class DeviceContextCollector:
 
         context.metadata["external_contexts"]["device_context"] = {
             "file": "device_context.json",
-            "schema_version": self.SCHEMA_VERSION,
+            "description": "Hardware and software environment context",
             "last_updated": timestamp
         }
 

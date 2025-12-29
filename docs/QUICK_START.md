@@ -230,8 +230,9 @@ Edit `~/.dpc/providers.json` to add your AI providers:
 # 1. Install Ollama
 curl -fsSL https://ollama.com/install.sh | sh
 
-# 2. Download a model
-ollama pull llama3.2
+# 2. Download models (text + vision)
+ollama pull llama3.1:8b          # Fast text model
+ollama pull llama3.2-vision:11b  # Vision model for images
 
 # 3. Configure in providers.json
 nano ~/.dpc/providers.json
@@ -239,14 +240,24 @@ nano ~/.dpc/providers.json
 
 ```json
 {
-  "default_provider": "ollama_local",
-  "providers": {
-    "ollama_local": {
+  "default_provider": "ollama_text",
+  "vision_provider": "ollama_vision",
+  "providers": [
+    {
+      "alias": "ollama_text",
       "type": "ollama",
-      "base_url": "http://localhost:11434",
-      "model": "llama3.2:latest"
+      "model": "llama3.1:8b",
+      "host": "http://127.0.0.1:11434",
+      "context_window": 131072
+    },
+    {
+      "alias": "ollama_vision",
+      "type": "ollama",
+      "model": "llama3.2-vision:11b",
+      "host": "http://127.0.0.1:11434",
+      "context_window": 131072
     }
-  }
+  ]
 }
 ```
 

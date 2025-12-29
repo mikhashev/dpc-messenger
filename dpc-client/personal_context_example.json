@@ -111,18 +111,20 @@
     "storage": "local",
     "format_version": "2.0",
     "external_contexts": {
+      "_comment": "Files that provide context to the AI (loaded during prompt assembly)",
       "device_context": {
         "file": "device_context.json",
-        "schema_version": "1.1",
+        "description": "Hardware and software environment context",
         "last_updated": "2025-01-20T16:45:00.000000"
-      }
-    },
-    "external_files": {
+      },
       "instructions": {
         "file": "instructions.json",
         "description": "AI behavior instructions",
         "last_updated": "2025-01-15T10:00:00.000000"
       }
+    },
+    "external_files": {
+      "_comment": "References to knowledge files, work files, or other external data sources"
     }
   }
 }

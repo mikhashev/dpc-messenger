@@ -8,7 +8,7 @@ Inspired by Personal Context Manager and cognitive bias research.
 import logging
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional, Literal
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -38,7 +38,7 @@ class KnowledgeCommitProposal:
     # Participants and consensus
     participants: List[str] = field(default_factory=list)  # Node IDs
     proposed_by: str = "ai"  # "ai" or node_id
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Bias mitigation tracking (Phase 2 integration)
     cultural_perspectives: List[str] = field(default_factory=list)  # ["Western", "Eastern", etc.]
@@ -80,7 +80,7 @@ class KnowledgeCommitProposal:
                 tags=entry_data.get('tags', []),
                 source=source,
                 confidence=entry_data.get('confidence', 1.0),
-                last_updated=entry_data.get('last_updated', datetime.utcnow().isoformat()),
+                last_updated=entry_data.get('last_updated', datetime.now(timezone.utc).isoformat()),
                 edited_by=entry_data.get('edited_by'),  # Phase 5 - inline editing
                 edited_at=entry_data.get('edited_at'),  # Phase 5 - inline editing
                 usage_count=entry_data.get('usage_count', 0),
@@ -99,7 +99,7 @@ class KnowledgeCommitProposal:
             entries=entries,
             participants=data.get('participants', []),
             proposed_by=data.get('proposed_by', 'ai'),
-            timestamp=data.get('timestamp', datetime.utcnow().isoformat()),
+            timestamp=data.get('timestamp', datetime.now(timezone.utc).isoformat()),
             cultural_perspectives=data.get('cultural_perspectives', []),
             alternatives=data.get('alternatives', []),
             flagged_assumptions=data.get('flagged_assumptions', []),
@@ -123,7 +123,7 @@ class CommitVote:
     voter_node_id: str
     vote: Literal["approve", "reject", "request_changes"]
     comment: Optional[str] = None
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Dissent tracking (if this voter was assigned as devil's advocate)
     is_required_dissent: bool = False
@@ -151,7 +151,7 @@ class KnowledgeCommit:
     # Provenance
     conversation_id: Optional[str] = None
     participants: List[str] = field(default_factory=list)
-    timestamp: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Consensus tracking
     consensus_type: Literal["unanimous", "majority", "disputed"] = "unanimous"

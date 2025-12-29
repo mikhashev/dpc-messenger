@@ -1,0 +1,76 @@
+{
+  "system_instruction": "You are an expert at creating personalized AI instruction sets for the D-PC Messenger platform. Your job is to help users design custom instruction sets that will guide AI behavior in their conversations.\n\nYour approach:\n1. Ask thoughtful questions to understand the user's needs, goals, and preferences\n2. Draw on best practices from cognitive science, learning theory, and AI interaction design\n3. Use patterns from the personal-context-manager project (cognitive profiles, learning strategies, mental models, bias mitigation)\n4. Generate a comprehensive instruction set tailored to their specific use case\n5. Explain your recommendations and be open to refinement\n\nBe conversational, helpful, and adaptive. If the user provides vague answers, ask follow-up questions to clarify. If they have specific requirements, incorporate them directly.",
+
+  "question_sequence": [
+    {
+      "id": "use_case",
+      "question": "What will you primarily use this instruction set for? For example:\n- Learning a specific subject (mathematics, languages, programming, etc.)\n- Professional work (engineering, writing, research, etc.)\n- Creative projects (art, music, game development, etc.)\n- Personal development (productivity, decision-making, reflection)\n- General conversation with specific personality traits\n\nTell me about your main use case.",
+      "follow_ups": [
+        "Can you be more specific about the topics or domains?",
+        "What are your main goals with this?"
+      ]
+    },
+    {
+      "id": "learning_style",
+      "question": "How do you prefer to learn or work? For example:\n- Visual learners prefer diagrams, charts, and visual representations\n- Hands-on learners prefer practice exercises and real examples\n- Conceptual thinkers prefer deep theoretical understanding\n- Step-by-step followers prefer structured, sequential guidance\n- Socratic learners prefer being asked probing questions\n\nWhat style resonates with you?",
+      "follow_ups": [
+        "Do you prefer detailed explanations or concise summaries?",
+        "How important is it to see connections between concepts?"
+      ]
+    },
+    {
+      "id": "ai_behaviors",
+      "question": "What specific AI behaviors do you want? For example:\n- Socratic questioning (challenge assumptions, ask probing questions)\n- Detailed explanations (thorough breakdowns of complex topics)\n- Concise answers (brief, to-the-point responses)\n- Creative suggestions (brainstorming, novel ideas)\n- Critical analysis (identify weaknesses, alternative perspectives)\n- Encouraging tone (supportive, motivational)\n- Neutral tone (objective, analytical)\n\nWhat behaviors are most important to you?",
+      "follow_ups": [
+        "Should the AI challenge your thinking or be more supportive?",
+        "Do you want the AI to proactively suggest improvements?"
+      ]
+    },
+    {
+      "id": "challenges",
+      "question": "Are there specific challenges you want the AI to help with? For example:\n- Staying focused and avoiding distractions\n- Remembering information and building retention\n- Critical thinking and avoiding biases\n- Creativity and generating new ideas\n- Understanding complex or abstract concepts\n- Making decisions and evaluating options\n- Building mental models and frameworks\n\nWhat challenges should the AI prioritize?",
+      "follow_ups": [
+        "Are there any bad habits or pitfalls you want to avoid?",
+        "What has worked well for you in the past?"
+      ]
+    },
+    {
+      "id": "verification",
+      "question": "How should the AI handle evidence and reasoning? For example:\n- Always cite sources when making factual claims\n- Explain reasoning steps explicitly\n- Acknowledge uncertainty and knowledge limitations\n- Honestly admit when lacking sufficient knowledge or information\n- Provide multiple perspectives on controversial topics\n- Challenge assumptions and status quo thinking\n\nWhat's important to you regarding evidence and reasoning?",
+      "follow_ups": [
+        "How important is it to see diverse perspectives?",
+        "Should the AI be more cautious or more exploratory?"
+      ]
+    }
+  ],
+
+  "output_format": {
+    "description": "After gathering user responses, generate a JSON object with the following structure",
+    "schema": {
+      "name": "User-provided name for the instruction set",
+      "description": "Brief description of the instruction set's purpose",
+      "primary": "Main instruction text (2-3 sentences) that sets the AI's overall behavior, incorporating user's use case, preferred style, and key behaviors",
+      "context_update": "How the AI should suggest updates to the user's personal knowledge base (1-2 sentences)",
+      "verification_protocol": "How the AI should handle evidence, reasoning, and citations (1-2 sentences)",
+      "learning_support": {
+        "explanations": "How the AI should explain concepts, tailored to user's learning style (1-2 sentences)",
+        "practice": "How to generate practice exercises or examples (1-2 sentences)",
+        "metacognition": "How to help with self-reflection and learning process awareness (1-2 sentences)",
+        "connections": "How to identify relationships between concepts and build mental models (1-2 sentences)"
+      },
+      "bias_mitigation": {
+        "require_multi_perspective": "boolean - whether to require considering multiple viewpoints",
+        "challenge_status_quo": "boolean - whether to challenge assumptions and conventional thinking",
+        "cultural_sensitivity": "string - how to handle diverse cultural perspectives (1-2 sentences)",
+        "framing_neutrality": "boolean - whether to avoid biased framing of questions",
+        "evidence_requirement": "string - one of: 'citations_required', 'citations_preferred', 'reasoning_only'"
+      },
+      "collaboration_mode": "string - one of: 'individual', 'group', 'public' (default: 'individual')",
+      "consensus_required": "boolean - whether group consensus is needed for knowledge updates (default: true for group, false for individual)",
+      "ai_curation_enabled": "boolean - whether AI can suggest knowledge updates (default: true)",
+      "dissent_encouraged": "boolean - whether dissenting opinions are encouraged (default: true)"
+    }
+  },
+
+  "generation_prompt_template": "Based on the user's responses, generate a custom instruction set.\n\nUser's Use Case: {use_case}\nLearning/Working Style: {learning_style}\nDesired AI Behaviors: {ai_behaviors}\nKey Challenges: {challenges}\nEvidence Preferences: {verification}\n\nGenerate a JSON object following this exact structure:\n\n```json\n{{\n  \"name\": \"<descriptive name>\",\n  \"description\": \"<brief description>\",\n  \"primary\": \"<2-3 sentence main instruction>\",\n  \"context_update\": \"<1-2 sentence guideline>\",\n  \"verification_protocol\": \"<1-2 sentence guideline>\",\n  \"learning_support\": {{\n    \"explanations\": \"<tailored to learning style>\",\n    \"practice\": \"<how to generate exercises>\",\n    \"metacognition\": \"<how to support reflection>\",\n    \"connections\": \"<how to build mental models>\"\n  }},\n  \"bias_mitigation\": {{\n    \"require_multi_perspective\": true/false,\n    \"challenge_status_quo\": true/false,\n    \"cultural_sensitivity\": \"<guideline text>\",\n    \"framing_neutrality\": true/false,\n    \"evidence_requirement\": \"citations_required|citations_preferred|reasoning_only\"\n  }},\n  \"collaboration_mode\": \"individual\",\n  \"consensus_required\": false,\n  \"ai_curation_enabled\": true,\n  \"dissent_encouraged\": true\n}}\n```\n\nEnsure the instruction set:\n1. Directly addresses the user's stated use case and challenges\n2. Incorporates their preferred learning/working style\n3. Emphasizes the AI behaviors they requested\n4. Follows their evidence and reasoning preferences\n5. Uses clear, actionable language that an AI can follow\n\nReturn ONLY the JSON object, no additional commentary."
+}

@@ -4,8 +4,9 @@ import os
 import json
 import asyncio
 import logging
+import base64
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 # Import client libraries
 from openai import AsyncOpenAI
@@ -35,12 +36,50 @@ class AIProvider:
         """Generates a response from the AI model."""
         raise NotImplementedError
 
+    def supports_vision(self) -> bool:
+        """Returns True if this provider supports vision API (multimodal queries)."""
+        return False
+
+    async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
+        """
+        Generates a response from the AI model with image inputs (vision API).
+
+        Args:
+            prompt: Text prompt
+            images: List of image dicts with keys:
+                - path: str (absolute path to image file)
+                - mime_type: str (e.g., "image/png")
+                - base64: str (optional, if already encoded)
+            **kwargs: Additional parameters (temperature, max_tokens, etc.)
+
+        Returns:
+            str: AI response text
+
+        Raises:
+            NotImplementedError: If provider doesn't support vision
+        """
+        raise NotImplementedError(f"Vision API not implemented for {self.__class__.__name__}")
+
 # --- Concrete Provider Implementations ---
+
+# Vision-capable Ollama models (for auto-detection)
+OLLAMA_VISION_MODELS = [
+    "qwen3-vl",         # Qwen3-VL (all variants: 2b, 4b, 8b, 30b, etc.)
+    "llava",            # LLaVA variants
+    "llama3.2-vision",  # Llama 3.2 vision models
+    "ministral-3",      # Ministral 3 vision models (3b, 8b, 14b)
+    "bakllava",         # BakLLaVA
+    "moondream",        # Moondream
+]
 
 class OllamaProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         self.client = ollama.AsyncClient(host=config.get("host"))
+
+    def supports_vision(self) -> bool:
+        """Check if this Ollama model supports vision/multimodal inputs."""
+        return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
 
     async def generate_response(self, prompt: str) -> str:
         try:
@@ -65,6 +104,68 @@ class OllamaProvider(AIProvider):
             raise RuntimeError(f"Ollama provider '{self.alias}' timed out after 60 seconds.")
         except Exception as e:
             raise RuntimeError(f"Ollama provider '{self.alias}' failed: {e}") from e
+
+    async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
+        """
+        Ollama vision API using images parameter.
+        Docs: https://docs.ollama.com/capabilities/vision
+
+        Args:
+            prompt: Text prompt
+            images: List of dicts with keys:
+                - path: str (file path)
+                - base64: str (optional, base64 data)
+                - mime_type: str (optional)
+            **kwargs: Additional parameters (temperature, timeout, etc.)
+
+        Returns:
+            str: AI response text
+        """
+        try:
+            # Build image list (Ollama accepts paths or base64)
+            image_inputs = []
+            for img in images:
+                if "base64" in img:
+                    # Use base64 data if available
+                    base64_data = img["base64"]
+                    # Strip data URL prefix if present (data:image/png;base64,...)
+                    if base64_data.startswith("data:"):
+                        base64_data = base64_data.split(",", 1)[1]
+                    image_inputs.append(base64_data)
+                elif "path" in img:
+                    # Use file path (Ollama SDK handles reading)
+                    image_inputs.append(str(img["path"]))
+                else:
+                    raise ValueError("Image must have 'path' or 'base64' key")
+
+            # Build message with images
+            message = {
+                'role': 'user',
+                'content': prompt,
+                'images': image_inputs
+            }
+
+            # Build options dict for custom parameters
+            options = {}
+            if self.config.get("context_window"):
+                options["num_ctx"] = self.config["context_window"]
+
+            # Vision queries may take longer - use configurable timeout
+            timeout = kwargs.get("timeout", 120.0)  # Default 120s for vision
+
+            response = await asyncio.wait_for(
+                self.client.chat(
+                    model=self.model,
+                    messages=[message],
+                    options=options if options else None
+                ),
+                timeout=timeout
+            )
+            return response['message']['content']
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {kwargs.get('timeout', 120)}s.")
+        except Exception as e:
+            raise RuntimeError(f"Ollama vision API failed for '{self.alias}': {e}") from e
 
     async def get_model_info(self) -> Dict[str, Any]:
         """Query Ollama for model information including parameters.
@@ -138,11 +239,16 @@ class OpenAICompatibleProvider(AIProvider):
             api_key_env = config.get("api_key_env")
             if api_key_env:
                 api_key = os.getenv(api_key_env)
-        
+
         if not api_key:
             raise ValueError(f"API key not found for OpenAI compatible provider '{self.alias}'")
 
         self.client = AsyncOpenAI(base_url=config.get("base_url"), api_key=api_key)
+
+    def supports_vision(self) -> bool:
+        """OpenAI vision models: gpt-4o, gpt-4-turbo, gpt-4o-mini"""
+        vision_models = ["gpt-4o", "gpt-4-turbo", "gpt-4o-mini"]
+        return any(vm in self.model for vm in vision_models)
 
     async def generate_response(self, prompt: str) -> str:
         try:
@@ -153,6 +259,46 @@ class OpenAICompatibleProvider(AIProvider):
             return response.choices[0].message.content
         except Exception as e:
             raise RuntimeError(f"OpenAI compatible provider '{self.alias}' failed: {e}") from e
+
+    async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
+        """
+        OpenAI vision API using multimodal content arrays.
+        Docs: https://platform.openai.com/docs/guides/vision
+        """
+        try:
+            # Build multimodal message content
+            content = [{"type": "text", "text": prompt}]
+
+            for img in images:
+                # Encode image to base64 if not already
+                if "base64" in img:
+                    base64_data = img["base64"]
+                    # Strip data URL prefix if present
+                    if base64_data.startswith("data:"):
+                        base64_data = base64_data.split(",", 1)[1]
+                else:
+                    with open(img["path"], "rb") as f:
+                        base64_data = base64.b64encode(f.read()).decode("utf-8")
+
+                # OpenAI expects data URL format
+                mime_type = img.get("mime_type", "image/png")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{base64_data}",
+                        "detail": "high"  # or "low" for faster/cheaper processing
+                    }
+                })
+
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": content}],
+                temperature=kwargs.get("temperature", 0.7),
+                max_tokens=kwargs.get("max_tokens", 4000)
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise RuntimeError(f"OpenAI vision API failed for '{self.alias}': {e}") from e
 
 class AnthropicProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
@@ -169,6 +315,11 @@ class AnthropicProvider(AIProvider):
         # Set to None or omit from config to use model's maximum
         self.max_tokens = config.get("max_tokens", 4096)
 
+    def supports_vision(self) -> bool:
+        """Claude 3+ models support vision"""
+        vision_models = ["claude-3", "claude-opus", "claude-sonnet", "claude-haiku"]
+        return any(vm in self.model for vm in vision_models)
+
     async def generate_response(self, prompt: str) -> str:
         try:
             # Use configured max_tokens or default (Anthropic requires max_tokens parameter)
@@ -180,6 +331,50 @@ class AnthropicProvider(AIProvider):
             return message.content[0].text
         except Exception as e:
             raise RuntimeError(f"Anthropic provider '{self.alias}' failed: {e}") from e
+
+    async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
+        """
+        Anthropic vision API using multimodal content blocks.
+        Docs: https://docs.anthropic.com/claude/docs/vision
+        """
+        try:
+            # Build multimodal content array
+            content = []
+
+            # Add images first
+            for img in images:
+                # Encode image to base64 if not already
+                if "base64" in img:
+                    base64_data = img["base64"]
+                    # Strip data URL prefix if present
+                    if base64_data.startswith("data:"):
+                        base64_data = base64_data.split(",", 1)[1]
+                else:
+                    with open(img["path"], "rb") as f:
+                        base64_data = base64.b64encode(f.read()).decode("utf-8")
+
+                mime_type = img.get("mime_type", "image/png")
+                content.append({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": base64_data
+                    }
+                })
+
+            # Add text prompt after images
+            content.append({"type": "text", "text": prompt})
+
+            response = await self.client.messages.create(
+                model=self.model,
+                messages=[{"role": "user", "content": content}],
+                temperature=kwargs.get("temperature", 0.7),
+                max_tokens=kwargs.get("max_tokens", self.max_tokens or 4096)
+            )
+            return response.content[0].text
+        except Exception as e:
+            raise RuntimeError(f"Anthropic vision API failed for '{self.alias}': {e}") from e
 
 
 # --- The Manager Class ---
@@ -203,6 +398,21 @@ MODEL_CONTEXT_WINDOWS = {
     "qwen2.5:7b": 32768,
     "deepseek-coder-v2:16b": 131072,
     "codellama:7b": 16384,
+
+    # Ollama vision models
+    "qwen3-vl:2b": 262144,     # 256K tokens
+    "qwen3-vl:4b": 262144,
+    "qwen3-vl:8b": 262144,
+    "qwen3-vl:30b": 262144,
+    "qwen3-vl:32b": 262144,
+    "llama3.2-vision:11b": 131072,  # 128K tokens
+    "llama3.2-vision:90b": 131072,
+    "ministral-3:3b": 262144,   # 256K tokens
+    "ministral-3:8b": 262144,
+    "ministral-3:14b": 262144,
+    "llava:7b": 4096,
+    "llava:13b": 4096,
+    "llava:34b": 4096,
 
     # OpenAI models
     "gpt-4": 8192,
@@ -233,31 +443,13 @@ class LLMManager:
         self.config_path = config_path
         self.providers: Dict[str, AIProvider] = {}
         self.default_provider: str | None = None
-        self._migrate_from_toml_if_needed()
+        self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
+
+        # Token counting manager (Phase 4 refactor - v0.12.1)
+        from dpc_client_core.managers.token_count_manager import TokenCountManager
+        self.token_count_manager = TokenCountManager()
+
         self._load_providers_from_config()
-
-    def _migrate_from_toml_if_needed(self):
-        """Migrates providers.toml to providers.json if needed."""
-        toml_path = self.config_path.parent / "providers.toml"
-
-        # Only migrate if TOML exists and JSON doesn't
-        if toml_path.exists() and not self.config_path.exists():
-            logger.info("Migrating %s to %s", toml_path, self.config_path)
-            try:
-                # Import toml only if needed for migration
-                import toml
-                config = toml.load(toml_path)
-
-                # Save as JSON
-                with open(self.config_path, 'w') as f:
-                    json.dump(config, f, indent=2)
-
-                # Backup TOML file
-                backup_path = toml_path.with_suffix('.toml.backup')
-                toml_path.rename(backup_path)
-                logger.info("Migration successful - original file backed up as %s", backup_path)
-            except Exception as e:
-                logger.error("Error migrating TOML to JSON: %s", e, exc_info=True)
 
     def _ensure_config_exists(self):
         """Creates a default providers.json file if one doesn't exist."""
@@ -268,16 +460,136 @@ class LLMManager:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
 
             default_config = {
-                "default_provider": "ollama_local",
+                "_comment": "AI Provider Configuration - Manage your local and cloud AI providers",
+                "default_provider": "ollama_text",
+                "vision_provider": "ollama_vision",
                 "providers": [
                     {
-                        "alias": "ollama_local",
+                        "alias": "ollama_text",
                         "type": "ollama",
                         "model": "llama3.1:8b",
                         "host": "http://127.0.0.1:11434",
-                        "context_window": 131072
+                        "context_window": 16384,
+                        "_note": "Fast text model for regular chat queries"
+                    },
+                    {
+                        "alias": "ollama_vision",
+                        "type": "ollama",
+                        "model": "qwen3-vl:8b",
+                        "host": "http://127.0.0.1:11434",
+                        "context_window": 16384,
+                        "_note": "Vision model for image analysis"
                     }
-                ]
+                ],
+                "_examples": {
+                    "_comment": "Example configurations - uncomment and add to providers array above",
+                    "ollama_vision_alternatives": [
+                        {
+                            "alias": "ollama_qwen_vision",
+                            "type": "ollama",
+                            "model": "qwen3-vl:8b",
+                            "host": "http://127.0.0.1:11434",
+                            "context_window": 262144,
+                            "_note": "Qwen3-VL 8B - excellent vision model (256K context)"
+                        },
+                        {
+                            "alias": "ollama_ministral_vision",
+                            "type": "ollama",
+                            "model": "ministral-3:8b",
+                            "host": "http://127.0.0.1:11434",
+                            "context_window": 262144,
+                            "_note": "Ministral 3 8B - fast vision model (256K context)"
+                        }
+                    ],
+                    "ollama_small_models": [
+                        {
+                            "alias": "ollama_small",
+                            "type": "ollama",
+                            "model": "llama3.2:3b",
+                            "host": "http://127.0.0.1:11434",
+                            "context_window": 131072,
+                            "_note": "Small model for resource-constrained systems (~2GB RAM)"
+                        },
+                        {
+                            "alias": "ollama_tiny",
+                            "type": "ollama",
+                            "model": "llama3.2:1b",
+                            "host": "http://127.0.0.1:11434",
+                            "context_window": 131072,
+                            "_note": "Tiny model for embedded devices (~1GB RAM)"
+                        }
+                    ],
+                    "lm_studio": {
+                        "alias": "lm_studio",
+                        "type": "openai_compatible",
+                        "model": "lmstudio-community/Meta-Llama-3-8B-Instruct-GGUF",
+                        "base_url": "http://127.0.0.1:1234/v1",
+                        "api_key": "lm-studio",
+                        "_note": "Local LM Studio - OpenAI-compatible API"
+                    },
+                    "openai": {
+                        "alias": "gpt4o",
+                        "type": "openai_compatible",
+                        "model": "gpt-4o",
+                        "base_url": "https://api.openai.com/v1",
+                        "api_key_env": "OPENAI_API_KEY",
+                        "context_window": 128000,
+                        "_note": "OpenAI GPT-4o - powerful vision-capable model",
+                        "_setup": "Set environment variable: export OPENAI_API_KEY='sk-...'"
+                    },
+                    "anthropic": [
+                        {
+                            "alias": "claude_sonnet",
+                            "type": "anthropic",
+                            "model": "claude-sonnet-4-5",
+                            "api_key_env": "ANTHROPIC_API_KEY",
+                            "context_window": 200000,
+                            "_note": "Claude Sonnet 4.5 - most capable (vision-capable, 200K context)",
+                            "_setup": "Set environment variable: export ANTHROPIC_API_KEY='sk-ant-...'"
+                        },
+                        {
+                            "alias": "claude_haiku",
+                            "type": "anthropic",
+                            "model": "claude-haiku-4-5",
+                            "api_key_env": "ANTHROPIC_API_KEY",
+                            "context_window": 200000,
+                            "_note": "Claude Haiku 4.5 - fast and affordable (vision-capable, 200K context)"
+                        }
+                    ]
+                },
+                "_instructions": {
+                    "default_provider": "Provider used for all text-only queries (no images)",
+                    "vision_provider": "Provider used for image analysis queries (screenshots, photos, diagrams)",
+                    "model_installation": {
+                        "ollama": "Install models: ollama pull llama3.1:8b && ollama pull llama3.2-vision:11b",
+                        "alternative_vision": "Other vision models: ollama pull qwen3-vl:8b OR ollama pull ministral-3:8b",
+                        "small_models": "For low RAM: ollama pull llama3.2:3b (2GB) OR ollama pull llama3.2:1b (1GB)"
+                    },
+                    "supported_types": "ollama (local, free), openai_compatible (GPT, LM Studio), anthropic (Claude)",
+                    "vision_capable_models": {
+                        "ollama": "llama3.2-vision, qwen3-vl, ministral-3, llava (all sizes)",
+                        "openai": "gpt-4o, gpt-4-turbo, gpt-4o-mini",
+                        "anthropic": "claude-3+, claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5"
+                    },
+                    "context_windows": {
+                        "128K": "llama3.1, llama3.2-vision, gpt-4o (efficient for most use cases)",
+                        "256K": "qwen3-vl, ministral-3 (excellent for long documents)",
+                        "200K": "claude-3+, claude-4.5 (best for complex analysis)"
+                    },
+                    "vram_requirements": {
+                        "1GB": "llama3.2:1b (tiny, embedded GPUs)",
+                        "2GB": "llama3.2:3b (small, budget GPUs)",
+                        "8GB": "llama3.1:8b, qwen3-vl:8b, ministral-3:8b (recommended - RTX 3060)",
+                        "12GB": "llama3.1:13b (RTX 3060 12GB, RTX 4060 Ti)",
+                        "16GB": "llama3.2-vision:11b (RTX 4060 Ti 16GB, RTX 4080)",
+                        "24GB+": "llama3.1:70b, llama3.2-vision:90b (RTX 4090, A5000, professional)"
+                    },
+                    "api_key_setup": {
+                        "linux_mac": "Add to ~/.bashrc: export OPENAI_API_KEY='sk-...' && export ANTHROPIC_API_KEY='sk-ant-...'",
+                        "windows_cmd": "setx OPENAI_API_KEY \"sk-...\" && setx ANTHROPIC_API_KEY \"sk-ant-...\"",
+                        "windows_powershell": "$env:OPENAI_API_KEY='sk-...'; [Environment]::SetEnvironmentVariable('OPENAI_API_KEY', 'sk-...', 'User')"
+                    }
+                }
             }
 
             with open(self.config_path, 'w') as f:
@@ -297,6 +609,7 @@ class LLMManager:
                 config = json.load(f)
 
             self.default_provider = config.get("default_provider")
+            self.vision_provider = config.get("vision_provider")  # Load vision provider for auto-selection
 
             for provider_config in config.get("providers", []):
                 alias = provider_config.get("alias")
@@ -392,39 +705,24 @@ class LLMManager:
         return None
 
     def count_tokens(self, text: str, model: str) -> int:
-        """
-        Count tokens in text for a given model.
+        """Count tokens in text for a given model.
 
-        Uses tiktoken for OpenAI/Anthropic models (accurate counting).
-        Falls back to character-based estimation (4 chars ≈ 1 token) for Ollama and unknown models.
+        REFACTORED (Phase 4 - v0.12.1): Delegates to TokenCountManager
+        for better separation of concerns and centralized token counting logic.
+
+        Uses:
+        - tiktoken for OpenAI/Anthropic (accurate BPE)
+        - HuggingFace transformers for Ollama (accurate model-specific)
+        - Character estimation fallback (4 chars ≈ 1 token)
 
         Args:
             text: The text to count tokens for
             model: The model name (e.g., "gpt-4", "llama3.1:8b")
 
         Returns:
-            Estimated token count
+            Token count
         """
-        if not text:
-            return 0
-
-        # Try tiktoken for accurate counting (OpenAI/Anthropic models)
-        if TIKTOKEN_AVAILABLE:
-            try:
-                # Map model names to tiktoken encodings
-                if "gpt-4" in model or "gpt-3.5" in model:
-                    encoding = tiktoken.encoding_for_model(model.split()[0] if " " in model else model)
-                    return len(encoding.encode(text))
-                elif "claude" in model:
-                    # Claude uses similar tokenization to GPT-4
-                    encoding = tiktoken.get_encoding("cl100k_base")
-                    return len(encoding.encode(text))
-            except Exception as e:
-                logger.warning("tiktoken failed for model '%s': %s - using estimation", model, e)
-
-        # Fallback: Character-based estimation (4 chars ≈ 1 token)
-        # This works reasonably well for most models
-        return len(text) // 4
+        return self.token_count_manager.count_tokens(text, model)
 
     def get_context_window(self, model: str) -> int:
         """
@@ -467,19 +765,54 @@ class LLMManager:
                       model, MODEL_CONTEXT_WINDOWS['default'])
         return MODEL_CONTEXT_WINDOWS["default"]
 
-    async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False):
+    async def query(self, prompt: str, provider_alias: str | None = None, return_metadata: bool = False,
+                    images: Optional[List[Dict[str, Any]]] = None, **kwargs):
         """
-        Routes a query to the specified provider, or the default provider if None.
+        Routes a query to the specified provider, or auto-selects based on query type.
+
+        Auto-selection logic (when provider_alias is None):
+        - If images present and vision_provider configured → use vision_provider
+        - If images present and no vision_provider → find first vision-capable provider
+        - If no images → use default_provider
 
         Args:
             prompt: The prompt to send to the LLM
-            provider_alias: Optional provider alias to use (uses default if None)
+            provider_alias: Optional provider alias to use (overrides auto-selection)
             return_metadata: If True, returns dict with 'response', 'provider', 'model', 'tokens_used', 'model_max_tokens'. If False, returns just the response string.
+            images: Optional list of image dicts for vision API (multimodal queries). Each dict should contain:
+                - path: str (absolute path to image file)
+                - mime_type: str (e.g., "image/png")
+                - base64: str (optional, if already encoded)
+            **kwargs: Additional parameters passed to vision API (temperature, max_tokens, etc.)
 
         Returns:
             str if return_metadata=False, dict if return_metadata=True
         """
-        alias_to_use = provider_alias or self.default_provider
+        # Auto-select provider based on query type
+        if provider_alias is None:
+            if images:
+                # Vision query: prefer vision_provider, fallback to first vision-capable
+                if self.vision_provider and self.vision_provider in self.providers:
+                    alias_to_use = self.vision_provider
+                    logger.info("Auto-selected vision provider '%s' for image query", alias_to_use)
+                else:
+                    # Find first vision-capable provider
+                    alias_to_use = None
+                    for alias, provider in self.providers.items():
+                        if provider.supports_vision():
+                            alias_to_use = alias
+                            logger.info("Auto-selected vision-capable provider '%s' (no vision_provider configured)", alias_to_use)
+                            break
+
+                    if not alias_to_use:
+                        raise ValueError("No vision-capable provider found. Please configure a vision_provider or add a vision-capable model.")
+            else:
+                # Text-only query: use default provider
+                alias_to_use = self.default_provider
+        else:
+            # Explicit provider specified
+            alias_to_use = provider_alias
+
         if not alias_to_use:
             raise ValueError("No provider specified and no default provider is set.")
 
@@ -487,8 +820,18 @@ class LLMManager:
             raise ValueError(f"Provider '{alias_to_use}' is not configured or failed to load.")
 
         provider = self.providers[alias_to_use]
-        logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
-        response = await provider.generate_response(prompt)
+
+        # Check if vision is requested but provider doesn't support it
+        if images:
+            if not provider.supports_vision():
+                raise ValueError(f"Provider '{alias_to_use}' (model: {provider.model}) does not support vision API. "
+                               f"Use a vision-capable model like gpt-4o, gpt-4-turbo, or claude-3+.")
+            logger.info("Routing vision query to provider '%s' with model '%s' (%d images)",
+                       alias_to_use, provider.model, len(images))
+            response = await provider.generate_with_vision(prompt, images, **kwargs)
+        else:
+            logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
+            response = await provider.generate_response(prompt)
 
         if return_metadata:
             # Count tokens in prompt and response
@@ -506,7 +849,8 @@ class LLMManager:
                 "tokens_used": total_tokens,
                 "prompt_tokens": prompt_tokens,
                 "response_tokens": response_tokens,
-                "model_max_tokens": context_window
+                "model_max_tokens": context_window,
+                "vision_used": bool(images)  # NEW: Indicate if vision API was used
             }
         return response
 

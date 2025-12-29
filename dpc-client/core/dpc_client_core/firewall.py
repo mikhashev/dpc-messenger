@@ -18,22 +18,8 @@ class ContextFirewall:
     """
     def __init__(self, access_file_path: Path):
         self.access_file_path = access_file_path
-        self._migrate_from_old_filename()
         self._ensure_file_exists()
         self._load_rules()
-
-    def _migrate_from_old_filename(self):
-        """Migrate from old .dpc_access.json to new privacy_rules.json filename."""
-        old_path = self.access_file_path.parent / ".dpc_access.json"
-
-        # Only migrate if old file exists and new file doesn't
-        if old_path.exists() and not self.access_file_path.exists():
-            logger.info("Migrating %s to %s", old_path.name, self.access_file_path.name)
-            try:
-                old_path.rename(self.access_file_path)
-                logger.info("Migration successful")
-            except Exception as e:
-                logger.error("Error migrating privacy rules file: %s", e, exc_info=True)
 
     def _load_rules(self):
         """Load and parse rules from JSON file."""
@@ -104,57 +90,96 @@ class ContextFirewall:
             # This ensures UI stays in sync with privacy_rules.json without requiring page refresh.
             # Example: AI scopes dropdown reloads immediately after user saves firewall rules.
             default_rules = {
-                "_comment": "D-PC Access Control File - This file controls who can access your context data and compute resources. By default, all access is denied.",
+                "_comment": "D-PC Access Control File - This file controls who can access your context data and compute resources. By default, all access is denied. Replace example node IDs (dpc-node-alice-123, etc.) with actual node IDs from your peers.",
                 "hub": {
+                    "_comment": "What the Hub can see for peer discovery (minimal by default)",
                     "personal.json:profile.name": "allow",
                     "personal.json:profile.description": "allow"
                 },
                 "node_groups": {
-                    "_comment": "Define which nodes belong to which groups",
-                    "_example_colleagues": ["dpc-node-alice-123", "dpc-node-bob-456"],
-                    "_example_friends": ["dpc-node-charlie-789"]
+                    "_comment": "Define which nodes belong to which groups. Add your peers' actual node IDs here.",
+                    "friends": ["dpc-node-alice-123", "dpc-node-charlie-789"],
+                    "colleagues": ["dpc-node-bob-456"],
+                    "family": []
                 },
                 "file_groups": {
-                    "_comment": "Define aliases for groups of files",
-                    "_example_work": ["work_*.json"],
-                    "_example_personal": ["personal.json"]
+                    "_comment": "Define aliases for groups of context files (supports wildcards)",
+                    "work": ["work_*.json", "projects.json"],
+                    "personal": ["personal.json", "hobbies.json"]
                 },
                 "compute": {
-                    "_comment": "Compute sharing settings (Remote Inference)",
+                    "_comment": "Compute sharing settings - Allow peers to run AI inference on your GPU/CPU",
                     "enabled": False,
-                    "allow_groups": [],
-                    "allow_nodes": [],
-                    "allowed_models": []
+                    "allow_groups": ["friends"],
+                    "allow_nodes": ["dpc-node-alice-123"],
+                    "allowed_models": ["llama3.1:8b", "llama3:70b"]
                 },
                 "nodes": {
-                    "_comment": "Access rules for specific nodes",
-                    "_example_dpc-node-friend-id-here": {
+                    "_comment": "Per-node access rules - Most specific, overrides group rules",
+                    "dpc-node-alice-123": {
                         "personal.json:profile.*": "allow",
-                        "personal.json:name": "allow",
-                        "personal.json:bio": "allow"
+                        "personal.json:knowledge.*": "allow",
+                        "device_context.json:software.*": "allow"
+                    },
+                    "dpc-node-bob-456": {
+                        "personal.json:profile.name": "allow",
+                        "personal.json:profile.description": "allow"
                     }
                 },
                 "groups": {
-                    "_comment": "Access rules for groups of nodes",
-                    "_example_colleagues": {
-                        "work_main.json:availability": "allow",
-                        "work_main.json:skills.*": "allow"
+                    "_comment": "Per-group access rules - Applied to all nodes in the group",
+                    "friends": {
+                        "personal.json:profile.*": "allow",
+                        "personal.json:knowledge.*": "allow"
+                    },
+                    "colleagues": {
+                        "personal.json:profile.name": "allow",
+                        "personal.json:profile.description": "allow",
+                        "personal.json:knowledge.professional_skills.*": "allow"
+                    },
+                    "family": {
+                        "personal.json:*": "allow"
                     }
                 },
                 "ai_scopes": {
-                    "_comment": "Access rules for AI scopes",
-                    "_example_work": {
-                        "@work:*": "allow"
+                    "_comment": "AI Scope Filtering - Control what your LOCAL AI can access. NEW in v0.12.1: Field-level filtering for device_context.json",
+                    "_examples": "Supports file groups (@work) and field-level filtering (device_context.json:hardware.gpu.*)",
+                    "work": {
+                        "_comment": "Work mode - Work files + hardware specs",
+                        "@work:*": "allow",
+                        "personal.json:knowledge.work_projects.*": "allow",
+                        "device_context.json:hardware.gpu.*": "allow",
+                        "device_context.json:software.dev_tools.*": "allow"
+                    },
+                    "personal": {
+                        "_comment": "Personal mode - Personal files, hide GPU specs",
+                        "@personal:*": "allow",
+                        "@work:*": "deny",
+                        "device_context.json:hardware.gpu.*": "deny",
+                        "device_context.json:software.os.*": "allow"
+                    },
+                    "basic": {
+                        "_comment": "Basic mode - Profile only, no hardware",
+                        "personal.json:profile.name": "allow",
+                        "personal.json:profile.description": "allow",
+                        "device_context.json:hardware.*": "deny",
+                        "device_context.json:software.os.*": "allow"
                     }
                 },
                 "device_sharing": {
-                    "_comment": "Device context sharing rules",
-                    "_example_basic": {
-                        "device_context.json:hardware.gpu.*": "allow"
+                    "_comment": "Device context sharing rules - Control what hardware/software info peers can see",
+                    "colleagues": {
+                        "device_context.json:software.os.*": "allow",
+                        "device_context.json:software.dev_tools.*": "allow"
+                    },
+                    "friends": {
+                        "device_context.json:hardware.gpu.*": "allow",
+                        "device_context.json:hardware.cpu.*": "allow",
+                        "device_context.json:software.*": "allow"
                     }
                 },
                 "notifications": {
-                    "_comment": "Desktop notification settings",
+                    "_comment": "Desktop notification settings - When to show system notifications (app in background)",
                     "enabled": True,
                     "events": {
                         "new_message": True,
@@ -169,11 +194,33 @@ class ContextFirewall:
                     }
                 },
                 "file_transfer": {
-                    "_comment": "File transfer permissions (v0.11.0+)",
-                    "allow_nodes": [],
-                    "allow_groups": [],
-                    "max_size_mb": 1000,
-                    "allowed_mime_types": ["*"]
+                    "_comment": "File transfer permissions (v0.11.0+). Configure per-group or per-node settings.",
+                    "groups": {
+                        "friends": {
+                            "file_transfer.allow": "allow",
+                            "file_transfer.max_size_mb": 100,
+                            "file_transfer.allowed_mime_types": ["*"]
+                        },
+                        "colleagues": {
+                            "file_transfer.allow": "allow",
+                            "file_transfer.max_size_mb": 50,
+                            "file_transfer.allowed_mime_types": ["image/*", "application/pdf", "text/*"]
+                        }
+                    },
+                    "nodes": {
+                        "dpc-node-example-abc123": {
+                            "file_transfer.allow": "allow",
+                            "file_transfer.max_size_mb": 500,
+                            "file_transfer.allowed_mime_types": ["*"]
+                        }
+                    }
+                },
+                "image_transfer": {
+                    "_comment": "Screenshot/image transfer settings (P2P clipboard paste). Controls auto-accept behavior, size limits, and storage for pasted images.",
+                    "auto_accept_threshold_mb": 25,
+                    "allowed_sources": ["clipboard", "file", "camera"],
+                    "max_size_mb": 100,
+                    "save_screenshots_to_disk": False
                 }
             }
 
@@ -447,6 +494,69 @@ class ContextFirewall:
         # This preserves the original dataclass instances (InstructionBlock, etc.)
         return PersonalContext(**filtered_kwargs)
 
+    def filter_device_context_for_ai_scope(self, device_context: Dict, scope_name: str) -> Dict:
+        """
+        Filters device context based on AI scope rules, removing fields that the AI scope cannot access.
+
+        Args:
+            device_context: The device context dict to filter
+            scope_name: The AI scope name (e.g., "work", "personal")
+
+        Returns:
+            Filtered device context dict with only allowed fields
+        """
+        def filter_nested_dict(data: Dict, path_prefix: str) -> Dict:
+            """Recursively filter nested dict based on AI scope rules."""
+            if not isinstance(data, dict):
+                return data
+
+            filtered = {}
+            for key, value in data.items():
+                current_path = f"{path_prefix}.{key}" if path_prefix else key
+                resource_path = f"device_context.json:{current_path}"
+
+                # Build the requester identity for AI scope
+                requester_identity = f"ai_scope:{scope_name}"
+
+                # Check for specific rule first
+                specific_rule = self._get_rule_for_resource('ai_scopes', scope_name, resource_path)
+
+                # If there's a specific rule, use it - don't fall back to wildcard
+                if specific_rule:
+                    logger.debug(f"AI Scope filter: Specific rule for {resource_path}: {specific_rule}")
+                    if specific_rule.lower() == 'allow':
+                        if isinstance(value, dict):
+                            # Allow access - but still recursively filter in case there are deny rules below
+                            filtered[key] = filter_nested_dict(value, current_path)
+                            # If nothing was allowed in the subtree, use the whole value
+                            if not filtered[key] and value:
+                                filtered[key] = deepcopy(value)
+                        else:
+                            # Leaf node - allow access
+                            filtered[key] = deepcopy(value)
+                    # else: specific deny - don't include this key
+                else:
+                    # No specific rule - check for wildcard access
+                    wildcard_path = f"device_context.json:{current_path}.*"
+                    has_wildcard_access = self.can_access(requester_identity, wildcard_path)
+                    logger.debug(f"AI Scope filter: Checking wildcard {wildcard_path}: {has_wildcard_access}")
+                    if has_wildcard_access:
+                        if isinstance(value, dict):
+                            # Has wildcard access - include the whole subtree
+                            filtered[key] = deepcopy(value)
+                        else:
+                            filtered[key] = deepcopy(value)
+                    elif isinstance(value, dict):
+                        # No direct access, but might have access to nested fields
+                        nested_filtered = filter_nested_dict(value, current_path)
+                        if nested_filtered:  # Only include if not empty
+                            filtered[key] = nested_filtered
+
+            return filtered
+
+        # Start filtering from root level
+        return filter_nested_dict(device_context, "")
+
     def can_request_inference(self, requester_node_id: str, model: str = None) -> bool:
         """
         Checks if a peer can request remote inference on this node.
@@ -628,7 +738,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'notifications', '_comment']
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -795,6 +905,45 @@ class ContextFirewall:
                             for event_name, enabled in notifications['events'].items():
                                 if not isinstance(enabled, bool):
                                     errors.append(f"'notifications.events.{event_name}' must be a boolean (true or false)")
+
+            # Validate image_transfer section
+            if 'image_transfer' in config_dict:
+                img_transfer = config_dict['image_transfer']
+                if not isinstance(img_transfer, dict):
+                    errors.append("'image_transfer' section must be a dictionary")
+                else:
+                    # Validate auto_accept_threshold_mb
+                    if 'auto_accept_threshold_mb' in img_transfer:
+                        threshold = img_transfer['auto_accept_threshold_mb']
+                        if not isinstance(threshold, (int, float)):
+                            errors.append("'image_transfer.auto_accept_threshold_mb' must be a number")
+                        elif threshold < 0:
+                            errors.append("'image_transfer.auto_accept_threshold_mb' must be non-negative (0 or greater)")
+
+                    # Validate allowed_sources
+                    if 'allowed_sources' in img_transfer:
+                        sources = img_transfer['allowed_sources']
+                        if not isinstance(sources, list):
+                            errors.append("'image_transfer.allowed_sources' must be a list")
+                        else:
+                            valid_sources = {"clipboard", "file", "camera"}
+                            for source in sources:
+                                if source not in valid_sources:
+                                    errors.append(f"Invalid source '{source}' in image_transfer.allowed_sources (valid options: {valid_sources})")
+
+                    # Validate max_size_mb
+                    if 'max_size_mb' in img_transfer:
+                        max_size = img_transfer['max_size_mb']
+                        if not isinstance(max_size, (int, float)):
+                            errors.append("'image_transfer.max_size_mb' must be a number")
+                        elif max_size <= 0:
+                            errors.append("'image_transfer.max_size_mb' must be positive (greater than 0)")
+
+                    # Validate save_screenshots_to_disk
+                    if 'save_screenshots_to_disk' in img_transfer:
+                        save_to_disk = img_transfer['save_screenshots_to_disk']
+                        if not isinstance(save_to_disk, bool):
+                            errors.append("'image_transfer.save_screenshots_to_disk' must be a boolean (true or false)")
 
         except Exception as e:
             errors.append(f"Validation error: {str(e)}")
