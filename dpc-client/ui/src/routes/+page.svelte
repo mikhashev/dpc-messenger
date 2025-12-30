@@ -17,6 +17,7 @@
   import ImageMessage from "$lib/components/ImageMessage.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
   import SessionControls from "$lib/components/SessionControls.svelte";
+  import FileTransferUI from "$lib/components/FileTransferUI.svelte";
   import { ask, open } from '@tauri-apps/plugin-dialog';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
@@ -2236,17 +2237,7 @@
           </div>
         {/if}
 
-        <!-- Image Preview Chip (Phase 2.4: improved UX) -->
-        {#if pendingImage}
-          <div class="image-preview-chip">
-            <img src={pendingImage.dataUrl} alt={pendingImage.filename} class="preview-thumbnail" />
-            <div class="preview-info">
-              <span class="preview-filename">{pendingImage.filename}</span>
-              <span class="preview-size">{(pendingImage.sizeBytes / (1024 * 1024)).toFixed(2)} MB</span>
-            </div>
-            <button class="preview-remove" onclick={clearPendingImage} aria-label="Remove image">✕</button>
-          </div>
-        {/if}
+        <!-- FileTransferUI component handles image preview, dialogs, and transfers -->
 
         <div class="input-row">
           <textarea
@@ -2470,108 +2461,28 @@
 
 <!-- File Transfer UI Components (Week 1) -->
 
-<!-- File Offer Dialog -->
-{#if showFileOfferDialog && currentFileOffer}
-  <div class="modal-overlay" role="presentation" onclick={handleRejectFile} onkeydown={(e) => e.key === 'Escape' && handleRejectFile()}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-      <h3>Incoming File</h3>
-      <p><strong>File:</strong> {currentFileOffer.filename}</p>
-      <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
-      <p><strong>From:</strong> {currentFileOffer.node_id.slice(0, 20)}...</p>
-      <div class="modal-buttons">
-        <button class="accept-button" onclick={handleAcceptFile}>Accept</button>
-        <button class="reject-button" onclick={handleRejectFile}>Reject</button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- Send File Confirmation Dialog -->
-{#if showSendFileDialog && pendingFileSend}
-  <div class="modal-overlay" role="presentation" onclick={handleCancelSendFile} onkeydown={(e) => e.key === 'Escape' && handleCancelSendFile()}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-      <h3>Send File</h3>
-      <p><strong>File:</strong> {pendingFileSend.fileName}</p>
-      <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
-
-      {#if $filePreparationStarted && isSendingFile}
-        <p style="margin-top: 10px; font-size: 13px;">
-          <strong>Size:</strong> {$filePreparationStarted.size_mb} MB
-        </p>
-      {/if}
-
-      {#if $filePreparationProgress && isSendingFile}
-        <div style="margin-top: 15px;">
-          <p style="font-size: 13px; margin-bottom: 5px; color: #555;">
-            {#if $filePreparationProgress.phase === 'hashing_file'}
-              Computing file hash: {$filePreparationProgress.percent}%
-            {:else if $filePreparationProgress.phase === 'computing_chunks'}
-              Computing chunk hashes: {$filePreparationProgress.percent}%
-            {:else}
-              Preparing file: {$filePreparationProgress.percent}%
-            {/if}
-          </p>
-          <div style="width: 100%; background-color: #e0e0e0; border-radius: 4px; height: 8px; overflow: hidden;">
-            <div style="width: {$filePreparationProgress.percent}%; background-color: #4CAF50; height: 100%; transition: width 0.3s ease;"></div>
-          </div>
-        </div>
-      {/if}
-
-      <div class="modal-buttons">
-        <button class="accept-button" onclick={handleConfirmSendFile} disabled={isSendingFile}>
-          {#if $filePreparationCompleted && isSendingFile}
-            Sending...
-          {:else if isSendingFile}
-            Preparing...
-          {:else}
-            Send
-          {/if}
-        </button>
-        <button class="reject-button" onclick={handleCancelSendFile} disabled={isSendingFile}>Cancel</button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- File Transfer Toast -->
-{#if showFileOfferToast}
-  <Toast
-    message={fileOfferToastMessage}
-    type="info"
-    duration={5000}
-    dismissible={true}
-    onDismiss={() => showFileOfferToast = false}
-  />
-{/if}
-
-<!-- Active File Transfers Progress -->
-{#if $activeFileTransfers.size > 0}
-  <div class="active-transfers-panel">
-    <h4>Active Transfers</h4>
-    {#each Array.from($activeFileTransfers.values()) as transfer}
-      <div class="transfer-item">
-        <div class="transfer-info">
-          <span class="transfer-filename">{transfer.filename}</span>
-          <span class="transfer-status">{transfer.direction === 'upload' ? '↑' : '↓'} {transfer.status}</span>
-          <button
-            class="cancel-transfer-button"
-            onclick={() => handleCancelTransfer(transfer.transfer_id, transfer.filename)}
-            title="Cancel transfer"
-            aria-label="Cancel transfer"
-          >
-            ×
-          </button>
-        </div>
-        {#if transfer.progress !== undefined}
-          <div class="progress-bar">
-            <div class="progress-fill" style="width: {transfer.progress}%"></div>
-          </div>
-          <span class="progress-text">{transfer.progress}%</span>
-        {/if}
-      </div>
-    {/each}
-  </div>
-{/if}
+<!-- FileTransferUI Component: Handles all file transfer UI (dialogs, panels, preview) -->
+<FileTransferUI
+  pendingImage={pendingImage}
+  onClearPendingImage={clearPendingImage}
+  showFileOfferDialog={showFileOfferDialog}
+  currentFileOffer={currentFileOffer}
+  onAcceptFile={handleAcceptFile}
+  onRejectFile={handleRejectFile}
+  showSendFileDialog={showSendFileDialog}
+  pendingFileSend={pendingFileSend}
+  isSendingFile={isSendingFile}
+  filePreparationStarted={$filePreparationStarted}
+  filePreparationProgress={$filePreparationProgress}
+  filePreparationCompleted={$filePreparationCompleted}
+  onConfirmSendFile={handleConfirmSendFile}
+  onCancelSendFile={handleCancelSendFile}
+  activeFileTransfers={$activeFileTransfers}
+  onCancelTransfer={handleCancelTransfer}
+  showFileOfferToast={showFileOfferToast}
+  fileOfferToastMessage={fileOfferToastMessage}
+  onDismissToast={() => showFileOfferToast = false}
+/>
 
 <!-- Add AI Chat Dialog -->
 {#if showAddAIChatDialog}
@@ -3892,181 +3803,6 @@
     cursor: not-allowed;
   }
 
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal-dialog {
-    background: #2a2a2a;
-    padding: 24px;
-    border-radius: 8px;
-    max-width: 500px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-  }
-
-  .modal-dialog h3 {
-    margin-top: 0;
-    color: #e0e0e0;
-  }
-
-  .modal-dialog p {
-    margin: 8px 0;
-    color: #b0b0b0;
-  }
-
-  .modal-buttons {
-    display: flex;
-    gap: 12px;
-    margin-top: 20px;
-  }
-
-  .accept-button {
-    flex: 1;
-    padding: 10px;
-    background: #4CAF50;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-weight: 500;
-    box-shadow: 0 2px 8px rgba(76, 175, 80, 0.3);
-    transition: all 0.2s;
-  }
-
-  .accept-button:hover {
-    background: #45a049;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4);
-  }
-
-  .reject-button {
-    flex: 1;
-    padding: 10px;
-    background: #f44336;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-weight: 500;
-    box-shadow: 0 2px 8px rgba(244, 67, 54, 0.3);
-    transition: all 0.2s;
-  }
-
-  .reject-button:hover {
-    background: #d32f2f;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(244, 67, 54, 0.4);
-  }
-
-  .active-transfers-panel {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: #2a2a2a;
-    padding: 16px;
-    border-radius: 8px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-    min-width: 300px;
-    z-index: 999;
-  }
-
-  .active-transfers-panel h4 {
-    margin: 0 0 12px 0;
-    color: #e0e0e0;
-    font-size: 14px;
-  }
-
-  .transfer-item {
-    margin-bottom: 12px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid #444;
-  }
-
-  .transfer-item:last-child {
-    margin-bottom: 0;
-    padding-bottom: 0;
-    border-bottom: none;
-  }
-
-  .transfer-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  .transfer-filename {
-    color: #b0b0b0;
-    font-size: 13px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .transfer-status {
-    color: #888;
-    font-size: 12px;
-    white-space: nowrap;
-  }
-
-  .cancel-transfer-button {
-    background: transparent;
-    border: none;
-    color: #888;
-    font-size: 20px;
-    line-height: 1;
-    padding: 0;
-    width: 24px;
-    height: 24px;
-    cursor: pointer;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s ease;
-    flex-shrink: 0;
-  }
-
-  .cancel-transfer-button:hover {
-    background: rgba(255, 68, 68, 0.2);
-    color: #ff4444;
-  }
-
-  .cancel-transfer-button:active {
-    transform: scale(0.95);
-  }
-
-  .progress-bar {
-    width: 100%;
-    height: 6px;
-    background: #444;
-    border-radius: 3px;
-    overflow: hidden;
-    margin-bottom: 4px;
-  }
-
-  .progress-fill {
-    height: 100%;
-    background: #17a2b8;
-    transition: width 0.3s ease;
-  }
-
-  .progress-text {
-    font-size: 11px;
-    color: #888;
-  }
-
   /* Notification Permission Dialog */
   .dialog-overlay {
     position: fixed;
@@ -4146,147 +3882,5 @@
 
   .btn-secondary:hover {
     background: #e0e0e0;
-  }
-
-  /* Image Preview Modal Styles (Phase 2.4) */
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10000;
-  }
-
-  .modal-dialog {
-    background: white;
-    padding: 2rem;
-    border-radius: 12px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-    max-width: 90%;
-    max-height: 90vh;
-    overflow-y: auto;
-  }
-
-  .modal-buttons {
-    display: flex;
-    gap: 1rem;
-    margin-top: 1.5rem;
-    justify-content: flex-end;
-  }
-
-  .accept-button, .reject-button {
-    padding: 0.75rem 1.5rem;
-    border: none;
-    border-radius: 6px;
-    font-size: 1rem;
-    cursor: pointer;
-    transition: background 0.2s ease;
-  }
-
-  .accept-button {
-    background: #4CAF50;
-    color: white;
-  }
-
-  .accept-button:hover {
-    background: #45a049;
-  }
-
-  .accept-button:disabled {
-    background: #cccccc;
-    cursor: not-allowed;
-  }
-
-  .reject-button {
-    background: #f44336;
-    color: white;
-  }
-
-  .reject-button:hover {
-    background: #d32f2f;
-  }
-
-  .reject-button:disabled {
-    background: #cccccc;
-    cursor: not-allowed;
-  }
-
-  /* Image Preview Chip (Phase 2.4: improved UX) */
-  .image-preview-chip {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.5rem;
-    margin-bottom: 0.5rem;
-    background: #f5f5f5;
-    border: 1px solid #ddd;
-    border-radius: 8px;
-    transition: all 0.2s ease;
-  }
-
-  .image-preview-chip:hover {
-    background: #ebebeb;
-    border-color: #ccc;
-  }
-
-  .preview-thumbnail {
-    width: 60px;
-    height: 60px;
-    object-fit: cover;
-    border-radius: 4px;
-    border: 1px solid #ccc;
-  }
-
-  .preview-info {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    min-width: 0; /* Enable text truncation */
-  }
-
-  .preview-filename {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: #333;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .preview-size {
-    font-size: 0.75rem;
-    color: #666;
-  }
-
-  .preview-remove {
-    flex-shrink: 0;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: #f44336;
-    color: white;
-    border: none;
-    border-radius: 50%;
-    font-size: 1.2rem;
-    line-height: 1;
-    cursor: pointer;
-    transition: background 0.2s ease;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .preview-remove:hover {
-    background: #d32f2f;
-  }
-
-  .preview-remove:active {
-    transform: scale(0.95);
   }
 </style>
