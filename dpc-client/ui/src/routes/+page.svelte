@@ -15,6 +15,7 @@
   import Toast from "$lib/components/Toast.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
   import ImageMessage from "$lib/components/ImageMessage.svelte";
+  import ChatPanel from "$lib/components/ChatPanel.svelte";
   import { ask, open } from '@tauri-apps/plugin-dialog';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
@@ -54,7 +55,7 @@
   let activeChatId = $state('local_ai');
   let currentInput = $state("");
   let isLoading = $state(false);
-  let chatWindow: HTMLElement;
+  let chatWindow = $state<HTMLElement>();  // Bound to ChatPanel's chatWindowElement
   let peerInput = $state("");  // RENAMED from peerUri for clarity
   let selectedComputeHost = $state("local");  // "local" or node_id for remote inference
   let selectedRemoteModel = $state("");  // Selected model when using remote compute host
@@ -731,7 +732,7 @@
   // Reactive statement to compute peer counts
   let peersByStrategy = $derived(getPeersByStrategy($nodeStatus?.peer_info));
 
-  function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
+  function isNearBottom(element: HTMLElement | undefined, threshold: number = 150): boolean {
     if (!element) return true;
     const { scrollTop, scrollHeight, clientHeight } = element;
     return scrollHeight - scrollTop - clientHeight < threshold;
@@ -2129,66 +2130,12 @@
         {/if}
       </div>
 
-      <div class="chat-window" bind:this={chatWindow}>
-        {#if activeMessages.length > 0}
-          {#each activeMessages as msg (msg.id)}
-            <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'}>
-              <div class="message-header">
-                <strong>
-                  {#if msg.sender === 'user'}
-                    You
-                  {:else if msg.sender === 'ai'}
-                    {msg.model ? `AI (${msg.model})` : 'AI Assistant'}
-                  {:else}
-                    {msg.senderName ? `${msg.senderName} | ${msg.sender.slice(0, 20)}...` : msg.sender}
-                  {/if}
-                </strong>
-                <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
-              </div>
-              <!-- Message text (shown always, serves as caption for images) -->
-              {#if msg.text && msg.text !== '[Image]'}
-                {#if msg.sender === 'ai' && enableMarkdown}
-                  <MarkdownMessage content={msg.text} />
-                {:else}
-                  <p>{msg.text}</p>
-                {/if}
-              {/if}
-
-              <!-- Attachments (Phase 2.5: Images + Files) -->
-              {#if msg.attachments && msg.attachments.length > 0}
-                <div class="message-attachments">
-                  {#each msg.attachments as attachment}
-                    {#if attachment.type === 'image'}
-                      <!-- Image attachment (Phase 2.5: Screenshot + Vision) -->
-                      <ImageMessage {attachment} conversationId={activeChatId} />
-                    {:else}
-                      <!-- Regular file attachment -->
-                      <div class="file-attachment">
-                        <div class="file-details">
-                          <div class="file-name">{attachment.filename}</div>
-                          <div class="file-meta">
-                            {attachment.size_mb ? `${attachment.size_mb} MB` : `${(attachment.size_bytes / (1024 * 1024)).toFixed(2)} MB`}
-                            {#if attachment.mime_type}
-                              • {attachment.mime_type}
-                            {/if}
-                            {#if attachment.status}
-                              • {attachment.status}
-                            {/if}
-                          </div>
-                        </div>
-                      </div>
-                    {/if}
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          {/each}
-        {:else}
-          <div class="empty-chat">
-            <p>No messages yet. Start the conversation!</p>
-          </div>
-        {/if}
-      </div>
+      <ChatPanel
+        messages={activeMessages}
+        conversationId={activeChatId}
+        bind:enableMarkdown
+        bind:chatWindowElement={chatWindow}
+      />
 
       <div class="chat-input">
         {#if $aiChats.has(activeChatId)}
@@ -3427,15 +3374,6 @@
     box-shadow: 0 1px 4px rgba(108, 117, 125, 0.2);
   }
 
-  .chat-window {
-    flex: 1;
-    padding: 1rem;
-    overflow-y: auto;
-    overflow-x: hidden; /* Prevent horizontal overflow */
-    background: #f9f9f9;
-    max-width: 100%; /* Constrain to parent width */
-  }
-
   /* Resize Handle */
   .resize-handle {
     height: 8px;
@@ -3474,72 +3412,6 @@
     background: #0056b3;
   }
 
-  .empty-chat {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: #999;
-    font-style: italic;
-  }
-  
-  .message {
-    margin-bottom: 1rem;
-    padding: 0.75rem;
-    border-radius: 12px;
-    max-width: 80%;
-    animation: slideIn 0.2s ease-out;
-    overflow-wrap: break-word; /* Break long words */
-    word-break: break-word; /* Break long unbreakable strings */
-  }
-  
-  @keyframes slideIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  
-  .message.user {
-    background: #dcf8c6;
-    margin-left: auto;
-  }
-  
-  .message:not(.user):not(.system) {
-    background: white;
-    border: 1px solid #eee;
-  }
-  
-  .message.system {
-    background: #fff0f0;
-    border: 1px solid #ffc0c0;
-    font-style: italic;
-    margin-left: auto;
-    margin-right: auto;
-  }
-  
-  .message-header {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 0.5rem;
-    font-size: 0.85rem;
-  }
-  
-  .message-header strong {
-    color: #555;
-  }
-  
-  .timestamp {
-    color: #999;
-    font-size: 0.75rem;
-  }
-  
-  .message p {
-    margin: 0;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    overflow-wrap: break-word; /* Break long words */
-    word-break: break-word; /* Break long unbreakable strings */
-  }
-  
   .chat-input {
     padding: 1rem;
     border-top: 1px solid #eee;
@@ -4341,47 +4213,6 @@
   .progress-text {
     font-size: 11px;
     color: #888;
-  }
-
-  /* File attachment display (Week 1) */
-  .message-attachments {
-    margin-top: 8px;
-  }
-
-  .file-attachment {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    margin-top: 8px;
-    transition: background 0.2s ease;
-  }
-
-  .file-attachment:hover {
-    background: rgba(255, 255, 255, 0.08);
-  }
-
-  .file-details {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .file-name {
-    color: #1a1a1a;
-    font-weight: 600;
-    font-size: 14px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .file-meta {
-    color: #4a4a4a;
-    font-size: 12px;
-    margin-top: 4px;
   }
 
   /* Notification Permission Dialog */
