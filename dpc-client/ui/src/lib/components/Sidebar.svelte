@@ -9,7 +9,10 @@
     external_uris?: Array<{ ip: string; uri: string }>;
     connected_to_hub?: boolean;
     hub_url?: string;
+    hub_status?: string;
     operation_mode?: string;
+    connection_status?: string;
+    available_features?: Record<string, boolean>;
     peer_info?: Array<{ node_id: string; name?: string }>;
     p2p_peers?: string[];
     cached_peers_count?: number;
@@ -32,6 +35,8 @@
     autoKnowledgeDetection = $bindable(false),
     peerInput = $bindable(""),
     isConnecting,
+    peersByStrategy,
+    formatPeerForTooltip,
 
     // Event handlers
     onReconnect,
@@ -57,6 +62,8 @@
     autoKnowledgeDetection?: boolean;
     peerInput?: string;
     isConnecting: boolean;
+    peersByStrategy: Record<string, any[]>;
+    formatPeerForTooltip: (peer: any) => string;
     onReconnect: () => void;
     onLoginToHub: (provider: string) => void;
     onViewPersonalContext: () => void;
@@ -176,76 +183,62 @@
         </div>
       {/if}
 
-      <!-- Hub Status (Collapsible) -->
-      {#if nodeStatus.hub_url}
+      <!-- Hub Mode (separate section) -->
+      {#if nodeStatus.operation_mode}
         <div class="dpc-uris-section">
           <details class="uri-details">
             <summary class="uri-summary">
-              <span class="uri-icon">🌐</span>
-              <span class="uri-title">
-                Hub Status: {nodeStatus.connected_to_hub ? "✓ Connected" : "✗ Offline"}
-              </span>
+              <span class="uri-title">Hub Mode</span>
             </summary>
-            <div class="hub-info-content">
-              <p class="small"><strong>Hub URL:</strong></p>
-              <code class="hub-url">{nodeStatus.hub_url}</code>
 
-              {#if nodeStatus.operation_mode}
-                <p class="small"><strong>Mode:</strong></p>
-                <p class="mode-description">{nodeStatus.operation_mode}</p>
-              {/if}
+            <div class="hub-mode-content">
+              <div
+                class="mode-badge"
+                class:fully-online={nodeStatus.operation_mode === 'fully_online'}
+                class:hub-offline={nodeStatus.operation_mode === 'hub_offline'}
+                class:fully-offline={nodeStatus.operation_mode === 'fully_offline'}
+              >
+                {#if nodeStatus.operation_mode === 'fully_online'}
+                  🟢 Online
+                {:else if nodeStatus.operation_mode === 'hub_offline'}
+                  🟡 Hub Offline
+                {:else}
+                  🔴 Offline
+                {/if}
+              </div>
+              <p class="mode-description">
+                {#if nodeStatus.connection_status}
+                  {nodeStatus.connection_status}
+                {:else}
+                  All features available
+                {/if}
+              </p>
 
-              {#if !nodeStatus.connected_to_hub}
-                <div class="oauth-buttons">
-                  <p class="small oauth-hint">Login to reconnect:</p>
-                  <button
-                    onclick={() => onLoginToHub('google')}
-                    class="btn-oauth btn-google"
-                    title="Login with Google"
-                  >
-                    <span class="oauth-icon">🔵</span>
-                    Google
-                  </button>
-                  <button
-                    onclick={() => onLoginToHub('github')}
-                    class="btn-oauth btn-github"
-                    title="Login with GitHub"
-                  >
-                    <span class="oauth-icon">⚫</span>
-                    GitHub
-                  </button>
+              <!-- OAuth Login (when Hub disconnected) -->
+              {#if nodeStatus.hub_status !== 'Connected' && !nodeStatus.connected_to_hub}
+                <div class="hub-login-section">
+                  <p class="info-text">Connect to Hub for WebRTC signaling</p>
+                  <div class="oauth-buttons">
+                    <button
+                      onclick={() => onLoginToHub('google')}
+                      class="btn-oauth btn-google"
+                      title="Login with Google"
+                    >
+                      <span class="oauth-icon">🔵</span>
+                      Google
+                    </button>
+                    <button
+                      onclick={() => onLoginToHub('github')}
+                      class="btn-oauth btn-github"
+                      title="Login with GitHub"
+                    >
+                      <span class="oauth-icon">⚫</span>
+                      GitHub
+                    </button>
+                  </div>
                 </div>
               {/if}
             </div>
-          </details>
-        </div>
-      {/if}
-
-      <!-- Peer Discovery List (from DHT + Hub) -->
-      {#if nodeStatus.peer_info && nodeStatus.peer_info.length > 0}
-        <div class="dpc-uris-section">
-          <details class="uri-details">
-            <summary class="uri-summary">
-              <span class="uri-icon">👥</span>
-              <span class="uri-title">Discovered Peers ({nodeStatus.peer_info.length})</span>
-            </summary>
-            <ul class="peer-discovery-list">
-              {#each nodeStatus.peer_info as peer}
-                {@const displayName = peer.name
-                  ? `${peer.name} | ${peer.node_id.slice(0, 20)}...`
-                  : `${peer.node_id.slice(0, 20)}...`}
-                {@const peerCount = nodeStatus.p2p_peers?.filter(id => id === peer.node_id).length || 0}
-                <li class="peer-discovery-item">
-                  {displayName}
-                  {#if peerCount > 0}
-                    <span class="peer-count">({peerCount})</span>
-                  {/if}
-                </li>
-              {/each}
-            </ul>
-            {#if nodeStatus.cached_peers_count && nodeStatus.cached_peers_count > 0}
-              <p class="cached-info">💾 {nodeStatus.cached_peers_count} cached peer(s)</p>
-            {/if}
           </details>
         </div>
       {/if}
@@ -329,6 +322,39 @@
           </p>
         </div>
       </details>
+
+      <!-- Available Features -->
+      {#if nodeStatus.available_features}
+        <details class="connection-methods-details" style="margin-top: 0.75rem;">
+          <summary class="connection-methods-summary">
+            <span class="uri-icon">ℹ️</span>
+            <span class="uri-title">Available Features</span>
+          </summary>
+          <div class="connection-help-content">
+            <ul class="features-list">
+              {#each Object.entries(nodeStatus.available_features) as [feature, available]}
+                {@const peerCount = peersByStrategy[feature]?.length || 0}
+                {@const tooltip = peersByStrategy[feature]
+                  ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
+                  : ''}
+                <li
+                  class:feature-available={available}
+                  class:feature-unavailable={!available}
+                  title={peerCount > 0 ? tooltip : ''}
+                >
+                  {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
+                  {#if peerCount > 0}
+                    <span class="peer-count">({peerCount})</span>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+            {#if nodeStatus.cached_peers_count && nodeStatus.cached_peers_count > 0}
+              <p class="cached-info">💾 {nodeStatus.cached_peers_count} cached peer(s)</p>
+            {/if}
+          </div>
+        </details>
+      {/if}
     </div>
 
     <!-- Chat List -->
@@ -624,12 +650,6 @@
     flex-wrap: wrap;
   }
 
-  .oauth-hint {
-    font-size: 0.85rem;
-    color: #666;
-    margin-bottom: 0.5rem;
-  }
-
   /* Knowledge Architecture - Context Button */
   .btn-context {
     width: 100%;
@@ -850,12 +870,6 @@
     padding: 1rem;
   }
 
-  .peer-count {
-    color: #888;
-    font-size: 0.9em;
-    margin-left: 0.25rem;
-  }
-
   .cached-info {
     font-size: 0.8rem;
     color: #666;
@@ -1025,40 +1039,85 @@
     line-height: 1.5;
   }
 
-  .hub-info-content {
+  .hub-login-section {
+    padding: 0.75rem;
+    background: #ffffff;
+    border-radius: 8px;
+  }
+
+  .hub-mode-content {
     padding: 1rem;
   }
 
-  .hub-url {
-    font-family: monospace;
-    font-size: 0.85rem;
-    color: #555;
-    word-break: break-all;
-    margin: 0.5rem 0;
+  .mode-badge {
+    display: inline-block;
+    padding: 0.5rem 1rem;
+    border-radius: 6px;
+    font-weight: 600;
+    font-size: 0.9rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .mode-badge.fully-online {
+    background: #d4edda;
+    color: #155724;
+    border: 1px solid #c3e6cb;
+  }
+
+  .mode-badge.hub-offline {
+    background: #fff3cd;
+    color: #856404;
+    border: 1px solid #ffeaa7;
+  }
+
+  .mode-badge.fully-offline {
+    background: #f8d7da;
+    color: #721c24;
+    border: 1px solid #f5c6cb;
   }
 
   .mode-description {
     font-size: 0.85rem;
     color: #666;
-    margin: 0.5rem 0;
+    margin: 0 0 1rem 0;
     font-style: italic;
   }
 
-  .peer-discovery-list {
+  .info-text {
+    font-size: 0.85rem;
+    color: #666;
+    margin: 0.5rem 0;
+  }
+
+  .features-list {
     list-style: none;
     padding: 0.5rem 0;
     margin: 0;
   }
 
-  .peer-discovery-item {
+  .features-list li {
     padding: 0.5rem 1rem;
     font-size: 0.85rem;
-    color: #333;
     border-bottom: 1px solid #f0f0f0;
   }
 
-  .peer-discovery-item:last-child {
+  .features-list li:last-child {
     border-bottom: none;
+  }
+
+  .feature-available {
+    color: #28a745;
+  }
+
+  .feature-unavailable {
+    color: #dc3545;
+  }
+
+  .peer-count {
+    color: #666;
+    font-size: 0.75rem;
+    margin-left: 0.5rem;
+    font-weight: normal;
   }
 
   .small-detail {

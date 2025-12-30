@@ -1656,6 +1656,8 @@
       bind:autoKnowledgeDetection
       bind:peerInput
       isConnecting={isConnecting}
+      peersByStrategy={peersByStrategy}
+      formatPeerForTooltip={formatPeerForTooltip}
       onReconnect={handleReconnect}
       onLoginToHub={(provider) => sendCommand('login_to_hub', {provider})}
       onViewPersonalContext={loadPersonalContext}
@@ -1848,7 +1850,28 @@
           </div>
         {/if}
 
-        <!-- FileTransferUI component handles image preview, dialogs, and transfers -->
+        <!-- FileTransferUI component: Image preview appears here, modals/panels are positioned -->
+        <FileTransferUI
+          pendingImage={pendingImage}
+          onClearPendingImage={clearPendingImage}
+          showFileOfferDialog={showFileOfferDialog}
+          currentFileOffer={currentFileOffer}
+          onAcceptFile={handleAcceptFile}
+          onRejectFile={handleRejectFile}
+          showSendFileDialog={showSendFileDialog}
+          pendingFileSend={pendingFileSend}
+          isSendingFile={isSendingFile}
+          filePreparationStarted={$filePreparationStarted}
+          filePreparationProgress={$filePreparationProgress}
+          filePreparationCompleted={$filePreparationCompleted}
+          onConfirmSendFile={handleConfirmSendFile}
+          onCancelSendFile={handleCancelSendFile}
+          activeFileTransfers={$activeFileTransfers}
+          onCancelTransfer={handleCancelTransfer}
+          showFileOfferToast={showFileOfferToast}
+          fileOfferToastMessage={fileOfferToastMessage}
+          onDismissToast={() => showFileOfferToast = false}
+        />
 
         <div class="input-row">
           <textarea
@@ -2068,31 +2091,6 @@
   on:close={() => {
     showVoteResultDialog = false;
   }}
-/>
-
-<!-- File Transfer UI Components (Week 1) -->
-
-<!-- FileTransferUI Component: Handles all file transfer UI (dialogs, panels, preview) -->
-<FileTransferUI
-  pendingImage={pendingImage}
-  onClearPendingImage={clearPendingImage}
-  showFileOfferDialog={showFileOfferDialog}
-  currentFileOffer={currentFileOffer}
-  onAcceptFile={handleAcceptFile}
-  onRejectFile={handleRejectFile}
-  showSendFileDialog={showSendFileDialog}
-  pendingFileSend={pendingFileSend}
-  isSendingFile={isSendingFile}
-  filePreparationStarted={$filePreparationStarted}
-  filePreparationProgress={$filePreparationProgress}
-  filePreparationCompleted={$filePreparationCompleted}
-  onConfirmSendFile={handleConfirmSendFile}
-  onCancelSendFile={handleCancelSendFile}
-  activeFileTransfers={$activeFileTransfers}
-  onCancelTransfer={handleCancelTransfer}
-  showFileOfferToast={showFileOfferToast}
-  fileOfferToastMessage={fileOfferToastMessage}
-  onDismissToast={() => showFileOfferToast = false}
 />
 
 <!-- Add AI Chat Dialog -->
