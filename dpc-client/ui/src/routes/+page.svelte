@@ -12,6 +12,7 @@
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
+  import ProviderSelector from "$lib/components/ProviderSelector.svelte";
   import Toast from "$lib/components/Toast.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
   import ImageMessage from "$lib/components/ImageMessage.svelte";
@@ -64,37 +65,12 @@
   let selectedPeerContexts = $state(new Set<string>());  // Set of peer node_ids to fetch context from
 
   // Dual provider selection (Phase 1: separate text and vision providers)
+  // Managed by ProviderSelector component (extracted)
   let selectedTextProvider = $state("");  // Provider for text-only queries
   let selectedVisionProvider = $state("");  // Provider for image queries
 
-  // Merged provider lists (Phase 2: combines local + remote providers)
-  // Phase 2.3: Add uniqueId to track provider source for remote vision routing
-  const mergedProviders = $derived(() => {
-    const local = ($providersList || []).map(p => ({
-      ...p,
-      source: 'local' as const,
-      displayText: `${p.alias} (${p.model}) - local`,
-      uniqueId: `local:${p.alias}`  // Unique identifier for selection tracking
-    }));
-
-    if (selectedComputeHost === "local") {
-      return local;
-    }
-
-    const remote = ($peerProviders.get(selectedComputeHost) || []).map(p => ({
-      ...p,
-      source: 'remote' as const,
-      displayText: `${p.alias} (${p.model}) - remote`,
-      uniqueId: `remote:${selectedComputeHost}:${p.alias}`  // Include node_id for routing
-    }));
-
-    return [...local, ...remote];
-  });
-
-  const mergedTextProviders = $derived(() => mergedProviders());
-  const mergedVisionProviders = $derived(() => mergedProviders().filter(p => p.supports_vision));
-
   // Helper function to parse provider selection (Phase 2.3)
+  // Used by parent for routing remote inference requests
   function parseProviderSelection(uniqueId: string): { source: 'local' | 'remote', alias: string, nodeId?: string } {
     if (!uniqueId) return { source: 'local', alias: '' };
 
@@ -191,14 +167,6 @@
   // Save markdown preference to localStorage when changed
   $effect(() => {
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
-  });
-
-  // Initialize provider selections from defaults (Phase 2.3: use uniqueId format)
-  $effect(() => {
-    if ($defaultProviders && !selectedTextProvider && !selectedVisionProvider) {
-      selectedTextProvider = `local:${$defaultProviders.default_provider}`;
-      selectedVisionProvider = `local:${$defaultProviders.vision_provider}`;
-    }
   });
 
   // Phase 7: Context hash tracking for "Updated" status indicators
@@ -2047,53 +2015,17 @@
         </div>
 
         {#if !chatHeaderCollapsed}
-          {#if $aiChats.has(activeChatId) && $providersList.length > 0}
-            <div class="provider-selector-header">
-              <!-- AI Host Selector (Phase 2: Remote Vision) -->
-              <div class="provider-row-header">
-                <label for="ai-host-header">AI Host:</label>
-                <select id="ai-host-header" bind:value={selectedComputeHost}>
-                  <option value="local">Local</option>
-                  {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
-                    <optgroup label="Remote Peers">
-                      {#each $nodeStatus.peer_info as peer}
-                        {@const displayName = peer.name
-                          ? `${peer.name} | ${peer.node_id.slice(0, 20)}...`
-                          : `${peer.node_id.slice(0, 20)}...`}
-                        <option value={peer.node_id}>
-                          {displayName}
-                        </option>
-                      {/each}
-                    </optgroup>
-                  {/if}
-                </select>
-              </div>
-
-              <!-- Text Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
-              <div class="provider-row-header">
-                <label for="text-provider-header">Text:</label>
-                <select id="text-provider-header" bind:value={selectedTextProvider}>
-                  {#each mergedTextProviders() as provider}
-                    <option value={provider.uniqueId}>
-                      {provider.displayText}
-                    </option>
-                  {/each}
-                </select>
-              </div>
-
-              <!-- Vision Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
-              <div class="provider-row-header">
-                <label for="vision-provider-header">Vision:</label>
-                <select id="vision-provider-header" bind:value={selectedVisionProvider}>
-                  {#each mergedVisionProviders() as provider}
-                    <option value={provider.uniqueId}>
-                      {provider.displayText}
-                    </option>
-                  {/each}
-                </select>
-              </div>
-            </div>
-          {/if}
+          <ProviderSelector
+            bind:selectedComputeHost
+            bind:selectedTextProvider
+            bind:selectedVisionProvider
+            showForChatId={activeChatId}
+            isAIChat={$aiChats.has(activeChatId)}
+            providersList={$providersList}
+            peerProviders={$peerProviders}
+            nodeStatus={$nodeStatus}
+            defaultProviders={$defaultProviders}
+          />
 
         <SessionControls
           showForChatId={activeChatId}
@@ -3089,52 +3021,6 @@
     transition: transform 0.2s ease;
     display: inline-block;
     min-width: 1em;
-  }
-
-  /* Dual Provider Selector in Header (Phase 1) */
-  .provider-selector-header {
-    display: flex;
-    flex-wrap: wrap;  /* Wrap items naturally when they don't fit */
-    gap: 0.75rem;
-    align-items: center;
-  }
-
-  .provider-row-header {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-  }
-
-  .provider-row-header label {
-    font-size: 0.85rem;
-    font-weight: 500;
-    color: #666;
-    white-space: nowrap;
-  }
-
-  .provider-row-header select {
-    padding: 0.4rem 0.6rem;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    background: white;
-    cursor: pointer;
-    font-size: 0.85rem;
-    min-width: 150px;
-    max-width: 220px;
-    /* Handle text overflow */
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .provider-row-header select:hover {
-    border-color: #4CAF50;
-  }
-
-  .provider-row-header select:focus {
-    outline: none;
-    border-color: #4CAF50;
-    box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.1);
   }
 
   /* Resize Handle */
