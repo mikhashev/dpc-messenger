@@ -911,6 +911,34 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Calculate average confidence
             avg_confidence = sum(e.confidence for e in entries) / len(entries) if entries else 1.0
 
+            # Sanitize alternatives (convert objects to strings if needed)
+            raw_alternatives = result.get('alternatives', [])
+            alternatives = []
+            for alt in raw_alternatives:
+                if isinstance(alt, str):
+                    alternatives.append(alt)
+                elif isinstance(alt, dict):
+                    # Extract string from dict (common AI response pattern)
+                    alternatives.append(alt.get('description') or alt.get('text') or alt.get('content') or str(alt))
+                else:
+                    alternatives.append(str(alt))
+
+            # Sanitize devil_advocate (convert object to string if needed)
+            raw_devil_advocate = result.get('devil_advocate')
+            if raw_devil_advocate is None:
+                devil_advocate = None
+            elif isinstance(raw_devil_advocate, str):
+                devil_advocate = raw_devil_advocate
+            elif isinstance(raw_devil_advocate, dict):
+                # Extract string from dict (common AI response pattern)
+                devil_advocate = (raw_devil_advocate.get('critique') or
+                                 raw_devil_advocate.get('analysis') or
+                                 raw_devil_advocate.get('text') or
+                                 raw_devil_advocate.get('content') or
+                                 str(raw_devil_advocate))
+            else:
+                devil_advocate = str(raw_devil_advocate)
+
             # Create proposal (extraction_model_name and extraction_host_name already determined above)
             proposal = KnowledgeCommitProposal(
                 conversation_id=self.conversation_id,
@@ -920,9 +948,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 participants=[p['node_id'] for p in self.participants],
                 proposed_by='ai',
                 cultural_perspectives=result.get('cultural_perspectives', []),
-                alternatives=result.get('alternatives', []),
+                alternatives=alternatives,
                 flagged_assumptions=result.get('flagged_assumptions', []),
-                devil_advocate=result.get('devil_advocate'),
+                devil_advocate=devil_advocate,
                 avg_confidence=avg_confidence,
                 extraction_model=extraction_model_name,
                 extraction_host=extraction_host_name,
