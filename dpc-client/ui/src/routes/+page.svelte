@@ -2530,7 +2530,8 @@
 
   .input-row button {
     min-width: 100px;
-    padding: 8px 16px;
+    height: 45px; /* Match file button height */
+    padding: 0 16px; /* Horizontal padding only, height is fixed */
     align-self: flex-end;
     background: #5a67d8;
     color: white;
@@ -2541,6 +2542,9 @@
     font-weight: 500;
     transition: all 0.2s;
     box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .input-row button:hover:not(:disabled) {
