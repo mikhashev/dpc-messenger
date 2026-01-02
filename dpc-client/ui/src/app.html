@@ -17,6 +17,33 @@
       }
     </style>
     %sveltekit.head%
+    <script type="module">
+      // Intercept external link clicks and open in system browser
+      document.addEventListener('click', async (event) => {
+        const target = event.target.closest('a');
+        if (!target) return;
+
+        const href = target.href;
+        if (!href) return;
+
+        // Only handle external HTTP(S) links
+        if (href.startsWith('http://') || href.startsWith('https://')) {
+          // Skip localhost links (internal navigation)
+          if (href.includes('localhost') || href.includes('127.0.0.1')) {
+            return;
+          }
+
+          // External link - prevent default and open in system browser
+          event.preventDefault();
+
+          // Use Tauri's opener plugin to open in system browser
+          if (window.__TAURI__) {
+            const { open } = window.__TAURI__.shell;
+            await open(href);
+          }
+        }
+      }, true); // Use capture phase to intercept before other handlers
+    </script>
   </head>
   <body data-sveltekit-preload-data="hover">
     <div style="display: contents">%sveltekit.body%</div>
