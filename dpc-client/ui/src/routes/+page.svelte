@@ -2521,11 +2521,37 @@
     overflow-wrap: break-word; /* Break long words */
     word-break: break-word; /* Break long unbreakable strings */
     overflow-x: auto; /* Allow horizontal scroll in textarea if needed */
+    padding: 0.75rem; /* Add padding inside textarea */
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 1rem;
   }
 
   .input-row button {
-    width: 100px;
+    min-width: 100px;
+    padding: 8px 16px;
     align-self: flex-end;
+    background: #5a67d8;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
+  }
+
+  .input-row button:hover:not(:disabled) {
+    background: #4c51bf;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4);
+  }
+
+  .input-row button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
   
   /* Modal Dialog Styles */
@@ -2646,15 +2672,21 @@
   /* File Transfer UI Styles (Week 1) */
   .file-button {
     min-width: 45px;
-    padding: 8px 12px;
-    font-size: 18px;
-    margin-right: 8px;
+    width: 45px; /* Fixed width for icon button */
+    height: 45px; /* Square button */
+    padding: 8px;
+    font-size: 20px;
     cursor: pointer;
     background: #5a67d8;
+    color: white;
     border: none;
     border-radius: 4px;
     transition: all 0.2s;
     box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
+    align-self: flex-end;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .file-button:hover:not(:disabled) {
