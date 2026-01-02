@@ -117,7 +117,10 @@
   let showProvidersEditor = $state(false);
   let showCommitDialog = $state(false);
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
-  let autoKnowledgeDetection = $state(false);  // Default: disabled
+  // Initialize from localStorage (browser-safe)
+  let autoKnowledgeDetection = $state(
+    typeof window !== 'undefined' && localStorage.getItem('autoKnowledgeDetection') === 'true'
+  );
 
   // Token tracking state (Phase 2)
   let tokenUsageMap = $state(new Map<string, {used: number, limit: number}>());
@@ -168,6 +171,13 @@
   // Save markdown preference to localStorage when changed
   $effect(() => {
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
+  });
+
+  // Save auto-knowledge detection preference to localStorage when changed
+  $effect(() => {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('autoKnowledgeDetection', autoKnowledgeDetection.toString());
+    }
   });
 
   // Phase 7: Context hash tracking for "Updated" status indicators
