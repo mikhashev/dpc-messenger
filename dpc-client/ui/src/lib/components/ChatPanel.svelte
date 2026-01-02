@@ -144,11 +144,13 @@
   .message.user {
     background: #dcf8c6;
     margin-left: auto;
+    margin-right: 0.5rem; /* Add right margin for spacing from edge */
   }
 
   .message:not(.user):not(.system) {
     background: white;
     border: 1px solid #eee;
+    margin-left: 0.5rem; /* Add left margin for spacing from edge */
   }
 
   .message.system {
