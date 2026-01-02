@@ -4014,7 +4014,14 @@ class CoreService:
                     "Please end the session to save knowledge and start a new conversation."
                 )
                 logger.warning("BLOCKED: %s", error_msg)
-                raise RuntimeError(error_msg)
+                # Send error response immediately instead of raising exception
+                await self.local_api.send_response_to_all(
+                    command_id=command_id,
+                    command="execute_ai_query",
+                    status="ERROR",
+                    payload={"message": error_msg}
+                )
+                return
 
         # Simplified context inclusion: Always include when checkbox checked
         # Rationale: Modern AI models have large context windows (128K+ tokens)
@@ -4157,7 +4164,14 @@ class CoreService:
 
             if not is_valid:
                 logger.warning("BLOCKED (pre-query validation): %s", error_msg)
-                raise RuntimeError(error_msg)
+                # Send error response immediately instead of raising exception
+                await self.local_api.send_response_to_all(
+                    command_id=command_id,
+                    command="execute_ai_query",
+                    status="ERROR",
+                    payload={"message": error_msg}
+                )
+                return
 
         response_payload = {}
         status = "OK"
