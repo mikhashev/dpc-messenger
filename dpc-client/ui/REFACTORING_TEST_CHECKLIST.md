@@ -27,119 +27,152 @@
 ### 1. Sidebar Component Tests
 
 #### Connection Status
-- [ ] Connection status badge displays correctly (connected/connecting/disconnected)
-- [ ] Reconnect button appears when disconnected
-- [ ] Reconnect button triggers reconnection
+- [x] Connection status badge displays correctly (connected/connecting/disconnected)
+- [x] Reconnect button appears when disconnected
+- [x] Reconnect button triggers reconnection
 
 #### Node Information
-- [ ] Node ID displays correctly
-- [ ] Copy node ID button works
-- [ ] DPC URIs section displays local network addresses
-- [ ] DPC URIs section displays external addresses (if available)
-- [ ] Hub status shows correct connection state
+- [x] Node ID displays correctly
+- [x] Copy node ID button works
+- [x] DPC URIs section displays local network addresses
+- [x] DPC URIs section displays external addresses (if available)
+- [x] Hub status shows correct connection state
 
 #### Authentication (Hub Mode)
-- [ ] Google login button visible when Hub disconnected
-- [ ] GitHub login button visible when Hub disconnected
-- [ ] OAuth login flow works for both providers
-- [ ] Login buttons hidden when Hub connected
+- [x] Google login button visible when Hub disconnected
+- [x] GitHub login button visible when Hub disconnected
+- [skipped] OAuth login flow works for both providers
+- [skipped] Login buttons hidden when Hub connected
 
 #### Peer Discovery
-- [ ] Cached peers list displays correctly
-- [ ] Online peers from Hub display with names
-- [ ] Peer count badges show correct numbers
+- [x] Cached peers list displays correctly
+- [x] Online peers from Hub display with names
+- [x] Peer count badges show correct numbers
 
 #### Personal Context Actions
-- [ ] "View Personal Context" button opens context viewer
-- [ ] "Edit Instructions" button opens instructions editor
-- [ ] "Firewall Rules" button opens firewall editor
-- [ ] "AI Providers" button opens providers editor
+- [x] "View Personal Context" button opens context viewer
+- [x] "Edit Instructions" button opens instructions editor
+- [x] "Firewall Rules" button opens firewall editor
+- [x] "AI Providers" button opens providers editor
 
 #### Auto-Knowledge Detection
-- [ ] Toggle switch displays current state
-- [ ] Clicking toggle updates state
-- [ ] State persists across page reloads
+- [x] Toggle switch displays current state
+- [x] Clicking toggle updates state
+- [after page reloading swithed off] State persists across page reloads
 
 #### Connect to Peer
-- [ ] Peer input field accepts text
-- [ ] Connection methods help text displays
-- [ ] Connecting to peer via DPC URI works
-- [ ] Connecting to peer via Node ID works
+- [x] Peer input field accepts text
+- [x] Connection methods help text displays
+- [x] Connecting to peer via DPC URI works
+- [don't check yet, need check full DHT with 3 independent peers] Connecting to peer via Node ID works
 
 #### Chat List
-- [ ] AI chats display with correct icons
-- [ ] P2P peer chats display with correct icons
-- [ ] Active chat highlighted correctly
-- [ ] Unread message badges display on inactive chats
-- [ ] Clicking chat switches active conversation
-- [ ] "+" button adds new AI chat
-- [ ] Delete button (×) removes AI chats
-- [ ] Disconnect button appears for P2P chats
+- [Yes, but i dleted icon fro AI chats, i don't need this icon] AI chats display with correct icons
+- [x] P2P peer chats display with correct icons
+- [x] Active chat highlighted correctly
+- [x] Unread message badges display on inactive chats
+- [x] Clicking chat switches active conversation
+- [x] "+" button adds new AI chat
+- [x] Delete button (×) removes AI chats
+- [x] Disconnect button appears for P2P chats
 
 ### 2. ProviderSelector Component Tests
 
 #### AI Host Selection
-- [ ] "Local" option always available
-- [ ] Remote peers appear in dropdown when connected
-- [ ] Peer names display correctly (name | node_id)
-- [ ] Selecting remote peer updates provider lists
+- [x] "Local" option always available
+- [x] Remote peers appear in dropdown when connected
+- [x] Peer names display correctly (name | node_id)
+- [x] Selecting remote peer updates provider lists
 
 #### Text Provider Selection
-- [ ] Local providers display with "(local)" suffix
-- [ ] Remote providers display with "(remote)" suffix when remote host selected
-- [ ] Provider selection persists when switching chats
-- [ ] Default provider auto-selected on first load
+- [x] Local providers display with "(local)" suffix
+- [x] Remote providers display with "(remote)" suffix when remote host selected
+- [x] Provider selection persists when switching chats
+- [x] Default provider auto-selected on first load
 
 #### Vision Provider Selection
-- [ ] Only vision-capable providers appear
-- [ ] Local vision providers display correctly
-- [ ] Remote vision providers display when available
-- [ ] Vision provider selection persists
+- [x] Only vision-capable providers appear
+- [x] Local vision providers display correctly
+- [x] Remote vision providers display when available
+- [x] Vision provider selection persists
 
 ### 3. SessionControls Component Tests
 
 #### Token Counter (AI Chats Only)
-- [ ] Token counter displays for AI chats
-- [ ] Token counter shows used/limit correctly
-- [ ] Percentage displays correctly
-- [ ] Warning color appears at 80%+ usage
-- [ ] Counter hidden for P2P chats
+- [It is displayed after message sent, for empty chat it is not displayed] Token counter displays for AI chats
+- [x] Token counter shows used/limit correctly
+- [x] Percentage displays correctly
+- [error see user notes below] Warning color appears at 80%+ usage
+- [Yes, but may be this is wrong, because we use AI model for knowledge extraction if user hit End conversation and Save Knowledge] Counter hidden for P2P chats
+
+user note: Tokens doesn't counts when in chat input
+after context window limit was exceed after user sent message there is no warnings in UI, AI jist show Thinking...
+in backend logs:
+```
+DEBUG    Using character estimation for llama3.1:8b
+WARNING  BLOCKED (pre-query validation): Prompt too large: 20,139 tokens (limit: 13,108 after reserving 20% for response).
+
+Context window: 16,384 tokens total.
+
+Suggestions:
+  1. Disable context checkboxes to reduce token usage
+  2. End session to save knowledge and clear history
+  3. Use a model with larger context window
+ERROR    Task exception was never retrieved
+future: <Task finished name='Task-625' coro=<CoreService.execute_ai_query() done, defined at C:\Users\mike\Documents\dpc-messenger\dpc-client\core\dpc_client_core\service.py
+:3981> exception=RuntimeError('Prompt too large: 20,139 tokens (limit: 13,108 after reserving 20% for response).\n\nContext window: 16,384 tokens total.\n\nSuggestions:\n  1
+. Disable context checkboxes to reduce token usage\n  2. End session to save knowledge and clear history\n  3. Use a model with larger context window')>
+Traceback (most recent call last):
+  File "C:\Users\mike\Documents\dpc-messenger\dpc-client\core\dpc_client_core\service.py", line 4160, in execute_ai_query
+    raise RuntimeError(error_msg)
+RuntimeError: Prompt too large: 20,139 tokens (limit: 13,108 after reserving 20% for response).
+
+Context window: 16,384 tokens total.
+
+Suggestions:
+  1. Disable context checkboxes to reduce token usage
+  2. End session to save knowledge and clear history
+  3. Use a model with larger context window
+
+```
 
 #### Session Actions
-- [ ] "New Session" button creates new chat session
-- [ ] "New Session" clears conversation history
+- [x] "New Session" button creates new chat session
+- [Yes, neeed to add tooltip explains requirement] "New Session" clears conversation history
 - [ ] "End Session & Save Knowledge" button appears
 - [ ] End session disabled when peer offline (P2P only)
-- [ ] End session tooltip explains requirement
+- [x] End session tooltip explains requirement
 - [ ] End session triggers knowledge extraction
 
 #### Markdown Toggle (AI Chats Only)
-- [ ] Markdown toggle button displays for AI chats
-- [ ] Button shows "Markdown" when enabled
-- [ ] Button shows "Text" when disabled
-- [ ] Toggle switches rendering mode
-- [ ] State persists across sessions
+- [x] Markdown toggle button displays for AI chats
+- [x] Button shows "Markdown" when enabled
+- [x] Button shows "Text" when disabled
+- [Yes. But see user notes below] Toggle switches rendering mode
+- [x] State persists across sessions
+
+user notes: May be this is a bug or what, if I click any weblink from app chat it opens this link in new window in this app.
 
 ### 4. ChatPanel Component Tests
 
 #### Message Display
-- [ ] User messages display with correct styling
-- [ ] Assistant messages display with correct styling
-- [ ] Message timestamps display correctly
-- [ ] Sender names display for P2P chats
-- [ ] Message bubbles align correctly (user right, assistant left)
+- [No margins in message input] User messages display with correct styling
+- [x] Assistant messages display with correct styling
+- [x] Message timestamps display correctly
+- [We don't need truncate node id, just show full length] Sender names display for P2P chats
+- [x] Message bubbles align correctly (user right, assistant left)
 
 #### Message Rendering
-- [ ] Markdown rendering works when enabled
-- [ ] Code blocks render with syntax highlighting
-- [ ] Links are clickable
-- [ ] Plain text displays when markdown disabled
+- [x] Markdown rendering works when enabled
+- [There is no syntax highlighting] Code blocks render with syntax highlighting
+- [ May be this is a bug or what, if I click any weblink from app chat it opens this link in new window in this app.] Links are clickable
+- [x] Plain text displays when markdown disabled
 
 #### Attachments
-- [ ] Image attachments display inline
+- [x] Image attachments display inline
 - [ ] File attachments show with download button
 - [ ] File metadata displays (name, size)
-- [ ] Clicking images opens full-size view
+- [x] Clicking images opens full-size view
 
 #### Scroll Behavior
 - [ ] Auto-scroll to bottom on new message

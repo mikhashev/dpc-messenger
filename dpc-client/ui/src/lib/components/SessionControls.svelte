@@ -9,6 +9,8 @@
     isPeerConnected,
     tokenUsed = 0,
     tokenLimit = 0,
+    estimatedTokens = 0,
+    showEstimation = false,
     enableMarkdown = $bindable(true),
     onNewSession,
     onEndSession
@@ -18,14 +20,24 @@
     isPeerConnected: boolean;
     tokenUsed?: number;
     tokenLimit?: number;
+    estimatedTokens?: number;
+    showEstimation?: boolean;
     enableMarkdown?: boolean;
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
   } = $props();
 
   // Computed properties
+  // Use default limit of 16,384 tokens if not yet set (before first message)
+  const DEFAULT_TOKEN_LIMIT = 16384;
+  let effectiveLimit = $derived(tokenLimit > 0 ? tokenLimit : DEFAULT_TOKEN_LIMIT);
+
+  let totalTokens = $derived(
+    tokenUsed + (showEstimation ? estimatedTokens : 0)
+  );
+
   let tokenUsagePercent = $derived(
-    tokenLimit > 0 ? (tokenUsed / tokenLimit) : 0
+    effectiveLimit > 0 ? (totalTokens / effectiveLimit) : 0
   );
 
   let showWarning = $derived(
@@ -43,14 +55,28 @@
   );
 </script>
 
-{#if isAIChat && tokenLimit > 0}
+{#if isAIChat}
   <div class="token-counter">
-    <span class="token-value">
-      {tokenUsed.toLocaleString()} / {tokenLimit.toLocaleString()} tokens
+    <span
+      class="token-value"
+      title={showEstimation && estimatedTokens > 0
+        ? "Estimate includes current input (4 chars ≈ 1 token, excludes contexts)"
+        : ""}
+    >
+      {#if showEstimation && estimatedTokens > 0}
+        {tokenUsed.toLocaleString()} + ~{estimatedTokens.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
+      {:else}
+        {tokenUsed.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
+      {/if}
     </span>
     <span class="token-percentage" class:warning={showWarning}>
       ({Math.round(tokenUsagePercent * 100)}%)
     </span>
+    {#if showWarning}
+      <span class="warning-label">
+        ⚠️ Approaching limit
+      </span>
+    {/if}
   </div>
 {/if}
 
@@ -104,6 +130,18 @@
   .token-percentage.warning {
     color: #ff9800;
     font-weight: 600;
+  }
+
+  .warning-label {
+    color: #ff9800;
+    font-weight: 600;
+    font-size: 0.8rem;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
   }
 
   .chat-actions {

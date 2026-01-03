@@ -20,9 +20,11 @@
   import SessionControls from "$lib/components/SessionControls.svelte";
   import FileTransferUI from "$lib/components/FileTransferUI.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
+  import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
   import { ask, open } from '@tauri-apps/plugin-dialog';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
+  import { estimateConversationUsage } from '$lib/tokenEstimator';
 
   console.log("Full D-PC Messenger loading...");
   
@@ -380,7 +382,34 @@
   });
 
   // Reactive: Get current chat's token usage
+  const DEFAULT_TOKEN_LIMIT = 16384; // Default limit for new AI chats (before first message)
   let currentTokenUsage = $derived(tokenUsageMap.get(activeChatId) || {used: 0, limit: 0});
+
+  // Use effective limit (default if not yet set by backend)
+  let effectiveTokenUsage = $derived({
+    used: currentTokenUsage.used,
+    limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT
+  });
+
+  // Reactive: Estimate token usage including current input (real-time feedback)
+  let estimatedUsage = $derived(
+    estimateConversationUsage(effectiveTokenUsage, currentInput)
+  );
+
+  // Reactive: Determine warning level based on estimated usage
+  let tokenWarningLevel = $derived(
+    !$aiChats.has(activeChatId)
+      ? 'none'
+      : estimatedUsage.percentage >= 1.0
+        ? 'critical'
+        : estimatedUsage.percentage >= 0.9
+          ? 'warning'
+          : 'none'
+  );
+
+  let showTokenBanner = $derived(
+    tokenWarningLevel === 'critical' || tokenWarningLevel === 'warning'
+  );
 
   // Reactive: Check if current peer is connected (for enabling/disabling send controls)
   let isPeerConnected = $derived(!activeChatId.startsWith('ai_') && activeChatId !== 'local_ai'
@@ -463,8 +492,8 @@
     }
   });
 
-  // Phase 7: Reactive: Check if context window is full (100% or more)
-  let isContextWindowFull = $derived(currentTokenUsage.limit > 0 && (currentTokenUsage.used / currentTokenUsage.limit) >= 1.0);
+  // Phase 7: Reactive: Check if context window is full (100% or more) - uses estimated total
+  let isContextWindowFull = $derived($aiChats.has(activeChatId) && estimatedUsage.percentage >= 1.0);
 
   // Reactive: Handle knowledge extraction failures (Phase 4)
   $effect(() => {
@@ -1488,7 +1517,10 @@
       const message = $coreMessages;
 
     if (message.command === "execute_ai_query") {
+      console.log(`[TokenCounter] execute_ai_query response: status=${message.status}, isLoading before clear=${isLoading}`);
       isLoading = false;
+      console.log(`[TokenCounter] isLoading cleared: ${isLoading}`);
+
       const newText = message.status === "OK"
         ? message.payload.content
         : `Error: ${message.payload?.message || 'Unknown error'}`;
@@ -1497,6 +1529,7 @@
 
       // Show toast notification for errors (helps remote users see host failures)
       if (message.status !== "OK") {
+        console.error(`[TokenCounter] AI query failed: ${message.payload?.message}`);
         fileOfferToastMessage = `⚠️ AI Query Failed: ${message.payload?.message || 'Unknown error'}`;
         showFileOfferToast = true;
         setTimeout(() => showFileOfferToast = false, 7000);  // 7s for errors (longer than success)
@@ -1722,8 +1755,10 @@
           showForChatId={activeChatId}
           isAIChat={$aiChats.has(activeChatId)}
           isPeerConnected={isPeerConnected}
-          tokenUsed={currentTokenUsage.used}
-          tokenLimit={currentTokenUsage.limit}
+          tokenUsed={effectiveTokenUsage.used}
+          tokenLimit={effectiveTokenUsage.limit}
+          estimatedTokens={estimatedUsage.estimated}
+          showEstimation={estimatedUsage.isEstimated}
           bind:enableMarkdown
           onNewSession={handleNewChat}
           onEndSession={handleEndSession}
@@ -1884,15 +1919,25 @@
         />
 
         <div class="input-row">
+          <!-- Token Warning Banner (90% and 100% warnings) -->
+          {#if showTokenBanner}
+            <TokenWarningBanner
+              severity={tokenWarningLevel === 'critical' ? 'critical' : 'warning'}
+              percentage={estimatedUsage.percentage}
+              onEndSession={() => handleEndSession(activeChatId)}
+              dismissible={tokenWarningLevel !== 'critical'}
+            />
+          {/if}
+
           <textarea
             id="message-input"
             name="message-input"
             bind:value={currentInput}
             placeholder={
-              isContextWindowFull ? 'Context window full - End session to continue' :
+              isContextWindowFull ? 'Context window full - Delete text or end session to continue' :
               ($connectionStatus === 'connected' ? (pendingImage ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
             }
-            disabled={$connectionStatus !== 'connected' || isLoading || isContextWindowFull}
+            disabled={$connectionStatus !== 'connected' || isLoading}
             onkeydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
