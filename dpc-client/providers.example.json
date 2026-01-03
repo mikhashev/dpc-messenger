@@ -53,6 +53,20 @@
       "_setup": "Set environment variable: export ANTHROPIC_API_KEY='sk-ant-...'"
     },
 
+    "zai": {
+      "alias": "zai_glm47",
+      "type": "zai",
+      "model": "glm-4.7",
+      "api_key_env": "ZAI_API_KEY",
+      "context_window": 128000,
+      "_setup": "Set environment variable: export ZAI_API_KEY='your_key_here'",
+      "_available_models": {
+        "text": ["glm-4.7", "glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4.5-airx", "glm-4.5-flash", "glm-4-plus", "glm-4-128-0414-128k"],
+        "vision": ["glm-4.6v-flash", "glm-4.5v", "glm-4.0v"]
+      },
+      "_rate_limits": "Concurrency-based (2-20 concurrent requests depending on model)"
+    },
+
     "openrouter": {
       "alias": "openrouter",
       "type": "openai_compatible",
@@ -67,8 +81,8 @@
     "_comment": "Reference guide for provider configuration fields",
     "common_fields": {
       "alias": "User-friendly name for the provider (must be unique)",
-      "type": "Provider type: 'ollama', 'openai_compatible', or 'anthropic'",
-      "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620')",
+      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', or 'zai'",
+      "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7')",
       "context_window": "Optional: Override default context window size in tokens"
     },
     "ollama_fields": {
@@ -81,6 +95,10 @@
     },
     "anthropic_fields": {
       "api_key_env": "Environment variable containing Anthropic API key (required)"
+    },
+    "zai_fields": {
+      "api_key": "API key (plaintext - alternative to api_key_env)",
+      "api_key_env": "Environment variable containing Z.AI API key (recommended)"
     }
   },
 

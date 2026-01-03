@@ -376,6 +376,84 @@ class AnthropicProvider(AIProvider):
         except Exception as e:
             raise RuntimeError(f"Anthropic vision API failed for '{self.alias}': {e}") from e
 
+class ZaiProvider(AIProvider):
+    """Z.AI provider for GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)"""
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        super().__init__(alias, config)
+
+        # API key handling (supports both plaintext and env var)
+        api_key = config.get("api_key")
+        if not api_key:
+            api_key_env = config.get("api_key_env", "ZAI_API_KEY")
+            if api_key_env:
+                api_key = os.getenv(api_key_env)
+
+        if not api_key:
+            raise ValueError(f"API key not found for Z.AI provider '{self.alias}'")
+
+        # Initialize Z.AI client (synchronous SDK confirmed from docs)
+        from zai import ZaiClient
+        self.client = ZaiClient(api_key=api_key)
+
+    def supports_vision(self) -> bool:
+        """GLM vision models: models with 'v' suffix (glm-4.6v-flash, glm-4.5v, glm-4.0v)"""
+        # Vision models confirmed from rate limits page
+        vision_models = ["glm-4.6v", "glm-4.5v", "glm-4.0v", "glm-4v"]
+        return any(vm in self.model.lower() for vm in vision_models)
+
+    async def generate_response(self, prompt: str) -> str:
+        """Generate text response using Z.AI GLM model"""
+        try:
+            # Z.AI SDK is synchronous, wrap in asyncio.to_thread()
+            response = await asyncio.to_thread(
+                self.client.chat.completions.create,
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {e}") from e
+
+    async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
+        """
+        Z.AI vision API for GLM-V models (glm-4.6v-flash, glm-4.5v, glm-4.0v)
+        Assuming OpenAI-compatible multimodal format (needs verification)
+        """
+        try:
+            # Build multimodal message content (OpenAI-compatible format)
+            content = [{"type": "text", "text": prompt}]
+
+            for img in images:
+                # Encode image to base64 if not already
+                if "base64" in img:
+                    base64_data = img["base64"]
+                    if base64_data.startswith("data:"):
+                        base64_data = base64_data.split(",", 1)[1]
+                else:
+                    with open(img["path"], "rb") as f:
+                        base64_data = base64.b64encode(f.read()).decode("utf-8")
+
+                mime_type = img.get("mime_type", "image/png")
+                content.append({
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{base64_data}",
+                        "detail": "high"
+                    }
+                })
+
+            # Z.AI SDK is synchronous, wrap in asyncio.to_thread()
+            response = await asyncio.to_thread(
+                self.client.chat.completions.create,
+                model=self.model,
+                messages=[{"role": "user", "content": content}],
+                temperature=kwargs.get("temperature", 0.7),
+                max_tokens=kwargs.get("max_tokens", 4000)
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise RuntimeError(f"Z.AI vision API failed for '{self.alias}': {e}") from e
+
 
 # --- The Manager Class ---
 
@@ -383,6 +461,7 @@ PROVIDER_MAP = {
     "ollama": OllamaProvider,
     "openai_compatible": OpenAICompatibleProvider,
     "anthropic": AnthropicProvider,
+    "zai": ZaiProvider,
 }
 
 # Default context window sizes for common models (in tokens)
@@ -430,6 +509,20 @@ MODEL_CONTEXT_WINDOWS = {
     "claude-sonnet-4-5-20250929": 200000,
     "claude-haiku-4-5": 200000,  # Claude Haiku 4.5 (shorthand model name)
     "claude-opus-4-5": 200000,   # Claude Opus 4.5 (shorthand model name)
+
+    # Z.AI models (GLM series) - from docs.z.ai
+    "glm-4.7": 128000,  # 128K tokens (estimated)
+    "glm-4.6": 128000,  # 128K tokens (estimated)
+    "glm-4.6v-flash": 128000,  # Vision model
+    "glm-4.5": 128000,  # 128K tokens (estimated)
+    "glm-4.5v": 128000,  # Vision model
+    "glm-4.5-air": 128000,
+    "glm-4.5-airx": 128000,
+    "glm-4.5-flash": 128000,
+    "glm-4-plus": 128000,
+    "glm-4.0v": 128000,  # Vision model
+    "glm-4-128-0414-128k": 131072,  # 128K explicit in name
+    "autoglm-phone-multilingal": 32768,  # Conservative estimate
 
     # Default fallback
     "default": 4096

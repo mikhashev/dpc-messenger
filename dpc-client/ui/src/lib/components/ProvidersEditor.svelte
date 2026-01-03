@@ -9,7 +9,7 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai';
 
   type Provider = {
     alias: string;
@@ -282,6 +282,10 @@
       provider.api_key_env = 'OPENAI_API_KEY';
     } else if (newProvider.type === 'anthropic') {
       provider.api_key_env = 'ANTHROPIC_API_KEY';
+    } else if (newProvider.type === 'zai') {
+      provider.api_key_env = 'ZAI_API_KEY';
+      provider.model = 'glm-4.7';
+      provider.context_window = 128000;
     }
 
     editedConfig.providers.push(provider);
@@ -432,6 +436,7 @@
                         <option value="ollama">Ollama</option>
                         <option value="openai_compatible">OpenAI Compatible</option>
                         <option value="anthropic">Anthropic</option>
+                        <option value="zai">Z.AI</option>
                       </select>
                     </div>
 
@@ -524,6 +529,33 @@
                           placeholder="ANTHROPIC_API_KEY"
                         />
                         <p class="help-text">Set this environment variable before starting the service</p>
+                      </div>
+                    {/if}
+
+                    {#if editedConfig.providers[i].type === 'zai'}
+                      <div class="form-group">
+                        <label for="api-key-env-{i}">API Key Environment Variable</label>
+                        <input
+                          id="api-key-env-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].api_key_env}
+                          placeholder="ZAI_API_KEY"
+                        />
+                        <p class="help-text">Recommended: Store API key in environment variable</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="api-key-{i}">API Key (plaintext, alternative)</label>
+                        <form on:submit|preventDefault>
+                          <input
+                            id="api-key-{i}"
+                            type="password"
+                            bind:value={editedConfig.providers[i].api_key}
+                            placeholder="Leave blank to use environment variable"
+                            autocomplete="off"
+                          />
+                        </form>
+                        <p class="help-text warn">⚠️ Not recommended: Stores key in config file</p>
                       </div>
                     {/if}
 

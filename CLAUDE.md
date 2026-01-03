@@ -1077,6 +1077,79 @@ poetry run pytest tests/test_turn_connectivity.py
 
 ---
 
+## AI Providers
+
+D-PC Messenger supports multiple AI providers for local and cloud-based inference:
+
+### Supported Providers
+- **Ollama**: Local models (llama3, mistral, qwen, etc.) via Ollama API
+- **OpenAI Compatible**: OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
+- **Anthropic**: Claude models (Claude 3.5 Sonnet, Claude Opus, etc.)
+- **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)
+
+### Z.AI Setup
+
+Z.AI provides access to the GLM series of language models, including both text and vision capabilities.
+
+**Installation:**
+```bash
+cd dpc-client/core
+poetry install  # Installs zai-sdk automatically
+```
+
+**Configuration:**
+1. Get API key from [docs.z.ai](https://docs.z.ai)
+2. Set environment variable:
+   ```bash
+   export ZAI_API_KEY="your_key_here"
+   ```
+3. Add to `~/.dpc/providers.json`:
+   ```json
+   {
+     "alias": "zai_glm47",
+     "type": "zai",
+     "model": "glm-4.7",
+     "api_key_env": "ZAI_API_KEY",
+     "context_window": 128000
+   }
+   ```
+
+**Available Models:**
+- **Text Models:** `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`, `glm-4.5-airx`, `glm-4.5-flash`, `glm-4-plus`, `glm-4-128-0414-128k`
+- **Vision Models:** `glm-4.6v-flash`, `glm-4.5v`, `glm-4.0v`
+
+**Rate Limits:**
+Z.AI uses concurrency-based rate limiting (not token-based):
+- GLM-4.7: 2 concurrent requests
+- GLM-4.6: 3 concurrent requests
+- GLM-4.5: 10 concurrent requests
+- GLM-4-Plus: 20 concurrent requests
+
+**Example Usage:**
+```json
+{
+  "default_provider": "zai_glm47",
+  "providers": [
+    {
+      "alias": "zai_glm47",
+      "type": "zai",
+      "model": "glm-4.7",
+      "api_key_env": "ZAI_API_KEY"
+    },
+    {
+      "alias": "zai_vision",
+      "type": "zai",
+      "model": "glm-4.6v-flash",
+      "api_key_env": "ZAI_API_KEY"
+    }
+  ]
+}
+```
+
+**See also:** `dpc-client/providers.example.json` for complete configuration examples
+
+---
+
 ## Technology Stack
 
 ### Backend
@@ -1085,7 +1158,7 @@ poetry run pytest tests/test_turn_connectivity.py
 - aiortc (WebRTC implementation)
 - SQLAlchemy + asyncpg + Alembic (Hub database)
 - cryptography library (PKI)
-- ollama, openai, anthropic (AI SDKs)
+- ollama, openai, anthropic, zai-sdk (AI SDKs)
 
 ### Frontend
 - SvelteKit 5.0 (Svelte 5 with runes)
