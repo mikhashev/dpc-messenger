@@ -1364,10 +1364,7 @@ class CoreService:
         """
         Check if a provider supports voice transcription (Whisper).
 
-        v0.13.0+: Voice transcription support detection.
-
-        Note: Only OpenAI/OpenAI-compatible providers are supported because
-        Ollama's whisper models don't have a stable HTTP API for audio transcription.
+        v0.13.1+: Updated to support LocalWhisperProvider.
 
         Args:
             provider: AIProvider instance
@@ -1377,8 +1374,11 @@ class CoreService:
         """
         provider_type = provider.__class__.__name__.replace("Provider", "")
 
-        # Only OpenAI/OpenAI-compatible providers support Whisper (cloud-based)
-        # Ollama whisper models don't support audio through HTTP API
+        # Local Whisper provider (offline transcription)
+        if provider_type == "LocalWhisper":
+            return True
+
+        # OpenAI/OpenAI-compatible providers (cloud-based transcription)
         if provider_type == "OpenAICompatible":
             return True
 
@@ -2663,18 +2663,21 @@ class CoreService:
         provider_alias: str | None = None
     ) -> dict:
         """
-        Transcribe audio to text using Whisper API (OpenAI) or Ollama whisper.
+        Transcribe audio to text using local Whisper (primary) or OpenAI API (fallback).
 
-        v0.13.0+: Now accepts provider_alias parameter to use selected voice provider.
+        v0.13.1+: Hybrid local/cloud transcription with automatic fallback.
+
+        Priority:
+        1. LocalWhisperProvider (if enabled and configured)
+        2. OpenAI/OpenAI-compatible provider (fallback)
 
         Args:
             audio_base64: Base64-encoded audio data (raw, not data URL)
             mime_type: Audio MIME type (default: audio/webm)
-            provider_alias: Optional provider alias to use for transcription (v0.13.0+)
-                          If not provided, auto-detects OpenAI or Ollama whisper provider
+            provider_alias: Optional provider alias to use for transcription
 
         Returns:
-            dict with transcription text
+            dict with transcription text and provider info
 
         Raises:
             ValueError: Invalid data or transcription failed
@@ -2704,88 +2707,112 @@ class CoreService:
             temp_path = temp_file.name
 
         try:
-            # 4. Transcribe using selected provider or auto-detect
-            # v0.13.0+: Use provider_alias if specified, otherwise auto-detect
-
+            # 4. Determine transcription method (local vs cloud)
             transcription_method = None
             provider_config = None
             provider_obj = None
 
             if provider_alias and provider_alias in self.llm_manager.providers:
-                # Use selected provider (v0.13.0+)
+                # Use selected provider
                 provider_obj = self.llm_manager.providers[provider_alias]
                 provider_config = provider_obj.config
-
-                # Determine transcription method based on provider type
                 provider_type = provider_obj.config.get("type", "")
-                if provider_type == "openai" or provider_type == "openai_compatible":
+
+                if provider_type == "local_whisper":
+                    transcription_method = "local_whisper"
+                elif provider_type == "openai" or provider_type == "openai_compatible":
                     transcription_method = "openai"
-                elif provider_type == "ollama":
-                    # Ollama whisper models don't support audio through HTTP API
-                    raise ValueError(
-                        f"Provider '{provider_alias}' (Ollama) does not support voice transcription through the HTTP API.\n"
-                        "Please use an OpenAI or OpenAI-compatible provider for voice transcription."
-                    )
                 else:
                     raise ValueError(f"Provider '{provider_alias}' does not support voice transcription. Type: {provider_type}")
 
                 logger.info(f"Using selected voice provider: {provider_alias} ({transcription_method})")
             else:
-                # Auto-detect: Find OpenAI/OpenAI-compatible provider
-                for provider in self.llm_manager.providers.values():
-                    if provider.config.get("type") == "openai" or provider.config.get("type") == "openai_compatible":
-                        provider_config = provider.config
-                        provider_obj = provider
-                        transcription_method = "openai"
-                        break
+                # Auto-detect: Try local first, then cloud
+                local_enabled = self.settings.get_local_transcription_enabled()
+
+                if local_enabled:
+                    # Check for LocalWhisperProvider in providers
+                    for provider in self.llm_manager.providers.values():
+                        if provider.config.get("type") == "local_whisper":
+                            provider_obj = provider
+                            provider_config = provider.config
+                            transcription_method = "local_whisper"
+
+                            # Check file size limit for local transcription
+                            local_max_mb = self.settings.get_local_transcription_max_file_size_mb()
+                            if size_mb > local_max_mb:
+                                logger.warning(f"Audio file ({size_mb:.2f} MB) exceeds local transcription limit ({local_max_mb} MB), skipping to cloud")
+                                transcription_method = None
+                            else:
+                                break
+
+                # Fallback to OpenAI if local not available or file too large
+                if not transcription_method:
+                    for provider in self.llm_manager.providers.values():
+                        if provider.config.get("type") == "openai" or provider.config.get("type") == "openai_compatible":
+                            provider_obj = provider
+                            provider_config = provider.config
+                            transcription_method = "openai"
+                            break
 
             if not provider_config:
                 raise ValueError(
-                    "No voice transcription provider found. Please add an OpenAI or OpenAI-compatible provider.\n"
-                    "Note: Ollama whisper models don't support audio transcription through the HTTP API.\n"
-                    "Recommended: Add an OpenAI provider with API key for Whisper-1 transcription."
+                    "No voice transcription provider found. Please add a local_whisper or OpenAI-compatible provider.\n"
+                    "Recommended: Add a local_whisper provider for privacy, with OpenAI as fallback."
                 )
 
             logger.info(f"Transcribing audio using {transcription_method}: {len(audio_data)} bytes, mime_type={mime_type}")
 
-            if transcription_method == "openai":
-                # Get API key from provider config
-                api_key = provider_config.get("api_key_env")
-                if not api_key:
-                    raise ValueError("OpenAI API key not configured")
+            # 5. Perform transcription
+            result = None
 
-                import os
-                api_key_value = os.environ.get(api_key)
-                if not api_key_value:
-                    raise ValueError(f"OpenAI API key environment variable '{api_key}' not set")
+            if transcription_method == "local_whisper":
+                try:
+                    # Use local Whisper provider
+                    result = await provider_obj.transcribe(temp_path)
+                    logger.info(f"Local transcription successful: {result['text'][:100]}...")
 
-                # Use OpenAI Whisper API
-                from openai import AsyncOpenAI
-                client = AsyncOpenAI(api_key=api_key_value)
+                except Exception as local_error:
+                    logger.warning(f"Local transcription failed: {local_error}")
 
-                with open(temp_path, "rb") as audio_file:
-                    transcript = await client.audio.transcriptions.create(
-                        model="whisper-1",
-                        file=audio_file,
-                        response_format="text"
-                    )
+                    # Check if fallback is enabled
+                    fallback_enabled = self.settings.get_local_transcription_fallback_to_openai()
 
-            elif transcription_method == "ollama":
-                # Ollama whisper models don't have a stable HTTP API for audio transcription
-                # The /api/generate endpoint's 'images' field only works for vision models
-                # Users should use OpenAI Whisper for voice transcription
-                raise ValueError(
-                    "Ollama whisper models don't support audio transcription through the HTTP API yet.\n"
-                    "Please add an OpenAI provider (or OpenAI-compatible provider) for voice transcription.\n"
-                    "OpenAI Whisper-1 is the recommended method for accurate speech-to-text."
-                )
+                    if fallback_enabled:
+                        logger.info("Falling back to OpenAI API transcription...")
 
-            logger.info(f"Transcription successful ({transcription_method}): {len(transcript)} characters")
+                        # Find OpenAI provider for fallback
+                        fallback_provider = None
+                        for provider in self.llm_manager.providers.values():
+                            if provider.config.get("type") == "openai" or provider.config.get("type") == "openai_compatible":
+                                fallback_provider = provider
+                                break
+
+                        if not fallback_provider:
+                            raise ValueError("Local transcription failed and no OpenAI provider available for fallback") from local_error
+
+                        # Use OpenAI API
+                        result = await self._transcribe_with_openai(temp_path, fallback_provider.config)
+                        result["fallback_reason"] = str(local_error)
+                    else:
+                        raise RuntimeError(f"Local transcription failed and fallback disabled: {local_error}") from local_error
+
+            elif transcription_method == "openai":
+                # Use OpenAI API
+                result = await self._transcribe_with_openai(temp_path, provider_config)
+
+            else:
+                raise ValueError(f"Unknown transcription method: {transcription_method}")
+
+            logger.info(f"Transcription successful ({result['provider']}): {len(result['text'])} characters")
 
             return {
                 "status": "success",
-                "text": transcript,
-                "provider": transcription_method
+                "text": result["text"],
+                "provider": result["provider"],
+                "language": result.get("language", "unknown"),
+                "duration": result.get("duration", 0),
+                "fallback_reason": result.get("fallback_reason")
             }
 
         except Exception as e:
@@ -2800,6 +2827,48 @@ class CoreService:
                 Path(temp_path).unlink(missing_ok=True)
             except Exception:
                 pass
+
+    async def _transcribe_with_openai(self, audio_path: str, provider_config: dict) -> dict:
+        """
+        Transcribe audio using OpenAI Whisper API.
+
+        Args:
+            audio_path: Path to audio file
+            provider_config: Provider configuration dict
+
+        Returns:
+            Dict with transcription results
+        """
+        import os
+        from openai import AsyncOpenAI
+
+        # Get API key
+        api_key = provider_config.get("api_key_env")
+        if not api_key:
+            raise ValueError("OpenAI API key not configured")
+
+        api_key_value = os.environ.get(api_key)
+        if not api_key_value:
+            raise ValueError(f"OpenAI API key environment variable '{api_key}' not set")
+
+        # Create client
+        base_url = provider_config.get("base_url", "https://api.openai.com/v1")
+        client = AsyncOpenAI(api_key=api_key_value, base_url=base_url)
+
+        # Transcribe
+        with open(audio_path, "rb") as audio_file:
+            transcript = await client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="text"
+            )
+
+        return {
+            "text": transcript,
+            "language": "unknown",  # OpenAI API doesn't return language in text format
+            "duration": 0,  # OpenAI API doesn't return duration
+            "provider": "openai"
+        }
 
     async def get_token_usage(self, conversation_id: str) -> Dict[str, Any]:
         """Get token usage statistics for a conversation

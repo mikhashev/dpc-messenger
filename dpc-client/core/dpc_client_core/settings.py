@@ -185,6 +185,21 @@ class Settings:
             'default_codec': 'opus'  # Default audio codec (opus for web compatibility)
         }
 
+        self._config['local_transcription'] = {
+            'enabled': 'true',  # Enable local Whisper transcription (v0.13.1+)
+            'model': 'openai/whisper-large-v3',  # Model name (HuggingFace)
+            'device': 'auto',  # Device: 'cuda', 'cpu', or 'auto' (auto-detects CUDA)
+            'compile_model': 'true',  # Use torch.compile for 4.5x speedup (PyTorch 2.4+)
+            'use_flash_attention': 'false',  # Use Flash Attention 2 (requires flash-attn package)
+            'chunk_length_s': '30',  # Chunk length for long-form transcription (speed vs accuracy)
+            'batch_size': '16',  # Batch size for chunked transcription (higher = faster, more VRAM)
+            'language': 'auto',  # Language: 'auto' (detect) or ISO 639-1 code (e.g., 'en', 'es')
+            'task': 'transcribe',  # Task: 'transcribe' or 'translate' (to English)
+            'fallback_to_openai': 'true',  # Fallback to OpenAI API if local fails
+            'max_file_size_mb': '25',  # Max audio file size for local transcription (VRAM limit)
+            'lazy_loading': 'true'  # Load model on first use (faster startup)
+        }
+
         self._config['vision'] = {
             'enabled': 'true',  # Enable vision API features (screenshot paste, image analysis)
             'default_provider': 'openai',  # Default AI provider for vision: 'openai' or 'anthropic'
@@ -619,6 +634,61 @@ class Settings:
     def get_vision_thumbnail_quality(self) -> int:
         """Get thumbnail JPEG quality (0-100)."""
         return int(self.get('vision', 'thumbnail_quality', '85'))
+
+    # Local Transcription Settings (v0.13.1+)
+
+    def get_local_transcription_enabled(self) -> bool:
+        """Check if local Whisper transcription is enabled."""
+        value = self.get('local_transcription', 'enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_local_transcription_model(self) -> str:
+        """Get the Whisper model name for local transcription."""
+        return self.get('local_transcription', 'model', 'openai/whisper-large-v3')
+
+    def get_local_transcription_device(self) -> str:
+        """Get the device for local transcription ('cuda', 'cpu', or 'auto')."""
+        return self.get('local_transcription', 'device', 'auto')
+
+    def get_local_transcription_compile_model(self) -> bool:
+        """Check if torch.compile is enabled for local transcription."""
+        value = self.get('local_transcription', 'compile_model', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_local_transcription_use_flash_attention(self) -> bool:
+        """Check if Flash Attention 2 is enabled for local transcription."""
+        value = self.get('local_transcription', 'use_flash_attention', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_local_transcription_chunk_length_s(self) -> int:
+        """Get chunk length for long-form transcription in seconds."""
+        return int(self.get('local_transcription', 'chunk_length_s', '30'))
+
+    def get_local_transcription_batch_size(self) -> int:
+        """Get batch size for chunked transcription."""
+        return int(self.get('local_transcription', 'batch_size', '16'))
+
+    def get_local_transcription_language(self) -> str:
+        """Get language for transcription ('auto' for auto-detect)."""
+        return self.get('local_transcription', 'language', 'auto')
+
+    def get_local_transcription_task(self) -> str:
+        """Get transcription task ('transcribe' or 'translate')."""
+        return self.get('local_transcription', 'task', 'transcribe')
+
+    def get_local_transcription_fallback_to_openai(self) -> bool:
+        """Check if fallback to OpenAI API is enabled when local fails."""
+        value = self.get('local_transcription', 'fallback_to_openai', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_local_transcription_max_file_size_mb(self) -> int:
+        """Get max file size for local transcription in MB."""
+        return int(self.get('local_transcription', 'max_file_size_mb', '25'))
+
+    def get_local_transcription_lazy_loading(self) -> bool:
+        """Check if lazy model loading is enabled (load on first use)."""
+        value = self.get('local_transcription', 'lazy_loading', 'true')
+        return value.lower() in ('true', '1', 'yes')
 
     def reload(self):
         """Reload configuration from file."""

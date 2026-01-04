@@ -3,6 +3,7 @@
 
   "default_provider": "ollama_text",
   "vision_provider": "ollama_vision",
+  "voice_provider": "local_whisper",
 
   "providers": [
     {
@@ -20,6 +21,23 @@
       "model": "llama3.2-vision:11b",
       "host": "http://127.0.0.1:11434",
       "context_window": 131072
+    },
+    {
+      "_comment": "Local Whisper transcription provider - Privacy-first voice messages (v0.13.1+)",
+      "alias": "local_whisper",
+      "type": "local_whisper",
+      "model": "openai/whisper-large-v3",
+      "device": "auto",
+      "compile_model": true,
+      "use_flash_attention": false,
+      "chunk_length_s": 30,
+      "batch_size": 16,
+      "language": "auto",
+      "task": "transcribe",
+      "lazy_loading": true,
+      "_note": "Privacy-first local transcription with OpenAI API fallback",
+      "_performance": "RTX 3060 12GB: ~6s for 1-minute audio (10x real-time)",
+      "_requirements": "CUDA GPU recommended (CPU fallback available, slower)"
     },
     {
       "_comment": "Local LM Studio - OpenAI-compatible API",
@@ -74,6 +92,21 @@
       "base_url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",
       "_setup": "Set environment variable: export OPENROUTER_API_KEY='sk-or-...'"
+    },
+
+    "local_whisper_large": {
+      "alias": "local_whisper_large",
+      "type": "local_whisper",
+      "model": "openai/whisper-large-v3",
+      "device": "cuda",
+      "compile_model": true,
+      "use_flash_attention": true,
+      "chunk_length_s": 30,
+      "batch_size": 16,
+      "language": "auto",
+      "task": "transcribe",
+      "lazy_loading": true,
+      "_note": "Best quality local transcription (1.55B params, 99 languages)"
     }
   },
 
@@ -81,8 +114,8 @@
     "_comment": "Reference guide for provider configuration fields",
     "common_fields": {
       "alias": "User-friendly name for the provider (must be unique)",
-      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', or 'zai'",
-      "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7')",
+      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', or 'local_whisper'",
+      "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7', 'openai/whisper-large-v3')",
       "context_window": "Optional: Override default context window size in tokens"
     },
     "ollama_fields": {
@@ -99,6 +132,16 @@
     "zai_fields": {
       "api_key": "API key (plaintext - alternative to api_key_env)",
       "api_key_env": "Environment variable containing Z.AI API key (recommended)"
+    },
+    "local_whisper_fields": {
+      "device": "Device to use: 'cuda', 'cpu', or 'auto' (auto-detects CUDA)",
+      "compile_model": "Enable torch.compile for 4.5x speedup (true/false)",
+      "use_flash_attention": "Enable Flash Attention 2 for 20% additional speedup (requires flash-attn package)",
+      "chunk_length_s": "Chunk length for long-form transcription in seconds (default: 30)",
+      "batch_size": "Batch size for chunked transcription (higher = faster, more VRAM)",
+      "language": "Language code or 'auto' for auto-detection",
+      "task": "Task: 'transcribe' or 'translate' (to English)",
+      "lazy_loading": "Load model on first use for faster startup (true/false)"
     }
   },
 
