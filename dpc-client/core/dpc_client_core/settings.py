@@ -175,6 +175,16 @@ class Settings:
             'preparation_progress_interval_chunks': '10000'  # Emit progress every N chunks during CRC32
         }
 
+        self._config['voice_messages'] = {
+            'enabled': 'true',  # Enable voice message recording and playback (v0.13.0+)
+            'max_duration_seconds': '300',  # Maximum recording duration in seconds (5 minutes)
+            'max_size_mb': '10',  # Maximum voice message file size in MB
+            'mime_types': 'audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg',  # Supported audio formats
+            'default_sample_rate': '48000',  # Default sample rate in Hz (48kHz for quality)
+            'default_channels': '1',  # Default audio channels (1 = mono, 2 = stereo)
+            'default_codec': 'opus'  # Default audio codec (opus for web compatibility)
+        }
+
         self._config['vision'] = {
             'enabled': 'true',  # Enable vision API features (screenshot paste, image analysis)
             'default_provider': 'openai',  # Default AI provider for vision: 'openai' or 'anthropic'

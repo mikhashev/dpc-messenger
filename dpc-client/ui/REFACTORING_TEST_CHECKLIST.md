@@ -139,10 +139,12 @@ Suggestions:
 #### Session Actions
 - [x] "New Session" button creates new chat session
 - [Yes, neeed to add tooltip explains requirement] "New Session" clears conversation history
-- [ ] "End Session & Save Knowledge" button appears
-- [ ] End session disabled when peer offline (P2P only)
+- [x]  "End Session & Save Knowledge" button appears
+- [x] End session disabled when peer offline (P2P only)
 - [x] End session tooltip explains requirement
-- [ ] End session triggers knowledge extraction
+- [After button pushed,knowledge extraction triggered, but aprroving window apperas] End session triggers knowledge extraction
+
+Note: New session button is active when peer is offline
 
 #### Markdown Toggle (AI Chats Only)
 - [x] Markdown toggle button displays for AI chats
@@ -164,36 +166,39 @@ user notes: May be this is a bug or what, if I click any weblink from app chat i
 
 #### Message Rendering
 - [x] Markdown rendering works when enabled
-- [There is no syntax highlighting] Code blocks render with syntax highlighting
-- [ May be this is a bug or what, if I click any weblink from app chat it opens this link in new window in this app.] Links are clickable
+- Don't need now [There is no syntax highlighting] Code blocks render with syntax highlighting
+- Fixed [ May be this is a bug or what, if I click any weblink from app chat it opens this link in new window in this app.] Links are clickable
 - [x] Plain text displays when markdown disabled
 
 #### Attachments
 - [x] Image attachments display inline
-- [ ] File attachments show with download button
-- [ ] File metadata displays (name, size)
-- [x] Clicking images opens full-size view
+- [x] File attachments show with download button
+- [x] File metadata displays (name, size)
+- [No, only of screenshot was sent and image save enabled] Clicking images opens full-size view
 
 #### Scroll Behavior
-- [ ] Auto-scroll to bottom on new message
-- [ ] Manual scroll preserves position
-- [ ] Scroll-to-bottom button appears when scrolled up
+- [x] Auto-scroll to bottom on new message
+- [x] Manual scroll preserves position
+- [there is no button] Scroll-to-bottom button appears when scrolled up
 
 ### 5. FileTransferUI Component Tests
 
 #### Image Preview (Clipboard Paste)
-- [ ] Pasting image creates preview chip
+- [There is small preview that is not clickable to see full image before sent] Pasting image creates preview chip
 - [ ] Preview thumbnail displays correctly
 - [ ] Preview shows filename and size
 - [ ] Remove button (×) clears preview
 - [ ] Preview persists until sent or cleared
 
+If screenshot was pasted into peer to peer chat input (and not sent)  and user switch to Local AI chat screenshot is still inserted (showing above chat input)
+
+
 #### File Offer Dialog (Incoming)
-- [ ] Dialog appears for incoming file offers
-- [ ] File details display correctly (name, size, sender)
-- [ ] "Accept" button starts download
-- [ ] "Reject" button declines transfer
-- [ ] Dialog closes after action
+- [x] Dialog appears for incoming file offers
+- [x] File details display correctly (name, size, sender)
+- [x] "Accept" button starts download
+- [x] "Reject" button declines transfer
+- [x] Dialog closes after action
 
 #### Send File Confirmation Dialog
 - [ ] Dialog appears when sending file
@@ -375,5 +380,6 @@ user notes: May be this is a bug or what, if I click any weblink from app chat i
 **Version**: _______________
 
 **Issues Found**:
+If screenshot was pasted into peer to peer chat input and user swith to Local AI chat screenshot is still inserted
 
 **Notes**:

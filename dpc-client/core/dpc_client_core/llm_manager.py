@@ -537,6 +537,7 @@ class LLMManager:
         self.providers: Dict[str, AIProvider] = {}
         self.default_provider: str | None = None
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
+        self.voice_provider: str | None = None  # v0.13.0+: Voice transcription provider for auto-selection
 
         # Token counting manager (Phase 4 refactor - v0.12.1)
         from dpc_client_core.managers.token_count_manager import TokenCountManager
@@ -556,6 +557,7 @@ class LLMManager:
                 "_comment": "AI Provider Configuration - Manage your local and cloud AI providers",
                 "default_provider": "ollama_text",
                 "vision_provider": "ollama_vision",
+                "voice_provider": "",  # v0.13.0+: Voice provider (OpenAI/OpenAI-compatible only, not Ollama)
                 "providers": [
                     {
                         "alias": "ollama_text",
@@ -653,8 +655,9 @@ class LLMManager:
                 "_instructions": {
                     "default_provider": "Provider used for all text-only queries (no images)",
                     "vision_provider": "Provider used for image analysis queries (screenshots, photos, diagrams)",
+                    "voice_provider": "v0.13.0+: Provider used for voice transcription (OpenAI/OpenAI-compatible only)",
                     "model_installation": {
-                        "ollama": "Install models: ollama pull llama3.1:8b && ollama pull llama3.2-vision:11b",
+                        "ollama": "Install models: ollama pull llama3.1:8b && ollama pull qwen3-vl:8b",
                         "alternative_vision": "Other vision models: ollama pull qwen3-vl:8b OR ollama pull ministral-3:8b",
                         "small_models": "For low RAM: ollama pull llama3.2:3b (2GB) OR ollama pull llama3.2:1b (1GB)"
                     },
@@ -703,6 +706,7 @@ class LLMManager:
 
             self.default_provider = config.get("default_provider")
             self.vision_provider = config.get("vision_provider")  # Load vision provider for auto-selection
+            self.voice_provider = config.get("voice_provider")  # v0.13.0+: Load voice provider for auto-selection
 
             for provider_config in config.get("providers", []):
                 alias = provider_config.get("alias")

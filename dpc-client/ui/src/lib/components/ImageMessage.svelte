@@ -13,7 +13,7 @@
   import { convertFileSrc } from '@tauri-apps/api/core';
 
   interface ImageAttachment {
-    type: 'image' | 'file';  // Accept union type from parent
+    type: 'image' | 'file' | 'voice';  // Accept union type from parent (v0.13.0: added voice)
     filename: string;
     thumbnail?: string;  // Base64 data URL (optional for backward compat)
     file_path?: string;  // Full-size image file path (for P2P file transfers)
@@ -26,6 +26,13 @@
     transfer_id?: string;
     hash?: string;
     status?: string;
+    voice_metadata?: {  // v0.13.0: Voice metadata (not used in ImageMessage but part of union)
+      duration_seconds: number;
+      sample_rate: number;
+      channels: number;
+      codec: string;
+      recorded_at: string;
+    };
   }
 
   interface Props {

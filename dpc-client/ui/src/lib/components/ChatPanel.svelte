@@ -4,6 +4,7 @@
 <script lang="ts">
   import MarkdownMessage from './MarkdownMessage.svelte';
   import ImageMessage from './ImageMessage.svelte';
+  import VoicePlayer from './VoicePlayer.svelte';
 
   // Message type definition
   type Message = {
@@ -14,8 +15,8 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
-    attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4)
-      type: 'file' | 'image';
+    attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
+      type: 'file' | 'image' | 'voice';
       filename: string;
       file_path?: string;  // Full-size image file path (for P2P file transfers)
       size_bytes: number;
@@ -29,6 +30,14 @@
       thumbnail?: string;  // Base64 data URL
       vision_analyzed?: boolean;  // AI chat only: was vision API used?
       vision_result?: string;  // AI chat only: vision analysis text
+      // Voice-specific fields (v0.13.0):
+      voice_metadata?: {
+        duration_seconds: number;
+        sample_rate: number;
+        channels: number;
+        codec: string;
+        recorded_at: string;
+      };
     }>;
   };
 
@@ -71,13 +80,31 @@
           {/if}
         {/if}
 
-        <!-- Attachments (Phase 2.5: Images + Files) -->
+        <!-- Attachments (Phase 2.5: Images + Files + v0.13.0: Voice) -->
         {#if msg.attachments && msg.attachments.length > 0}
           <div class="message-attachments">
             {#each msg.attachments as attachment}
               {#if attachment.type === 'image'}
                 <!-- Image attachment (Phase 2.5: Screenshot + Vision) -->
                 <ImageMessage {attachment} {conversationId} />
+              {:else if attachment.type === 'voice' && attachment.voice_metadata}
+                <!-- Voice attachment (v0.13.0: Voice Messages) -->
+                <div class="voice-attachment">
+                  {#if attachment.file_path}
+                    <VoicePlayer
+                      audioUrl={attachment.file_path}
+                      duration={attachment.voice_metadata.duration_seconds}
+                      timestamp={attachment.voice_metadata.recorded_at}
+                    />
+                  {:else}
+                    <div class="voice-pending">
+                      <span>Voice message ({attachment.voice_metadata.duration_seconds}s)</span>
+                      {#if attachment.status}
+                        • {attachment.status}
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
               {:else}
                 <!-- Regular file attachment -->
                 <div class="file-attachment">
@@ -223,5 +250,21 @@
     color: #4a4a4a;
     font-size: 12px;
     margin-top: 4px;
+  }
+
+  .voice-attachment {
+    margin-top: 8px;
+  }
+
+  .voice-pending {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(200, 220, 255, 0.1);
+    border: 1px solid rgba(100, 150, 255, 0.2);
+    border-radius: 8px;
+    color: #555;
+    font-size: 13px;
   }
 </style>

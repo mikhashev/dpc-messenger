@@ -9,11 +9,13 @@ export interface ProviderInfo {
     model: string;
     type: string;
     supports_vision: boolean;
+    supports_voice?: boolean;  // v0.13.0+: Voice transcription support
 }
 
 export interface DefaultProvidersResponse {
     default_provider: string;
     vision_provider: string;
+    voice_provider?: string;  // v0.13.0+
 }
 
 export interface ProvidersListResponse {
@@ -90,6 +92,9 @@ export const newSessionResult = writable<any>(null);  // {proposal_id, result, c
 
 // Conversation reset store (v0.11.3 - for AI chats and approved P2P session resets)
 export const conversationReset = writable<any>(null);  // {conversation_id}
+
+// Voice message stores (v0.13.0 - voice recording and playback)
+export const voiceOfferReceived = writable<any>(null);  // {transfer_id, node_id, sender_name, filename, size_bytes, duration_seconds, ...voice_metadata}
 
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
@@ -360,6 +365,11 @@ export function connectToCoreService() {
                     sendCommand("get_providers_list");     // Reload full provider list
                     sendCommand("get_default_providers");  // Reload defaults
                 }
+                // Handle default_providers_updated event (v0.13.0+: voice/text/vision default changed)
+                else if (message.event === "default_providers_updated") {
+                    console.log("Default providers updated, reloading defaults");
+                    sendCommand("get_default_providers");  // Reload defaults
+                }
                 // Handle firewall_rules_updated event
                 // NOTE: This event is triggered when user saves firewall rules via FirewallEditor.
                 // It allows UI components to reload data from privacy_rules.json without page refresh.
@@ -474,6 +484,41 @@ export function connectToCoreService() {
                     } else {
                         // Large image: Show acceptance dialog
                         console.log(`Large image (${sizeMB.toFixed(2)} MB), prompting user`);
+                        fileTransferOffer.set(message.payload); // Reuse existing dialog
+                    }
+                }
+                else if (message.event === "voice_offer_received") {
+                    console.log("Voice offer received:", message.payload);
+
+                    // Auto-accept voice messages (usually small, under 10MB)
+                    const autoAcceptThresholdMB = 10; // Voice messages are typically small
+                    const sizeMB = message.payload.size_bytes / (1024 * 1024);
+
+                    if (sizeMB <= autoAcceptThresholdMB) {
+                        // Auto-accept voice messages
+                        console.log(`Auto-accepting voice message (${sizeMB.toFixed(2)} MB ≤ ${autoAcceptThresholdMB} MB)`);
+
+                        // Immediately accept transfer
+                        sendCommand("accept_file_transfer", {
+                            transfer_id: message.payload.transfer_id
+                        });
+
+                        // Add to active transfers for progress tracking
+                        activeFileTransfers.update(map => {
+                            const newMap = new Map(map);
+                            newMap.set(message.payload.transfer_id, {
+                                ...message.payload,
+                                status: "downloading",
+                                progress: 0,
+                                auto_accepted: true
+                            });
+                            return newMap;
+                        });
+
+                        console.log(`Auto-downloading voice message from ${message.payload.sender_name}: ${message.payload.filename} (${message.payload.duration_seconds}s)`);
+                    } else {
+                        // Large voice message: Show acceptance dialog
+                        console.log(`Large voice message (${sizeMB.toFixed(2)} MB), prompting user`);
                         fileTransferOffer.set(message.payload); // Reuse existing dialog
                     }
                 }
@@ -708,6 +753,29 @@ export async function cancelFileTransfer(transferId: string, reason: string = "u
     return sendCommand('cancel_file_transfer', {
         transfer_id: transferId,
         reason: reason
+    });
+}
+
+// Voice message function (v0.13.0 - Voice Messages)
+export async function sendVoiceMessage(
+    nodeId: string,
+    audioBlob: Blob,
+    durationSeconds: number
+): Promise<any> {
+    // Convert blob to base64
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const base64 = btoa(
+        new Uint8Array(arrayBuffer).reduce(
+            (data, byte) => data + String.fromCharCode(byte),
+            ''
+        )
+    );
+
+    return sendCommand('send_voice_message', {
+        node_id: nodeId,
+        audio_base64: base64,
+        duration_seconds: durationSeconds,
+        mime_type: audioBlob.type || 'audio/webm'
     });
 }
 

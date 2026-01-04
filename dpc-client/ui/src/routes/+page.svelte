@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -21,6 +21,8 @@
   import FileTransferUI from "$lib/components/FileTransferUI.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
+  import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
+  import VoicePlayer from "$lib/components/VoicePlayer.svelte";
   import { ask, open } from '@tauri-apps/plugin-dialog';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
@@ -67,10 +69,14 @@
   let selectedRemoteModel = $state("");  // Selected model when using remote compute host
   let selectedPeerContexts = $state(new Set<string>());  // Set of peer node_ids to fetch context from
 
+  // Voice message state (v0.13.0 - Voice Messages)
+  let voicePreview = $state<{ blob: Blob; duration: number } | null>(null);
+
   // Dual provider selection (Phase 1: separate text and vision providers)
   // Managed by ProviderSelector component (extracted)
   let selectedTextProvider = $state("");  // Provider for text-only queries
   let selectedVisionProvider = $state("");  // Provider for image queries
+  let selectedVoiceProvider = $state("");  // v0.13.0+: Provider for voice transcription
 
   // Helper function to parse provider selection (Phase 2.3)
   // Used by parent for routing remote inference requests
@@ -1522,6 +1528,85 @@
     }
   }
 
+  // Voice message handlers (v0.13.0 - Voice Messages)
+  async function handleRecordingComplete(blob: Blob, duration: number) {
+    voicePreview = { blob, duration };
+  }
+
+  async function handleSendVoiceMessage() {
+    if (!voicePreview) return;
+
+    try {
+      // For P2P chats, send via file transfer
+      if (activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+        await sendVoiceMessage(activeChatId, voicePreview.blob, voicePreview.duration);
+      }
+      // For AI chats, voice messages must be transcribed first (use handleTranscribeVoiceMessage instead)
+
+      // Clear preview
+      voicePreview = null;
+    } catch (error) {
+      console.error('Error sending voice message:', error);
+      fileOfferToastMessage = `Failed to send voice: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  async function handleTranscribeVoiceMessage() {
+    if (!voicePreview) return;
+
+    try {
+      // Convert blob to base64
+      const arrayBuffer = await voicePreview.blob.arrayBuffer();
+      const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+
+      // Show loading state
+      fileOfferToastMessage = 'Transcribing voice message...';
+      showFileOfferToast = true;
+
+      // Parse selected voice provider (v0.13.0+: Use selected provider instead of auto-detect)
+      const parsedProvider = parseProviderSelection(selectedVoiceProvider || selectedTextProvider);
+
+      // Call backend for transcription
+      const response = await sendCommand('transcribe_audio', {
+        audio_base64: base64Audio,
+        mime_type: voicePreview.blob.type || 'audio/webm',
+        provider_alias: parsedProvider.alias  // v0.13.0+: Pass selected provider
+      });
+
+      if (response.error) {
+        throw new Error(response.error);
+      }
+
+      // Insert transcribed text into textarea
+      const transcription = response.text || '';
+      if (transcription) {
+        currentInput = currentInput + (currentInput ? ' ' : '') + transcription;
+      }
+
+      // Clear preview and hide toast
+      voicePreview = null;
+      showFileOfferToast = false;
+
+      // Focus textarea
+      const textarea = document.getElementById('message-input') as HTMLTextAreaElement;
+      if (textarea) {
+        textarea.focus();
+        textarea.setSelectionRange(currentInput.length, currentInput.length);
+      }
+    } catch (error) {
+      console.error('Error transcribing voice message:', error);
+      fileOfferToastMessage = `Transcription failed: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  function handleCancelVoicePreview() {
+    voicePreview = null;
+  }
+
   // --- HANDLE INCOMING MESSAGES ---
   $effect(() => {
     if ($coreMessages?.id) {
@@ -1754,6 +1839,7 @@
             bind:selectedComputeHost
             bind:selectedTextProvider
             bind:selectedVisionProvider
+            bind:selectedVoiceProvider
             showForChatId={activeChatId}
             isAIChat={$aiChats.has(activeChatId)}
             providersList={$providersList}
@@ -1906,10 +1992,15 @@
           </div>
         {/if}
 
-        <!-- FileTransferUI component: Image preview appears here, modals/panels are positioned -->
+        <!-- FileTransferUI component: Image/voice preview appears here, modals/panels are positioned -->
         <FileTransferUI
           pendingImage={pendingImage}
           onClearPendingImage={clearPendingImage}
+          voicePreview={voicePreview}
+          onClearVoicePreview={handleCancelVoicePreview}
+          onSendVoiceMessage={handleSendVoiceMessage}
+          onTranscribeVoiceMessage={handleTranscribeVoiceMessage}
+          isLocalAIChat={activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
           showFileOfferDialog={showFileOfferDialog}
           currentFileOffer={currentFileOffer}
           onAcceptFile={handleAcceptFile}
@@ -1960,6 +2051,14 @@
             }}
             onpaste={handlePaste}
           ></textarea>
+
+          <!-- Voice Recorder (v0.13.0) -->
+          <VoiceRecorder
+            disabled={$connectionStatus !== 'connected' || isLoading}
+            maxDuration={300}
+            onRecordingComplete={handleRecordingComplete}
+          />
+
           <button
             class="file-button"
             onclick={handleSendFile}

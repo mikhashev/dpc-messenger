@@ -429,7 +429,38 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
 {"command": "FILE_CHUNK", "payload": {"transfer_id": "...", "chunk_index": 0, "total_chunks": 10, "data": "base64..."}}
 {"command": "FILE_COMPLETE", "payload": {"transfer_id": "...", "hash": "sha256:..."}}
 {"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|timeout|hash_mismatch"}}
+
+# Voice Messages (v0.13.0) - Reuses FILE_OFFER with voice_metadata
+{"command": "FILE_OFFER", "payload": {"transfer_id": "...", "filename": "voice_2026-01-04_12-34-56.webm", "size_bytes": 245000, "hash": "sha256:...", "mime_type": "audio/webm", "voice_metadata": {"duration_seconds": 30.5, "sample_rate": 48000, "channels": 1, "codec": "opus", "recorded_at": "2026-01-04T12:34:56Z"}}}
 ```
+
+**Voice Messages (v0.13.0):**
+
+Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CHUNK/FILE_COMPLETE) with additional `voice_metadata` in the payload. Voice files are stored in `~/.dpc/conversations/{peer_id}/files/` and displayed in the chat with audio player controls.
+
+**Voice Metadata Fields:**
+- `duration_seconds` (number): Recording duration in seconds
+- `sample_rate` (integer): Audio sample rate in Hz (e.g., 48000)
+- `channels` (integer): Number of audio channels (1 = mono, 2 = stereo)
+- `codec` (string): Audio codec used (e.g., "opus", "aac")
+- `recorded_at` (string): ISO 8601 timestamp when voice was recorded
+
+**Configuration:**
+```ini
+[voice_messages]
+enabled = true
+max_duration_seconds = 300  # 5 minutes
+max_size_mb = 10
+mime_types = audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg
+```
+
+**Frontend Components:**
+- `VoiceRecorder.svelte` - Recording UI with MediaRecorder API integration
+- `VoicePlayer.svelte` - Audio playback with play/pause, seek, volume, speed control
+- `ChatPanel.svelte` - Renders voice attachments using VoicePlayer
+
+**Backend Commands:**
+- `send_voice_message` (WebSocket) - Send voice message via file transfer
 
 ### Conversation History & Context Inclusion (Phase 7+)
 

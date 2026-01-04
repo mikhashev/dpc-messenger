@@ -69,9 +69,9 @@ class LocalApiServer:
                     if handler_method and asyncio.iscoroutinefunction(handler_method):
                         # Sanitize payload for logging (truncate large base64 strings)
                         sanitized_payload = _sanitize_payload_for_logging(payload)
-                        # Special logging for image commands
-                        if command in ["send_image", "send_p2p_image"]:
-                            logger.debug("Executing command '%s' (payload contains image data)", command)
+                        # Special logging for image/voice commands
+                        if command in ["send_image", "send_p2p_image", "send_voice_message", "transcribe_audio"]:
+                            logger.debug("Executing command '%s' (payload contains media data)", command)
                         else:
                             logger.debug("Executing command '%s' with payload: %s", command, sanitized_payload)
 

@@ -725,6 +725,12 @@ Offers a file to the peer for transfer.
   - `thumbnail_base64` (string, required): Data URL of thumbnail (max 100KB)
   - `source` (string, required): Source of image (e.g., "clipboard", "file", "screenshot")
   - `captured_at` (string, optional): ISO 8601 timestamp when image was captured
+- `voice_metadata` (object, optional): Metadata for voice message transfers (v0.13.0)
+  - `duration_seconds` (number, required): Recording duration in seconds
+  - `sample_rate` (integer, required): Audio sample rate in Hz (e.g., 48000)
+  - `channels` (integer, required): Number of audio channels (1 = mono, 2 = stereo)
+  - `codec` (string, required): Audio codec used (e.g., "opus", "aac")
+  - `recorded_at` (string, required): ISO 8601 timestamp when voice was recorded
 
 **Response:** FILE_ACCEPT (if accepted) or FILE_CANCEL (if rejected)
 
@@ -1619,6 +1625,13 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.3 (January 2026)
+- **FILE_OFFER enhancement:**
+  - Added `voice_metadata` field for voice message transfers (v0.13.0)
+  - Includes duration_seconds, sample_rate, channels, codec, recorded_at timestamp
+  - Enables audio preview with playback controls before accepting transfer
+  - Reuses file transfer infrastructure (FILE_OFFER/FILE_CHUNK/FILE_COMPLETE)
 
 ### v1.2 (December 2025)
 - **New message types: Vision & Image Support (v0.12.0)**

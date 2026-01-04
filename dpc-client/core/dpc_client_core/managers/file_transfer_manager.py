@@ -83,6 +83,8 @@ class FileTransfer:
         chunks_failed: Set of chunk indices that failed verification (v0.11.1)
         retry_count: Dict mapping chunk index to retry attempt count (v0.11.1)
         max_retries: Maximum retry attempts per chunk (default: 3)
+        image_metadata: Optional dict with image metadata (dimensions, thumbnail, etc.) for v0.12.0+
+        voice_metadata: Optional dict with voice metadata (duration, sample_rate, codec, etc.) for v0.13.0+
     """
     transfer_id: str
     filename: str
@@ -102,7 +104,8 @@ class FileTransfer:
     chunks_failed: Optional[set] = None  # Failed chunk indices
     retry_count: Optional[dict] = None   # Chunk index -> retry count
     max_retries: int = 3                 # Max retries per chunk
-    image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.)
+    image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.) v0.12.0+
+    voice_metadata: Optional[dict] = None  # Voice metadata (duration, sample_rate, codec) v0.13.0+
 
 
 class FileTransferManager:
@@ -349,7 +352,8 @@ class FileTransferManager:
         node_id: str,
         file_path: Path,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
-        image_metadata: Optional[Dict[str, Any]] = None
+        image_metadata: Optional[Dict[str, Any]] = None,
+        voice_metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -363,6 +367,12 @@ class FileTransferManager:
                 - thumbnail_base64: str (data URL)
                 - source: str (e.g., "clipboard")
                 - captured_at: str (ISO timestamp)
+            voice_metadata: Optional voice metadata (for voice transfers only):
+                - duration_seconds: float (recording duration)
+                - sample_rate: int (e.g., 48000)
+                - channels: int (e.g., 1 for mono)
+                - codec: str (e.g., "opus")
+                - recorded_at: str (ISO timestamp)
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -433,11 +443,12 @@ class FileTransferManager:
             file_path=file_path,
             progress_callback=progress_callback,
             chunk_hashes=chunk_hashes,  # v0.11.1: Store for retry requests
-            image_metadata=image_metadata  # Store image metadata for screenshots
+            image_metadata=image_metadata,  # Store image metadata for screenshots (v0.12.0+)
+            voice_metadata=voice_metadata   # Store voice metadata for voice messages (v0.13.0+)
         )
         self.active_transfers[transfer_id] = transfer
 
-        # Send FILE_OFFER (with optional image_metadata for Phase 2.3)
+        # Send FILE_OFFER (with optional image_metadata for v0.12.0+ or voice_metadata for v0.13.0+)
         payload = {
             "transfer_id": transfer_id,
             "filename": transfer.filename,
@@ -448,9 +459,13 @@ class FileTransferManager:
             "chunk_hashes": chunk_hashes  # v0.11.1: CRC32 per chunk for integrity
         }
 
-        # Add image metadata if provided (Phase 2.3: Vision + P2P Image Transfer)
+        # Add image metadata if provided (v0.12.0+: Vision + P2P Image Transfer)
         if image_metadata:
             payload["image_metadata"] = image_metadata
+
+        # Add voice metadata if provided (v0.13.0+: Voice Messages)
+        if voice_metadata:
+            payload["voice_metadata"] = voice_metadata
 
         await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_OFFER",

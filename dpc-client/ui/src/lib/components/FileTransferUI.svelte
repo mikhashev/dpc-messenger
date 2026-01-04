@@ -1,14 +1,22 @@
 <!-- FileTransferUI.svelte - Extracted file transfer UI components -->
-<!-- Displays image preview, file transfer dialogs, and active transfers panel -->
+<!-- Displays image/voice preview, file transfer dialogs, and active transfers panel -->
 
 <script lang="ts">
   import Toast from './Toast.svelte';
+  import VoicePlayer from './VoicePlayer.svelte';
 
   // Props (Svelte 5 runes mode)
   let {
     // Image preview state
     pendingImage = null,
     onClearPendingImage,
+
+    // Voice preview state (v0.13.0+)
+    voicePreview = null,
+    onClearVoicePreview,
+    onSendVoiceMessage,
+    onTranscribeVoiceMessage,
+    isLocalAIChat = false,
 
     // File offer dialog state
     showFileOfferDialog = false,
@@ -37,6 +45,11 @@
   }: {
     pendingImage?: { dataUrl: string; filename: string; sizeBytes: number } | null;
     onClearPendingImage: () => void;
+    voicePreview?: { blob: Blob; duration: number } | null;
+    onClearVoicePreview: () => void;
+    onSendVoiceMessage: () => void;
+    onTranscribeVoiceMessage?: () => Promise<void>;
+    isLocalAIChat?: boolean;
     showFileOfferDialog?: boolean;
     currentFileOffer?: any;
     onAcceptFile: () => void;
@@ -66,6 +79,44 @@
       <span class="preview-size">{(pendingImage.sizeBytes / (1024 * 1024)).toFixed(2)} MB</span>
     </div>
     <button class="preview-remove" onclick={onClearPendingImage} aria-label="Remove image">✕</button>
+  </div>
+{/if}
+
+<!-- Voice Preview Chip (v0.13.0+) -->
+{#if voicePreview}
+  <div class="voice-preview-chip">
+    <div class="voice-icon">🎤</div>
+    <div class="preview-info">
+      <span class="preview-filename">Voice Message</span>
+      <span class="preview-size">{voicePreview.duration.toFixed(1)}s</span>
+    </div>
+    <VoicePlayer
+      audioUrl={URL.createObjectURL(voicePreview.blob)}
+      duration={voicePreview.duration}
+      compact={true}
+    />
+    {#if isLocalAIChat && onTranscribeVoiceMessage}
+      <button
+        class="voice-transcribe-button"
+        onclick={onTranscribeVoiceMessage}
+        title="Transcribe and send to AI"
+      >
+        📝 Send
+      </button>
+    {:else}
+      <button
+        class="voice-send-button"
+        onclick={onSendVoiceMessage}
+        title="Send voice message"
+      >
+        Send
+      </button>
+    {/if}
+    <button
+      class="preview-remove"
+      onclick={onClearVoicePreview}
+      aria-label="Remove voice"
+    >✕</button>
   </div>
 {/if}
 
@@ -244,6 +295,67 @@
   }
 
   .preview-remove:active {
+    transform: scale(0.95);
+  }
+
+  /* Voice Preview Chip (v0.13.0+) */
+  .voice-preview-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    margin-bottom: 0.5rem;
+    background: #f0f8ff;
+    border: 1px solid #b3d9ff;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+  }
+
+  .voice-preview-chip:hover {
+    background: #e6f3ff;
+    border-color: #99ccff;
+  }
+
+  .voice-icon {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.5rem;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .voice-send-button,
+  .voice-transcribe-button {
+    padding: 0.4rem 0.8rem;
+    background: #4CAF50;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.875rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    white-space: nowrap;
+  }
+
+  .voice-transcribe-button {
+    background: #2196F3;
+  }
+
+  .voice-send-button:hover {
+    background: #45a049;
+  }
+
+  .voice-transcribe-button:hover {
+    background: #1976D2;
+  }
+
+  .voice-send-button:active,
+  .voice-transcribe-button:active {
     transform: scale(0.95);
   }
 

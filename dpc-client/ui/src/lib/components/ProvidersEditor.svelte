@@ -25,6 +25,7 @@
   type ProvidersConfig = {
     default_provider: string;
     vision_provider?: string;  // Optional vision provider for image queries
+    voice_provider?: string;   // v0.13.0+: Optional voice provider for transcription
     providers: Provider[];
   };
 
@@ -177,6 +178,10 @@
       if (editedConfig.vision_provider === provider.alias) {
         editedConfig.vision_provider = editedConfig.providers[0]?.alias || '';
       }
+      // v0.13.0+: If deleted provider was voice default, reset voice default
+      if (editedConfig.voice_provider === provider.alias) {
+        editedConfig.voice_provider = editedConfig.providers[0]?.alias || '';
+      }
       editedConfig = editedConfig; // Trigger reactivity
     }
   }
@@ -192,6 +197,13 @@
   function setVisionDefault(alias: string) {
     if (!editedConfig) return;
     editedConfig.vision_provider = alias;
+    editedConfig = editedConfig; // Trigger reactivity
+  }
+
+  // Set voice default provider (v0.13.0+)
+  function setVoiceDefault(alias: string) {
+    if (!editedConfig) return;
+    editedConfig.voice_provider = alias;
     editedConfig = editedConfig; // Trigger reactivity
   }
 
@@ -218,6 +230,11 @@
     // Auto-update vision_provider if this was the vision default
     if (editedConfig.vision_provider === oldAlias) {
       editedConfig.vision_provider = newAlias;
+    }
+
+    // v0.13.0+: Auto-update voice_provider if this was the voice default
+    if (editedConfig.voice_provider === oldAlias) {
+      editedConfig.voice_provider = newAlias;
     }
 
     // Update the tracked alias
@@ -407,6 +424,7 @@
                     {provider.alias}
                     {#if provider.alias === displayConfig.default_provider}<span class="default-badge">⭐ Text Default</span>{/if}
                     {#if provider.alias === displayConfig.vision_provider}<span class="default-badge vision-badge">👁️ Vision Default</span>{/if}
+                    {#if provider.alias === displayConfig.voice_provider}<span class="default-badge voice-badge">🎤 Voice Default</span>{/if}
                   </h3>
                   {#if editMode}
                     <button class="btn-delete" on:click={() => deleteProvider(i)}>Delete</button>
@@ -425,7 +443,7 @@
                         on:blur={() => handleAliasBlur(i)}
                         placeholder="my_provider"
                       />
-                      {#if editedConfig.default_provider === provider.alias || editedConfig.vision_provider === provider.alias}
+                      {#if editedConfig.default_provider === provider.alias || editedConfig.vision_provider === provider.alias || editedConfig.voice_provider === provider.alias}
                         <p class="help-text">💡 Renaming will automatically update default settings</p>
                       {/if}
                     </div>
@@ -609,6 +627,13 @@
                         on:click={() => setVisionDefault(provider.alias)}
                       >
                         {provider.alias === displayConfig.vision_provider ? '✓ Vision Default' : 'Set as Vision Default'}
+                      </button>
+                      <button
+                        class="btn-set-default"
+                        class:active={provider.alias === displayConfig.voice_provider}
+                        on:click={() => setVoiceDefault(provider.alias)}
+                      >
+                        {provider.alias === displayConfig.voice_provider ? '✓ Voice Default' : 'Set as Voice Default'}
                       </button>
                     </div>
                   </div>
@@ -988,6 +1013,16 @@
 
   .default-badge {
     color: #ffd700;
+    margin-left: 8px;
+  }
+
+  .vision-badge {
+    color: #00bcd4;
+    margin-left: 8px;
+  }
+
+  .voice-badge {
+    color: #9C27B0;
     margin-left: 8px;
   }
 

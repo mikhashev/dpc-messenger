@@ -59,7 +59,6 @@ from .message_handlers.file_chunk_handler import FileChunkHandler
 from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
-from .message_handlers.image_handler import ImageOfferHandler
 from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
 from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
@@ -331,8 +330,8 @@ class CoreService:
         self.message_router.register_handler(RelayMessageHandler(self))  # Message forwarding
         self.message_router.register_handler(RelayDisconnectHandler(self))  # Session cleanup
 
-        # File transfer handlers (v0.11.3: ImageOfferHandler replaces FileOfferHandler, handles both files and images)
-        self.message_router.register_handler(ImageOfferHandler(self))
+        # File transfer handlers (v0.13.0: FileOfferHandler handles images, voice messages, and regular files)
+        self.message_router.register_handler(FileOfferHandler(self))
         self.message_router.register_handler(FileAcceptHandler(self))
         self.message_router.register_handler(FileChunkHandler(self))
         self.message_router.register_handler(FileCompleteHandler(self))
@@ -1323,10 +1322,12 @@ class CoreService:
             Dictionary with:
             - default_provider: str (text provider alias)
             - vision_provider: str (vision provider alias)
+            - voice_provider: str (voice transcription provider alias) v0.13.0+
         """
         return {
             "default_provider": self.llm_manager.default_provider or "",
-            "vision_provider": self.llm_manager.vision_provider or ""
+            "vision_provider": self.llm_manager.vision_provider or "",
+            "voice_provider": self.llm_manager.voice_provider or ""  # v0.13.0+
         }
 
     async def get_providers_list(self) -> Dict[str, Any]:
@@ -1335,24 +1336,116 @@ class CoreService:
 
         Returns:
             Dictionary with:
-            - providers: List of provider dicts with alias, model, type, supports_vision
+            - providers: List of provider dicts with alias, model, type, supports_vision, supports_voice
             - default_provider: Default text provider alias
             - vision_provider: Default vision provider alias
+            - voice_provider: Default voice transcription provider alias v0.13.0+
         """
         providers_info = []
         for alias, provider in self.llm_manager.providers.items():
-            providers_info.append({
+            provider_dict = {
                 "alias": alias,
                 "model": provider.model,
                 "type": provider.__class__.__name__.replace("Provider", ""),  # "Ollama", "OpenAICompatible", etc.
-                "supports_vision": provider.supports_vision()
-            })
+                "supports_vision": provider.supports_vision(),
+            }
+            # v0.13.0+: Add supports_voice flag for Whisper-capable providers
+            provider_dict["supports_voice"] = self._provider_supports_voice(provider)
+            providers_info.append(provider_dict)
 
         return {
             "providers": providers_info,
             "default_provider": self.llm_manager.default_provider or "",
-            "vision_provider": self.llm_manager.vision_provider or ""
+            "vision_provider": self.llm_manager.vision_provider or "",
+            "voice_provider": self.llm_manager.voice_provider or ""  # v0.13.0+
         }
+
+    def _provider_supports_voice(self, provider: Any) -> bool:
+        """
+        Check if a provider supports voice transcription (Whisper).
+
+        v0.13.0+: Voice transcription support detection.
+
+        Note: Only OpenAI/OpenAI-compatible providers are supported because
+        Ollama's whisper models don't have a stable HTTP API for audio transcription.
+
+        Args:
+            provider: AIProvider instance
+
+        Returns:
+            True if provider supports voice transcription, False otherwise
+        """
+        provider_type = provider.__class__.__name__.replace("Provider", "")
+
+        # Only OpenAI/OpenAI-compatible providers support Whisper (cloud-based)
+        # Ollama whisper models don't support audio through HTTP API
+        if provider_type == "OpenAICompatible":
+            return True
+
+        # Other providers (Ollama, Anthropic, Z.AI) do not support voice transcription
+        return False
+
+    async def set_voice_provider(self, provider_alias: str) -> Dict[str, Any]:
+        """
+        Set the default voice provider for transcription.
+
+        v0.13.0+: Sets the voice_provider field in providers.json.
+
+        Args:
+            provider_alias: Alias of the provider to set as default for voice transcription
+
+        Returns:
+            Dictionary with status and message
+        """
+        import json
+
+        # Validate provider exists and supports voice
+        if provider_alias not in self.llm_manager.providers:
+            return {
+                "status": "error",
+                "message": f"Provider '{provider_alias}' not found"
+            }
+
+        provider = self.llm_manager.providers[provider_alias]
+        if not self._provider_supports_voice(provider):
+            return {
+                "status": "error",
+                "message": f"Provider '{provider_alias}' does not support voice transcription"
+            }
+
+        try:
+            # Read current config
+            config_path = self.llm_manager.config_path
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Update voice_provider
+            config["voice_provider"] = provider_alias
+
+            # Save updated config
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+
+            # Reload providers
+            self.llm_manager.providers.clear()
+            self.llm_manager._load_providers_from_config()
+
+            # Broadcast event
+            await self.local_api.broadcast_event("default_providers_updated", {
+                "voice_provider": provider_alias
+            })
+
+            logger.info(f"Voice provider set to '{provider_alias}'")
+            return {
+                "status": "success",
+                "message": f"Voice provider set to '{provider_alias}'"
+            }
+        except Exception as e:
+            logger.error(f"Failed to set voice provider: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": f"Failed to set voice provider: {e}"
+            }
 
     async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -2441,6 +2534,271 @@ class CoreService:
             "height": height,
             "mime_type": mime_type
         }
+
+    async def send_voice_message(
+        self,
+        node_id: str,
+        audio_base64: str,
+        duration_seconds: float,
+        mime_type: str = "audio/webm"
+    ) -> dict:
+        """
+        Send voice message to peer via file transfer with voice metadata.
+
+        Args:
+            node_id: Target peer node ID
+            audio_base64: Base64-encoded audio data (raw, not data URL)
+            duration_seconds: Recording duration in seconds
+            mime_type: Audio MIME type (default: audio/webm)
+
+        Returns:
+            dict with transfer_id, file_path, size_bytes, voice_metadata
+
+        Raises:
+            ValueError: Invalid data, peer not connected, or privacy rules violation
+        """
+        from datetime import datetime, timezone
+        import base64
+        from pathlib import Path
+
+        # 1. Validate peer connection
+        connected_peers = self.p2p_coordinator.get_connected_peers()
+        if node_id not in connected_peers:
+            raise ValueError(f"Peer {node_id} not connected")
+
+        # 2. Decode audio data
+        try:
+            audio_data = base64.b64decode(audio_base64)
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 audio data: {e}")
+
+        # 3. Get voice settings
+        max_duration = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
+        max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
+        supported_mime_types = self.settings.get("voice_messages", "mime_types", "audio/webm,audio/opus").split(",")
+
+        # 4. Validate duration
+        if duration_seconds > max_duration:
+            raise ValueError(f"Voice message too long ({duration_seconds}s > {max_duration}s limit)")
+
+        # 5. Validate size
+        size_mb = len(audio_data) / (1024 * 1024)
+        if size_mb > max_size_mb:
+            raise ValueError(f"Voice message too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+
+        # 6. Validate mime type
+        if mime_type not in supported_mime_types:
+            raise ValueError(f"Unsupported audio format: {mime_type}. Supported: {', '.join(supported_mime_types)}")
+
+        # 7. Check privacy rules (file_transfer rules apply)
+        rules = self.firewall.rules.get("file_transfer", {})
+        max_size_mb_rules = rules.get("max_size_mb", 100)
+        if size_mb > max_size_mb_rules:
+            raise ValueError(f"File too large by firewall rules ({size_mb:.2f} MB > {max_size_mb_rules} MB limit)")
+
+        # 8. Generate filename with timestamp
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        extension = mime_type.split("/")[-1]  # e.g., "webm"
+        filename = f"voice_{timestamp}.{extension}"
+
+        # 9. Create voice messages directory
+        peer_files_dir = DPC_HOME_DIR / "conversations" / node_id / "files"
+        peer_files_dir.mkdir(parents=True, exist_ok=True)
+
+        # 10. Save voice file
+        file_path = peer_files_dir / filename
+
+        # Handle filename collisions
+        if file_path.exists():
+            stem = file_path.stem
+            suffix = file_path.suffix
+            counter = 1
+            while file_path.exists():
+                file_path = peer_files_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+        try:
+            with open(file_path, "wb") as f:
+                f.write(audio_data)
+            logger.info(f"Saved voice message: {file_path} ({len(audio_data)} bytes, {duration_seconds}s)")
+        except Exception as e:
+            raise ValueError(f"Failed to save voice file: {e}")
+
+        # 11. Send via file transfer with voice_metadata
+        voice_metadata = {
+            "duration_seconds": duration_seconds,
+            "sample_rate": int(self.settings.get("voice_messages", "default_sample_rate", "48000")),
+            "channels": int(self.settings.get("voice_messages", "default_channels", "1")),
+            "codec": self.settings.get("voice_messages", "default_codec", "opus"),
+            "recorded_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        try:
+            transfer_id = await self.file_transfer_manager.send_file(
+                node_id=node_id,
+                file_path=file_path,
+                voice_metadata=voice_metadata
+            )
+        except Exception as e:
+            # Clean up file if transfer fails to start
+            if file_path.exists():
+                file_path.unlink()
+            raise ValueError(f"Failed to start voice transfer: {e}")
+
+        # 12. Return details for frontend
+        return {
+            "transfer_id": transfer_id,
+            "file_path": str(file_path),
+            "size_bytes": len(audio_data),
+            "duration_seconds": duration_seconds,
+            "voice_metadata": voice_metadata,
+            "mime_type": mime_type
+        }
+
+    async def transcribe_audio(
+        self,
+        audio_base64: str,
+        mime_type: str = "audio/webm",
+        provider_alias: str | None = None
+    ) -> dict:
+        """
+        Transcribe audio to text using Whisper API (OpenAI) or Ollama whisper.
+
+        v0.13.0+: Now accepts provider_alias parameter to use selected voice provider.
+
+        Args:
+            audio_base64: Base64-encoded audio data (raw, not data URL)
+            mime_type: Audio MIME type (default: audio/webm)
+            provider_alias: Optional provider alias to use for transcription (v0.13.0+)
+                          If not provided, auto-detects OpenAI or Ollama whisper provider
+
+        Returns:
+            dict with transcription text
+
+        Raises:
+            ValueError: Invalid data or transcription failed
+        """
+        import base64
+        import tempfile
+        from pathlib import Path
+
+        # 1. Decode audio data
+        try:
+            audio_data = base64.b64decode(audio_base64)
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 audio data: {e}")
+
+        # 2. Validate size
+        max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
+        size_mb = len(audio_data) / (1024 * 1024)
+        if size_mb > max_size_mb:
+            raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+
+        # 3. Save to temporary file
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=f".{mime_type.split('/')[-1]}"
+        ) as temp_file:
+            temp_file.write(audio_data)
+            temp_path = temp_file.name
+
+        try:
+            # 4. Transcribe using selected provider or auto-detect
+            # v0.13.0+: Use provider_alias if specified, otherwise auto-detect
+
+            transcription_method = None
+            provider_config = None
+            provider_obj = None
+
+            if provider_alias and provider_alias in self.llm_manager.providers:
+                # Use selected provider (v0.13.0+)
+                provider_obj = self.llm_manager.providers[provider_alias]
+                provider_config = provider_obj.config
+
+                # Determine transcription method based on provider type
+                provider_type = provider_obj.config.get("type", "")
+                if provider_type == "openai" or provider_type == "openai_compatible":
+                    transcription_method = "openai"
+                elif provider_type == "ollama":
+                    # Ollama whisper models don't support audio through HTTP API
+                    raise ValueError(
+                        f"Provider '{provider_alias}' (Ollama) does not support voice transcription through the HTTP API.\n"
+                        "Please use an OpenAI or OpenAI-compatible provider for voice transcription."
+                    )
+                else:
+                    raise ValueError(f"Provider '{provider_alias}' does not support voice transcription. Type: {provider_type}")
+
+                logger.info(f"Using selected voice provider: {provider_alias} ({transcription_method})")
+            else:
+                # Auto-detect: Find OpenAI/OpenAI-compatible provider
+                for provider in self.llm_manager.providers.values():
+                    if provider.config.get("type") == "openai" or provider.config.get("type") == "openai_compatible":
+                        provider_config = provider.config
+                        provider_obj = provider
+                        transcription_method = "openai"
+                        break
+
+            if not provider_config:
+                raise ValueError(
+                    "No voice transcription provider found. Please add an OpenAI or OpenAI-compatible provider.\n"
+                    "Note: Ollama whisper models don't support audio transcription through the HTTP API.\n"
+                    "Recommended: Add an OpenAI provider with API key for Whisper-1 transcription."
+                )
+
+            logger.info(f"Transcribing audio using {transcription_method}: {len(audio_data)} bytes, mime_type={mime_type}")
+
+            if transcription_method == "openai":
+                # Get API key from provider config
+                api_key = provider_config.get("api_key_env")
+                if not api_key:
+                    raise ValueError("OpenAI API key not configured")
+
+                import os
+                api_key_value = os.environ.get(api_key)
+                if not api_key_value:
+                    raise ValueError(f"OpenAI API key environment variable '{api_key}' not set")
+
+                # Use OpenAI Whisper API
+                from openai import AsyncOpenAI
+                client = AsyncOpenAI(api_key=api_key_value)
+
+                with open(temp_path, "rb") as audio_file:
+                    transcript = await client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file,
+                        response_format="text"
+                    )
+
+            elif transcription_method == "ollama":
+                # Ollama whisper models don't have a stable HTTP API for audio transcription
+                # The /api/generate endpoint's 'images' field only works for vision models
+                # Users should use OpenAI Whisper for voice transcription
+                raise ValueError(
+                    "Ollama whisper models don't support audio transcription through the HTTP API yet.\n"
+                    "Please add an OpenAI provider (or OpenAI-compatible provider) for voice transcription.\n"
+                    "OpenAI Whisper-1 is the recommended method for accurate speech-to-text."
+                )
+
+            logger.info(f"Transcription successful ({transcription_method}): {len(transcript)} characters")
+
+            return {
+                "status": "success",
+                "text": transcript,
+                "provider": transcription_method
+            }
+
+        except Exception as e:
+            logger.error(f"Audio transcription failed: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+        finally:
+            # Clean up temp file
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
     async def get_token_usage(self, conversation_id: str) -> Dict[str, Any]:
         """Get token usage statistics for a conversation

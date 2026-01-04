@@ -1,5 +1,5 @@
 <!-- ProviderSelector.svelte - Extracted provider selection controls -->
-<!-- Displays compute host, text provider, and vision provider dropdowns for AI chats -->
+<!-- Displays compute host, text provider, vision provider, and voice provider dropdowns for AI chats -->
 
 <script lang="ts">
   // Provider type definition (base type from store)
@@ -7,6 +7,7 @@
     alias: string;
     model: string;
     supports_vision?: boolean;
+    supports_voice?: boolean;  // v0.13.0+: Voice transcription support
   };
 
   // Extended provider type with source tracking
@@ -24,6 +25,7 @@
   type DefaultProviders = {
     default_provider: string;
     vision_provider: string;
+    voice_provider?: string;  // v0.13.0+
   };
 
   // Props (Svelte 5 runes mode)
@@ -32,6 +34,7 @@
     selectedComputeHost = $bindable("local"),
     selectedTextProvider = $bindable(""),
     selectedVisionProvider = $bindable(""),
+    selectedVoiceProvider = $bindable(""),  // v0.13.0+
 
     // Display control
     showForChatId,
@@ -46,6 +49,7 @@
     selectedComputeHost?: string;
     selectedTextProvider?: string;
     selectedVisionProvider?: string;
+    selectedVoiceProvider?: string;
     showForChatId: string;
     isAIChat: boolean;
     providersList?: ProviderInfo[];
@@ -80,6 +84,7 @@
 
   const mergedTextProviders = $derived(() => mergedProviders());
   const mergedVisionProviders = $derived(() => mergedProviders().filter(p => p.supports_vision));
+  const mergedVoiceProviders = $derived(() => mergedProviders().filter(p => p.supports_voice));
 
   // Helper function to parse provider selection (Phase 2.3)
   // Exported for parent to use if needed
@@ -100,9 +105,16 @@
 
   // Initialize provider selections from defaults (Phase 2.3: use uniqueId format)
   $effect(() => {
-    if (defaultProviders && !selectedTextProvider && !selectedVisionProvider) {
-      selectedTextProvider = `local:${defaultProviders.default_provider}`;
-      selectedVisionProvider = `local:${defaultProviders.vision_provider}`;
+    if (defaultProviders) {
+      if (!selectedTextProvider) {
+        selectedTextProvider = `local:${defaultProviders.default_provider}`;
+      }
+      if (!selectedVisionProvider) {
+        selectedVisionProvider = `local:${defaultProviders.vision_provider}`;
+      }
+      if (!selectedVoiceProvider && defaultProviders.voice_provider) {
+        selectedVoiceProvider = `local:${defaultProviders.voice_provider}`;
+      }
     }
   });
 </script>
@@ -152,6 +164,20 @@
         {/each}
       </select>
     </div>
+
+    <!-- Voice Provider Selector (v0.13.0+) -->
+    {#if mergedVoiceProviders().length > 0}
+      <div class="provider-row-header">
+        <label for="voice-provider-header">Voice:</label>
+        <select id="voice-provider-header" bind:value={selectedVoiceProvider}>
+          {#each mergedVoiceProviders() as provider}
+            <option value={provider.uniqueId}>
+              {provider.displayText}
+            </option>
+          {/each}
+        </select>
+      </div>
+    {/if}
   </div>
 {/if}
 
