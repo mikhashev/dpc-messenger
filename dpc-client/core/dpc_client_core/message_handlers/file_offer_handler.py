@@ -196,6 +196,20 @@ class FileOfferHandler(MessageHandler):
         )
         file_transfer_manager.active_transfers[transfer_id] = transfer
 
-        transfer_type = 'Image' if is_image else 'Voice' if is_voice else 'File'
-        self.logger.info(f"{transfer_type} transfer pending user acceptance: {transfer_id}")
+        # Auto-accept voice messages and images (v0.13.0+) - these are automatically accepted
+        # without showing a dialog, similar to how text messages work.
+        # Voice messages: Typically small (< 10MB), personal communication
+        # Images (screenshots): Pasted from clipboard, shared in conversation context
+        if is_voice or is_image:
+            # Send FILE_ACCEPT to peer immediately to start the download
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                "command": "FILE_ACCEPT",
+                "payload": {"transfer_id": transfer_id}
+            })
+            transfer_type = 'Voice' if is_voice else 'Image'
+            self.logger.info(f"{transfer_type} transfer auto-accepted: {transfer_id}")
+        else:
+            transfer_type = 'File'
+            self.logger.info(f"{transfer_type} transfer pending user acceptance: {transfer_id}")
+
         return None

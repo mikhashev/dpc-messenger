@@ -23,6 +23,9 @@
   }
 
   async function startRecording() {
+    // Reset duration for new recording (fixes issue where cancelled recordings kept old duration)
+    recordingDuration = 0;
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaRecorder = new MediaRecorder(stream, {

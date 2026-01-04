@@ -512,10 +512,13 @@
       return;
     }
 
-    // Clear pending image only when actually switching to a different chat
+    // Clear pending image and voice preview when actually switching to a different chat
     if (currentChat !== previousChatId) {
       if (pendingImage !== null) {
         pendingImage = null;
+      }
+      if (voicePreview !== null) {
+        voicePreview = null;
       }
       previousChatId = currentChat;
     }

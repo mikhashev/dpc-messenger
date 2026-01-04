@@ -704,13 +704,14 @@ class FileTransferManager:
 
             size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
 
-            # Detect if this is an image transfer
+            # Detect if this is an image or voice transfer
             is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
                        and transfer.image_metadata is not None)
+            is_voice = transfer.voice_metadata is not None
 
             # Build attachment
             attachment = {
-                "type": "image" if is_image else "file",
+                "type": "image" if is_image else ("voice" if is_voice else "file"),
                 "filename": transfer.filename,
                 "size_bytes": transfer.size_bytes,
                 "size_mb": size_mb,
@@ -729,6 +730,14 @@ class FileTransferManager:
                     attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
                     attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
 
+            # Add voice-specific fields (v0.13.0+)
+            if is_voice:
+                # Voice messages always need file_path for playback
+                if file_path:
+                    attachment["file_path"] = str(file_path)
+                if transfer.voice_metadata:
+                    attachment["voice_metadata"] = transfer.voice_metadata
+
             # Extract text caption from image_metadata if available
             caption_text = ""
             if is_image and transfer.image_metadata:
@@ -741,7 +750,7 @@ class FileTransferManager:
                 "message_id": message_id,
                 "attachments": [attachment]
             })
-            logger.debug(f"Broadcasted {'image' if is_image else 'file'} received message to UI: {transfer.filename}")
+            logger.debug(f"Broadcasted {'image' if is_image else 'voice' if is_voice else 'file'} received message to UI: {transfer.filename}")
 
             # Broadcast completion event to hide active transfer panel
             await self.local_api.broadcast_event("file_transfer_complete", {

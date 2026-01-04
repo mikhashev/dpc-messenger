@@ -91,11 +91,13 @@
                 <!-- Voice attachment (v0.13.0: Voice Messages) -->
                 <div class="voice-attachment">
                   {#if attachment.file_path}
-                    <VoicePlayer
-                      audioUrl={attachment.file_path}
-                      duration={attachment.voice_metadata.duration_seconds}
-                      timestamp={attachment.voice_metadata.recorded_at}
-                    />
+                    {#key attachment.transfer_id || attachment.file_path}
+                      <VoicePlayer
+                        audioUrl={attachment.file_path}
+                        duration={attachment.voice_metadata.duration_seconds}
+                        timestamp={attachment.voice_metadata.recorded_at}
+                      />
+                    {/key}
                   {:else}
                     <div class="voice-pending">
                       <span>Voice message ({attachment.voice_metadata.duration_seconds}s)</span>

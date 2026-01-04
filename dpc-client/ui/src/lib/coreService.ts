@@ -454,73 +454,38 @@ export function connectToCoreService() {
                 else if (message.event === "image_offer_received") {
                     console.log("Image offer received:", message.payload);
 
-                    // Get auto-accept threshold from firewall rules (default 25MB)
-                    const autoAcceptThresholdMB = 25; // TODO: Read from firewall rules store
-                    const sizeMB = message.payload.size_bytes / (1024 * 1024);
-
-                    if (sizeMB <= autoAcceptThresholdMB) {
-                        // Auto-accept small images
-                        console.log(`Auto-accepting image (${sizeMB.toFixed(2)} MB ≤ ${autoAcceptThresholdMB} MB)`);
-
-                        // Immediately accept transfer
-                        sendCommand("accept_file_transfer", {
-                            transfer_id: message.payload.transfer_id
+                    // Backend auto-accepts images (v0.13.0+) - no dialog needed
+                    // Just add to active transfers for progress tracking
+                    activeFileTransfers.update(map => {
+                        const newMap = new Map(map);
+                        newMap.set(message.payload.transfer_id, {
+                            ...message.payload,
+                            status: "downloading",
+                            progress: 0,
+                            auto_accepted: true
                         });
+                        return newMap;
+                    });
 
-                        // Add to active transfers for progress tracking
-                        activeFileTransfers.update(map => {
-                            const newMap = new Map(map);
-                            newMap.set(message.payload.transfer_id, {
-                                ...message.payload,
-                                status: "downloading",
-                                progress: 0,
-                                auto_accepted: true
-                            });
-                            return newMap;
-                        });
-
-                        // Log for user notification (optional)
-                        console.log(`Auto-downloading image from ${message.payload.sender_name}: ${message.payload.filename}`);
-                    } else {
-                        // Large image: Show acceptance dialog
-                        console.log(`Large image (${sizeMB.toFixed(2)} MB), prompting user`);
-                        fileTransferOffer.set(message.payload); // Reuse existing dialog
-                    }
+                    console.log(`Auto-downloading image from ${message.payload.sender_name}: ${message.payload.filename}`);
                 }
                 else if (message.event === "voice_offer_received") {
                     console.log("Voice offer received:", message.payload);
 
-                    // Auto-accept voice messages (usually small, under 10MB)
-                    const autoAcceptThresholdMB = 10; // Voice messages are typically small
-                    const sizeMB = message.payload.size_bytes / (1024 * 1024);
-
-                    if (sizeMB <= autoAcceptThresholdMB) {
-                        // Auto-accept voice messages
-                        console.log(`Auto-accepting voice message (${sizeMB.toFixed(2)} MB ≤ ${autoAcceptThresholdMB} MB)`);
-
-                        // Immediately accept transfer
-                        sendCommand("accept_file_transfer", {
-                            transfer_id: message.payload.transfer_id
+                    // Backend auto-accepts voice messages (v0.13.0+) - no dialog needed
+                    // Just add to active transfers for progress tracking
+                    activeFileTransfers.update(map => {
+                        const newMap = new Map(map);
+                        newMap.set(message.payload.transfer_id, {
+                            ...message.payload,
+                            status: "downloading",
+                            progress: 0,
+                            auto_accepted: true
                         });
+                        return newMap;
+                    });
 
-                        // Add to active transfers for progress tracking
-                        activeFileTransfers.update(map => {
-                            const newMap = new Map(map);
-                            newMap.set(message.payload.transfer_id, {
-                                ...message.payload,
-                                status: "downloading",
-                                progress: 0,
-                                auto_accepted: true
-                            });
-                            return newMap;
-                        });
-
-                        console.log(`Auto-downloading voice message from ${message.payload.sender_name}: ${message.payload.filename} (${message.payload.duration_seconds}s)`);
-                    } else {
-                        // Large voice message: Show acceptance dialog
-                        console.log(`Large voice message (${sizeMB.toFixed(2)} MB), prompting user`);
-                        fileTransferOffer.set(message.payload); // Reuse existing dialog
-                    }
+                    console.log(`Auto-downloading voice message from ${message.payload.sender_name}: ${message.payload.filename} (${message.payload.duration_seconds}s)`);
                 }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)

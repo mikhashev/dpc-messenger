@@ -67,13 +67,14 @@ class FileCompleteHandler(MessageHandler):
 
             size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
 
-            # Detect if this is an image transfer
+            # Detect if this is an image or voice transfer
             is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
                        and transfer.image_metadata is not None)
+            is_voice = transfer.voice_metadata is not None
 
             # Build attachment
             attachment = {
-                "type": "image" if is_image else "file",
+                "type": "image" if is_image else ("voice" if is_voice else "file"),
                 "filename": transfer.filename,
                 "size_bytes": transfer.size_bytes,
                 "size_mb": size_mb,
@@ -92,6 +93,14 @@ class FileCompleteHandler(MessageHandler):
                     attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
                     attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
 
+            # Add voice-specific fields (v0.13.0+)
+            if is_voice:
+                # Voice messages always need file_path for playback
+                if transfer.file_path and transfer.file_path.exists():
+                    attachment["file_path"] = str(transfer.file_path)
+                if transfer.voice_metadata:
+                    attachment["voice_metadata"] = transfer.voice_metadata
+
             # Extract text caption from image_metadata if available
             caption_text = ""
             if is_image and transfer.image_metadata:
@@ -108,9 +117,10 @@ class FileCompleteHandler(MessageHandler):
             # Add to conversation history
             conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
             if conversation_monitor:
-                message_content = f"Sent {'screenshot' if is_image else 'file'}: {transfer.filename} ({size_mb} MB)"
+                file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
+                message_content = f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
                 conversation_monitor.add_message("user", message_content, [attachment])
-                self.logger.debug(f"Added {'image' if is_image else 'file'} attachment to conversation history: {transfer.filename}")
+                self.logger.debug(f"Added {file_type} attachment to conversation history: {transfer.filename}")
 
         self.logger.debug(f"FILE_COMPLETE processed, transfer marked as completed: {transfer.filename}")
 
