@@ -2586,8 +2586,9 @@ class CoreService:
         if size_mb > max_size_mb:
             raise ValueError(f"Voice message too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
 
-        # 6. Validate mime type
-        if mime_type not in supported_mime_types:
+        # 6. Validate mime type (strip parameters like ";codecs=opus")
+        mime_type_base = mime_type.split(";")[0].strip()
+        if mime_type_base not in supported_mime_types:
             raise ValueError(f"Unsupported audio format: {mime_type}. Supported: {', '.join(supported_mime_types)}")
 
         # 7. Check privacy rules (file_transfer rules apply)

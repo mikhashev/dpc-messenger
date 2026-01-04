@@ -499,13 +499,25 @@
   });
 
   // Clear input state when switching chats (prevent cross-chat pollution)
+  // Track previous chat to detect actual chat switches
+  let previousChatId: string = '';
+
   $effect(() => {
     // Track activeChatId dependency
     const currentChat = activeChatId;
 
-    // Clear pending image when switching chats
-    if (pendingImage !== null) {
-      pendingImage = null;
+    // Skip first run (just initialize)
+    if (previousChatId === '') {
+      previousChatId = currentChat;
+      return;
+    }
+
+    // Clear pending image only when actually switching to a different chat
+    if (currentChat !== previousChatId) {
+      if (pendingImage !== null) {
+        pendingImage = null;
+      }
+      previousChatId = currentChat;
     }
   });
 
