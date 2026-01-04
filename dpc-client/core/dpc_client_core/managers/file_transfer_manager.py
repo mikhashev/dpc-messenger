@@ -421,7 +421,12 @@ class FileTransferManager:
                 "total_chunks": len(chunk_hashes)
             })
 
-        mime_type = self._detect_mime_type(file_path)
+        # Detect MIME type (but override for voice messages to ensure audio/webm)
+        if voice_metadata:
+            # Force audio MIME type for voice messages (.webm can be detected as video/webm)
+            mime_type = "audio/webm"
+        else:
+            mime_type = self._detect_mime_type(file_path)
         total_chunks = (file_size + self.chunk_size - 1) // self.chunk_size
 
         logger.info(f"Computed {len(chunk_hashes)} chunk hashes ({len(chunk_hashes) * 8} bytes) for {file_path.name}")

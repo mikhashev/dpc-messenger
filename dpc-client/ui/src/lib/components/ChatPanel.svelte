@@ -94,6 +94,7 @@
                     {#key attachment.transfer_id || attachment.file_path}
                       <VoicePlayer
                         audioUrl={attachment.file_path}
+                        filePath={attachment.file_path}
                         duration={attachment.voice_metadata.duration_seconds}
                         timestamp={attachment.voice_metadata.recorded_at}
                       />

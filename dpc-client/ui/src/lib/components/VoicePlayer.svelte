@@ -1,20 +1,26 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { convertFileSrc } from '@tauri-apps/api/core';
 
   interface VoicePlayerProps {
     audioUrl: string;
+    filePath?: string;  // Local file path (for Tauri desktop app)
     duration: number;
     timestamp?: string;
     compact?: boolean;
   }
 
-  let { audioUrl, duration, timestamp, compact = false }: VoicePlayerProps = $props();
+  let { audioUrl, filePath, duration, timestamp, compact = false }: VoicePlayerProps = $props();
 
   let audioElement: HTMLAudioElement;
   let isPlaying = $state(false);
   let currentTime = $state(0);
   let playbackRate = $state(1.0);
   let volume = $state(1.0);
+
+  // Convert local file path to Tauri asset URL if provided (v0.13.0+)
+  // This fixes "Not allowed to load local resource" error in Tauri desktop app
+  const actualAudioUrl = $derived(filePath ? convertFileSrc(filePath) : audioUrl);
 
   function togglePlay() {
     if (!audioElement) return;
@@ -57,7 +63,7 @@
   }
 
   onMount(() => {
-    audioElement = new Audio(audioUrl);
+    audioElement = new Audio(actualAudioUrl);
     audioElement.volume = volume;
 
     const handleTimeUpdate = () => {
