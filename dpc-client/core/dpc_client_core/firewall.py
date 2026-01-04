@@ -813,6 +813,8 @@ class ContextFirewall:
                             errors.append(f"Rules for node '{node_id}' must be a dictionary")
                         else:
                             for resource_path, action in rules.items():
+                                if resource_path.startswith('_'):  # Skip nested comment fields
+                                    continue
                                 if action not in ['allow', 'deny']:
                                     errors.append(f"Invalid action for node '{node_id}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
 
@@ -828,6 +830,8 @@ class ContextFirewall:
                             errors.append(f"Rules for group '{group_name}' must be a dictionary")
                         else:
                             for resource_path, action in rules.items():
+                                if resource_path.startswith('_'):  # Skip nested comment fields
+                                    continue
                                 if action not in ['allow', 'deny']:
                                     errors.append(f"Invalid action for group '{group_name}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
 
@@ -843,6 +847,8 @@ class ContextFirewall:
                             errors.append(f"Rules for AI scope '{scope_name}' must be a dictionary")
                         else:
                             for resource_path, action in rules.items():
+                                if resource_path.startswith('_'):  # Skip nested comment fields
+                                    continue
                                 if action not in ['allow', 'deny']:
                                     errors.append(f"Invalid action for AI scope '{scope_name}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
 
@@ -858,6 +864,8 @@ class ContextFirewall:
                             errors.append(f"Rules for device sharing scope '{sharing_scope}' must be a dictionary")
                         else:
                             for resource_path, action in rules.items():
+                                if resource_path.startswith('_'):  # Skip nested comment fields
+                                    continue
                                 if action not in ['allow', 'deny']:
                                     errors.append(f"Invalid action for device sharing scope '{sharing_scope}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
 

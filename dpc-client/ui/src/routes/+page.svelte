@@ -492,6 +492,17 @@
     }
   });
 
+  // Clear input state when switching chats (prevent cross-chat pollution)
+  $effect(() => {
+    // Track activeChatId dependency
+    const currentChat = activeChatId;
+
+    // Clear pending image when switching chats
+    if (pendingImage !== null) {
+      pendingImage = null;
+    }
+  });
+
   // Phase 7: Reactive: Check if context window is full (100% or more) - uses estimated total
   let isContextWindowFull = $derived($aiChats.has(activeChatId) && estimatedUsage.percentage >= 1.0);
 
