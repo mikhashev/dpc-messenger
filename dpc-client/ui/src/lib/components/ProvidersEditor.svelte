@@ -600,11 +600,13 @@
                       <div class="form-group">
                         <label for="device-{i}">Device</label>
                         <select id="device-{i}" bind:value={editedConfig.providers[i].device}>
-                          <option value="auto">Auto (detect CUDA)</option>
-                          <option value="cuda">CUDA (GPU)</option>
+                          <option value="auto">Auto (detect best available)</option>
+                          <option value="mlx">MLX (Apple Silicon - M1/M2/M3/M4)</option>
+                          <option value="cuda">CUDA (NVIDIA GPU)</option>
+                          <option value="mps">MPS (macOS Metal)</option>
                           <option value="cpu">CPU</option>
                         </select>
-                        <p class="help-text">GPU recommended for fast transcription (~10x real-time)</p>
+                        <p class="help-text">GPU recommended for fast transcription (~10-15x real-time)</p>
                       </div>
 
                       <div class="form-group">

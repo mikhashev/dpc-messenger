@@ -100,13 +100,29 @@
       "model": "openai/whisper-large-v3",
       "device": "cuda",
       "compile_model": true,
-      "use_flash_attention": true,
+      "use_flash_attention": false,
       "chunk_length_s": 30,
       "batch_size": 16,
       "language": "auto",
       "task": "transcribe",
       "lazy_loading": true,
-      "_note": "Best quality local transcription (1.55B params, 99 languages)"
+      "_note": "NVIDIA GPU transcription (1.55B params, 99 languages, ~10-13x real-time)"
+    },
+
+    "apple_whisper_mlx": {
+      "alias": "apple_whisper_mlx",
+      "type": "local_whisper",
+      "model": "openai/whisper-large-v3",
+      "device": "mlx",
+      "compile_model": false,
+      "use_flash_attention": false,
+      "chunk_length_s": 30,
+      "batch_size": 16,
+      "language": "auto",
+      "task": "transcribe",
+      "lazy_loading": true,
+      "_note": "Apple Silicon GPU transcription (M1/M2/M3/M4, ~10-15x real-time)",
+      "_setup": "Install MLX dependencies: poetry install -E mlx (macOS only)"
     }
   },
 
