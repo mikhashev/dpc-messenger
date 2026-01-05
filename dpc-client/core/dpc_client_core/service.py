@@ -4176,7 +4176,8 @@ class CoreService:
                 "alias": alias,
                 "model": model,
                 "type": provider_type,
-                "supports_vision": provider.supports_vision()
+                "supports_vision": provider.supports_vision(),
+                "supports_voice": provider_type == "local_whisper"  # Mark transcription providers
             }
 
             # Categorize by provider type
