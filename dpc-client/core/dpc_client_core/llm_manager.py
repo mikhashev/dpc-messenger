@@ -525,8 +525,9 @@ class LocalWhisperProvider(AIProvider):
         if self.model_loaded:
             return
 
+        import time
         logger.info(f"Loading Whisper model '{self.model_name}' (this may take a minute on first use)...")
-        start_time = asyncio.get_event_loop().time()
+        start_time = time.time()
 
         try:
             import torch
