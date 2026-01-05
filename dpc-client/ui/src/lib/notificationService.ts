@@ -8,9 +8,6 @@
  * - Provide fallback to in-app toasts when app is foreground
  */
 
-import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
-import { getCurrentWindow } from '@tauri-apps/api/window';
-
 export interface NotificationOptions {
   title: string;
   body: string;
@@ -18,12 +15,39 @@ export interface NotificationOptions {
 
 let permissionGranted = false;
 
+// Check if we're running in Tauri context
+function isTauriContext(): boolean {
+  return typeof window !== 'undefined' && !!(window as any).__TAURI__;
+}
+
+// Lazy load Tauri APIs
+async function getTauriNotification() {
+  if (!isTauriContext()) return null;
+  try {
+    return await import('@tauri-apps/plugin-notification');
+  } catch {
+    return null;
+  }
+}
+
+async function getTauriWindow() {
+  if (!isTauriContext()) return null;
+  try {
+    return await import('@tauri-apps/api/window');
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Initialize permission state on module load
  */
 (async () => {
   try {
-    permissionGranted = await isPermissionGranted();
+    const notification = await getTauriNotification();
+    if (notification) {
+      permissionGranted = await notification.isPermissionGranted();
+    }
   } catch (error) {
     console.error('Failed to check notification permission:', error);
     permissionGranted = false;
@@ -36,7 +60,13 @@ let permissionGranted = false;
  */
 export async function requestNotificationPermission(): Promise<boolean> {
   try {
-    const permission = await requestPermission();
+    const notification = await getTauriNotification();
+    if (!notification) {
+      console.warn('Tauri notification API not available');
+      return false;
+    }
+
+    const permission = await notification.requestPermission();
     permissionGranted = permission === 'granted';
 
     // Store preference in localStorage
@@ -56,7 +86,13 @@ export async function requestNotificationPermission(): Promise<boolean> {
  */
 async function isAppInBackground(): Promise<boolean> {
   try {
-    const appWindow = getCurrentWindow();
+    const windowAPI = await getTauriWindow();
+    if (!windowAPI) {
+      // Not in Tauri context, assume foreground
+      return false;
+    }
+
+    const appWindow = windowAPI.getCurrentWindow();
     const [focused, minimized] = await Promise.all([
       appWindow.isFocused(),
       appWindow.isMinimized()
@@ -97,7 +133,13 @@ export async function showNotificationIfBackground(options: NotificationOptions)
 
   // Send system notification
   try {
-    await sendNotification({
+    const notification = await getTauriNotification();
+    if (!notification) {
+      console.warn('Tauri notification API not available');
+      return false;
+    }
+
+    await notification.sendNotification({
       title: options.title,
       body: options.body
     });
@@ -115,7 +157,13 @@ export async function showNotificationIfBackground(options: NotificationOptions)
  */
 export async function bringAppToForeground(): Promise<void> {
   try {
-    const appWindow = getCurrentWindow();
+    const windowAPI = await getTauriWindow();
+    if (!windowAPI) {
+      console.warn('Tauri window API not available');
+      return;
+    }
+
+    const appWindow = windowAPI.getCurrentWindow();
     await appWindow.show();
     await appWindow.setFocus();
   } catch (error) {

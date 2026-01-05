@@ -1,6 +1,5 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { convertFileSrc } from '@tauri-apps/api/core';
 
   interface VoicePlayerProps {
     audioUrl: string;
@@ -20,7 +19,29 @@
 
   // Convert local file path to Tauri asset URL if provided (v0.13.0+)
   // This fixes "Not allowed to load local resource" error in Tauri desktop app
-  const actualAudioUrl = $derived(filePath ? convertFileSrc(filePath) : audioUrl);
+  // Use dynamic Tauri API access to avoid import errors when Tauri is not available
+  let actualAudioUrl = $state(audioUrl);
+
+  $effect(() => {
+    if (!filePath) {
+      actualAudioUrl = audioUrl;
+      return;
+    }
+
+    // Check if we're in a Tauri context
+    if (typeof window !== 'undefined' && (window as any).__TAURI__) {
+      try {
+        // Dynamically access convertFileSrc from Tauri global
+        const { convertFileSrc } = (window as any).__TAURI__.core;
+        actualAudioUrl = convertFileSrc(filePath);
+      } catch (err) {
+        console.warn('Failed to convert file path, using original URL:', err);
+        actualAudioUrl = audioUrl;
+      }
+    } else {
+      actualAudioUrl = audioUrl;
+    }
+  });
 
   function togglePlay() {
     if (!audioElement) return;
