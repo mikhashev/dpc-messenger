@@ -44,6 +44,9 @@ from .message_handlers.context_handler import (
 from .message_handlers.inference_handler import (
     RemoteInferenceRequestHandler, RemoteInferenceResponseHandler
 )
+from .message_handlers.transcription_handler import (
+    RemoteTranscriptionRequestHandler, RemoteTranscriptionResponseHandler
+)
 from .message_handlers.provider_handler import GetProvidersHandler, ProvidersResponseHandler
 from .message_handlers.knowledge_handler import (
     ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler,
@@ -251,6 +254,9 @@ class CoreService:
         # Track pending inference requests (for request-response matching)
         self._pending_inference_requests: Dict[str, asyncio.Future] = {}
 
+        # Track pending transcription requests (for request-response matching)
+        self._pending_transcription_requests: Dict[str, asyncio.Future] = {}
+
         # Hub reconnection settings
         self._hub_reconnect_attempts = 0
         self._max_hub_reconnect_attempts = 5
@@ -307,6 +313,10 @@ class CoreService:
         # Remote inference (compute sharing)
         self.message_router.register_handler(RemoteInferenceRequestHandler(self))
         self.message_router.register_handler(RemoteInferenceResponseHandler(self))
+
+        # Remote transcription (voice transcription sharing)
+        self.message_router.register_handler(RemoteTranscriptionRequestHandler(self))
+        self.message_router.register_handler(RemoteTranscriptionResponseHandler(self))
 
         # Provider discovery
         self.message_router.register_handler(GetProvidersHandler(self))
@@ -2663,18 +2673,21 @@ class CoreService:
         provider_alias: str | None = None
     ) -> dict:
         """
-        Transcribe audio to text using local Whisper (primary) or OpenAI API (fallback).
+        Transcribe audio to text using local Whisper (primary), OpenAI API (fallback), or remote peer.
 
-        v0.13.1+: Hybrid local/cloud transcription with automatic fallback.
+        v0.13.1+: Hybrid local/cloud/remote transcription with automatic fallback.
+        v0.14.0+: Remote transcription support for P2P Whisper sharing.
 
         Priority:
-        1. LocalWhisperProvider (if enabled and configured)
-        2. OpenAI/OpenAI-compatible provider (fallback)
+        1. Remote peer (if provider_alias format is "remote:node_id:alias")
+        2. LocalWhisperProvider (if enabled and configured)
+        3. OpenAI/OpenAI-compatible provider (fallback)
 
         Args:
             audio_base64: Base64-encoded audio data (raw, not data URL)
             mime_type: Audio MIME type (default: audio/webm)
             provider_alias: Optional provider alias to use for transcription
+                           Format: "local:alias" or "remote:node_id:alias"
 
         Returns:
             dict with transcription text and provider info
@@ -2685,6 +2698,41 @@ class CoreService:
         import base64
         import tempfile
         from pathlib import Path
+
+        # 0. Check if this is a remote transcription request
+        if provider_alias and provider_alias.startswith("remote:"):
+            # Parse remote provider: "remote:node_id:alias"
+            parts = provider_alias.split(":", 2)
+            if len(parts) < 3:
+                raise ValueError(f"Invalid remote provider format: {provider_alias}. Expected 'remote:node_id:alias'")
+
+            node_id = parts[1]
+            remote_alias = parts[2]
+
+            logger.info(f"Remote transcription requested from peer {node_id[:20]}... using provider '{remote_alias}'")
+
+            try:
+                # Call remote peer for transcription
+                result = await self._request_transcription_from_peer(
+                    peer_id=node_id,
+                    audio_base64=audio_base64,
+                    mime_type=mime_type,
+                    provider=remote_alias,
+                    timeout=120.0  # 2-minute timeout for remote transcription
+                )
+
+                # Format result to match local transcription response
+                return {
+                    "text": result.get("text", ""),
+                    "language": result.get("language", "unknown"),
+                    "duration": result.get("duration_seconds", 0),
+                    "provider": f"remote_{result.get('provider', remote_alias)}",
+                    "remote_node_id": node_id
+                }
+
+            except Exception as e:
+                logger.error(f"Remote transcription failed: {e}", exc_info=True)
+                raise ValueError(f"Remote transcription failed: {e}")
 
         # 1. Decode audio data
         try:
@@ -3971,6 +4019,126 @@ class CoreService:
             except Exception as send_err:
                 logger.error("Error sending inference error response to %s: %s", peer_id, send_err, exc_info=True)
 
+    async def _handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
+        """
+        Handle incoming remote transcription request from a peer.
+        Check firewall permissions, run transcription, and send response.
+
+        Args:
+            peer_id: Node ID of the requesting peer
+            request_id: Unique request identifier
+            audio_base64: Base64-encoded audio data
+            mime_type: Audio MIME type (e.g., audio/webm)
+            model: Optional model name
+            provider: Optional provider alias
+            language: Language code or "auto" for detection
+            task: "transcribe" or "translate"
+        """
+        from dpc_protocol.protocol import create_remote_transcription_response
+        import base64
+        import tempfile
+        import os
+
+        logger.debug("Handling transcription request from %s (request_id: %s, mime_type: %s)", peer_id, request_id, mime_type)
+
+        # Check if peer is allowed to request transcription
+        if not self.firewall.can_request_transcription(peer_id, model):
+            logger.warning("Access denied: %s cannot request transcription%s", peer_id, f" for model {model}" if model else "")
+            error_response = create_remote_transcription_response(
+                request_id=request_id,
+                error=f"Access denied: You are not authorized to request transcription" + (f" for model {model}" if model else "")
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending transcription error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # Run transcription
+        temp_audio_path = None
+        try:
+            logger.info("Running transcription for %s (model: %s, provider: %s, language: %s, task: %s)",
+                       peer_id, model or 'default', provider or 'default', language, task)
+
+            # Decode base64 audio data and save to temporary file
+            audio_data = base64.b64decode(audio_base64)
+
+            # Determine file extension from MIME type
+            ext_map = {
+                "audio/webm": ".webm",
+                "audio/opus": ".opus",
+                "audio/ogg": ".ogg",
+                "audio/wav": ".wav",
+                "audio/mp3": ".mp3",
+                "audio/mp4": ".mp4",
+                "audio/mpeg": ".mp3"
+            }
+            file_ext = ext_map.get(mime_type, ".webm")
+
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+                temp_audio_path = temp_file.name
+                temp_file.write(audio_data)
+
+            # Determine which provider to use
+            provider_alias_to_use = provider
+
+            if model and not provider:
+                # Find provider by model name
+                found_alias = self.llm_manager.find_provider_by_model(model)
+                if found_alias:
+                    provider_alias_to_use = found_alias
+                    logger.debug("Found provider '%s' for model '%s'", found_alias, model)
+                else:
+                    raise ValueError(f"No provider found for model '{model}'")
+
+            # Get the provider instance
+            provider_instance = self.llm_manager.get_provider(provider_alias_to_use)
+
+            # Check if provider supports transcription
+            if not hasattr(provider_instance, 'transcribe'):
+                raise ValueError(f"Provider '{provider_alias_to_use}' does not support transcription")
+
+            # Update provider settings for this transcription
+            if language != "auto":
+                provider_instance.language = language
+            if task:
+                provider_instance.task = task
+
+            # Run transcription
+            result = await provider_instance.transcribe(temp_audio_path)
+            logger.info("Transcription completed successfully for %s", peer_id)
+
+            # Send success response
+            success_response = create_remote_transcription_response(
+                request_id=request_id,
+                text=result.get("text", ""),
+                language=result.get("language"),
+                duration_seconds=result.get("duration"),
+                provider=result.get("provider") or provider_alias_to_use
+            )
+            await self.p2p_manager.send_message_to_peer(peer_id, success_response)
+            logger.debug("Sent transcription result to %s", peer_id)
+
+        except Exception as e:
+            logger.error("Transcription failed for %s: %s", peer_id, e, exc_info=True)
+            error_response = create_remote_transcription_response(
+                request_id=request_id,
+                error=str(e)
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as send_err:
+                logger.error("Error sending transcription error response to %s: %s", peer_id, send_err, exc_info=True)
+
+        finally:
+            # Clean up temporary file
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.unlink(temp_audio_path)
+                except Exception as cleanup_err:
+                    logger.warning("Failed to delete temporary audio file %s: %s", temp_audio_path, cleanup_err)
+
     async def _handle_get_providers_request(self, peer_id: str):
         """
         Handle GET_PROVIDERS request from a peer.
@@ -4368,6 +4536,85 @@ class CoreService:
 
         except Exception as e:
             logger.error("Error requesting inference from %s: %s", peer_id, e, exc_info=True)
+            raise
+
+    async def _request_transcription_from_peer(
+        self, peer_id: str, audio_base64: str, mime_type: str,
+        model: str = None, provider: str = None, language: str = "auto",
+        task: str = "transcribe", timeout: float = 120.0
+    ) -> Dict[str, Any]:
+        """
+        Request remote transcription from a specific peer.
+        Uses async request-response pattern with Future.
+
+        Args:
+            peer_id: The node_id of the peer to request transcription from
+            audio_base64: Base64-encoded audio data
+            mime_type: Audio MIME type (e.g., audio/webm)
+            model: Optional model name to use
+            provider: Optional provider alias to use
+            language: Language code or "auto" for detection
+            task: "transcribe" (default) or "translate" (to English)
+            timeout: Timeout in seconds (default 120s for transcription)
+
+        Returns:
+            Dict containing transcription result with keys:
+                - text: Transcribed text
+                - language: Detected language
+                - duration_seconds: Audio duration
+                - provider: Provider used
+
+        Raises:
+            ConnectionError: If peer is not connected
+            TimeoutError: If request times out
+            RuntimeError: If transcription fails on remote peer
+        """
+        from dpc_protocol.protocol import create_remote_transcription_request
+
+        logger.debug("Requesting transcription from peer: %s (mime_type: %s, language: %s)",
+                    peer_id, mime_type, language)
+
+        if peer_id not in self.p2p_manager.peers:
+            raise ConnectionError(f"Peer {peer_id} is not connected")
+
+        try:
+            # Generate unique request ID
+            request_id = str(uuid.uuid4())
+
+            # Create Future to wait for response
+            response_future = asyncio.Future()
+            self._pending_transcription_requests[request_id] = response_future
+
+            # Create transcription request message
+            request_message = create_remote_transcription_request(
+                request_id=request_id,
+                audio_base64=audio_base64,
+                mime_type=mime_type,
+                model=model,
+                provider=provider,
+                language=language,
+                task=task
+            )
+
+            # Send request
+            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
+
+            # Wait for response with timeout
+            try:
+                result = await asyncio.wait_for(response_future, timeout=timeout)
+                logger.info("Received transcription result from %s: %d chars",
+                           peer_id, len(result.get("text", "")))
+                return result
+
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for transcription from %s", peer_id)
+                raise TimeoutError(f"Transcription request to {peer_id} timed out after {timeout}s")
+            finally:
+                # Clean up pending request
+                self._pending_transcription_requests.pop(request_id, None)
+
+        except Exception as e:
+            logger.error("Error requesting transcription from %s: %s", peer_id, e, exc_info=True)
             raise
 
     async def _aggregate_contexts(self, query: str, peer_ids: List[str] = None) -> Dict[str, PersonalContext]:

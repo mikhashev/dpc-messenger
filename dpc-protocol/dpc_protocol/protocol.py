@@ -90,6 +90,65 @@ def create_remote_inference_response(
         payload["status"] = "error"
     return {"command": "REMOTE_INFERENCE_RESPONSE", "payload": payload}
 
+def create_remote_transcription_request(
+    request_id: str,
+    audio_base64: str,
+    mime_type: str,
+    model: str = None,
+    provider: str = None,
+    language: str = "auto",
+    task: str = "transcribe"
+) -> Dict[str, Any]:
+    """
+    Creates a remote transcription request message.
+
+    Args:
+        request_id: Unique identifier for this request
+        audio_base64: Base64-encoded audio data
+        mime_type: Audio MIME type (e.g., audio/webm, audio/opus)
+        model: Optional model name to use
+        provider: Optional provider alias to use
+        language: Language code or "auto" for detection
+        task: "transcribe" (default) or "translate" (to English)
+    """
+    payload = {
+        "request_id": request_id,
+        "audio_base64": audio_base64,
+        "mime_type": mime_type,
+        "language": language,
+        "task": task
+    }
+    if model:
+        payload["model"] = model
+    if provider:
+        payload["provider"] = provider
+    return {"command": "REMOTE_TRANSCRIPTION_REQUEST", "payload": payload}
+
+def create_remote_transcription_response(
+    request_id: str,
+    text: str = None,
+    error: str = None,
+    language: str = None,
+    duration_seconds: float = None,
+    provider: str = None
+) -> Dict[str, Any]:
+    """Creates a remote transcription response message with optional metadata."""
+    payload = {"request_id": request_id}
+    if text is not None:
+        payload["text"] = text
+        payload["status"] = "success"
+        # Add metadata if provided
+        if language is not None:
+            payload["language"] = language
+        if duration_seconds is not None:
+            payload["duration_seconds"] = duration_seconds
+        if provider is not None:
+            payload["provider"] = provider
+    else:
+        payload["error"] = error or "Unknown error"
+        payload["status"] = "error"
+    return {"command": "REMOTE_TRANSCRIPTION_RESPONSE", "payload": payload}
+
 def create_get_providers_message() -> Dict[str, Any]:
     """Creates a request to get available AI providers from a peer."""
     return {"command": "GET_PROVIDERS"}

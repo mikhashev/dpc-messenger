@@ -106,6 +106,14 @@
     "allowed_models": ["llama3.1:8b", "llama3:70b"]
   },
 
+  "transcription": {
+    "_comment": "Remote Transcription Permissions - Controls who can use your local Whisper model for voice transcription. Useful for GPU sharing (Apple Silicon MLX, NVIDIA CUDA).",
+    "enabled": false,
+    "allow_nodes": ["dpc-node-alice-123"],
+    "allow_groups": ["friends", "trusted_developers"],
+    "allowed_models": ["openai/whisper-large-v3", "openai/whisper-medium", "openai/whisper-small"]
+  },
+
   "file_transfer": {
     "_comment": "File Transfer Permissions - Controls who can send/receive files with you",
     "groups": {

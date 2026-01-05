@@ -250,6 +250,98 @@ Returns the result of a remote inference request.
 
 ---
 
+### 3.4.1 Remote Audio Transcription
+
+#### REMOTE_TRANSCRIPTION_REQUEST
+
+Requests the peer to transcribe audio using their local Whisper model.
+
+**Format:**
+```json
+{
+  "command": "REMOTE_TRANSCRIPTION_REQUEST",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "audio_base64": "SGVsbG8gV29ybGQh...",
+    "mime_type": "audio/webm",
+    "model": "openai/whisper-large-v3",  // Optional
+    "provider": "local_whisper",         // Optional
+    "language": "auto",                   // Optional
+    "task": "transcribe"                  // Optional: "transcribe" or "translate"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): UUID for request/response correlation
+- `audio_base64` (string, required): Base64-encoded audio data
+- `mime_type` (string, required): Audio MIME type (e.g., `audio/webm`, `audio/opus`, `audio/wav`)
+- `model` (string, optional): Specific Whisper model to use
+- `provider` (string, optional): Transcription provider (e.g., `local_whisper`)
+- `language` (string, optional): Language code (`auto` for automatic detection, `en`, `es`, etc.)
+- `task` (string, optional): `transcribe` (default) or `translate` (to English)
+
+**Response:** REMOTE_TRANSCRIPTION_RESPONSE message
+
+**Security:** Peer may reject request based on firewall rules (`privacy_rules.json` → `transcription.enabled`)
+
+**Size Limits:** Audio data should be reasonable size (recommended max: 10MB base64-encoded)
+
+---
+
+#### REMOTE_TRANSCRIPTION_RESPONSE
+
+Returns the result of a remote transcription request.
+
+**Success Format:**
+```json
+{
+  "command": "REMOTE_TRANSCRIPTION_RESPONSE",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "success",
+    "text": "Hello, this is a transcribed message.",
+    "language": "en",
+    "duration_seconds": 5.2,
+    "provider": "local_whisper"
+  }
+}
+```
+
+**Error Format:**
+```json
+{
+  "command": "REMOTE_TRANSCRIPTION_RESPONSE",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "error",
+    "error": "Transcription not enabled in firewall rules"
+  }
+}
+```
+
+**Fields (Success):**
+- `request_id` (string, required): Matches request UUID
+- `status` (string, required): `"success"`
+- `text` (string, required): Transcribed text
+- `language` (string, optional): Detected language code
+- `duration_seconds` (number, optional): Audio duration in seconds
+- `provider` (string, optional): Provider used for transcription
+
+**Fields (Error):**
+- `request_id` (string, required): Matches request UUID
+- `status` (string, required): `"error"`
+- `error` (string, required): Human-readable error message
+
+**Common Error Codes:**
+- `Transcription not enabled in firewall rules` - Peer has disabled remote transcription
+- `Model not available` - Requested Whisper model not installed
+- `Invalid audio format` - Unsupported MIME type
+- `Audio too large` - Exceeds peer's size limits
+- `Transcription failed` - Processing error
+
+---
+
 ### 3.5 Provider Discovery
 
 #### GET_PROVIDERS

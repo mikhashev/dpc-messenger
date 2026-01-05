@@ -40,6 +40,9 @@ class ContextFirewall:
         # Parse compute sharing settings
         self._parse_compute_settings()
 
+        # Parse transcription sharing settings
+        self._parse_transcription_settings()
+
         # Parse notification settings
         self._parse_notification_settings()
 
@@ -53,6 +56,17 @@ class ContextFirewall:
         logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
                      self.compute_enabled, len(self.compute_allowed_nodes),
                      len(self.compute_allowed_groups), len(self.compute_allowed_models))
+
+    def _parse_transcription_settings(self):
+        """Parse transcription sharing settings from the config."""
+        transcription = self.rules.get('transcription', {})
+        self.transcription_enabled = transcription.get('enabled', False)
+        self.transcription_allowed_nodes: List[str] = transcription.get('allow_nodes', [])
+        self.transcription_allowed_groups: List[str] = transcription.get('allow_groups', [])
+        self.transcription_allowed_models: List[str] = transcription.get('allowed_models', [])
+        logger.debug("Transcription sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
+                     self.transcription_enabled, len(self.transcription_allowed_nodes),
+                     len(self.transcription_allowed_groups), len(self.transcription_allowed_models))
 
     def _parse_notification_settings(self):
         """Parse notification settings from the config."""
@@ -113,6 +127,13 @@ class ContextFirewall:
                     "allow_groups": ["friends"],
                     "allow_nodes": ["dpc-node-alice-123"],
                     "allowed_models": ["llama3.1:8b", "llama3:70b"]
+                },
+                "transcription": {
+                    "_comment": "Transcription sharing settings - Allow peers to use your Whisper model for voice transcription",
+                    "enabled": False,
+                    "allow_groups": ["friends"],
+                    "allow_nodes": ["dpc-node-alice-123"],
+                    "allowed_models": ["openai/whisper-large-v3", "openai/whisper-medium"]
                 },
                 "nodes": {
                     "_comment": "Per-node access rules - Most specific, overrides group rules",
@@ -586,6 +607,40 @@ class ContextFirewall:
                 # Node is in an allowed group, check model if specified
                 if model and self.compute_allowed_models:
                     return model in self.compute_allowed_models
+                return True
+
+        # Not authorized
+        return False
+
+    def can_request_transcription(self, requester_node_id: str, model: str = None) -> bool:
+        """
+        Checks if a peer can request remote transcription on this node.
+
+        Args:
+            requester_node_id: The node_id of the requesting peer
+            model: Optional model name to check if allowed
+
+        Returns:
+            True if the peer can request transcription (and use the specified model if provided)
+        """
+        # Check if transcription sharing is enabled
+        if not self.transcription_enabled:
+            return False
+
+        # Check if requester is in allowed nodes list
+        if requester_node_id in self.transcription_allowed_nodes:
+            # Node is explicitly allowed, check model if specified
+            if model and self.transcription_allowed_models:
+                return model in self.transcription_allowed_models
+            return True
+
+        # Check if requester is in any allowed group
+        requester_groups = self._get_groups_for_node(requester_node_id)
+        for group in requester_groups:
+            if group in self.transcription_allowed_groups:
+                # Node is in an allowed group, check model if specified
+                if model and self.transcription_allowed_models:
+                    return model in self.transcription_allowed_models
                 return True
 
         # Not authorized

@@ -52,10 +52,15 @@
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
 
-  // Intermediate string variables for textarea editing
+  // Intermediate string variables for textarea editing (compute sharing)
   let allowNodesText: string = '';
   let allowGroupsText: string = '';
   let allowedModelsText: string = '';
+
+  // Intermediate string variables for textarea editing (transcription sharing)
+  let transcriptionAllowNodesText: string = '';
+  let transcriptionAllowGroupsText: string = '';
+  let transcriptionAllowedModelsText: string = '';
 
   // Load rules when modal opens
   $: if (open && !rules) {
@@ -67,6 +72,13 @@
     allowNodesText = editedRules.compute.allow_nodes.join('\n');
     allowGroupsText = editedRules.compute.allow_groups.join('\n');
     allowedModelsText = editedRules.compute.allowed_models.join('\n');
+  }
+
+  // Sync transcription string variables with arrays when entering edit mode
+  $: if (editMode && editedRules?.transcription) {
+    transcriptionAllowNodesText = editedRules.transcription.allow_nodes.join('\n');
+    transcriptionAllowGroupsText = editedRules.transcription.allow_groups.join('\n');
+    transcriptionAllowedModelsText = editedRules.transcription.allowed_models.join('\n');
   }
 
   async function loadRules() {
@@ -842,6 +854,119 @@
               </div>
             {:else}
               <p class="empty">Compute sharing not configured.</p>
+            {/if}
+          </div>
+
+          <!-- Transcription Sharing Section -->
+          <div class="section">
+            <h3>Transcription Sharing (Remote Whisper)</h3>
+            <p class="help-text">Allow peers to use your local Whisper model for voice transcription.</p>
+
+            {#if displayRules?.transcription}
+              <div class="compute-settings">
+                <div class="setting-item">
+                  <label>
+                    {#if editMode && editedRules && editedRules.transcription}
+                      <input id="transcription-enabled" name="transcription-enabled" type="checkbox" bind:checked={editedRules.transcription.enabled} />
+                    {:else}
+                      <input id="transcription-enabled-display" name="transcription-enabled-display" type="checkbox" checked={displayRules.transcription.enabled} disabled />
+                    {/if}
+                    <strong>Enable Transcription Sharing</strong>
+                  </label>
+                </div>
+
+                {#if displayRules.transcription.enabled}
+                  <div class="subsection">
+                    <h4>Allowed Nodes</h4>
+                    {#if editMode && editedRules}
+                      <textarea
+                        id="transcription-allow-nodes"
+                        name="transcription-allow-nodes"
+                        class="edit-textarea"
+                        rows="3"
+                        placeholder="Enter node IDs (one per line)"
+                        bind:value={transcriptionAllowNodesText}
+                        on:blur={() => {
+                          if (editedRules?.transcription) {
+                            const nodes = transcriptionAllowNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.transcription.allow_nodes = [...new Set(nodes)];
+                            transcriptionAllowNodesText = editedRules.transcription.allow_nodes.join('\n');
+                          }
+                        }}
+                      ></textarea>
+                    {:else}
+                      <div class="tags">
+                        {#each displayRules.transcription.allow_nodes as nodeId}
+                          <span class="tag">{nodeId}</span>
+                        {:else}
+                          <span class="empty-small">No specific nodes allowed</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="subsection">
+                    <h4>Allowed Groups</h4>
+                    {#if editMode && editedRules}
+                      <textarea
+                        id="transcription-allow-groups"
+                        name="transcription-allow-groups"
+                        class="edit-textarea"
+                        rows="2"
+                        placeholder="Enter group names (one per line)"
+                        bind:value={transcriptionAllowGroupsText}
+                        on:blur={() => {
+                          if (editedRules?.transcription) {
+                            const groups = transcriptionAllowGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.transcription.allow_groups = [...new Set(groups)];
+                            transcriptionAllowGroupsText = editedRules.transcription.allow_groups.join('\n');
+                          }
+                        }}
+                      ></textarea>
+                    {:else}
+                      <div class="tags">
+                        {#each displayRules.transcription.allow_groups as groupName}
+                          <span class="tag">{groupName}</span>
+                        {:else}
+                          <span class="empty-small">No groups allowed</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="subsection">
+                    <h4>Allowed Models</h4>
+                    <p class="help-text-small">Leave empty to allow all Whisper models.</p>
+                    {#if editMode && editedRules}
+                      <textarea
+                        id="transcription-allowed-models"
+                        name="transcription-allowed-models"
+                        class="edit-textarea"
+                        rows="3"
+                        placeholder="Enter model names (one per line, e.g., openai/whisper-large-v3)"
+                        bind:value={transcriptionAllowedModelsText}
+                        on:blur={() => {
+                          if (editedRules?.transcription) {
+                            const models = transcriptionAllowedModelsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.transcription.allowed_models = [...new Set(models)];
+                            transcriptionAllowedModelsText = editedRules.transcription.allowed_models.join('\n');
+                          }
+                        }}
+                      ></textarea>
+                    {:else}
+                      <div class="tags">
+                        {#each displayRules.transcription.allowed_models as model}
+                          <span class="tag">{model}</span>
+                        {:else}
+                          <span class="empty-small">All models allowed</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              <p class="empty">Transcription sharing not configured.</p>
             {/if}
           </div>
 
