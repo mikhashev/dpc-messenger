@@ -793,7 +793,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', '_comment']
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -853,6 +853,24 @@ class ContextFirewall:
 
                     if 'allowed_models' in compute and not isinstance(compute['allowed_models'], list):
                         errors.append("'compute.allowed_models' must be a list")
+
+            # Validate transcription section
+            if 'transcription' in config_dict:
+                transcription = config_dict['transcription']
+                if not isinstance(transcription, dict):
+                    errors.append("'transcription' section must be a dictionary")
+                else:
+                    if 'enabled' in transcription and not isinstance(transcription['enabled'], bool):
+                        errors.append("'transcription.enabled' must be a boolean (true or false)")
+
+                    if 'allow_nodes' in transcription and not isinstance(transcription['allow_nodes'], list):
+                        errors.append("'transcription.allow_nodes' must be a list")
+
+                    if 'allow_groups' in transcription and not isinstance(transcription['allow_groups'], list):
+                        errors.append("'transcription.allow_groups' must be a list")
+
+                    if 'allowed_models' in transcription and not isinstance(transcription['allowed_models'], list):
+                        errors.append("'transcription.allowed_models' must be a list")
 
             # Validate nodes section
             if 'nodes' in config_dict:
