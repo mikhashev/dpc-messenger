@@ -44,7 +44,8 @@
             "core:window:allow-toggle-maximize",
             "core:webview:allow-webview-position",
             "core:webview:allow-webview-size",
-            "core:webview:allow-internal-toggle-devtools"
+            "core:webview:allow-internal-toggle-devtools",
+            "dialog:allow-message"
           ],
           "platforms": ["linux", "macOS", "windows"]
         }
