@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "dpc-messenger",
         "width": 1000,
         "height": 700,
@@ -23,13 +24,31 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:* ws://localhost:* https://fonts.googleapis.com https://fonts.gstatic.com; media-src 'self' mediastream: blob:; microphone 'self';",
       "assetProtocol": {
         "enable": true,
         "scope": [
           "$HOME/.dpc/**"
         ]
-      }
+      },
+      "capabilities": [
+        {
+          "identifier": "main-capability",
+          "description": "Main window capability with microphone access",
+          "windows": ["main"],
+          "permissions": [
+            "core:default",
+            "core:window:allow-close",
+            "core:window:allow-maximize",
+            "core:window:allow-minimize",
+            "core:window:allow-toggle-maximize",
+            "core:webview:allow-webview-position",
+            "core:webview:allow-webview-size",
+            "core:webview:allow-internal-toggle-devtools"
+          ],
+          "platforms": ["linux", "macOS", "windows"]
+        }
+      ]
     }
   },
   "bundle": {
