@@ -4143,14 +4143,18 @@ class CoreService:
         """
         Handle GET_PROVIDERS request from a peer.
         Check firewall permissions and send available providers that the peer can use.
+        Supports both compute sharing (AI inference) and transcription sharing (Whisper).
         """
         from dpc_protocol.protocol import create_providers_response
 
         logger.debug("Handling GET_PROVIDERS request from %s", peer_id)
 
-        # Check if compute sharing is enabled and peer is authorized
-        if not self.firewall.can_request_inference(peer_id):
-            logger.warning("Access denied: %s cannot access compute resources", peer_id)
+        # Check if peer has access to compute OR transcription resources
+        has_compute_access = self.firewall.can_request_inference(peer_id)
+        has_transcription_access = self.firewall.can_request_transcription(peer_id)
+
+        if not has_compute_access and not has_transcription_access:
+            logger.warning("Access denied: %s cannot access compute or transcription resources", peer_id)
             # Send empty provider list (no access)
             response = create_providers_response([])
             try:
@@ -4161,30 +4165,52 @@ class CoreService:
 
         # Get all available providers
         all_providers = []
-        all_models = []
+        compute_models = []
+        transcription_models = []
 
         for alias, provider in self.llm_manager.providers.items():
             model = provider.model
             provider_type = provider.config.get("type", "unknown")
 
-            all_providers.append({
+            provider_info = {
                 "alias": alias,
                 "model": model,
                 "type": provider_type,
-                "supports_vision": provider.supports_vision()  # Phase 2: Add vision capability flag
-            })
-            all_models.append(model)
+                "supports_vision": provider.supports_vision()
+            }
 
-        # Filter providers based on firewall allowed_models setting
-        allowed_models = self.firewall.get_available_models_for_peer(peer_id, all_models)
+            # Categorize by provider type
+            if provider_type == "local_whisper":
+                transcription_models.append(model)
+            else:
+                compute_models.append(model)
 
-        # Only include providers with allowed models
-        filtered_providers = [
-            p for p in all_providers
-            if p["model"] in allowed_models
-        ]
+            all_providers.append(provider_info)
 
-        logger.debug("Sending %d providers to %s (filtered from %d total)", len(filtered_providers), peer_id, len(all_providers))
+        # Filter providers based on firewall permissions
+        filtered_providers = []
+
+        for provider_info in all_providers:
+            provider_type = provider_info["type"]
+            model = provider_info["model"]
+
+            # Check transcription providers
+            if provider_type == "local_whisper":
+                if has_transcription_access:
+                    # Check if model is allowed for transcription
+                    if self.firewall.can_request_transcription(peer_id, model):
+                        filtered_providers.append(provider_info)
+                        logger.debug("Including transcription provider '%s' for %s", provider_info["alias"], peer_id[:20])
+            # Check compute providers (text/vision models)
+            else:
+                if has_compute_access:
+                    # Check if model is allowed for compute
+                    if self.firewall.can_request_inference(peer_id, model):
+                        filtered_providers.append(provider_info)
+                        logger.debug("Including compute provider '%s' for %s", provider_info["alias"], peer_id[:20])
+
+        logger.debug("Sending %d providers to %s (filtered from %d total, compute_access=%s, transcription_access=%s)",
+                    len(filtered_providers), peer_id[:20], len(all_providers), has_compute_access, has_transcription_access)
 
         # Send response with filtered providers
         response = create_providers_response(filtered_providers)
