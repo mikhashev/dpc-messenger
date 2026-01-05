@@ -1574,7 +1574,16 @@
     try {
       // Convert blob to base64
       const arrayBuffer = await voicePreview.blob.arrayBuffer();
-      const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+      const uint8Array = new Uint8Array(arrayBuffer);
+
+      // Convert to base64 in chunks to avoid "Maximum call stack size exceeded"
+      let binaryString = '';
+      const chunkSize = 8192;
+      for (let i = 0; i < uint8Array.length; i += chunkSize) {
+        const chunk = uint8Array.subarray(i, i + chunkSize);
+        binaryString += String.fromCharCode(...chunk);
+      }
+      const base64Audio = btoa(binaryString);
 
       // Show loading state
       fileOfferToastMessage = 'Transcribing voice message...';

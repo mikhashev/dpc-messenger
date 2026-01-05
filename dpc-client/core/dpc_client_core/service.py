@@ -1566,7 +1566,7 @@ class CoreService:
 
             if "type" not in provider:
                 errors.append(f"{prefix}: Missing 'type'")
-            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai"]:
+            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper"]:
                 errors.append(f"{prefix}: Invalid type '{provider['type']}'")
 
             if "model" not in provider:

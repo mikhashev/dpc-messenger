@@ -612,7 +612,8 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'delete_instruction_set',  // Instruction management
             'rename_instruction_set',  // Instruction management
             'set_default_instruction_set',  // Instruction management
-            'get_instruction_set'  // Instruction management
+            'get_instruction_set',  // Instruction management
+            'transcribe_audio'  // v0.13.1 - voice message transcription
         ].includes(command);
 
         if (expectsResponse) {
@@ -626,6 +627,11 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                 } else if (command === 'ai_assisted_instruction_creation_remote') {
                     // AI instruction creation timeout: 60s (remote LLM processing can take time)
                     timeout = 60000;
+                } else if (command === 'transcribe_audio') {
+                    // Voice transcription timeout: 240s (v0.13.1+)
+                    // First use: model download (~3GB, 1-2min) + load (~20s) + compile (~30s) + transcribe (~5s)
+                    // Subsequent uses: ~5-10s
+                    timeout = 240000;
                 } else if (command === 'send_file') {
                     // Dynamic timeout based on file size (v0.11.2+)
                     const fileSizeBytes = payload.file_size_bytes || 0;
