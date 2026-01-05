@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:* ws://localhost:* https://fonts.googleapis.com https://fonts.gstatic.com; media-src 'self' mediastream: blob: https://asset.localhost asset:; microphone 'self';",
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:* ws://localhost:* https://fonts.googleapis.com https://fonts.gstatic.com; media-src 'self' mediastream: blob: https://asset.localhost asset:;",
       "assetProtocol": {
         "enable": true,
         "scope": [
@@ -45,7 +45,10 @@
             "core:webview:allow-webview-position",
             "core:webview:allow-webview-size",
             "core:webview:allow-internal-toggle-devtools",
-            "dialog:allow-message"
+            "dialog:allow-message",
+            "notification:allow-is-permission-granted",
+            "notification:allow-request-permission",
+            "notification:allow-show"
           ],
           "platforms": ["linux", "macOS", "windows"]
         }
