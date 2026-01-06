@@ -378,9 +378,17 @@
   $effect(() => {
     if ($tokenWarning) {
       const {conversation_id, tokens_used, token_limit, usage_percent} = $tokenWarning;
+
+      // Guard: Only update if values actually changed (prevent infinite loop)
+      const existing = tokenUsageMap.get(conversation_id);
+      if (existing && existing.used === tokens_used && existing.limit === token_limit) {
+        return; // Values unchanged, skip update
+      }
+
       // Update token usage map
       tokenUsageMap = new Map(tokenUsageMap);
       tokenUsageMap.set(conversation_id, {used: tokens_used, limit: token_limit});
+
       // Show warning toast
       showTokenWarning = true;
       tokenWarningMessage = `Context window ${Math.round(usage_percent * 100)}% full. Consider ending session to save knowledge.`;
