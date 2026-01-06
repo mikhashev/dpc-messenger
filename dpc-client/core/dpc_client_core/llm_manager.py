@@ -861,7 +861,7 @@ class LLMManager:
                 "_comment": "AI Provider Configuration - Manage your local and cloud AI providers",
                 "default_provider": "ollama_text",
                 "vision_provider": "ollama_vision",
-                "voice_provider": "",  # v0.13.0+: Voice provider (OpenAI/OpenAI-compatible only, not Ollama)
+                "voice_provider": "local_whisper_large",  # v0.13.0+: Local Whisper or OpenAI-compatible
                 "providers": [
                     {
                         "alias": "ollama_text",
@@ -878,6 +878,20 @@ class LLMManager:
                         "host": "http://127.0.0.1:11434",
                         "context_window": 16384,
                         "_note": "Vision model for image analysis"
+                    },
+                    {
+                        "alias": "local_whisper_large",
+                        "type": "local_whisper",
+                        "model": "openai/whisper-large-v3",
+                        "device": "auto",
+                        "compile_model": False,
+                        "use_flash_attention": False,
+                        "chunk_length_s": 30,
+                        "batch_size": 16,
+                        "language": "auto",
+                        "task": "transcribe",
+                        "lazy_loading": True,
+                        "_note": "Local Whisper transcription - GPU accelerated (CUDA, MLX)"
                     }
                 ],
                 "_examples": {
@@ -959,7 +973,7 @@ class LLMManager:
                 "_instructions": {
                     "default_provider": "Provider used for all text-only queries (no images)",
                     "vision_provider": "Provider used for image analysis queries (screenshots, photos, diagrams)",
-                    "voice_provider": "v0.13.0+: Provider used for voice transcription (OpenAI/OpenAI-compatible only)",
+                    "voice_provider": "v0.13.0+: Provider used for voice transcription (local_whisper or OpenAI-compatible)",
                     "model_installation": {
                         "ollama": "Install models: ollama pull llama3.1:8b && ollama pull qwen3-vl:8b",
                         "alternative_vision": "Other vision models: ollama pull qwen3-vl:8b OR ollama pull ministral-3:8b",
