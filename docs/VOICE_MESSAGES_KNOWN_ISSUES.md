@@ -30,7 +30,29 @@ macOS WKWebView does not expose the `navigator.mediaDevices` API at all, even wi
 
 **Workarounds:**
 
-**Option 1: Native Rust Plugin (Recommended)**
+**Option 1: Info.plist Configuration (REQUIRED - Added in v0.13.2)**
+macOS requires explicit permission descriptions in `tauri.conf.json`:
+
+```json
+{
+  "bundle": {
+    "macOS": {
+      "info": {
+        "NSMicrophoneUsageDescription": "D-PC Messenger needs microphone access...",
+        "NSCameraUsageDescription": "D-PC Messenger needs camera access..."
+      }
+    }
+  }
+}
+```
+
+**Status:** ✅ Fixed in v0.13.2 - macOS builds now include Info.plist with microphone permissions.
+
+**Note:** macOS 14 shows **double permission prompts** (app-level + webview-level). This is a known macOS behavior.
+
+**Alternative Workarounds:**
+
+**Option 2: Native Rust Plugin**
 Create a Tauri plugin using native macOS audio APIs:
 
 ```toml
@@ -39,9 +61,9 @@ cpal = "0.15"  # Cross-platform audio I/O
 coreaudio-rs = "0.11"  # macOS-specific audio APIs
 ```
 
-This bypasses WebView limitations entirely.
+This bypasses WKWebView limitations entirely.
 
-**Option 2: Open System Browser**
+**Option 3: Open System Browser**
 For macOS users, open a browser window for voice recording:
 
 ```javascript
@@ -53,10 +75,7 @@ if (isMacOS && !navigator.mediaDevices) {
 
 The browser window has full WebRTC access, records voice, then sends back to main app via WebSocket.
 
-**Option 3: Electron Build**
-As a last resort, build an Electron version for macOS users. Electron uses Chromium with full WebRTC support.
-
-**Status:** Investigating native Rust plugin approach.
+**Status:** Investigating native Rust plugin approach for future releases.
 
 ---
 
@@ -252,11 +271,21 @@ The issue is NOT CSP - it's the underlying WebView engine limitations.
 
 ## References
 
+### Official Documentation
 - [WebKitGTK WebRTC Support](https://webkitgtk.org/reference/webkit2gtk/stable/index.html)
 - [Tauri v2 Security Configuration](https://v2.tauri.app/reference/config/)
+- [Tauri v2 Permissions System](https://v2.tauri.app/security/permissions/)
 - [WKWebView Limitations on macOS](https://developer.apple.com/documentation/webkit/wkwebview)
 - [cpal - Cross-platform Audio I/O in Rust](https://github.com/RustAudio/cpal)
 - [GStreamer Plugin Documentation](https://gstreamer.freedesktop.org/documentation/plugins_doc.html)
+
+### Community Issues & Discussions
+- [Tauri #11951 - macOS Microphone Permission not Prompted](https://github.com/tauri-apps/tauri/issues/11951) (Dec 2024)
+- [Tauri #8851 - Linux Permission Problems](https://github.com/tauri-apps/tauri/issues/8851) (Jan 2025)
+- [Tauri #8346 - Ubuntu 22.04 getUserMedia NotAllowedError](https://github.com/tauri-apps/tauri/issues/8346)
+- [Tauri Discussion #8426 - Functional WebRTC in WebKitGTK](https://github.com/tauri-apps/tauri/discussions/8426)
+- [Tauri #9573 - Blob Audio NotSupportedError](https://github.com/tauri-apps/tauri/issues/9573) (Apr 2024)
+- [Tauri #5203 - Asset Server Wrong MIME Type](https://github.com/tauri-apps/tauri/issues/5203)
 
 ---
 
