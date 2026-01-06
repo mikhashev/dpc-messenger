@@ -38,6 +38,16 @@
         codec: string;
         recorded_at: string;
       };
+      // Voice transcription (v0.13.2+):
+      transcription?: {
+        text: string;
+        provider: string;
+        transcriber_node_id?: string;
+        confidence?: number;
+        language?: string;
+        timestamp?: string;
+        remote_provider_node_id?: string;
+      };
     }>;
   };
 
@@ -97,6 +107,8 @@
                         filePath={attachment.file_path}
                         duration={attachment.voice_metadata.duration_seconds}
                         timestamp={attachment.voice_metadata.recorded_at}
+                        transcription={attachment.transcription}
+                        showTranscriberName={false}
                       />
                     {/key}
                   {:else}

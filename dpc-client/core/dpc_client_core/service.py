@@ -62,6 +62,7 @@ from .message_handlers.file_chunk_handler import FileChunkHandler
 from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
+from .message_handlers.voice_transcription_handler import VoiceTranscriptionHandler  # v0.13.2+ auto-transcription
 from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
 from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
@@ -257,6 +258,10 @@ class CoreService:
         # Track pending transcription requests (for request-response matching)
         self._pending_transcription_requests: Dict[str, asyncio.Future] = {}
 
+        # Voice transcription tracking (v0.13.2+ auto-transcription)
+        self._voice_transcriptions: Dict[str, Dict[str, Any]] = {}  # transfer_id -> transcription_data
+        self._transcription_locks: Dict[str, asyncio.Lock] = {}  # transfer_id -> lock (prevents concurrent transcription)
+
         # Hub reconnection settings
         self._hub_reconnect_attempts = 0
         self._max_hub_reconnect_attempts = 5
@@ -347,6 +352,9 @@ class CoreService:
         self.message_router.register_handler(FileCompleteHandler(self))
         self.message_router.register_handler(FileCancelHandler(self))
         self.message_router.register_handler(FileChunkRetryHandler(self))  # v0.11.1
+
+        # Voice transcription (v0.13.2+)
+        self.message_router.register_handler(VoiceTranscriptionHandler(self))
 
         # Chat history sync handlers (v0.11.2)
         self.message_router.register_handler(RequestChatHistoryHandler(self))
@@ -2948,6 +2956,185 @@ class CoreService:
                 "usage_percent": 0.0
             }
 
+    # Voice Transcription Methods (v0.13.2+ auto-transcription)
+
+    async def _maybe_transcribe_voice_message(
+        self,
+        transfer_id: str,
+        node_id: str,
+        file_path: Path,
+        voice_metadata: Dict[str, Any],
+        is_sender: bool
+    ) -> None:
+        """
+        Conditionally trigger auto-transcription for a voice message.
+
+        Implements distributed transcription protocol:
+        - Sender: Optionally transcribes immediately (if sender_transcribes=true)
+        - Recipients: Wait N seconds, then check if transcription exists. If not, first capable recipient transcribes.
+
+        Args:
+            transfer_id: Unique transfer identifier
+            node_id: Peer node ID
+            file_path: Path to voice file
+            voice_metadata: Voice metadata dict (duration, codec, etc.)
+            is_sender: True if this node sent the voice message, False if received
+        """
+        # 1. Check if auto-transcription is enabled
+        if not self.settings.get_voice_transcription_enabled():
+            logger.debug(f"Auto-transcription disabled, skipping transfer {transfer_id}")
+            return
+
+        # 2. Check if already transcribed (deduplication)
+        if transfer_id in self._voice_transcriptions:
+            logger.debug(f"Transfer {transfer_id} already transcribed, skipping")
+            return
+
+        # 3. Check if this is a sender and sender_transcribes is disabled
+        if is_sender and not self.settings.get_voice_transcription_sender_transcribes():
+            logger.debug(f"Sender transcription disabled, skipping transfer {transfer_id}")
+            return
+
+        # 4. Acquire transcription lock to prevent race conditions
+        if transfer_id not in self._transcription_locks:
+            self._transcription_locks[transfer_id] = asyncio.Lock()
+
+        async with self._transcription_locks[transfer_id]:
+            # Double-check after acquiring lock
+            if transfer_id in self._voice_transcriptions:
+                logger.debug(f"Transfer {transfer_id} was transcribed while waiting for lock")
+                return
+
+            # 5. Recipients wait N seconds before attempting transcription (gives sender time to transcribe first)
+            if not is_sender:
+                delay = self.settings.get_voice_transcription_recipient_delay_seconds()
+                logger.debug(f"Recipient waiting {delay}s before checking transcription for {transfer_id}")
+                await asyncio.sleep(delay)
+
+                # Check again after delay
+                if transfer_id in self._voice_transcriptions:
+                    logger.debug(f"Transfer {transfer_id} was transcribed during delay period")
+                    return
+
+            # 6. Check if this node has transcription capability
+            has_capability = await self._check_transcription_capability()
+            if not has_capability:
+                logger.info(f"No transcription capability available for transfer {transfer_id}")
+                return
+
+            # 7. Read audio file and convert to base64
+            try:
+                with open(file_path, "rb") as f:
+                    audio_data = f.read()
+                import base64
+                audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            except Exception as e:
+                logger.error(f"Failed to read audio file for transcription: {e}")
+                return
+
+            # 8. Transcribe audio using configured provider
+            try:
+                mime_type = voice_metadata.get("mime_type", "audio/webm")
+
+                # Use provider priority list
+                provider_priority = self.settings.get_voice_transcription_provider_priority()
+                result = None
+
+                for provider_alias in provider_priority:
+                    try:
+                        logger.info(f"Attempting transcription with provider: {provider_alias}")
+                        result = await self.transcribe_audio(audio_base64, mime_type, provider_alias)
+                        break  # Success, stop trying providers
+                    except Exception as e:
+                        logger.warning(f"Transcription failed with {provider_alias}: {e}")
+                        continue  # Try next provider
+
+                if result is None:
+                    logger.error(f"All transcription providers failed for transfer {transfer_id}")
+                    return
+
+                # 9. Store transcription locally
+                from datetime import datetime, timezone
+                transcription_data = {
+                    "text": result.get("text", ""),
+                    "transcriber_node_id": self.p2p_manager.node_id,  # Orchestrator
+                    "provider": result.get("provider", "unknown"),
+                    "confidence": result.get("confidence", 0.0),
+                    "language": result.get("language", "unknown"),
+                    "timestamp": datetime.now(timezone.utc).isoformat()
+                }
+
+                # Add remote provider credit if used (v0.13.2+ remote transcription)
+                if "remote_node_id" in result:
+                    transcription_data["remote_provider_node_id"] = result["remote_node_id"]
+
+                self._voice_transcriptions[transfer_id] = transcription_data
+
+                # 10. Broadcast transcription to peers
+                await self._broadcast_voice_transcription(node_id, transfer_id, transcription_data)
+
+                # 11. Notify UI
+                await self.local_api.broadcast_event("voice_transcription_complete", {
+                    "transfer_id": transfer_id,
+                    "node_id": node_id,
+                    **transcription_data
+                })
+
+                logger.info(f"Successfully transcribed voice message {transfer_id} using {result.get('provider')}")
+
+            except Exception as e:
+                logger.error(f"Transcription failed for transfer {transfer_id}: {e}", exc_info=True)
+
+    async def _check_transcription_capability(self) -> bool:
+        """
+        Check if this node has transcription capability.
+
+        Returns:
+            True if at least one transcription provider is available
+        """
+        provider_priority = self.settings.get_voice_transcription_provider_priority()
+
+        for provider_alias in provider_priority:
+            # Check if provider exists in LLM manager
+            if provider_alias in self.llm_manager.providers:
+                provider = self.llm_manager.providers[provider_alias]
+                # Check if provider supports voice (has whisper or audio capabilities)
+                provider_type = provider.config.get("type", "")
+                if provider_type in ["local_whisper", "openai", "openai_compatible"]:
+                    return True
+
+        return False
+
+    async def _broadcast_voice_transcription(
+        self,
+        node_id: str,
+        transfer_id: str,
+        transcription_data: Dict[str, Any]
+    ) -> None:
+        """
+        Broadcast VOICE_TRANSCRIPTION message to peer(s).
+
+        Args:
+            node_id: Peer node ID to send to
+            transfer_id: Voice message transfer ID
+            transcription_data: Transcription result
+        """
+        message = {
+            "command": "VOICE_TRANSCRIPTION",
+            "payload": {
+                "transfer_id": transfer_id,
+                "transcription_text": transcription_data.get("text", ""),
+                **transcription_data
+            }
+        }
+
+        # Send to specific peer
+        try:
+            await self.p2p_coordinator.send_message_to_peer(node_id, message)
+            logger.debug(f"Broadcasted VOICE_TRANSCRIPTION for {transfer_id} to {node_id}")
+        except Exception as e:
+            logger.error(f"Failed to broadcast transcription to {node_id}: {e}")
+
     async def get_firewall_rules(self) -> Dict[str, Any]:
         """Get current firewall rules as JSON dict for editor.
 
@@ -3093,6 +3280,71 @@ class CoreService:
 
         except Exception as e:
             logger.error("Error validating firewall rules: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_voice_transcription_config(self) -> Dict[str, Any]:
+        """
+        Get voice transcription configuration.
+
+        UI Integration: Called when user opens voice transcription settings.
+
+        Returns:
+            Dict with voice transcription settings
+        """
+        try:
+            return {
+                "status": "success",
+                "enabled": self.settings.get_voice_transcription_enabled(),
+                "sender_transcribes": self.settings.get_voice_transcription_sender_transcribes(),
+                "recipient_delay_seconds": self.settings.get_voice_transcription_recipient_delay_seconds(),
+                "provider_priority": self.settings.get_voice_transcription_provider_priority(),
+                "show_transcriber_name": self.settings.get_voice_transcription_show_transcriber_name(),
+                "cache_enabled": self.settings.get_voice_transcription_cache_enabled(),
+                "fallback_to_openai": self.settings.get_voice_transcription_fallback_to_openai()
+            }
+        except Exception as e:
+            logger.error("Error getting voice transcription config: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_voice_transcription_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Save voice transcription configuration.
+
+        UI Integration: Called when user saves voice transcription settings.
+
+        Args:
+            config: Voice transcription configuration dict
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            # Update settings
+            for key, value in config.items():
+                if key == "status":  # Skip status field from request
+                    continue
+                config_value = str(value) if not isinstance(value, list) else ",".join(value)
+                self.settings.set('voice_transcription', key, config_value)
+
+            # Persist to disk
+            self.settings.save()
+
+            # Broadcast update event to UI
+            await self.local_api.broadcast_event("voice_transcription_config_updated", config)
+
+            return {
+                "status": "success",
+                "message": "Voice transcription settings saved successfully"
+            }
+
+        except Exception as e:
+            logger.error("Error saving voice transcription config: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)

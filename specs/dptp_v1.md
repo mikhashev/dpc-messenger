@@ -1025,7 +1025,120 @@ verify_hash = true
 
 ---
 
-### 3.12 Relay Protocol Messages (v0.10.0)
+### 3.12 Voice Transcription Messages (v0.13.2)
+
+Distributed voice message transcription with automatic deduplication to prevent duplicate work in group chats.
+
+**Overview:**
+When a voice message is received, participants coordinate to ensure only ONE peer transcribes the audio and shares the result with all others. This prevents wasteful duplicate transcription in group conversations.
+
+**Distributed Transcription Flow:**
+1. Alice sends voice message → Bob & Charlie receive
+2. Bob waits 3 seconds (recipient delay), checks if transcription exists
+3. If Bob has Whisper capability: transcribes and broadcasts VOICE_TRANSCRIPTION to all participants
+4. Charlie waits 3 seconds, sees Bob already transcribed, skips transcription
+5. Charlie receives VOICE_TRANSCRIPTION from Bob and displays result
+
+**Deduplication:**
+- Uses `transfer_id` (from FILE_OFFER) as unique key
+- Per-transfer locks prevent race conditions
+- First transcription wins (subsequent messages ignored)
+
+#### VOICE_TRANSCRIPTION
+
+Broadcasts transcription result to all participants in a voice message conversation.
+
+**Format:**
+```json
+{
+  "command": "VOICE_TRANSCRIPTION",
+  "payload": {
+    "transfer_id": "550e8400-e29b-41d4-a716-446655440000",
+    "transcription_text": "Hello, this is a test voice message.",
+    "transcriber_node_id": "dpc-node-bob-abc123",
+    "provider": "local_whisper",
+    "confidence": 0.95,
+    "language": "en",
+    "timestamp": "2026-01-06T12:34:56Z",
+    "remote_provider_node_id": "dpc-node-charlie-xyz789"
+  }
+}
+```
+
+**Fields:**
+- `transfer_id` (string, required): Matches FILE_OFFER transfer_id for the voice message
+- `transcription_text` (string, required): Transcribed text content
+- `transcriber_node_id` (string, required): Node ID of orchestrator who initiated transcription
+- `provider` (string, required): Transcription provider used (e.g., "local_whisper", "openai", "remote:charlie:local_whisper")
+- `confidence` (float, required): Transcription confidence score (0.0 to 1.0)
+- `language` (string, required): Detected language code (e.g., "en", "es", "zh")
+- `timestamp` (string, required): ISO 8601 timestamp when transcription was created
+- `remote_provider_node_id` (string, optional): Node ID of remote compute provider (if using remote Whisper)
+
+**Response:** None (broadcast message, no acknowledgment required)
+
+**Behavior:**
+- Receiver checks for duplicate (via `transfer_id` in registry)
+- If duplicate: ignores message (transcription already stored)
+- If new: stores transcription data in registry
+- Updates conversation history (attaches transcription to voice message attachment)
+- Broadcasts `voice_transcription_received` event to UI
+
+**Remote Whisper Scenario:**
+When Bob uses Charlie's remote Whisper to transcribe Alice's voice message:
+- `transcriber_node_id`: Bob (orchestrator who decided to transcribe)
+- `provider`: "remote:charlie:local_whisper" (shows remote usage)
+- `remote_provider_node_id`: Charlie (compute provider who did actual work)
+- UI attribution (if enabled): "Transcribed by Bob using Charlie's local_whisper"
+
+**Privacy:**
+- Transcription text stored locally in conversation history
+- No Hub involvement (pure P2P broadcast)
+- Only participants who received original voice message get transcription
+
+---
+
+**Voice Transcription Configuration:**
+
+Client configuration (`~/.dpc/config.ini`):
+```ini
+[voice_transcription]
+enabled = true
+sender_transcribes = false
+recipient_delay_seconds = 3
+provider_priority = local_whisper,openai
+show_transcriber_name = false
+cache_transcriptions = true
+fallback_to_openai = true
+```
+
+**Settings:**
+- `enabled`: Master toggle for auto-transcription
+- `sender_transcribes`: Whether sender should transcribe their own voice messages (default: false)
+- `recipient_delay_seconds`: Wait time before recipients attempt transcription (default: 3 seconds)
+- `provider_priority`: Comma-separated list of providers to try (default: local_whisper,openai)
+- `show_transcriber_name`: Show attribution in UI (default: false for privacy)
+- `cache_transcriptions`: Store transcriptions in conversation history (default: true)
+- `fallback_to_openai`: Use OpenAI API if local Whisper unavailable (default: true)
+
+**UI Display:**
+- Transcription shown **below** voice player (original audio always visible)
+- Checkmark icon indicates transcription status
+- Optional attribution shows transcriber and provider
+- Warning icon (⚠️) for low confidence transcriptions (<0.8)
+
+**Edge Cases:**
+- **No Whisper available**: No transcription occurs (graceful degradation, voice player only)
+- **Multiple simultaneous recipients**: Recipient delay + locks prevent duplicate work
+- **Offline peer**: Transcription happens when peer reconnects and receives voice message
+
+**Token Usage:**
+- Transcription metadata: ~50 tokens per voice message (text + attribution)
+- Stored in conversation history for persistent display
+
+---
+
+### 3.13 Relay Protocol Messages (v0.10.0)
 
 Server-side relay functionality enabling NAT traversal for 100% peer connectivity. Volunteer relay nodes forward encrypted messages between peers without decrypting content.
 

@@ -7,9 +7,18 @@
     duration: number;
     timestamp?: string;
     compact?: boolean;
+    transcription?: {  // v0.13.2+ auto-transcription
+      text: string;
+      provider: string;
+      transcriber_node_id?: string;
+      confidence?: number;
+      language?: string;
+      remote_provider_node_id?: string;
+    };
+    showTranscriberName?: boolean;  // Whether to show who transcribed (v0.13.2+)
   }
 
-  let { audioUrl, filePath, duration, timestamp, compact = false }: VoicePlayerProps = $props();
+  let { audioUrl, filePath, duration, timestamp, compact = false, transcription, showTranscriberName = false }: VoicePlayerProps = $props();
 
   let audioElement: HTMLAudioElement;
   let isPlaying = $state(false);
@@ -191,6 +200,35 @@
   {/if}
 </div>
 
+<!-- Transcription display (v0.13.2+ auto-transcription) -->
+{#if transcription && !compact}
+  <div class="transcription-container">
+    <div class="transcription-header">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" class="transcription-icon">
+        <path d="M21 6.5l-9 9-3.5-3.5-1.5 1.5 5 5L22.5 8z"/>
+      </svg>
+      <span class="transcription-label">Transcription</span>
+
+      {#if showTranscriberName && transcription.transcriber_node_id}
+        <span class="transcription-attribution">
+          by {transcription.transcriber_node_id.substring(9, 20)}... using {transcription.provider}
+          {#if transcription.remote_provider_node_id}
+            (compute: {transcription.remote_provider_node_id.substring(9, 20)}...)
+          {/if}
+        </span>
+      {/if}
+
+      {#if transcription.confidence && transcription.confidence < 0.8}
+        <span class="transcription-warning" title="Low confidence transcription">⚠️</span>
+      {/if}
+    </div>
+
+    <div class="transcription-text">
+      {transcription.text}
+    </div>
+  </div>
+{/if}
+
 <style>
   .voice-player {
     display: flex;
@@ -364,5 +402,55 @@
     font-family: monospace;
     color: #666;
     white-space: nowrap;
+  }
+
+  /* Transcription styles (v0.13.2+ auto-transcription) */
+  .transcription-container {
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: #f9f9f9;
+    border-left: 3px solid #4CAF50;
+    border-radius: 4px;
+    font-size: 13px;
+  }
+
+  .transcription-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 6px;
+    color: #666;
+    font-size: 11px;
+    font-weight: 600;
+  }
+
+  .transcription-icon {
+    color: #4CAF50;
+    flex-shrink: 0;
+  }
+
+  .transcription-label {
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .transcription-attribution {
+    margin-left: auto;
+    color: #999;
+    font-size: 10px;
+    font-style: italic;
+  }
+
+  .transcription-warning {
+    margin-left: 4px;
+    font-size: 12px;
+    cursor: help;
+  }
+
+  .transcription-text {
+    color: #333;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-wrap: break-word;
   }
 </style>

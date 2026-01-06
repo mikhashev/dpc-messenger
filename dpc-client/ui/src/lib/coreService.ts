@@ -96,6 +96,11 @@ export const conversationReset = writable<any>(null);  // {conversation_id}
 // Voice message stores (v0.13.0 - voice recording and playback)
 export const voiceOfferReceived = writable<any>(null);  // {transfer_id, node_id, sender_name, filename, size_bytes, duration_seconds, ...voice_metadata}
 
+// Voice transcription stores (v0.13.2 - auto-transcription)
+export const voiceTranscriptionReceived = writable<any>(null);  // {transfer_id, node_id, text, provider, transcriber_node_id, confidence, language, timestamp}
+export const voiceTranscriptionComplete = writable<any>(null);  // {transfer_id, node_id, text, provider, ...} (local transcription completed)
+export const voiceTranscriptionConfig = writable<any>(null);  // Voice transcription settings updated
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -487,6 +492,19 @@ export function connectToCoreService() {
 
                     console.log(`Auto-downloading voice message from ${message.payload.sender_name}: ${message.payload.filename} (${message.payload.duration_seconds}s)`);
                 }
+                // Voice transcription events (v0.13.2+ auto-transcription)
+                else if (message.event === "voice_transcription_received") {
+                    console.log("Voice transcription received:", message.payload);
+                    voiceTranscriptionReceived.set(message.payload);
+                }
+                else if (message.event === "voice_transcription_complete") {
+                    console.log("Voice transcription complete:", message.payload);
+                    voiceTranscriptionComplete.set(message.payload);
+                }
+                else if (message.event === "voice_transcription_config_updated") {
+                    console.log("Voice transcription config updated:", message.payload);
+                    voiceTranscriptionConfig.set(message.payload);
+                }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)
                     for (const [cmdId, cmd] of pendingCommands.entries()) {
@@ -613,7 +631,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'rename_instruction_set',  // Instruction management
             'set_default_instruction_set',  // Instruction management
             'get_instruction_set',  // Instruction management
-            'transcribe_audio'  // v0.13.1 - voice message transcription
+            'transcribe_audio',  // v0.13.1 - voice message transcription
+            'get_voice_transcription_config',  // v0.13.2 - auto-transcription config
+            'save_voice_transcription_config'  // v0.13.2 - auto-transcription config
         ].includes(command);
 
         if (expectsResponse) {
@@ -771,4 +791,13 @@ export async function voteNewSession(proposalId: string, vote: boolean): Promise
         proposal_id: proposalId,
         vote: vote
     });
+}
+
+// Voice transcription config commands (v0.13.2+)
+export async function getVoiceTranscriptionConfig(): Promise<any> {
+    return sendCommand('get_voice_transcription_config', {});
+}
+
+export async function saveVoiceTranscriptionConfig(config: any): Promise<any> {
+    return sendCommand('save_voice_transcription_config', { config });
 }

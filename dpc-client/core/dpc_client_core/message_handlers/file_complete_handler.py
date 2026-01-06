@@ -122,6 +122,32 @@ class FileCompleteHandler(MessageHandler):
                 conversation_monitor.add_message("user", message_content, [attachment])
                 self.logger.debug(f"Added {file_type} attachment to conversation history: {transfer.filename}")
 
+            # Auto-transcribe if sender_transcribes enabled (v0.13.2+)
+            if is_voice:
+                import asyncio
+                asyncio.create_task(
+                    self.service._maybe_transcribe_voice_message(
+                        transfer_id=transfer_id,
+                        node_id=sender_node_id,
+                        file_path=transfer.file_path,
+                        voice_metadata=transfer.voice_metadata,
+                        is_sender=True
+                    )
+                )
+
+        # Auto-transcribe voice messages on download (v0.13.2+)
+        if transfer.direction == "download" and is_voice:
+            import asyncio
+            asyncio.create_task(
+                self.service._maybe_transcribe_voice_message(
+                    transfer_id=transfer_id,
+                    node_id=sender_node_id,
+                    file_path=transfer.file_path,
+                    voice_metadata=transfer.voice_metadata,
+                    is_sender=False
+                )
+            )
+
         self.logger.debug(f"FILE_COMPLETE processed, transfer marked as completed: {transfer.filename}")
 
         return None

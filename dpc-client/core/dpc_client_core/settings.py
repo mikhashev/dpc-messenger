@@ -185,6 +185,16 @@ class Settings:
             'default_codec': 'opus'  # Default audio codec (opus for web compatibility)
         }
 
+        self._config['voice_transcription'] = {
+            'enabled': 'true',  # Enable auto-transcription of received voice messages (v0.13.2+)
+            'sender_transcribes': 'false',  # Should sender transcribe their own voice messages
+            'recipient_delay_seconds': '3',  # Wait N seconds before recipients attempt transcription (coordination)
+            'provider_priority': 'local_whisper,openai',  # Comma-separated provider priority (local_whisper, openai, etc.)
+            'show_transcriber_name': 'false',  # Show who transcribed the message in UI
+            'cache_transcriptions': 'true',  # Cache transcriptions in memory
+            'fallback_to_openai': 'true'  # Fallback to OpenAI API if local Whisper unavailable
+        }
+
         self._config['local_transcription'] = {
             'enabled': 'true',  # Enable local Whisper transcription (v0.13.1+)
             'model': 'openai/whisper-large-v3',  # Model name (HuggingFace)
@@ -634,6 +644,42 @@ class Settings:
     def get_vision_thumbnail_quality(self) -> int:
         """Get thumbnail JPEG quality (0-100)."""
         return int(self.get('vision', 'thumbnail_quality', '85'))
+
+    # Voice Transcription Settings (v0.13.2+)
+
+    def get_voice_transcription_enabled(self) -> bool:
+        """Check if auto-transcription of voice messages is enabled."""
+        value = self.get('voice_transcription', 'enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_voice_transcription_sender_transcribes(self) -> bool:
+        """Check if sender should transcribe their own voice messages."""
+        value = self.get('voice_transcription', 'sender_transcribes', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_voice_transcription_recipient_delay_seconds(self) -> int:
+        """Get delay in seconds before recipients attempt transcription."""
+        return int(self.get('voice_transcription', 'recipient_delay_seconds', '3'))
+
+    def get_voice_transcription_provider_priority(self) -> list[str]:
+        """Get ordered list of transcription provider aliases."""
+        priority_str = self.get('voice_transcription', 'provider_priority', 'local_whisper,openai')
+        return [p.strip() for p in priority_str.split(',') if p.strip()]
+
+    def get_voice_transcription_show_transcriber_name(self) -> bool:
+        """Check if transcriber name should be shown in UI."""
+        value = self.get('voice_transcription', 'show_transcriber_name', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_voice_transcription_cache_enabled(self) -> bool:
+        """Check if transcription caching is enabled."""
+        value = self.get('voice_transcription', 'cache_transcriptions', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_voice_transcription_fallback_to_openai(self) -> bool:
+        """Check if OpenAI fallback is enabled."""
+        value = self.get('voice_transcription', 'fallback_to_openai', 'true')
+        return value.lower() in ('true', '1', 'yes')
 
     # Local Transcription Settings (v0.13.1+)
 
