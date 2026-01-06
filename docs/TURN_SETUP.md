@@ -96,7 +96,7 @@ Choose one method above and set your credentials.
 
 ```bash
 cd dpc-client/core
-poetry run python test_turn.py
+poetry run python tests/test_turn.py
 ```
 
 **Expected output if credentials are configured:**
@@ -206,7 +206,7 @@ After configuring credentials:
 
 1. **Test TURN connectivity:**
    ```bash
-   poetry run python test_turn.py
+   poetry run python tests/test_turn.py
    ```
 
 2. **Start the client:**
@@ -225,5 +225,5 @@ After configuring credentials:
 ## Related Documentation
 
 - [Metered.ca TURN Setup](https://www.metered.ca/docs/turn-stun/turn)
-- [Hub + TURN Integration Guide](../../docs/HUB_TURN_INTEGRATION.md)
-- [WebRTC Troubleshooting](../../docs/WEBRTC_SETUP_GUIDE.md)
+- [Hub + TURN Integration Guide](HUB_TURN_INTEGRATION.md)
+- [WebRTC Troubleshooting](WEBRTC_SETUP_GUIDE.md)

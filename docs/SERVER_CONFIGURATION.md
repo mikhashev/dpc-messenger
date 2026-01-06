@@ -116,7 +116,7 @@ stun_servers = stun:stun.provider-a.com:3478,stun:stun.provider-b.com:19302
 **WebRTC Connections Fail:**
 - Ensure at least one STUN server is accessible
 - Configure TURN credentials for restrictive NAT/firewall environments
-- Test server connectivity using `turn_connectivity_check.py`
+- Test server connectivity using `tests/test_turn.py`
 
 **Slow External IP Discovery:**
 - STUN servers may be slow or blocked
@@ -129,7 +129,7 @@ Run the diagnostic tool:
 
 ```bash
 cd dpc-client/core
-poetry run python turn_connectivity_check.py
+poetry run python tests/test_turn.py
 ```
 
 This will test connectivity to all configured servers.
