@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { convertFileSrc } from '@tauri-apps/api/core';
 
   interface VoicePlayerProps {
     audioUrl: string;
@@ -32,40 +33,6 @@
   let volume = $state(1.0);
   let actualAudioUrl = $state(audioUrl);  // Reactive state for converted URL
 
-  // Convert file path to Tauri asset URL (v0.13.0+)
-  // Handles timing issues where Tauri API loads asynchronously
-  function convertTauriPath(path: string): string | null {
-    console.error(`[VoicePlayer] Attempting Tauri conversion for: "${path}"`);
-
-    // Check if Tauri API is available
-    if (typeof window === 'undefined') {
-      console.error('[VoicePlayer] Window is undefined');
-      return null;
-    }
-
-    const tauri = (window as any).__TAURI__;
-    console.error(`[VoicePlayer] window.__TAURI__ = ${typeof tauri}`);
-
-    if (!tauri) {
-      console.error('[VoicePlayer] ❌ Tauri API not available');
-      return null;
-    }
-
-    if (!tauri.core || !tauri.core.convertFileSrc) {
-      console.error('[VoicePlayer] ❌ Tauri core.convertFileSrc not found');
-      return null;
-    }
-
-    try {
-      const converted = tauri.core.convertFileSrc(path);
-      console.error(`[VoicePlayer] ✅ CONVERTED: ${path} -> ${converted}`);
-      return converted;
-    } catch (err) {
-      console.error('[VoicePlayer] ❌ CONVERSION FAILED:', err);
-      return null;
-    }
-  }
-
   // Update actualAudioUrl when filePath or audioUrl changes
   $effect(() => {
     console.error(`[VoicePlayer] Effect triggered: filePath="${filePath}", audioUrl="${audioUrl}"`);
@@ -79,24 +46,16 @@
       return;
     }
 
-    // Try immediate conversion
-    const converted = convertTauriPath(cleanPath);
-    if (converted) {
+    // Convert using Tauri v2 API (works in both Tauri and browser contexts)
+    try {
+      const converted = convertFileSrc(cleanPath);
+      console.error(`[VoicePlayer] ✅ CONVERTED: ${cleanPath} -> ${converted}`);
       actualAudioUrl = converted;
-      return;
+    } catch (err) {
+      console.error(`[VoicePlayer] ❌ CONVERSION FAILED:`, err);
+      console.error(`[VoicePlayer] Falling back to original audioUrl: "${audioUrl}"`);
+      actualAudioUrl = audioUrl;
     }
-
-    // Tauri API not ready yet, retry after short delay
-    console.error('[VoicePlayer] Tauri API not ready, retrying in 100ms...');
-    setTimeout(() => {
-      const retryConverted = convertTauriPath(cleanPath);
-      if (retryConverted) {
-        actualAudioUrl = retryConverted;
-      } else {
-        console.error(`[VoicePlayer] ⚠️ Tauri conversion failed after retry, using original: "${audioUrl}"`);
-        actualAudioUrl = audioUrl;
-      }
-    }, 100);
   });
 
   function togglePlay() {
