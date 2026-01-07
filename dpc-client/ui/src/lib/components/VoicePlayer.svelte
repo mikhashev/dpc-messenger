@@ -30,42 +30,73 @@
   let currentTime = $state(0);
   let playbackRate = $state(1.0);
   let volume = $state(1.0);
+  let actualAudioUrl = $state(audioUrl);  // Reactive state for converted URL
 
-  // Convert local file path to Tauri asset URL if provided (v0.13.0+)
-  // This fixes "Not allowed to load local resource" error in Tauri desktop app
-  // Use $derived for synchronous conversion before onMount
-  const actualAudioUrl = $derived.by(() => {
-    console.error(`[VoicePlayer] DERIVING URL...`);
+  // Convert file path to Tauri asset URL (v0.13.0+)
+  // Handles timing issues where Tauri API loads asynchronously
+  function convertTauriPath(path: string): string | null {
+    console.error(`[VoicePlayer] Attempting Tauri conversion for: "${path}"`);
+
+    // Check if Tauri API is available
+    if (typeof window === 'undefined') {
+      console.error('[VoicePlayer] Window is undefined');
+      return null;
+    }
+
+    const tauri = (window as any).__TAURI__;
+    console.error(`[VoicePlayer] window.__TAURI__ = ${typeof tauri}`);
+
+    if (!tauri) {
+      console.error('[VoicePlayer] ❌ Tauri API not available');
+      return null;
+    }
+
+    if (!tauri.core || !tauri.core.convertFileSrc) {
+      console.error('[VoicePlayer] ❌ Tauri core.convertFileSrc not found');
+      return null;
+    }
+
+    try {
+      const converted = tauri.core.convertFileSrc(path);
+      console.error(`[VoicePlayer] ✅ CONVERTED: ${path} -> ${converted}`);
+      return converted;
+    } catch (err) {
+      console.error('[VoicePlayer] ❌ CONVERSION FAILED:', err);
+      return null;
+    }
+  }
+
+  // Update actualAudioUrl when filePath or audioUrl changes
+  $effect(() => {
+    console.error(`[VoicePlayer] Effect triggered: filePath="${filePath}", audioUrl="${audioUrl}"`);
 
     // Strip file:// protocol if present (Windows Tauri adds this incorrectly)
     const cleanPath = filePath ? filePath.replace(/^file:\/\/\//, '').replace(/^file:\/\//, '') : null;
-    console.error(`[VoicePlayer] Clean path: "${cleanPath}"`);
 
-    // If no filePath provided, use audioUrl directly
     if (!cleanPath) {
-      console.error('[VoicePlayer] No clean path, using audioUrl');
-      return audioUrl;
+      console.error(`[VoicePlayer] No filePath, using audioUrl: "${audioUrl}"`);
+      actualAudioUrl = audioUrl;
+      return;
     }
 
-    // Check if we're in a Tauri context
-    const hasTauri = typeof window !== 'undefined' && (window as any).__TAURI__;
-    console.error(`[VoicePlayer] Tauri available: ${hasTauri}`);
+    // Try immediate conversion
+    const converted = convertTauriPath(cleanPath);
+    if (converted) {
+      actualAudioUrl = converted;
+      return;
+    }
 
-    if (hasTauri) {
-      try {
-        // Dynamically access convertFileSrc from Tauri global
-        const { convertFileSrc } = (window as any).__TAURI__.core;
-        const converted = convertFileSrc(cleanPath);
-        console.error(`[VoicePlayer] ✅ CONVERTED: ${cleanPath} -> ${converted}`);
-        return converted;
-      } catch (err) {
-        console.error('[VoicePlayer] ❌ CONVERSION FAILED:', err);
-        return audioUrl;
+    // Tauri API not ready yet, retry after short delay
+    console.error('[VoicePlayer] Tauri API not ready, retrying in 100ms...');
+    setTimeout(() => {
+      const retryConverted = convertTauriPath(cleanPath);
+      if (retryConverted) {
+        actualAudioUrl = retryConverted;
+      } else {
+        console.error(`[VoicePlayer] ⚠️ Tauri conversion failed after retry, using original: "${audioUrl}"`);
+        actualAudioUrl = audioUrl;
       }
-    } else {
-      console.error('[VoicePlayer] Not in Tauri, using audioUrl');
-      return audioUrl;
-    }
+    }, 100);
   });
 
   function togglePlay() {
