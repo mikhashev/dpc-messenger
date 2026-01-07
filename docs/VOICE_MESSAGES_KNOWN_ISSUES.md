@@ -31,20 +31,22 @@ macOS WKWebView does not expose the `navigator.mediaDevices` API at all, even wi
 **Workarounds:**
 
 **Option 1: Info.plist Configuration (REQUIRED - Added in v0.13.2)**
-macOS requires explicit permission descriptions in `tauri.conf.json`:
+macOS requires explicit permission descriptions in `src-tauri/Info.plist`:
 
-```json
-{
-  "bundle": {
-    "macOS": {
-      "info": {
-        "NSMicrophoneUsageDescription": "D-PC Messenger needs microphone access...",
-        "NSCameraUsageDescription": "D-PC Messenger needs camera access..."
-      }
-    }
-  }
-}
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>D-PC Messenger needs microphone access...</string>
+    <key>NSCameraUsageDescription</key>
+    <string>D-PC Messenger needs camera access...</string>
+</dict>
+</plist>
 ```
+
+**Important:** Tauri 2.x merges this Info.plist file with auto-generated values during build.
 
 **Status:** ✅ Fixed in v0.13.2 - macOS builds now include Info.plist with microphone permissions.
 

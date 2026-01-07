@@ -64,18 +64,6 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "macOS": {
-      "minimumSystemVersion": "10.13",
-      "entitlements": null,
-      "exceptionDomain": "",
-      "frameworks": [],
-      "providerShortName": null,
-      "signingIdentity": null,
-      "info": {
-        "NSMicrophoneUsageDescription": "D-PC Messenger needs microphone access to record and send voice messages to your contacts.",
-        "NSCameraUsageDescription": "D-PC Messenger needs camera access to capture and send photos or video messages."
-      }
-    }
+    ]
   }
 }
