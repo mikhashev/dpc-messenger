@@ -28,13 +28,11 @@
 
   // Convert local file path to Tauri asset URL if provided (v0.13.0+)
   // This fixes "Not allowed to load local resource" error in Tauri desktop app
-  // Use dynamic Tauri API access to avoid import errors when Tauri is not available
-  let actualAudioUrl = $state(audioUrl);
-
-  $effect(() => {
+  // Use $derived for synchronous conversion before onMount
+  const actualAudioUrl = $derived.by(() => {
+    // If no filePath provided, use audioUrl directly
     if (!filePath) {
-      actualAudioUrl = audioUrl;
-      return;
+      return audioUrl;
     }
 
     // Check if we're in a Tauri context
@@ -42,13 +40,16 @@
       try {
         // Dynamically access convertFileSrc from Tauri global
         const { convertFileSrc } = (window as any).__TAURI__.core;
-        actualAudioUrl = convertFileSrc(filePath);
+        const converted = convertFileSrc(filePath);
+        console.log(`Converted file path: ${filePath} -> ${converted}`);
+        return converted;
       } catch (err) {
         console.warn('Failed to convert file path, using original URL:', err);
-        actualAudioUrl = audioUrl;
+        return audioUrl;
       }
     } else {
-      actualAudioUrl = audioUrl;
+      // Not in Tauri context, use audioUrl as-is
+      return audioUrl;
     }
   });
 
