@@ -56,12 +56,14 @@
     messages,
     conversationId,
     enableMarkdown = $bindable(true),
-    chatWindowElement = $bindable()
+    chatWindowElement = $bindable(),
+    showTranscription = true  // v0.13.2+: Control transcription display
   }: {
     messages: Message[];
     conversationId: string;
     enableMarkdown?: boolean;
     chatWindowElement?: HTMLElement;
+    showTranscription?: boolean;
   } = $props();
 </script>
 
@@ -107,7 +109,7 @@
                         filePath={attachment.file_path}
                         duration={attachment.voice_metadata.duration_seconds}
                         timestamp={attachment.voice_metadata.recorded_at}
-                        transcription={attachment.transcription}
+                        transcription={showTranscription ? attachment.transcription : undefined}
                         showTranscriberName={false}
                       />
                     {/key}

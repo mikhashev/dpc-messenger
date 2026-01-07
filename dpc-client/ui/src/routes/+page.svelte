@@ -1717,6 +1717,34 @@
     voicePreview = null;
   }
 
+  // Auto-transcribe setting management (v0.13.2+ Auto-Transcription)
+  function saveAutoTranscribeSetting() {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(`autoTranscribe_${activeChatId}`, autoTranscribeEnabled.toString());
+      console.log(`[AutoTranscribe] Saved setting for ${activeChatId}: ${autoTranscribeEnabled}`);
+    }
+  }
+
+  function loadAutoTranscribeSetting(chatId: string) {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem(`autoTranscribe_${chatId}`);
+      if (saved !== null) {
+        autoTranscribeEnabled = saved === 'true';
+        console.log(`[AutoTranscribe] Loaded setting for ${chatId}: ${autoTranscribeEnabled}`);
+      } else {
+        // Default to true if not set
+        autoTranscribeEnabled = true;
+      }
+    }
+  }
+
+  // Load auto-transcribe setting when chat changes
+  $effect(() => {
+    if (activeChatId) {
+      loadAutoTranscribeSetting(activeChatId);
+    }
+  });
+
   // --- HANDLE INCOMING MESSAGES ---
   $effect(() => {
     if ($coreMessages?.id) {
@@ -1990,6 +2018,7 @@
         conversationId={activeChatId}
         bind:enableMarkdown
         bind:chatWindowElement={chatWindow}
+        showTranscription={autoTranscribeEnabled}
       />
 
       <div class="chat-input">
@@ -2530,6 +2559,38 @@
     transition: transform 0.2s ease;
     display: inline-block;
     min-width: 1em;
+  }
+
+  /* Auto Transcribe Toggle (v0.13.2+) */
+  .auto-transcribe-toggle {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 14px;
+    color: #555;
+    cursor: pointer;
+    padding: 0.5rem 0.75rem;
+    margin-left: auto;
+    background: #f5f5f5;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+    user-select: none;
+  }
+
+  .auto-transcribe-toggle:hover {
+    background: #e8e8e8;
+  }
+
+  .auto-transcribe-toggle input[type="checkbox"] {
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+  }
+
+  .auto-transcribe-toggle span {
+    font-weight: 500;
+    white-space: nowrap;
   }
 
   /* Resize Handle */
