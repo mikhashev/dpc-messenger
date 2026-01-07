@@ -633,7 +633,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_instruction_set',  // Instruction management
             'transcribe_audio',  // v0.13.1 - voice message transcription
             'get_voice_transcription_config',  // v0.13.2 - auto-transcription config
-            'save_voice_transcription_config'  // v0.13.2 - auto-transcription config
+            'save_voice_transcription_config',  // v0.13.2 - auto-transcription config
+            'set_conversation_transcription',  // v0.13.2 - per-conversation transcription control
+            'get_conversation_transcription'  // v0.13.2 - per-conversation transcription control
         ].includes(command);
 
         if (expectsResponse) {
@@ -800,4 +802,13 @@ export async function getVoiceTranscriptionConfig(): Promise<any> {
 
 export async function saveVoiceTranscriptionConfig(config: any): Promise<any> {
     return sendCommand('save_voice_transcription_config', { config });
+}
+
+// Per-conversation transcription control (v0.13.2+ checkbox)
+export async function setConversationTranscription(nodeId: string, enabled: boolean): Promise<any> {
+    return sendCommand('set_conversation_transcription', { node_id: nodeId, enabled });
+}
+
+export async function getConversationTranscription(nodeId: string): Promise<any> {
+    return sendCommand('get_conversation_transcription', { node_id: nodeId });
 }

@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, setConversationTranscription, getConversationTranscription } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -1718,29 +1718,46 @@
   }
 
   // Auto-transcribe setting management (v0.13.2+ Auto-Transcription)
-  function saveAutoTranscribeSetting() {
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(`autoTranscribe_${activeChatId}`, autoTranscribeEnabled.toString());
-      console.log(`[AutoTranscribe] Saved setting for ${activeChatId}: ${autoTranscribeEnabled}`);
+  async function saveAutoTranscribeSetting() {
+    // Only save for P2P chats (not AI chats or local_ai)
+    if ($aiChats.has(activeChatId) || activeChatId === 'local_ai') {
+      return;
+    }
+
+    try {
+      const result = await setConversationTranscription(activeChatId, autoTranscribeEnabled);
+      console.log(`[AutoTranscribe] Saved setting for ${activeChatId}: ${autoTranscribeEnabled}`, result);
+    } catch (error) {
+      console.error(`[AutoTranscribe] Failed to save setting for ${activeChatId}:`, error);
     }
   }
 
-  function loadAutoTranscribeSetting(chatId: string) {
-    if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem(`autoTranscribe_${chatId}`);
-      if (saved !== null) {
-        autoTranscribeEnabled = saved === 'true';
+  async function loadAutoTranscribeSetting(chatId: string) {
+    // Only load for P2P chats (not AI chats or local_ai)
+    if ($aiChats.has(chatId) || chatId === 'local_ai') {
+      autoTranscribeEnabled = true;  // Not applicable for AI chats
+      return;
+    }
+
+    try {
+      const result = await getConversationTranscription(chatId);
+      if (result.status === 'success') {
+        autoTranscribeEnabled = result.enabled;
         console.log(`[AutoTranscribe] Loaded setting for ${chatId}: ${autoTranscribeEnabled}`);
       } else {
-        // Default to true if not set
+        // Default to true on error
         autoTranscribeEnabled = true;
+        console.warn(`[AutoTranscribe] Failed to load setting for ${chatId}, defaulting to true`);
       }
+    } catch (error) {
+      console.error(`[AutoTranscribe] Error loading setting for ${chatId}:`, error);
+      autoTranscribeEnabled = true;  // Default to true on error
     }
   }
 
   // Load auto-transcribe setting when chat changes
   $effect(() => {
-    if (activeChatId) {
+    if (activeChatId && $connectionStatus === 'connected') {
       loadAutoTranscribeSetting(activeChatId);
     }
   });

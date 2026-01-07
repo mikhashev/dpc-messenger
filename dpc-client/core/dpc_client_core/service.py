@@ -261,6 +261,8 @@ class CoreService:
         # Voice transcription tracking (v0.13.2+ auto-transcription)
         self._voice_transcriptions: Dict[str, Dict[str, Any]] = {}  # transfer_id -> transcription_data
         self._transcription_locks: Dict[str, asyncio.Lock] = {}  # transfer_id -> lock (prevents concurrent transcription)
+        self._voice_transcription_settings: Dict[str, bool] = {}  # node_id -> enabled (per-conversation setting)
+        self._load_voice_transcription_settings()  # Load from disk
 
         # Hub reconnection settings
         self._hub_reconnect_attempts = 0
@@ -2980,22 +2982,29 @@ class CoreService:
             voice_metadata: Voice metadata dict (duration, codec, etc.)
             is_sender: True if this node sent the voice message, False if received
         """
-        # 1. Check if auto-transcription is enabled
+        # 1. Check if auto-transcription is enabled globally
         if not self.settings.get_voice_transcription_enabled():
-            logger.debug(f"Auto-transcription disabled, skipping transfer {transfer_id}")
+            logger.debug(f"Auto-transcription disabled globally, skipping transfer {transfer_id}")
             return
 
-        # 2. Check if already transcribed (deduplication)
+        # 2. Check per-conversation transcription setting (frontend checkbox)
+        # Default to True if not set (backward compatibility)
+        per_conversation_enabled = self._voice_transcription_settings.get(node_id, True)
+        if not per_conversation_enabled:
+            logger.debug(f"Auto-transcription disabled for conversation with {node_id}, skipping transfer {transfer_id}")
+            return
+
+        # 3. Check if already transcribed (deduplication)
         if transfer_id in self._voice_transcriptions:
             logger.debug(f"Transfer {transfer_id} already transcribed, skipping")
             return
 
-        # 3. Check if this is a sender and sender_transcribes is disabled
+        # 4. Check if this is a sender and sender_transcribes is disabled
         if is_sender and not self.settings.get_voice_transcription_sender_transcribes():
             logger.debug(f"Sender transcription disabled, skipping transfer {transfer_id}")
             return
 
-        # 4. Acquire transcription lock to prevent race conditions
+        # 5. Acquire transcription lock to prevent race conditions
         if transfer_id not in self._transcription_locks:
             self._transcription_locks[transfer_id] = asyncio.Lock()
 
@@ -3005,7 +3014,7 @@ class CoreService:
                 logger.debug(f"Transfer {transfer_id} was transcribed while waiting for lock")
                 return
 
-            # 5. Recipients wait N seconds before attempting transcription (gives sender time to transcribe first)
+            # 6. Recipients wait N seconds before attempting transcription (gives sender time to transcribe first)
             if not is_sender:
                 delay = self.settings.get_voice_transcription_recipient_delay_seconds()
                 logger.debug(f"Recipient waiting {delay}s before checking transcription for {transfer_id}")
@@ -3016,7 +3025,7 @@ class CoreService:
                     logger.debug(f"Transfer {transfer_id} was transcribed during delay period")
                     return
 
-            # 6. Check if this node has transcription capability
+            # 7. Check if this node has transcription capability
             has_capability = await self._check_transcription_capability()
             if not has_capability:
                 logger.info(f"No transcription capability available for transfer {transfer_id}")
@@ -3084,6 +3093,42 @@ class CoreService:
 
             except Exception as e:
                 logger.error(f"Transcription failed for transfer {transfer_id}: {e}", exc_info=True)
+
+    def _load_voice_transcription_settings(self) -> None:
+        """
+        Load per-conversation voice transcription settings from disk.
+
+        Settings stored in ~/.dpc/voice_transcription_settings.json:
+        {
+            "node_id_1": true,
+            "node_id_2": false,
+            ...
+        }
+        """
+        settings_file = DPC_HOME_DIR / "voice_transcription_settings.json"
+        if settings_file.exists():
+            try:
+                import json
+                with open(settings_file, 'r') as f:
+                    self._voice_transcription_settings = json.load(f)
+                logger.debug(f"Loaded voice transcription settings for {len(self._voice_transcription_settings)} conversations")
+            except Exception as e:
+                logger.warning(f"Failed to load voice transcription settings: {e}")
+                self._voice_transcription_settings = {}
+        else:
+            logger.debug("No voice transcription settings file found, using empty settings")
+            self._voice_transcription_settings = {}
+
+    def _save_voice_transcription_settings(self) -> None:
+        """Save per-conversation voice transcription settings to disk."""
+        settings_file = DPC_HOME_DIR / "voice_transcription_settings.json"
+        try:
+            import json
+            with open(settings_file, 'w') as f:
+                json.dump(self._voice_transcription_settings, f, indent=2)
+            logger.debug(f"Saved voice transcription settings for {len(self._voice_transcription_settings)} conversations")
+        except Exception as e:
+            logger.error(f"Failed to save voice transcription settings: {e}")
 
     async def _check_transcription_capability(self) -> bool:
         """
@@ -3355,6 +3400,69 @@ class CoreService:
             return {
                 "status": "error",
                 "message": str(e)
+            }
+
+    async def set_conversation_transcription(self, node_id: str, enabled: bool) -> Dict[str, Any]:
+        """
+        Set per-conversation auto-transcription setting (v0.13.2+ UI checkbox control).
+
+        UI Integration: Called when user toggles "Auto Transcribe" checkbox in chat header.
+
+        Args:
+            node_id: Peer node ID for the conversation
+            enabled: True to enable auto-transcription, False to disable
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            # Update in-memory setting
+            self._voice_transcription_settings[node_id] = enabled
+
+            # Persist to disk
+            self._save_voice_transcription_settings()
+
+            logger.info(f"Set auto-transcription for {node_id}: {enabled}")
+
+            return {
+                "status": "success",
+                "message": f"Auto-transcription {'enabled' if enabled else 'disabled'} for conversation"
+            }
+
+        except Exception as e:
+            logger.error(f"Error setting conversation transcription for {node_id}: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_conversation_transcription(self, node_id: str) -> Dict[str, Any]:
+        """
+        Get per-conversation auto-transcription setting (v0.13.2+ UI checkbox state).
+
+        UI Integration: Called when chat loads to restore checkbox state.
+
+        Args:
+            node_id: Peer node ID for the conversation
+
+        Returns:
+            Dict with status and enabled flag
+        """
+        try:
+            # Default to True if not set (backward compatibility)
+            enabled = self._voice_transcription_settings.get(node_id, True)
+
+            return {
+                "status": "success",
+                "enabled": enabled
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting conversation transcription for {node_id}: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "enabled": True  # Default to enabled on error
             }
 
     async def vote_knowledge_commit(
