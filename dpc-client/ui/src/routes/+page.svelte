@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -39,8 +39,8 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
-    attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4)
-      type: 'file' | 'image';
+    attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
+      type: 'file' | 'image' | 'voice';
       filename: string;
       file_path?: string;  // Full-size image file path (for P2P file transfers)
       size_bytes: number;
@@ -54,6 +54,24 @@
       thumbnail?: string;  // Base64 data URL
       vision_analyzed?: boolean;  // AI chat only: was vision API used?
       vision_result?: string;  // AI chat only: vision analysis text
+      // Voice-specific fields (v0.13.0):
+      voice_metadata?: {
+        duration_seconds: number;
+        sample_rate: number;
+        channels: number;
+        codec: string;
+        recorded_at: string;
+      };
+      // Voice transcription (v0.13.2+):
+      transcription?: {
+        text: string;
+        provider: string;
+        transcriber_node_id?: string;
+        confidence?: number;
+        language?: string;
+        timestamp?: string;
+        remote_provider_node_id?: string;
+      };
     }>;
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
@@ -666,6 +684,43 @@
         });
         console.log(`[Notifications] File cancelled notification: ${notified ? 'system' : 'skip'}`);
       })();
+    }
+  });
+
+  // Reactive: Handle voice transcription complete (v0.13.2+)
+  $effect(() => {
+    if ($voiceTranscriptionComplete) {
+      const { transfer_id, node_id, text, transcriber_node_id, provider, confidence, language, timestamp, remote_provider_node_id } = $voiceTranscriptionComplete;
+      console.log(`[VoiceTranscription] Received transcription for ${transfer_id}: "${text}"`);
+
+      // Find the message with this transfer_id and add transcription to attachment
+      chatHistories.update(histories => {
+        const updatedHistories = new Map(histories);
+        for (const [chatId, messages] of updatedHistories) {
+          for (const message of messages) {
+            if (message.attachments) {
+              for (const attachment of message.attachments) {
+                if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
+                  // Add transcription to attachment
+                  attachment.transcription = {
+                    text,
+                    provider,
+                    transcriber_node_id,
+                    confidence,
+                    language,
+                    timestamp,
+                    remote_provider_node_id
+                  };
+                  console.log(`[VoiceTranscription] Added transcription to message in chat ${chatId}`);
+                  return updatedHistories;
+                }
+              }
+            }
+          }
+        }
+        console.warn(`[VoiceTranscription] Could not find message with transfer_id: ${transfer_id}`);
+        return updatedHistories;
+      });
     }
   });
 
