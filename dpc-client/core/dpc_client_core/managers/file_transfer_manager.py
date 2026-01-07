@@ -770,6 +770,22 @@ class FileTransferManager:
                 "status": "completed"
             })
 
+            # Add to backend conversation monitor (RECEIVER SIDE)
+            # This ensures transcriptions can be attached and knowledge extraction works
+            conversation_monitor = self.service._get_or_create_conversation_monitor(node_id)
+            if conversation_monitor:
+                # Determine message content based on attachment type
+                if is_voice:
+                    message_content = f"Received voice message: {transfer.filename} ({size_mb} MB)"
+                elif is_image:
+                    message_content = f"Received screenshot: {transfer.filename} ({size_mb} MB)"
+                else:
+                    message_content = f"Received file: {transfer.filename} ({size_mb} MB)"
+
+                # Add as "assistant" role (peer's message from receiver's perspective)
+                conversation_monitor.add_message("assistant", message_content, [attachment])
+                logger.debug(f"Added received {attachment['type']} to conversation history: {transfer.filename}")
+
         # Auto-transcribe voice messages if enabled (v0.13.2+ recipient-side)
         if is_voice and transfer.voice_metadata and save_to_disk:
             import asyncio

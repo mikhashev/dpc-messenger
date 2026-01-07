@@ -751,6 +751,11 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         messages_to_analyze = self.full_conversation if self.full_conversation else self.message_buffer
         messages_text = self._format_messages_for_analysis(messages_to_analyze)
 
+        # Extract voice transcriptions from message_history (v0.13.2+)
+        # Includes transcribed text for knowledge extraction
+        transcriptions_text = self._extract_transcriptions_from_history()
+        messages_text += transcriptions_text
+
         # Build cultural context section (conditional)
         cultural_section = ""
         if cultural_perspectives_enabled:
@@ -1004,6 +1009,42 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             timestamp = msg.timestamp.split('T')[1][:8] if 'T' in msg.timestamp else msg.timestamp
             lines.append(f"[{timestamp}] {msg.sender_name}: {msg.text}")
         return "\n".join(lines)
+
+    def _extract_transcriptions_from_history(self) -> str:
+        """Extract voice transcription text from message_history
+
+        Scans message_history for voice attachments with transcriptions and
+        formats them for inclusion in knowledge extraction prompts.
+
+        Returns:
+            Formatted string with voice transcriptions, or empty string if none found
+        """
+        transcriptions = []
+
+        for msg in self.message_history:
+            attachments = msg.get("attachments", [])
+            for attachment in attachments:
+                if attachment.get("type") == "voice":
+                    transcription = attachment.get("transcription")
+                    if transcription and transcription.get("text"):
+                        # Format: "Voice message from [sender]: [transcription text]"
+                        role = msg.get("role", "user")
+                        sender_label = "You" if role == "user" else "Peer"
+
+                        text = transcription["text"]
+                        provider = transcription.get("provider", "unknown")
+                        confidence = transcription.get("confidence", 0.0)
+
+                        # Format with metadata for context
+                        transcriptions.append(
+                            f"{sender_label} (voice message, transcribed by {provider}, "
+                            f"confidence: {confidence:.2f}): {text}"
+                        )
+
+        if transcriptions:
+            return "\n\nVOICE MESSAGE TRANSCRIPTIONS:\n" + "\n".join(transcriptions)
+        else:
+            return ""
 
     def reset(self):
         """Reset monitor state"""
