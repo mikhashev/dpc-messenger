@@ -20,6 +20,11 @@
 
   let { audioUrl, filePath, duration, timestamp, compact = false, transcription, showTranscriberName = false }: VoicePlayerProps = $props();
 
+  // Debug props immediately
+  $effect(() => {
+    console.error(`[VoicePlayer] PROPS RECEIVED: audioUrl="${audioUrl}", filePath="${filePath}"`);
+  });
+
   let audioElement: HTMLAudioElement;
   let isPlaying = $state(false);
   let currentTime = $state(0);
@@ -30,25 +35,35 @@
   // This fixes "Not allowed to load local resource" error in Tauri desktop app
   // Use $derived for synchronous conversion before onMount
   const actualAudioUrl = $derived.by(() => {
+    console.error(`[VoicePlayer] DERIVING URL...`);
+
+    // Strip file:// protocol if present (Windows Tauri adds this incorrectly)
+    const cleanPath = filePath ? filePath.replace(/^file:\/\/\//, '').replace(/^file:\/\//, '') : null;
+    console.error(`[VoicePlayer] Clean path: "${cleanPath}"`);
+
     // If no filePath provided, use audioUrl directly
-    if (!filePath) {
+    if (!cleanPath) {
+      console.error('[VoicePlayer] No clean path, using audioUrl');
       return audioUrl;
     }
 
     // Check if we're in a Tauri context
-    if (typeof window !== 'undefined' && (window as any).__TAURI__) {
+    const hasTauri = typeof window !== 'undefined' && (window as any).__TAURI__;
+    console.error(`[VoicePlayer] Tauri available: ${hasTauri}`);
+
+    if (hasTauri) {
       try {
         // Dynamically access convertFileSrc from Tauri global
         const { convertFileSrc } = (window as any).__TAURI__.core;
-        const converted = convertFileSrc(filePath);
-        console.log(`Converted file path: ${filePath} -> ${converted}`);
+        const converted = convertFileSrc(cleanPath);
+        console.error(`[VoicePlayer] ✅ CONVERTED: ${cleanPath} -> ${converted}`);
         return converted;
       } catch (err) {
-        console.warn('Failed to convert file path, using original URL:', err);
+        console.error('[VoicePlayer] ❌ CONVERSION FAILED:', err);
         return audioUrl;
       }
     } else {
-      // Not in Tauri context, use audioUrl as-is
+      console.error('[VoicePlayer] Not in Tauri, using audioUrl');
       return audioUrl;
     }
   });

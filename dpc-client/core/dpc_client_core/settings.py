@@ -189,7 +189,7 @@ class Settings:
             'enabled': 'true',  # Enable auto-transcription of received voice messages (v0.13.2+)
             'sender_transcribes': 'false',  # Should sender transcribe their own voice messages
             'recipient_delay_seconds': '3',  # Wait N seconds before recipients attempt transcription (coordination)
-            'provider_priority': 'local_whisper,openai',  # Comma-separated provider priority (local_whisper, openai, etc.)
+            'provider_priority': 'local_whisper_large,local_whisper,openai',  # Comma-separated provider priority (aliases from providers.json)
             'show_transcriber_name': 'false',  # Show who transcribed the message in UI
             'cache_transcriptions': 'true',  # Cache transcriptions in memory
             'fallback_to_openai': 'true'  # Fallback to OpenAI API if local Whisper unavailable
@@ -663,7 +663,7 @@ class Settings:
 
     def get_voice_transcription_provider_priority(self) -> list[str]:
         """Get ordered list of transcription provider aliases."""
-        priority_str = self.get('voice_transcription', 'provider_priority', 'local_whisper,openai')
+        priority_str = self.get('voice_transcription', 'provider_priority', 'local_whisper_large,local_whisper,openai')
         return [p.strip() for p in priority_str.split(',') if p.strip()]
 
     def get_voice_transcription_show_transcriber_name(self) -> bool:
