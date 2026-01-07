@@ -3137,7 +3137,7 @@ class CoreService:
 
         # Send to specific peer
         try:
-            await self.p2p_coordinator.send_message_to_peer(node_id, message)
+            await self.p2p_manager.send_message_to_peer(node_id, message)
             logger.debug(f"Broadcasted VOICE_TRANSCRIPTION for {transfer_id} to {node_id}")
         except Exception as e:
             logger.error(f"Failed to broadcast transcription to {node_id}: {e}")

@@ -694,31 +694,51 @@
       console.log(`[VoiceTranscription] Received transcription for ${transfer_id}: "${text}"`);
 
       // Find the message with this transfer_id and add transcription to attachment
+      // CRITICAL: Must create NEW objects at every level to trigger Svelte reactivity
       chatHistories.update(histories => {
-        const updatedHistories = new Map(histories);
-        for (const [chatId, messages] of updatedHistories) {
-          for (const message of messages) {
+        const updatedHistories = new Map();
+
+        for (const [chatId, messages] of histories) {
+          // Create NEW messages array for this chat
+          const updatedMessages = messages.map(message => {
+            // Check if this message has the voice attachment we're looking for
             if (message.attachments) {
-              for (const attachment of message.attachments) {
-                if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
-                  // Add transcription to attachment
-                  attachment.transcription = {
-                    text,
-                    provider,
-                    transcriber_node_id,
-                    confidence,
-                    language,
-                    timestamp,
-                    remote_provider_node_id
-                  };
-                  console.log(`[VoiceTranscription] Added transcription to message in chat ${chatId}`);
-                  return updatedHistories;
-                }
+              const hasTargetVoice = message.attachments.some(
+                att => att.type === 'voice' && att.transfer_id === transfer_id
+              );
+
+              if (hasTargetVoice) {
+                // Create NEW message with NEW attachments array
+                return {
+                  ...message,
+                  attachments: message.attachments.map(attachment => {
+                    if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
+                      // Create NEW attachment with transcription
+                      console.log(`[VoiceTranscription] Adding transcription to message in chat ${chatId}`);
+                      return {
+                        ...attachment,
+                        transcription: {
+                          text,
+                          provider,
+                          transcriber_node_id,
+                          confidence,
+                          language,
+                          timestamp,
+                          remote_provider_node_id
+                        }
+                      };
+                    }
+                    return attachment;
+                  })
+                };
               }
             }
-          }
+            return message;
+          });
+
+          updatedHistories.set(chatId, updatedMessages);
         }
-        console.warn(`[VoiceTranscription] Could not find message with transfer_id: ${transfer_id}`);
+
         return updatedHistories;
       });
     }
