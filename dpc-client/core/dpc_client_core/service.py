@@ -3093,6 +3093,8 @@ class CoreService:
             True if at least one transcription provider is available
         """
         provider_priority = self.settings.get_voice_transcription_provider_priority()
+        logger.debug(f"Checking transcription capability with provider priority: {provider_priority}")
+        logger.debug(f"Available LLM providers: {list(self.llm_manager.providers.keys())}")
 
         for provider_alias in provider_priority:
             # Check if provider exists in LLM manager
@@ -3100,9 +3102,14 @@ class CoreService:
                 provider = self.llm_manager.providers[provider_alias]
                 # Check if provider supports voice (has whisper or audio capabilities)
                 provider_type = provider.config.get("type", "")
+                logger.debug(f"Provider '{provider_alias}' has type '{provider_type}'")
                 if provider_type in ["local_whisper", "openai", "openai_compatible"]:
+                    logger.info(f"Found transcription capability: {provider_alias} ({provider_type})")
                     return True
+            else:
+                logger.debug(f"Provider '{provider_alias}' not found in LLM manager")
 
+        logger.warning(f"No transcription providers found in priority list: {provider_priority}")
         return False
 
     async def _broadcast_voice_transcription(

@@ -94,9 +94,6 @@
   }
 
   onMount(() => {
-    audioElement = new Audio(actualAudioUrl);
-    audioElement.volume = volume;
-
     const handleTimeUpdate = () => {
       currentTime = audioElement.currentTime;
     };
@@ -114,18 +111,23 @@
       currentTime = 0;
     };
 
+    // Create audio element with converted URL
+    audioElement = new Audio(actualAudioUrl);
+    audioElement.volume = volume;
     audioElement.addEventListener('timeupdate', handleTimeUpdate);
     audioElement.addEventListener('play', handlePlay);
     audioElement.addEventListener('pause', handlePause);
     audioElement.addEventListener('ended', handleEnded);
 
     return () => {
-      audioElement.removeEventListener('timeupdate', handleTimeUpdate);
-      audioElement.removeEventListener('play', handlePlay);
-      audioElement.removeEventListener('pause', handlePause);
-      audioElement.removeEventListener('ended', handleEnded);
-      audioElement.pause();
-      audioElement = null as any;
+      if (audioElement) {
+        audioElement.removeEventListener('timeupdate', handleTimeUpdate);
+        audioElement.removeEventListener('play', handlePlay);
+        audioElement.removeEventListener('pause', handlePause);
+        audioElement.removeEventListener('ended', handleEnded);
+        audioElement.pause();
+        audioElement = null as any;
+      }
     };
   });
 </script>
