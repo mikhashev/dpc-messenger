@@ -90,6 +90,9 @@
   // Voice message state (v0.13.0 - Voice Messages)
   let voicePreview = $state<{ blob: Blob; duration: number } | null>(null);
 
+  // Auto-transcribe toggle state (v0.13.2+ Auto-Transcription)
+  let autoTranscribeEnabled = $state(true);  // Default ON
+
   // Dual provider selection (Phase 1: separate text and vision providers)
   // Managed by ProviderSelector component (extracted)
   let selectedTextProvider = $state("");  // Provider for text-only queries
@@ -1939,6 +1942,18 @@
               {/if}
             </h2>
           </button>
+
+          <!-- Auto Transcribe toggle (P2P chats only) -->
+          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai'}
+            <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
+              <input
+                type="checkbox"
+                bind:checked={autoTranscribeEnabled}
+                onchange={saveAutoTranscribeSetting}
+              />
+              <span>Auto Transcribe</span>
+            </label>
+          {/if}
         </div>
 
         {#if !chatHeaderCollapsed}

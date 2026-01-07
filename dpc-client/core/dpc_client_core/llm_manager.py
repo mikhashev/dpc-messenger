@@ -605,8 +605,19 @@ class LocalWhisperProvider(AIProvider):
                 **model_kwargs
             )
 
-            # Move model to device
-            model.to(device)
+            # Move model to device with CUDA fallback handling
+            try:
+                model.to(device)
+            except RuntimeError as e:
+                if "NVIDIA" in str(e) or "CUDA" in str(e):
+                    # CUDA initialization failed (no GPU or driver), force CPU
+                    logger.warning(f"Failed to initialize {device}: {e}")
+                    logger.info("Forcing CPU mode for Whisper model")
+                    device = "cpu"
+                    torch_dtype = torch.float32  # CPU needs float32
+                    model.to(device)
+                else:
+                    raise
 
             # Load processor
             processor = AutoProcessor.from_pretrained(self.model_name)
