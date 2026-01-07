@@ -770,6 +770,19 @@ class FileTransferManager:
                 "status": "completed"
             })
 
+        # Auto-transcribe voice messages if enabled (v0.13.2+ recipient-side)
+        if is_voice and transfer.voice_metadata and save_to_disk:
+            import asyncio
+            asyncio.create_task(
+                self.service._maybe_transcribe_voice_message(
+                    transfer_id=transfer.transfer_id,
+                    node_id=node_id,
+                    file_path=file_path,
+                    voice_metadata=transfer.voice_metadata,
+                    is_sender=False  # Recipient-side transcription
+                )
+            )
+
         # Cleanup (chunk_data will be freed when transfer is deleted)
         del self.active_transfers[transfer.transfer_id]  # Remove from active transfers
         logger.debug(f"Cleaned up completed download transfer: {transfer.transfer_id}")
