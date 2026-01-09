@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -757,6 +757,62 @@
                           language,
                           timestamp,
                           remote_provider_node_id
+                        }
+                      };
+                    }
+                    return attachment;
+                  })
+                };
+              }
+            }
+            return message;
+          });
+
+          updatedHistories.set(chatId, updatedMessages);
+        }
+
+        return updatedHistories;
+      });
+    }
+  });
+
+  // Reactive: Handle voice transcription received from peer (v0.13.2+)
+  $effect(() => {
+    if ($voiceTranscriptionReceived) {
+      const { transfer_id, node_id, text, transcriber_node_id, provider, confidence, language, timestamp } = $voiceTranscriptionReceived;
+      console.log(`[VoiceTranscription] Received transcription from peer for ${transfer_id}: "${text}"`);
+
+      // Find the message with this transfer_id and add transcription to attachment
+      // CRITICAL: Must create NEW objects at every level to trigger Svelte reactivity
+      chatHistories.update(histories => {
+        const updatedHistories = new Map();
+
+        for (const [chatId, messages] of histories) {
+          // Create NEW messages array for this chat
+          const updatedMessages = messages.map(message => {
+            // Check if this message has the voice attachment we're looking for
+            if (message.attachments) {
+              const hasTargetVoice = message.attachments.some(
+                att => att.type === 'voice' && att.transfer_id === transfer_id
+              );
+
+              if (hasTargetVoice) {
+                // Create NEW message with NEW attachments array
+                return {
+                  ...message,
+                  attachments: message.attachments.map(attachment => {
+                    if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
+                      // Create NEW attachment with transcription from peer
+                      console.log(`[VoiceTranscription] Adding peer transcription to message in chat ${chatId}`);
+                      return {
+                        ...attachment,
+                        transcription: {
+                          text,
+                          provider,
+                          transcriber_node_id,
+                          confidence,
+                          language,
+                          timestamp
                         }
                       };
                     }
