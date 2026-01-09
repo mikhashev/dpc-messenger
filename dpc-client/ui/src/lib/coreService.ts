@@ -101,6 +101,11 @@ export const voiceTranscriptionReceived = writable<any>(null);  // {transfer_id,
 export const voiceTranscriptionComplete = writable<any>(null);  // {transfer_id, node_id, text, provider, ...} (local transcription completed)
 export const voiceTranscriptionConfig = writable<any>(null);  // Voice transcription settings updated
 
+// Whisper model loading stores (v0.13.3 - model pre-loading)
+export const whisperModelLoadingStarted = writable<any>(null);  // {provider}
+export const whisperModelLoaded = writable<any>(null);  // {provider}
+export const whisperModelLoadingFailed = writable<any>(null);  // {provider, error}
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -505,6 +510,19 @@ export function connectToCoreService() {
                     console.log("Voice transcription config updated:", message.payload);
                     voiceTranscriptionConfig.set(message.payload);
                 }
+                // Whisper model loading events (v0.13.3+ model pre-loading)
+                else if (message.event === "whisper_model_loading_started") {
+                    console.log("Whisper model loading started:", message.payload);
+                    whisperModelLoadingStarted.set(message.payload);
+                }
+                else if (message.event === "whisper_model_loaded") {
+                    console.log("Whisper model loaded successfully:", message.payload);
+                    whisperModelLoaded.set(message.payload);
+                }
+                else if (message.event === "whisper_model_loading_failed") {
+                    console.error("Whisper model loading failed:", message.payload);
+                    whisperModelLoadingFailed.set(message.payload);
+                }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)
                     for (const [cmdId, cmd] of pendingCommands.entries()) {
@@ -811,4 +829,11 @@ export async function setConversationTranscription(nodeId: string, enabled: bool
 
 export async function getConversationTranscription(nodeId: string): Promise<any> {
     return sendCommand('get_conversation_transcription', { node_id: nodeId });
+}
+
+// Whisper model pre-loading (v0.13.3+ - load model before first transcription)
+export async function preloadWhisperModel(providerAlias?: string): Promise<any> {
+    return sendCommand('preload_whisper_model', {
+        provider_alias: providerAlias  // Optional: specify provider, or use first local_whisper
+    });
 }

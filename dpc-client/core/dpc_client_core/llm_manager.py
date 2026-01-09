@@ -651,6 +651,34 @@ class LocalWhisperProvider(AIProvider):
             logger.error(f"Failed to load Whisper model: {e}", exc_info=True)
             raise RuntimeError(f"Failed to load local Whisper model: {e}") from e
 
+    def is_model_loaded(self) -> bool:
+        """Check if Whisper model is loaded in memory."""
+        return self.model_loaded
+
+    async def ensure_model_loaded(self) -> None:
+        """
+        Ensure Whisper model is loaded, loading it if necessary.
+
+        This method is safe to call multiple times (idempotent) and uses
+        a lock to prevent concurrent loading attempts.
+        """
+        if self.model_loaded:
+            return  # Already loaded
+
+        # Initialize lock if needed (lazy init for asyncio compatibility)
+        if self._load_lock is None:
+            import asyncio
+            self._load_lock = asyncio.Lock()
+
+        # Acquire lock and double-check loaded status
+        async with self._load_lock:
+            if self.model_loaded:
+                return  # Another task loaded it while we waited
+
+            # Load model in thread pool (blocking operation)
+            import asyncio
+            await asyncio.to_thread(self._load_model)
+
     async def transcribe(self, audio_path: str) -> Dict[str, Any]:
         """
         Transcribe audio file using local Whisper model.

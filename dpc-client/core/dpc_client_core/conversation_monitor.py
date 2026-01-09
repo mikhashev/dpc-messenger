@@ -966,7 +966,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         except Exception as e:
             logger.error("Error generating commit proposal: %s", e, exc_info=True)
-            logger.error("  LLM Response preview: %s...", response[:300] if 'response' in locals() else 'N/A')
+            logger.error("  LLM Response preview: %s...", response[:300] if 'response' in locals() and response is not None and isinstance(response, str) else 'N/A')
 
             # Determine error message based on exception type
             error_msg = 'Failed to extract knowledge'

@@ -2886,6 +2886,97 @@ class CoreService:
             except Exception:
                 pass
 
+    async def preload_whisper_model(self, provider_alias: str | None = None) -> dict:
+        """
+        Pre-load Whisper model into memory/GPU for faster first transcription.
+
+        Called by UI when user enables auto-transcribe to avoid delays on first voice message.
+
+        Args:
+            provider_alias: Optional provider alias (default: first local_whisper provider)
+
+        Returns:
+            dict with status and info
+        """
+        try:
+            # Find Whisper provider
+            provider_obj = None
+
+            if provider_alias:
+                provider_obj = self.llm_manager.providers.get(provider_alias)
+                if not provider_obj or provider_obj.config.get("type") != "local_whisper":
+                    return {
+                        "status": "error",
+                        "error": f"Provider '{provider_alias}' is not a local Whisper provider"
+                    }
+            else:
+                # Find first local_whisper provider
+                for provider in self.llm_manager.providers.values():
+                    if provider.config.get("type") == "local_whisper":
+                        provider_obj = provider
+                        provider_alias = provider.alias
+                        break
+
+                if not provider_obj:
+                    return {
+                        "status": "error",
+                        "error": "No local Whisper provider configured"
+                    }
+
+            # Check if already loaded
+            if hasattr(provider_obj, 'is_model_loaded') and provider_obj.is_model_loaded():
+                logger.info(f"Whisper model already loaded for provider '{provider_alias}'")
+                return {
+                    "status": "success",
+                    "provider": provider_alias,
+                    "already_loaded": True
+                }
+
+            # Broadcast loading started event
+            await self.local_api.broadcast_event("whisper_model_loading_started", {
+                "provider": provider_alias
+            })
+
+            # Load model (this runs in thread pool, so it won't block)
+            logger.info(f"Pre-loading Whisper model for provider '{provider_alias}'...")
+
+            if hasattr(provider_obj, 'ensure_model_loaded'):
+                await provider_obj.ensure_model_loaded()
+            else:
+                # Fallback: trigger loading via a dummy transcription (silent audio)
+                logger.warning(f"Provider '{provider_alias}' doesn't support ensure_model_loaded(), using fallback")
+                return {
+                    "status": "error",
+                    "error": "Provider doesn't support pre-loading"
+                }
+
+            # Broadcast loading completed event
+            await self.local_api.broadcast_event("whisper_model_loaded", {
+                "provider": provider_alias
+            })
+
+            logger.info(f"Successfully pre-loaded Whisper model for provider '{provider_alias}'")
+
+            return {
+                "status": "success",
+                "provider": provider_alias,
+                "already_loaded": False
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to pre-load Whisper model: {e}", exc_info=True)
+
+            # Broadcast loading failed event
+            await self.local_api.broadcast_event("whisper_model_loading_failed", {
+                "provider": provider_alias if provider_alias else "unknown",
+                "error": str(e)
+            })
+
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
     async def _transcribe_with_openai(self, audio_path: str, provider_config: dict) -> dict:
         """
         Transcribe audio using OpenAI Whisper API.
@@ -3070,7 +3161,8 @@ class CoreService:
                     "provider": result.get("provider", "unknown"),
                     "confidence": result.get("confidence", 0.0),
                     "language": result.get("language", "unknown"),
-                    "timestamp": datetime.now(timezone.utc).isoformat()
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "success": True  # Mark as successful transcription
                 }
 
                 # Add remote provider credit if used (v0.13.2+ remote transcription)

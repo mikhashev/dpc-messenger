@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, setConversationTranscription, getConversationTranscription } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -92,6 +92,10 @@
 
   // Auto-transcribe toggle state (v0.13.2+ Auto-Transcription)
   let autoTranscribeEnabled = $state(true);  // Default ON
+
+  // Whisper model loading state (v0.13.3+ Model Pre-loading)
+  let whisperModelLoading = $state(false);
+  let whisperModelLoadError = $state<string | null>(null);
 
   // Dual provider selection (Phase 1: separate text and vision providers)
   // Managed by ProviderSelector component (extracted)
@@ -206,6 +210,31 @@
   $effect(() => {
     if (typeof window !== 'undefined') {
       localStorage.setItem('autoKnowledgeDetection', autoKnowledgeDetection.toString());
+    }
+  });
+
+  // Whisper model loading event handlers (v0.13.3+ Model Pre-loading)
+  $effect(() => {
+    if ($whisperModelLoadingStarted) {
+      console.log(`[Whisper] Model loading started: ${$whisperModelLoadingStarted.provider}`);
+      whisperModelLoading = true;
+      whisperModelLoadError = null;
+    }
+  });
+
+  $effect(() => {
+    if ($whisperModelLoaded) {
+      console.log(`[Whisper] Model loaded successfully: ${$whisperModelLoaded.provider}`);
+      whisperModelLoading = false;
+      whisperModelLoadError = null;
+    }
+  });
+
+  $effect(() => {
+    if ($whisperModelLoadingFailed) {
+      console.error(`[Whisper] Model loading failed: ${$whisperModelLoadingFailed.error}`);
+      whisperModelLoading = false;
+      whisperModelLoadError = $whisperModelLoadingFailed.error;
     }
   });
 
@@ -1727,6 +1756,17 @@
     try {
       const result = await setConversationTranscription(activeChatId, autoTranscribeEnabled);
       console.log(`[AutoTranscribe] Saved setting for ${activeChatId}: ${autoTranscribeEnabled}`, result);
+
+      // v0.13.3+: Pre-load Whisper model when enabling auto-transcribe
+      if (autoTranscribeEnabled && !whisperModelLoading) {
+        console.log(`[Whisper] Pre-loading model (auto-transcribe enabled)`);
+        try {
+          await preloadWhisperModel();  // Uses default local_whisper provider
+        } catch (error) {
+          console.error(`[Whisper] Failed to pre-load model:`, error);
+          // Don't block - model will load lazily on first transcription
+        }
+      }
     } catch (error) {
       console.error(`[AutoTranscribe] Failed to save setting for ${activeChatId}:`, error);
     }
@@ -1995,8 +2035,15 @@
                 type="checkbox"
                 bind:checked={autoTranscribeEnabled}
                 onchange={saveAutoTranscribeSetting}
+                disabled={whisperModelLoading}
               />
               <span>Auto Transcribe</span>
+              {#if whisperModelLoading}
+                <span class="whisper-loading-indicator" title="Loading Whisper model...">⏳</span>
+              {/if}
+              {#if whisperModelLoadError}
+                <span class="whisper-error-indicator" title={whisperModelLoadError}>⚠️</span>
+              {/if}
             </label>
           {/if}
         </div>
@@ -2222,7 +2269,7 @@
 
           <!-- Voice Recorder (v0.13.0) -->
           <VoiceRecorder
-            disabled={$connectionStatus !== 'connected' || isLoading}
+            disabled={$connectionStatus !== 'connected' || isLoading || (autoTranscribeEnabled && whisperModelLoading)}
             maxDuration={300}
             onRecordingComplete={handleRecordingComplete}
           />
@@ -2608,6 +2655,22 @@
   .auto-transcribe-toggle span {
     font-weight: 500;
     white-space: nowrap;
+  }
+
+  /* Whisper model loading indicator (v0.13.3+) */
+  .whisper-loading-indicator {
+    font-size: 14px;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+  }
+
+  .whisper-error-indicator {
+    font-size: 14px;
+    color: #ff9800;
   }
 
   /* Resize Handle */

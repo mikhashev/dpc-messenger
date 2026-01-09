@@ -40,10 +40,16 @@ class VoiceTranscriptionHandler(MessageHandler):
             f"(provider: {provider}, language: {language}, confidence: {confidence})"
         )
 
-        # 1. Check for duplicate (already have transcription for this transfer)
-        if transfer_id in self.service._voice_transcriptions:
-            self.logger.debug(f"Already have transcription for {transfer_id}, ignoring duplicate")
-            return None
+        # 1. Check for duplicate (already have successful transcription for this transfer)
+        existing = self.service._voice_transcriptions.get(transfer_id)
+        if existing:
+            # Only ignore if existing transcription was successful
+            if existing.get("success", False):
+                self.logger.debug(f"Already have successful transcription for {transfer_id}, ignoring duplicate")
+                return None
+            else:
+                # Replace failed/partial transcription with peer's successful one
+                self.logger.info(f"Replacing failed transcription for {transfer_id} with peer's transcription")
 
         # 2. Store transcription locally
         transcription_data = {
@@ -52,7 +58,8 @@ class VoiceTranscriptionHandler(MessageHandler):
             "provider": provider,
             "confidence": confidence,
             "language": language,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "success": True  # Peer's transcription is considered successful
         }
 
         # Add remote provider node if present
