@@ -1141,15 +1141,44 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """Add a message to the conversation history
 
         Args:
-            role: 'user' or 'assistant'
+            role: 'user' or 'assistant' (or 'peer')
             content: Message content
             attachments: Optional list of attachment metadata dicts
                 Example: [{"type": "file", "filename": "...", "size_bytes": 123, ...}]
+
+        Note: This also adds to message_buffer and full_conversation for knowledge extraction.
         """
-        message = {"role": role, "content": content}
+        # Add to message_history (for chat history sync)
+        message_dict = {"role": role, "content": content}
         if attachments:
-            message["attachments"] = attachments
-        self.message_history.append(message)
+            message_dict["attachments"] = attachments
+        self.message_history.append(message_dict)
+
+        # Also add to knowledge extraction buffers (v0.13.2 fix for voice messages)
+        # Map role to sender info
+        if role == "user":
+            # User is the local node (first participant is always self)
+            sender_node_id = self.participants[0]["node_id"] if self.participants else "local"
+            sender_name = self.participants[0]["name"] if self.participants else "You"
+        else:  # role == "assistant" or "peer"
+            # Assistant/peer is the conversation partner (second participant)
+            sender_node_id = self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
+            sender_name = self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
+
+        # Create Message object for knowledge extraction
+        from datetime import datetime, timezone
+        import uuid
+        message_obj = Message(
+            message_id=str(uuid.uuid4()),
+            conversation_id=self.conversation_id,
+            sender_node_id=sender_node_id,
+            sender_name=sender_name,
+            text=content,
+            timestamp=datetime.now(timezone.utc).isoformat()
+        )
+
+        self.message_buffer.append(message_obj)
+        self.full_conversation.append(message_obj)
 
     def get_message_history(self) -> List[Dict[str, str]]:
         """Get the full conversation history
