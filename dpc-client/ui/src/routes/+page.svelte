@@ -23,10 +23,12 @@
   import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
   import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
   import VoicePlayer from "$lib/components/VoicePlayer.svelte";
-  import { ask, open } from '@tauri-apps/plugin-dialog';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
+
+  // Tauri APIs - will be loaded in onMount if in Tauri environment
+  let ask: any = null;
+  let open: any = null;
 
   console.log("Full D-PC Messenger loading...");
   
@@ -280,8 +282,29 @@
 
   // Initialize window focus tracking and notification permission (runs once on mount)
   onMount(async () => {
+    // Detect if running in Tauri (official method for Tauri 2.x)
+    const isTauri = typeof window !== 'undefined' && (
+      (window as any).isTauri === true ||  // Tauri 2.x official detection
+      !!(window as any).__TAURI__           // Fallback for older versions
+    );
+    console.log(`[Environment] Detected: ${isTauri ? 'Tauri' : 'Browser'} mode`);
+
+    // Load Tauri dialog APIs if in Tauri environment
+    if (isTauri) {
+      try {
+        const dialog = await import('@tauri-apps/plugin-dialog');
+        ask = dialog.ask;
+        open = dialog.open;
+        console.log('[Tauri] Dialog API loaded');
+      } catch (err) {
+        console.error('[Tauri] Failed to load dialog API:', err);
+      }
+    }
+
     if (typeof window !== 'undefined') {
       try {
+        // Load window tracking API if in Tauri
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
         const appWindow = getCurrentWindow();
 
         // Listen to focus changes (store unlisten function for cleanup)
@@ -293,7 +316,9 @@
         // Check initial focus state
         windowFocused = await appWindow.isFocused();
       } catch (error) {
-        console.error('[Notifications] Failed to set up window tracking:', error);
+        console.log('[Notifications] Window tracking not available (running in browser)');
+        // In browser, assume window is always focused
+        windowFocused = true;
       }
     }
 
@@ -1498,15 +1523,24 @@
     console.log('Delete AI chat button clicked for:', chatId);
 
     if (chatId === 'local_ai') {
-      await ask("Cannot delete the default Local AI chat.", { title: "D-PC Messenger", kind: "info" });
+      if (ask) {
+        await ask("Cannot delete the default Local AI chat.", { title: "D-PC Messenger", kind: "info" });
+      } else {
+        alert("Cannot delete the default Local AI chat.");
+      }
       return;
     }
 
     // Use Tauri's ask dialog (works on all platforms including macOS)
-    const shouldDelete = await ask(
-      "Delete this AI chat? This will permanently remove the chat history.",
-      { title: "Confirm Deletion", kind: "warning" }
-    );
+    let shouldDelete = false;
+    if (ask) {
+      shouldDelete = await ask(
+        "Delete this AI chat? This will permanently remove the chat history.",
+        { title: "Confirm Deletion", kind: "warning" }
+      );
+    } else {
+      shouldDelete = confirm("Delete this AI chat? This will permanently remove the chat history.");
+    }
     console.log('User confirmed deletion:', shouldDelete);
 
     if (!shouldDelete) {
@@ -1546,7 +1580,17 @@
   async function handleSendFile() {
     // Only allow file transfer to P2P chats (not local_ai or ai_xxx chats)
     if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
-      await ask("File transfer is only available in P2P chats.", { title: "D-PC Messenger", kind: "info" });
+      if (ask) {
+        await ask("File transfer is only available in P2P chats.", { title: "D-PC Messenger", kind: "info" });
+      } else {
+        alert("File transfer is only available in P2P chats.");
+      }
+      return;
+    }
+
+    // Check if running in Tauri
+    if (!open) {
+      alert("File transfer requires the Tauri desktop app. Please use the desktop version.");
       return;
     }
 

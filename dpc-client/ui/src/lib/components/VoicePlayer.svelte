@@ -1,6 +1,28 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { convertFileSrc } from '@tauri-apps/api/core';
+
+  // Detect if running in Tauri (check in onMount when window is ready)
+  let isTauri = $state(false);
+  let convertFileSrc = $state<((filePath: string, protocol?: string) => string) | undefined>(undefined);
+
+  onMount(() => {
+    // Check for Tauri environment (official method for Tauri 2.x)
+    isTauri = typeof window !== 'undefined' && (
+      (window as any).isTauri === true ||  // Tauri 2.x official detection
+      !!(window as any).__TAURI__           // Fallback for older versions
+    );
+    console.log(`[VoicePlayer] Environment detected: ${isTauri ? 'Tauri' : 'Browser'}`);
+
+    // Load convertFileSrc if in Tauri
+    if (isTauri) {
+      import('@tauri-apps/api/core').then((module) => {
+        convertFileSrc = module.convertFileSrc;
+        console.log('[VoicePlayer] Tauri convertFileSrc loaded');
+      }).catch((err) => {
+        console.error('[VoicePlayer] Failed to load Tauri API:', err);
+      });
+    }
+  });
 
   interface VoicePlayerProps {
     audioUrl: string;
@@ -23,7 +45,7 @@
 
   // Debug props immediately
   $effect(() => {
-    console.error(`[VoicePlayer] PROPS RECEIVED: audioUrl="${audioUrl}", filePath="${filePath}"`);
+    console.log(`[VoicePlayer] PROPS RECEIVED: audioUrl="${audioUrl}", filePath="${filePath}", isTauri=${isTauri}`);
   });
 
   let audioElement: HTMLAudioElement;
@@ -35,27 +57,50 @@
 
   // Update actualAudioUrl when filePath or audioUrl changes
   $effect(() => {
-    console.error(`[VoicePlayer] Effect triggered: filePath="${filePath}", audioUrl="${audioUrl}"`);
+    console.log(`[VoicePlayer] Effect triggered: filePath="${filePath}", audioUrl="${audioUrl}", isTauri=${isTauri}`);
 
-    // Strip file:// protocol if present (Windows Tauri adds this incorrectly)
-    const cleanPath = filePath ? filePath.replace(/^file:\/\/\//, '').replace(/^file:\/\//, '') : null;
-
-    if (!cleanPath) {
-      console.error(`[VoicePlayer] No filePath, using audioUrl: "${audioUrl}"`);
+    // If audioUrl is already a blob URL, use it directly (just-recorded messages)
+    if (audioUrl?.startsWith('blob:')) {
+      console.log('[VoicePlayer] Using blob URL:', audioUrl);
       actualAudioUrl = audioUrl;
       return;
     }
 
-    // Convert using Tauri v2 API (works in both Tauri and browser contexts)
-    try {
-      const converted = convertFileSrc(cleanPath);
-      console.error(`[VoicePlayer] ✅ CONVERTED: ${cleanPath} -> ${converted}`);
-      actualAudioUrl = converted;
-    } catch (err) {
-      console.error(`[VoicePlayer] ❌ CONVERSION FAILED:`, err);
-      console.error(`[VoicePlayer] Falling back to original audioUrl: "${audioUrl}"`);
+    // Strip file:// protocol and codec suffix (e.g., ";codecs=opus") from file path
+    const cleanPath = filePath
+      ? filePath.replace(/^file:\/\/\//, '').replace(/^file:\/\//, '').split(';')[0]
+      : null;
+
+    if (!cleanPath) {
+      console.log(`[VoicePlayer] No filePath, using audioUrl: "${audioUrl}"`);
       actualAudioUrl = audioUrl;
+      return;
     }
+
+    // In Tauri: Wait for convertFileSrc to load (effect will re-run when it's ready)
+    if (isTauri && !convertFileSrc) {
+      console.log('[VoicePlayer] Waiting for Tauri convertFileSrc to load...');
+      return;
+    }
+
+    // In Tauri: Convert filesystem path to asset:// protocol
+    if (isTauri && convertFileSrc) {
+      try {
+        const converted = convertFileSrc(cleanPath);
+        console.log(`[VoicePlayer] ✅ TAURI: Converted ${cleanPath} -> ${converted}`);
+        actualAudioUrl = converted;
+      } catch (err) {
+        console.error(`[VoicePlayer] ❌ TAURI CONVERSION FAILED:`, err);
+        actualAudioUrl = audioUrl;
+      }
+      return;
+    }
+
+    // In Browser: Can't access filesystem directly
+    // For received messages with filePath, we can't play them in browser
+    // Just-recorded messages work because they use blob URLs
+    console.warn('[VoicePlayer] ⚠️ BROWSER: Cannot play filesystem paths. Use Tauri app for received voice messages.');
+    actualAudioUrl = audioUrl;  // Will fail but prevents crash
   });
 
   function togglePlay() {

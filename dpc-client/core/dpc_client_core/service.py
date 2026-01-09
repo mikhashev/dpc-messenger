@@ -2619,7 +2619,8 @@ class CoreService:
 
         # 8. Generate filename with timestamp
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        extension = mime_type.split("/")[-1]  # e.g., "webm"
+        # Strip codec suffix from extension (e.g., "webm;codecs=opus" -> "webm")
+        extension = mime_type.split("/")[-1].split(";")[0].strip()
         filename = f"voice_{timestamp}.{extension}"
 
         # 9. Create voice messages directory
@@ -3827,6 +3828,7 @@ class CoreService:
             history = monitor.get_message_history()
 
             # Convert to frontend format (role, content, attachments)
+            # v0.13.2+: Merge transcription data into voice attachments from _voice_transcriptions
             messages = []
             for msg in history:
                 message_dict = {
@@ -3834,7 +3836,29 @@ class CoreService:
                     "content": msg["content"]
                 }
                 if "attachments" in msg:
-                    message_dict["attachments"] = msg["attachments"]
+                    # Deep copy attachments to avoid mutating original
+                    attachments = []
+                    for attachment in msg["attachments"]:
+                        attachment_copy = attachment.copy()
+
+                        # Merge transcription data for voice messages
+                        if attachment_copy.get("type") == "voice":
+                            transfer_id = attachment_copy.get("transfer_id")
+                            if transfer_id and transfer_id in self._voice_transcriptions:
+                                transcription_data = self._voice_transcriptions[transfer_id]
+                                attachment_copy["transcription"] = {
+                                    "text": transcription_data.get("text", ""),
+                                    "provider": transcription_data.get("provider", ""),
+                                    "transcriber_node_id": transcription_data.get("transcriber_node_id", ""),
+                                    "confidence": transcription_data.get("confidence"),
+                                    "language": transcription_data.get("language", ""),
+                                    "timestamp": transcription_data.get("timestamp", "")
+                                }
+                                logger.debug(f"Merged transcription for transfer_id={transfer_id} into history")
+
+                        attachments.append(attachment_copy)
+
+                    message_dict["attachments"] = attachments
                 messages.append(message_dict)
 
             logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
