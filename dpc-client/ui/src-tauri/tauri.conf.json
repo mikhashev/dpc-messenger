@@ -30,33 +30,7 @@
         "scope": [
           "$HOME/.dpc/**"
         ]
-      },
-      "capabilities": [
-        {
-          "identifier": "main-capability",
-          "description": "Main window capability with microphone access",
-          "windows": ["main"],
-          "permissions": [
-            "core:default",
-            "core:window:allow-close",
-            "core:window:allow-maximize",
-            "core:window:allow-minimize",
-            "core:window:allow-toggle-maximize",
-            "core:webview:allow-webview-position",
-            "core:webview:allow-webview-size",
-            "core:webview:allow-internal-toggle-devtools",
-            "dialog:allow-message",
-            "dialog:allow-open",
-            "dialog:allow-ask",
-            "clipboard:allow-read-text",
-            "clipboard:allow-write-text",
-            "notification:allow-is-permission-granted",
-            "notification:allow-request-permission",
-            "notification:allow-show"
-          ],
-          "platforms": ["linux", "macOS", "windows"]
-        }
-      ]
+      }
     }
   },
   "bundle": {
