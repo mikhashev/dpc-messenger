@@ -1620,16 +1620,30 @@
 
   // Image paste handlers (Phase 2.4: Screenshot + Vision - improved UX)
   function handlePaste(event: ClipboardEvent) {
+    console.log('[Paste] Paste event triggered');
     const items = event.clipboardData?.items;
-    if (!items) return;
+    if (!items) {
+      console.log('[Paste] No clipboard items available');
+      return;
+    }
 
-    for (const item of items) {
+    console.log(`[Paste] Found ${items.length} clipboard items`);
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      console.log(`[Paste] Item ${i}: type="${item.type}", kind="${item.kind}"`);
+
       if (item.type.startsWith('image/')) {
+        console.log('[Paste] Image item detected, processing...');
         event.preventDefault();
         const blob = item.getAsFile();
 
         // Check if blob is valid
-        if (!blob) continue;
+        if (!blob) {
+          console.log('[Paste] Failed to get file blob from clipboard item');
+          continue;
+        }
+
+        console.log(`[Paste] Got blob: size=${blob.size} bytes, type=${blob.type}`);
 
         // Validate size (5MB limit)
         if (blob.size > 5 * 1024 * 1024) {
@@ -1642,16 +1656,21 @@
         // Convert to data URL and show as preview chip
         const reader = new FileReader();
         reader.onload = (e) => {
+          console.log('[Paste] Image converted to data URL, setting pendingImage');
           pendingImage = {
             dataUrl: e.target?.result as string,
             filename: `screenshot_${Date.now()}.png`,
             sizeBytes: blob.size
           };
         };
+        reader.onerror = (e) => {
+          console.error('[Paste] FileReader error:', e);
+        };
         reader.readAsDataURL(blob);
         break;
       }
     }
+    console.log('[Paste] Paste handling complete');
   }
 
   function clearPendingImage() {

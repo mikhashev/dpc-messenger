@@ -46,6 +46,10 @@
             "core:webview:allow-webview-size",
             "core:webview:allow-internal-toggle-devtools",
             "dialog:allow-message",
+            "dialog:allow-open",
+            "dialog:allow-ask",
+            "clipboard:allow-read-text",
+            "clipboard:allow-write-text",
             "notification:allow-is-permission-granted",
             "notification:allow-request-permission",
             "notification:allow-show"
