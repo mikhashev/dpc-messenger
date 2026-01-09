@@ -3119,7 +3119,18 @@ class CoreService:
             # 7. Check if this node has transcription capability
             has_capability = await self._check_transcription_capability()
             if not has_capability:
-                logger.info(f"No transcription capability available for transfer {transfer_id}")
+                # No local capability - wait for peer's transcription (passive mode)
+                if not is_sender:
+                    logger.info(f"No transcription capability, waiting for peer's transcription for {transfer_id}")
+                    # Wait up to 30 seconds for peer to send transcription
+                    for _ in range(30):
+                        await asyncio.sleep(1)
+                        if transfer_id in self._voice_transcriptions:
+                            logger.info(f"Received transcription from peer for {transfer_id}")
+                            return
+                    logger.warning(f"No transcription received from peer after 30s for {transfer_id}")
+                else:
+                    logger.info(f"Sender has no transcription capability for {transfer_id}, skipping")
                 return
 
             # 7. Read audio file and convert to base64
@@ -3224,10 +3235,13 @@ class CoreService:
 
     async def _check_transcription_capability(self) -> bool:
         """
-        Check if this node has transcription capability.
+        Check if this node has transcription capability (provider available AND ready).
+
+        For local_whisper providers, checks if model is actually loaded in memory.
+        This prevents failed transcription attempts when model is not ready.
 
         Returns:
-            True if at least one transcription provider is available
+            True if at least one transcription provider is available and ready
         """
         provider_priority = self.settings.get_voice_transcription_provider_priority()
         logger.debug(f"Checking transcription capability with provider priority: {provider_priority}")
@@ -3240,7 +3254,14 @@ class CoreService:
                 # Check if provider supports voice (has whisper or audio capabilities)
                 provider_type = provider.config.get("type", "")
                 logger.debug(f"Provider '{provider_alias}' has type '{provider_type}'")
+
                 if provider_type in ["local_whisper", "openai", "openai_compatible"]:
+                    # For local_whisper, check if model is actually loaded
+                    if provider_type == "local_whisper":
+                        if hasattr(provider, 'is_model_loaded') and not provider.is_model_loaded():
+                            logger.info(f"Provider '{provider_alias}' exists but model not loaded yet, skipping")
+                            continue  # Try next provider
+
                     logger.info(f"Found transcription capability: {provider_alias} ({provider_type})")
                     return True
             else:
