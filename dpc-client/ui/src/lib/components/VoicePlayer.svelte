@@ -53,7 +53,7 @@
   let currentTime = $state(0);
   let playbackRate = $state(1.0);
   let volume = $state(1.0);
-  let actualAudioUrl = $state(audioUrl);  // Reactive state for converted URL
+  let actualAudioUrl = $state<string | undefined>(undefined);  // Reactive state for converted URL
 
   // Update actualAudioUrl when filePath or audioUrl changes
   $effect(() => {
@@ -171,8 +171,8 @@
       currentTime = 0;
     };
 
-    // Create audio element with converted URL
-    audioElement = new Audio(actualAudioUrl);
+    // Create audio element (initially without src)
+    audioElement = new Audio();
     audioElement.volume = volume;
     audioElement.addEventListener('timeupdate', handleTimeUpdate);
     audioElement.addEventListener('play', handlePlay);
@@ -189,6 +189,15 @@
         audioElement = null as any;
       }
     };
+  });
+
+  // Update audio element src when actualAudioUrl changes
+  $effect(() => {
+    if (audioElement && actualAudioUrl) {
+      console.log(`[VoicePlayer] Setting audio src: ${actualAudioUrl}`);
+      audioElement.src = actualAudioUrl;
+      audioElement.load();  // Reload audio with new src
+    }
   });
 </script>
 

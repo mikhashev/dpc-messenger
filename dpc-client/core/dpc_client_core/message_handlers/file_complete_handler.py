@@ -114,13 +114,14 @@ class FileCompleteHandler(MessageHandler):
                 "attachments": [attachment]
             })
 
-            # Add to conversation history
-            conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
+            # Add to conversation history (SENDER SIDE)
+            # Create monitor if it doesn't exist (in case user sends voice/file before making AI query)
+            conversation_monitor = self.service._get_or_create_conversation_monitor(sender_node_id)
             if conversation_monitor:
                 file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
                 message_content = f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
                 conversation_monitor.add_message("user", message_content, [attachment])
-                self.logger.debug(f"Added {file_type} attachment to conversation history: {transfer.filename}")
+                self.logger.debug(f"Added sent {file_type} to conversation history: {transfer.filename}")
 
             # Auto-transcribe if sender_transcribes enabled (v0.13.2+)
             if is_voice:

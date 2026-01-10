@@ -919,9 +919,10 @@ class CoreService:
                 metadata={"last_connection_type": connection_type}
             )
 
-            # Auto-request chat history if our history is empty (v0.11.2)
+            # Auto-request chat history if our history is empty (v0.11.2+)
             # This handles reconnection after app restart
-            conversation_monitor = self.conversation_monitors.get(peer_id)
+            # Always create conversation monitor on connect to ensure both sides can sync
+            conversation_monitor = self._get_or_create_conversation_monitor(peer_id)
             if conversation_monitor:
                 history = conversation_monitor.get_message_history()
                 # Only request if: (1) history is empty AND (2) we haven't already requested for this peer
