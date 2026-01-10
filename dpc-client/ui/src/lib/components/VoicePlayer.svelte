@@ -96,11 +96,21 @@
       return;
     }
 
-    // In Browser: Can't access filesystem directly
-    // For received messages with filePath, we can't play them in browser
-    // Just-recorded messages work because they use blob URLs
-    console.warn('[VoicePlayer] ⚠️ BROWSER: Cannot play filesystem paths. Use Tauri app for received voice messages.');
-    actualAudioUrl = audioUrl;  // Will fail but prevents crash
+    // In Browser: Use HTTP file server to access local files (v0.13.3+)
+    // Extract peer_id and filename from path: /home/mike/.dpc/conversations/{peer_id}/files/{filename}
+    // or: C:\Users\mike\.dpc\conversations\{peer_id}\files\{filename}
+    const pathParts = cleanPath.split(/[/\\]/);  // Split by / or \
+    const conversationsIndex = pathParts.indexOf('conversations');
+    if (conversationsIndex !== -1 && conversationsIndex + 3 < pathParts.length) {
+      const peerId = pathParts[conversationsIndex + 1];
+      const filename = pathParts[pathParts.length - 1];  // Last part is filename
+      const httpUrl = `http://localhost:9998/files/${peerId}/${filename}`;
+      console.log(`[VoicePlayer] ✅ BROWSER: Using HTTP file server: ${httpUrl}`);
+      actualAudioUrl = httpUrl;
+    } else {
+      console.warn('[VoicePlayer] ⚠️ BROWSER: Could not parse file path:', cleanPath);
+      actualAudioUrl = audioUrl;  // Will fail but prevents crash
+    }
   });
 
   function togglePlay() {

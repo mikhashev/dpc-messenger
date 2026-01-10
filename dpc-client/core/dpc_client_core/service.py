@@ -19,6 +19,7 @@ from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager
 from .local_api import LocalApiServer
+from .file_server import FileServer
 from .context_cache import ContextCache
 from .settings import Settings
 from .token_cache import TokenCache
@@ -125,6 +126,7 @@ class CoreService:
         self.cache = ContextCache()
 
         self.local_api = LocalApiServer(core_service=self)
+        self.file_server = FileServer(dpc_home_dir=DPC_HOME_DIR, host="127.0.0.1", port=9998)
 
         # Knowledge Architecture components (Phase 1-6)
         self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
@@ -473,6 +475,10 @@ class CoreService:
         api_task.set_name("local_api")
         self._background_tasks.add(api_task)
 
+        # Start file server for browser file access (v0.13.3+)
+        self.file_server.start()
+        logger.info("File server started on http://127.0.0.1:9998")
+
         # Start STUN discovery task (background, non-blocking)
         stun_task = asyncio.create_task(self._discover_external_ip())
         stun_task.set_name("stun_discovery")
@@ -686,6 +692,7 @@ class CoreService:
         # Shutdown core components
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()
+        self.file_server.stop()  # Stop HTTP file server
         await self.hub_client.close()
         logger.info("D-PC Core Service shut down")
 
