@@ -189,6 +189,7 @@ class Settings:
             'enabled': 'true',  # Enable auto-transcription of received voice messages (v0.13.2+)
             'sender_transcribes': 'false',  # Should sender transcribe their own voice messages
             'recipient_delay_seconds': '3',  # Wait N seconds before recipients attempt transcription (coordination)
+            'timeout_seconds': '60',  # Max wait time for peer's transcription before trying locally (v0.13.3+)
             'provider_priority': 'local_whisper_large,local_whisper,openai',  # Comma-separated provider priority (aliases from providers.json)
             'show_transcriber_name': 'false',  # Show who transcribed the message in UI
             'cache_transcriptions': 'true',  # Cache transcriptions in memory
@@ -660,6 +661,10 @@ class Settings:
     def get_voice_transcription_recipient_delay_seconds(self) -> int:
         """Get delay in seconds before recipients attempt transcription."""
         return int(self.get('voice_transcription', 'recipient_delay_seconds', '3'))
+
+    def get_voice_transcription_timeout_seconds(self) -> int:
+        """Get max wait time in seconds for peer's transcription before trying locally (v0.13.3+)."""
+        return int(self.get('voice_transcription', 'timeout_seconds', '60'))
 
     def get_voice_transcription_provider_priority(self) -> list[str]:
         """Get ordered list of transcription provider aliases."""

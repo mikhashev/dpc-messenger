@@ -3132,17 +3132,27 @@ class CoreService:
             if not has_capability:
                 # No local capability - wait for peer's transcription (passive mode)
                 if not is_sender:
-                    logger.info(f"No transcription capability, waiting for peer's transcription for {transfer_id}")
-                    # Wait up to 30 seconds for peer to send transcription
-                    for _ in range(30):
+                    timeout_seconds = self.settings.get_voice_transcription_timeout_seconds() or 30
+                    logger.info(f"No transcription capability (model not loaded), waiting {timeout_seconds}s for peer's transcription for {transfer_id}")
+                    # Wait for peer to send transcription
+                    for _ in range(timeout_seconds):
                         await asyncio.sleep(1)
                         if transfer_id in self._voice_transcriptions:
                             logger.info(f"Received transcription from peer for {transfer_id}")
                             return
-                    logger.warning(f"No transcription received from peer after 30s for {transfer_id}")
+                    logger.warning(f"No transcription received from peer after {timeout_seconds}s for {transfer_id}")
+
+                    # Timeout expired - try to transcribe locally (allow lazy model loading)
+                    logger.info(f"Attempting local transcription after timeout for {transfer_id} (will load model if needed)")
+                    has_capability_lazy = await self._check_transcription_capability(check_model_loaded=False)
+                    if not has_capability_lazy:
+                        logger.error(f"No transcription provider configured at all for {transfer_id}, giving up")
+                        return
+                    # Fall through to transcribe locally
+                    logger.info(f"Transcription capability found (lazy loading), proceeding to transcribe {transfer_id}")
                 else:
                     logger.info(f"Sender has no transcription provider configured for {transfer_id}, skipping")
-                return
+                    return
 
             # 7. Read audio file and convert to base64
             try:
