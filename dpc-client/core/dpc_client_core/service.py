@@ -3329,10 +3329,16 @@ class CoreService:
                     logger.error(f"All transcription providers failed for transfer {transfer_id}")
                     return
 
-                # 9. Store transcription locally
+                # 9. Validate transcription result (ensure not empty)
+                transcription_text = result.get("text", "").strip()
+                if not transcription_text:
+                    logger.error(f"Transcription returned empty text for transfer {transfer_id}, result: {result}")
+                    return
+
+                # 10. Store transcription locally
                 from datetime import datetime, timezone
                 transcription_data = {
-                    "text": result.get("text", ""),
+                    "text": transcription_text,
                     "transcriber_node_id": self.p2p_manager.node_id,  # Orchestrator
                     "provider": result.get("provider", "unknown"),
                     "confidence": result.get("confidence", 0.0),
@@ -3347,17 +3353,18 @@ class CoreService:
 
                 self._voice_transcriptions[transfer_id] = transcription_data
 
-                # 10. Broadcast transcription to peers
+                # 11. Broadcast transcription to peers (only if not empty)
+                logger.info(f"Broadcasting transcription to peer {node_id}: {len(transcription_text)} chars")
                 await self._broadcast_voice_transcription(node_id, transfer_id, transcription_data)
 
-                # 11. Notify UI
+                # 12. Notify UI
                 await self.local_api.broadcast_event("voice_transcription_complete", {
                     "transfer_id": transfer_id,
                     "node_id": node_id,
                     **transcription_data
                 })
 
-                logger.info(f"Successfully transcribed voice message {transfer_id} using {result.get('provider')}")
+                logger.info(f"Successfully transcribed voice message {transfer_id} using {result.get('provider')} ({len(transcription_text)} chars)")
 
             except Exception as e:
                 logger.error(f"Transcription failed for transfer {transfer_id}: {e}", exc_info=True)
@@ -3408,7 +3415,8 @@ class CoreService:
         Used to determine if Whisper model can be safely unloaded.
         """
         # Check if global auto-transcribe is enabled
-        global_enabled = self.settings.get_bool('voice_messages', 'auto_transcribe', fallback=True)
+        value = self.settings.get('voice_messages', 'auto_transcribe', fallback='true')
+        global_enabled = value.lower() in ('true', '1', 'yes')
 
         if not global_enabled:
             return False  # Global disable overrides all
