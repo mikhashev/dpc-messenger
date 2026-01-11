@@ -3276,7 +3276,7 @@ class CoreService:
             if not has_capability:
                 # No local capability - wait for peer's transcription (passive mode)
                 if not is_sender:
-                    timeout_seconds = self.settings.get_voice_transcription_timeout_seconds() or 30
+                    timeout_seconds = self.settings.get_voice_transcription_timeout_seconds() or 240
                     logger.info(f"No transcription capability (model not loaded), waiting {timeout_seconds}s for peer's transcription for {transfer_id}")
                     # Wait for peer to send transcription
                     for _ in range(timeout_seconds):
@@ -3308,7 +3308,13 @@ class CoreService:
                 logger.error(f"Failed to read audio file for transcription: {e}")
                 return
 
-            # 8. Transcribe audio using configured provider
+            # 8. Final check: Did peer send transcription while we were preparing?
+            # This prevents duplicate work if sender took long to load model but finished before us
+            if transfer_id in self._voice_transcriptions:
+                logger.info(f"Transcription received from peer while preparing, cancelling local attempt for {transfer_id}")
+                return
+
+            # 9. Transcribe audio using configured provider
             try:
                 mime_type = voice_metadata.get("mime_type", "audio/webm")
 
@@ -3333,6 +3339,13 @@ class CoreService:
                 transcription_text = result.get("text", "").strip()
                 if not transcription_text:
                     logger.error(f"Transcription returned empty text for transfer {transfer_id}, result: {result}")
+                    return
+
+                # 9a. Final check before storing: Did peer send transcription while we were transcribing?
+                # Prefer peer's transcription over ours if both completed (first-wins deduplication)
+                existing = self._voice_transcriptions.get(transfer_id)
+                if existing and existing.get("success", False):
+                    logger.info(f"Peer's transcription arrived while we were transcribing {transfer_id}, discarding local result")
                     return
 
                 # 10. Store transcription locally
