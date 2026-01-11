@@ -105,6 +105,13 @@ export const voiceTranscriptionConfig = writable<any>(null);  // Voice transcrip
 export const whisperModelLoadingStarted = writable<any>(null);  // {provider}
 export const whisperModelLoaded = writable<any>(null);  // {provider}
 export const whisperModelLoadingFailed = writable<any>(null);  // {provider, error}
+export const whisperModelUnloaded = writable<any>(null);  // {reason, vram_freed_gb} (v0.13.4+ VRAM unloading)
+
+// Whisper model download stores (v0.13.5+ - interactive download dialog)
+export const whisperModelDownloadRequired = writable<any>(null);  // {model_name, cache_path, download_size_gb, provider_alias}
+export const whisperModelDownloadStarted = writable<any>(null);  // {provider, model_name}
+export const whisperModelDownloadCompleted = writable<any>(null);  // {provider, model_name, cache_path}
+export const whisperModelDownloadFailed = writable<any>(null);  // {provider, error}
 
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
@@ -522,6 +529,28 @@ export function connectToCoreService() {
                 else if (message.event === "whisper_model_loading_failed") {
                     console.error("Whisper model loading failed:", message.payload);
                     whisperModelLoadingFailed.set(message.payload);
+                }
+                else if (message.event === "whisper_model_unloaded") {
+                    console.log("Whisper model unloaded:", message.payload);
+                    whisperModelUnloaded.set(message.payload);
+                    // Optional: Show toast notification about VRAM freed
+                    // console.log(`💾 Voice transcription model unloaded (~${message.payload.vram_freed_gb}GB VRAM freed)`);
+                }
+                else if (message.event === "whisper_model_download_required") {
+                    console.log("Whisper model download required:", message.payload);
+                    whisperModelDownloadRequired.set(message.payload);
+                }
+                else if (message.event === "whisper_model_download_started") {
+                    console.log("Whisper model download started:", message.payload);
+                    whisperModelDownloadStarted.set(message.payload);
+                }
+                else if (message.event === "whisper_model_download_completed") {
+                    console.log("Whisper model download completed:", message.payload);
+                    whisperModelDownloadCompleted.set(message.payload);
+                }
+                else if (message.event === "whisper_model_download_failed") {
+                    console.error("Whisper model download failed:", message.payload);
+                    whisperModelDownloadFailed.set(message.payload);
                 }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)

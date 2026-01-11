@@ -4,10 +4,11 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
+  import ModelDownloadDialog from "$lib/components/ModelDownloadDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
@@ -172,6 +173,14 @@
   let commitResultType = $state<"info" | "error" | "warning">("info");
   let showVoteResultDialog = $state(false);
   let currentVoteResult = $state<any>(null);
+
+  // Model download dialog state (v0.13.5)
+  let showModelDownloadDialog = $state(false);
+  let modelDownloadInfo = $state<any>(null);
+  let isDownloadingModel = $state(false);
+  let showModelDownloadToast = $state(false);
+  let modelDownloadToastMessage = $state("");
+  let modelDownloadToastType = $state<"info" | "error" | "warning">("info");
 
   // Add AI Chat dialog state
   let showAddAIChatDialog = $state(false);
@@ -418,6 +427,57 @@
 
       // Clear the result to prevent re-triggering this reactive statement
       newSessionResult.set(null);
+    }
+  });
+
+  // Reactive: Open model download dialog when model not cached (v0.13.5)
+  $effect(() => {
+    if ($whisperModelDownloadRequired) {
+      console.log('[ModelDownload] Model download required:', $whisperModelDownloadRequired);
+      modelDownloadInfo = $whisperModelDownloadRequired;
+      showModelDownloadDialog = true;
+      isDownloadingModel = false;
+    }
+  });
+
+  // Reactive: Update download status when download starts (v0.13.5)
+  $effect(() => {
+    if ($whisperModelDownloadStarted) {
+      console.log('[ModelDownload] Download started:', $whisperModelDownloadStarted);
+      isDownloadingModel = true;
+    }
+  });
+
+  // Reactive: Close dialog and show success when download completes (v0.13.5)
+  $effect(() => {
+    if ($whisperModelDownloadCompleted) {
+      console.log('[ModelDownload] Download completed:', $whisperModelDownloadCompleted);
+      isDownloadingModel = false;
+      showModelDownloadDialog = false;
+
+      // Show success toast
+      modelDownloadToastMessage = '✅ Model download successful! Voice transcription is now available.';
+      modelDownloadToastType = 'info';
+      showModelDownloadToast = true;
+
+      // Clear the event
+      whisperModelDownloadCompleted.set(null);
+    }
+  });
+
+  // Reactive: Show error and reset when download fails (v0.13.5)
+  $effect(() => {
+    if ($whisperModelDownloadFailed) {
+      console.error('[ModelDownload] Download failed:', $whisperModelDownloadFailed);
+      isDownloadingModel = false;
+
+      // Show error toast
+      modelDownloadToastMessage = `❌ Model download failed: ${$whisperModelDownloadFailed.error}`;
+      modelDownloadToastType = 'error';
+      showModelDownloadToast = true;
+
+      // Clear the event
+      whisperModelDownloadFailed.set(null);
     }
   });
 
@@ -1418,6 +1478,40 @@
     newSessionProposal.set(null);
   }
 
+  // Model download dialog handlers (v0.13.5)
+  async function handleModelDownload(event: CustomEvent) {
+    const { provider_alias } = event.detail;
+    console.log('[ModelDownload] Starting download for provider:', provider_alias);
+
+    try {
+      const result = await sendCommand('download_whisper_model', {
+        provider_alias
+      });
+
+      if (result.status === 'success') {
+        console.log('[ModelDownload] Download initiated successfully');
+      } else {
+        console.error('[ModelDownload] Download failed:', result.error);
+        modelDownloadToastMessage = `❌ Download failed: ${result.error}`;
+        modelDownloadToastType = 'error';
+        showModelDownloadToast = true;
+        isDownloadingModel = false;
+      }
+    } catch (error) {
+      console.error('[ModelDownload] Error initiating download:', error);
+      modelDownloadToastMessage = `❌ Error: ${error}`;
+      modelDownloadToastType = 'error';
+      showModelDownloadToast = true;
+      isDownloadingModel = false;
+    }
+  }
+
+  function handleModelDownloadCancel() {
+    console.log('[ModelDownload] User cancelled download');
+    showModelDownloadDialog = false;
+    whisperModelDownloadRequired.set(null);
+  }
+
   function handleEndSession(conversationId: string) {
     if (confirm("End this conversation session and extract knowledge?")) {
       sendCommand("end_conversation_session", {
@@ -1876,16 +1970,8 @@
       const result = await setConversationTranscription(activeChatId, autoTranscribeEnabled);
       console.log(`[AutoTranscribe] Saved setting for ${activeChatId}: ${autoTranscribeEnabled}`, result);
 
-      // v0.13.3+: Pre-load Whisper model when enabling auto-transcribe
-      if (autoTranscribeEnabled && !whisperModelLoading) {
-        console.log(`[Whisper] Pre-loading model (auto-transcribe enabled)`);
-        try {
-          await preloadWhisperModel();  // Uses default local_whisper provider
-        } catch (error) {
-          console.error(`[Whisper] Failed to pre-load model:`, error);
-          // Don't block - model will load lazily on first transcription
-        }
-      }
+      // Model will load lazily on first voice message recording
+      // No need to preload here - this speeds up app startup significantly
     } catch (error) {
       console.error(`[AutoTranscribe] Failed to save setting for ${activeChatId}:`, error);
     }
@@ -2442,6 +2528,18 @@
   on:close={closeNewSessionDialog}
 />
 
+<!-- Model Download Dialog (v0.13.5) -->
+<ModelDownloadDialog
+  bind:open={showModelDownloadDialog}
+  modelName={modelDownloadInfo?.model_name || ''}
+  downloadSizeGb={modelDownloadInfo?.download_size_gb || 3.0}
+  cachePath={modelDownloadInfo?.cache_path || ''}
+  providerAlias={modelDownloadInfo?.provider_alias || ''}
+  downloading={isDownloadingModel}
+  on:download={handleModelDownload}
+  on:cancel={handleModelDownloadCancel}
+/>
+
 <!-- Notification Permission Dialog -->
 {#if showNotificationPermissionDialog}
   <div
@@ -2579,6 +2677,20 @@
     onDismiss={() => {
       showConnectionError = false;
       connectionError = "";
+    }}
+  />
+{/if}
+
+<!-- Model Download Toast (v0.13.5) -->
+{#if showModelDownloadToast}
+  <Toast
+    message={modelDownloadToastMessage}
+    type={modelDownloadToastType}
+    duration={modelDownloadToastType === 'error' ? 10000 : 5000}
+    dismissible={true}
+    onDismiss={() => {
+      showModelDownloadToast = false;
+      modelDownloadToastMessage = "";
     }}
   />
 {/if}

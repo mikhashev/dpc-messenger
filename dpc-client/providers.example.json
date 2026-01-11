@@ -37,7 +37,10 @@
       "lazy_loading": true,
       "_note": "Privacy-first local transcription with OpenAI API fallback",
       "_performance": "RTX 3060 12GB: ~6s for 1-minute audio (10x real-time)",
-      "_requirements": "CUDA GPU recommended (CPU fallback available, slower)"
+      "_requirements": "CUDA GPU recommended (CPU fallback available, slower)",
+      "_offline_mode": "Model works completely offline after initial download (~3GB, cached in ~/.cache/huggingface/)",
+      "_vram_management": "Model auto-unloads from VRAM when auto-transcribe disabled (frees ~3GB VRAM)",
+      "_lazy_loading": "true = faster startup (model loads on first recording), false = preload on startup"
     },
     {
       "_comment": "Local LM Studio - OpenAI-compatible API",
@@ -150,14 +153,17 @@
       "api_key_env": "Environment variable containing Z.AI API key (recommended)"
     },
     "local_whisper_fields": {
-      "device": "Device to use: 'cuda', 'cpu', or 'auto' (auto-detects CUDA)",
-      "compile_model": "Enable torch.compile for 4.5x speedup (true/false)",
+      "device": "Device to use: 'cuda', 'cpu', 'mps' (macOS), or 'auto' (auto-detects best device)",
+      "compile_model": "Enable torch.compile for 4.5x speedup on CUDA (true/false)",
       "use_flash_attention": "Enable Flash Attention 2 for 20% additional speedup (requires flash-attn package)",
       "chunk_length_s": "Chunk length for long-form transcription in seconds (default: 30)",
       "batch_size": "Batch size for chunked transcription (higher = faster, more VRAM)",
-      "language": "Language code or 'auto' for auto-detection",
-      "task": "Task: 'transcribe' or 'translate' (to English)",
-      "lazy_loading": "Load model on first use for faster startup (true/false)"
+      "language": "Language code (e.g., 'en', 'es', 'fr') or 'auto' for auto-detection",
+      "task": "Task: 'transcribe' (default) or 'translate' (to English)",
+      "lazy_loading": "Load model on first use for faster startup (recommended: true)",
+      "_offline_behavior": "After initial download, model works completely offline with local_files_only=True",
+      "_vram_management": "Model auto-unloads from VRAM when auto-transcribe is disabled for all conversations (~3GB freed)",
+      "_cache_location": "Model files cached in ~/.cache/huggingface/hub/ (~3GB download on first use)"
     }
   },
 

@@ -23,6 +23,16 @@ except ImportError:
     TIKTOKEN_AVAILABLE = False
     logger.warning("tiktoken not available - token counting will use estimation for all models")
 
+# --- Custom Exceptions ---
+
+class ModelNotCachedError(Exception):
+    """Raised when a model is not found in local cache and needs to be downloaded."""
+    def __init__(self, model_name: str, cache_path: str, download_size_gb: float = 3.0):
+        self.model_name = model_name
+        self.cache_path = cache_path
+        self.download_size_gb = download_size_gb
+        super().__init__(f"Model '{model_name}' not found in cache: {cache_path}")
+
 # --- Abstract Base Class for all Providers ---
 
 class AIProvider:
@@ -563,6 +573,11 @@ class LocalWhisperProvider(AIProvider):
             else:
                 device = self.device
 
+            # Force HuggingFace to use offline mode (no network calls)
+            # This applies to both MLX and PyTorch paths
+            import os
+            os.environ['HF_HUB_OFFLINE'] = '1'
+
             # MLX path (Apple Silicon)
             if device == "mlx":
                 try:
@@ -586,6 +601,10 @@ class LocalWhisperProvider(AIProvider):
             import torch
             from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
+            # Determine HuggingFace cache directory
+            cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+            os.makedirs(cache_dir, exist_ok=True)
+
             # Model dtype (float16 for GPU, float32 for CPU)
             torch_dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
 
@@ -597,13 +616,30 @@ class LocalWhisperProvider(AIProvider):
                 else:
                     model_kwargs["attn_implementation"] = "sdpa"
 
-            model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                self.model_name,
-                torch_dtype=torch_dtype,
-                low_cpu_mem_usage=True,
-                use_safetensors=True,
-                **model_kwargs
-            )
+            try:
+                model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch_dtype,
+                    low_cpu_mem_usage=True,
+                    use_safetensors=True,
+                    cache_dir=cache_dir,
+                    local_files_only=True,  # Never check HuggingFace after initial download
+                    **model_kwargs
+                )
+            except OSError as e:
+                if "local_files_only" in str(e) or "offline mode" in str(e).lower():
+                    logger.warning(
+                        f"Whisper model '{self.model_name}' not found in cache. "
+                        f"Download required (~3GB). User will be prompted."
+                    )
+                    # Raise custom exception to trigger user download prompt
+                    raise ModelNotCachedError(
+                        model_name=self.model_name,
+                        cache_path=cache_dir,
+                        download_size_gb=3.0
+                    ) from e
+                else:
+                    raise
 
             # Move model to device with CUDA fallback handling
             try:
@@ -620,7 +656,11 @@ class LocalWhisperProvider(AIProvider):
                     raise
 
             # Load processor
-            processor = AutoProcessor.from_pretrained(self.model_name)
+            processor = AutoProcessor.from_pretrained(
+                self.model_name,
+                cache_dir=cache_dir,
+                local_files_only=True  # Never check HuggingFace after initial download
+            )
 
             # Create pipeline with chunking for long-form audio
             self.pipeline = pipeline(
@@ -678,6 +718,216 @@ class LocalWhisperProvider(AIProvider):
             # Load model in thread pool (blocking operation)
             import asyncio
             await asyncio.to_thread(self._load_model)
+
+    def _unload_model(self) -> None:
+        """
+        Unload the Whisper model from memory and free GPU VRAM.
+
+        This method:
+        - Moves PyTorch model to CPU (frees VRAM)
+        - Deletes model references
+        - Clears CUDA cache
+        - Handles both MLX and PyTorch backends
+
+        Called when auto-transcribe is disabled for all conversations.
+        """
+        if not self.model_loaded:
+            logger.info("Whisper model already unloaded")
+            return
+
+        logger.info(f"Unloading Whisper model '{self.model_name}' from memory...")
+
+        try:
+            # Handle MLX backend (Apple Silicon)
+            if self.pipeline == "mlx":
+                # MLX manages memory automatically, just delete references
+                if hasattr(self, 'whisper_model'):
+                    del self.whisper_model
+                logger.info("MLX Whisper model references cleared")
+
+            # Handle PyTorch backend (CUDA/MPS/CPU)
+            elif self.pipeline is not None:
+                import torch
+
+                # Check if model is on GPU
+                device = None
+                if hasattr(self.pipeline, 'model') and hasattr(self.pipeline.model, 'device'):
+                    device = str(self.pipeline.model.device)
+
+                # Move model to CPU first (frees GPU VRAM)
+                if device and 'cuda' in device:
+                    logger.info(f"Moving Whisper model from {device} to CPU...")
+                    self.pipeline.model.to('cpu')
+                elif device and 'mps' in device:
+                    logger.info(f"Moving Whisper model from {device} to CPU...")
+                    self.pipeline.model.to('cpu')
+
+                # Delete pipeline reference
+                del self.pipeline
+
+                # Force garbage collection
+                import gc
+                gc.collect()
+
+                # Clear CUDA cache if available
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logger.info("CUDA cache cleared, ~3GB VRAM freed")
+                elif torch.backends.mps.is_available():
+                    # MPS doesn't have explicit cache clearing, but memory is freed
+                    logger.info("MPS memory freed")
+                else:
+                    logger.info("CPU memory freed")
+
+            # Reset state
+            self.pipeline = None
+            self.model_loaded = False
+
+            logger.info(f"Whisper model '{self.model_name}' unloaded successfully")
+
+        except Exception as e:
+            logger.error(f"Error unloading Whisper model: {e}", exc_info=True)
+            # Still reset state even on error
+            self.pipeline = None
+            self.model_loaded = False
+
+    async def unload_model_async(self) -> None:
+        """
+        Async wrapper for unload_model that ensures thread-safe unloading.
+
+        Uses the same lock as model loading to prevent race conditions.
+        Checks if model is currently in use before unloading.
+        """
+        # Initialize lock if needed (for consistency with ensure_model_loaded)
+        if self._load_lock is None:
+            import asyncio
+            self._load_lock = asyncio.Lock()
+
+        async with self._load_lock:
+            # Check if model is loaded
+            if not self.model_loaded:
+                logger.debug("Whisper model not loaded, skipping unload")
+                return
+
+            # Run unload in thread pool (blocking I/O)
+            import asyncio
+            await asyncio.to_thread(self._unload_model)
+
+            logger.info("Whisper model unloaded (async)")
+
+    async def download_model_async(self, progress_callback=None) -> Dict[str, Any]:
+        """
+        Download the Whisper model from HuggingFace.
+
+        This method temporarily disables offline mode to allow downloading.
+        Called when user confirms download in the UI dialog.
+
+        Args:
+            progress_callback: Optional async callback function(step: str, progress: float)
+                              to report download progress (0.0 to 1.0)
+
+        Returns:
+            Dict with keys:
+                - success: bool
+                - message: str (success or error message)
+                - model_name: str
+                - cache_path: str
+
+        Raises:
+            Exception: If download fails
+        """
+        import asyncio
+        import time
+
+        logger.info(f"Starting download of Whisper model '{self.model_name}' (~3GB)...")
+
+        if progress_callback:
+            await progress_callback("Preparing download", 0.0)
+
+        def _download():
+            """Synchronous download function to run in thread pool."""
+            import torch
+            from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
+
+            # Determine cache directory
+            cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
+            os.makedirs(cache_dir, exist_ok=True)
+
+            # Temporarily enable online mode for download
+            original_offline = os.environ.get('HF_HUB_OFFLINE')
+            os.environ['HF_HUB_OFFLINE'] = '0'
+
+            try:
+                # Determine device for dtype
+                if self.device == "auto":
+                    device = self._detect_device()
+                else:
+                    device = self.device
+
+                torch_dtype = torch.float16 if device in ("cuda", "mps") else torch.float32
+
+                logger.info(f"Downloading model from HuggingFace: {self.model_name}")
+
+                # Download model (this will cache it)
+                model = AutoModelForSpeechSeq2Seq.from_pretrained(
+                    self.model_name,
+                    torch_dtype=torch_dtype,
+                    low_cpu_mem_usage=True,
+                    use_safetensors=True,
+                    cache_dir=cache_dir
+                    # Note: NOT using local_files_only, so it downloads from HuggingFace
+                )
+
+                logger.info(f"Downloading processor config from HuggingFace: {self.model_name}")
+
+                # Download processor (also cached)
+                processor = AutoProcessor.from_pretrained(
+                    self.model_name,
+                    cache_dir=cache_dir
+                )
+
+                logger.info(f"Model and processor downloaded successfully to {cache_dir}")
+
+                # Don't load model into memory yet, just download
+                del model
+                del processor
+
+                import gc
+                gc.collect()
+
+                return {
+                    "success": True,
+                    "message": f"Model '{self.model_name}' downloaded successfully (~3GB)",
+                    "model_name": self.model_name,
+                    "cache_path": cache_dir
+                }
+
+            except Exception as e:
+                logger.error(f"Failed to download Whisper model: {e}", exc_info=True)
+                return {
+                    "success": False,
+                    "message": f"Download failed: {str(e)}",
+                    "model_name": self.model_name,
+                    "cache_path": cache_dir
+                }
+
+            finally:
+                # Restore offline mode
+                if original_offline is not None:
+                    os.environ['HF_HUB_OFFLINE'] = original_offline
+                else:
+                    os.environ['HF_HUB_OFFLINE'] = '1'
+
+        # Run download in thread pool (it's blocking I/O)
+        if progress_callback:
+            await progress_callback("Downloading model files", 0.3)
+
+        result = await asyncio.to_thread(_download)
+
+        if progress_callback:
+            await progress_callback("Download complete" if result["success"] else "Download failed", 1.0)
+
+        return result
 
     async def transcribe(self, audio_path: str) -> Dict[str, Any]:
         """

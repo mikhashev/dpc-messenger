@@ -689,6 +689,17 @@ class CoreService:
             logger.info("Stopping Gossip Manager...")
             await self.gossip_manager.stop()
 
+        # Unload Whisper model if loaded (free VRAM before shutdown)
+        try:
+            for provider in self.llm_manager.providers:
+                if provider.get('type') == 'local_whisper':
+                    provider_obj = self.llm_manager.get_provider(provider['alias'])
+                    if provider_obj and hasattr(provider_obj, 'is_model_loaded') and provider_obj.is_model_loaded():
+                        logger.info(f"Unloading Whisper model during shutdown: {provider['alias']}")
+                        await provider_obj.unload_model_async()
+        except Exception as e:
+            logger.error(f"Error unloading Whisper model during shutdown: {e}", exc_info=True)
+
         # Shutdown core components
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()
@@ -2840,6 +2851,30 @@ class CoreService:
                     logger.info(f"Local transcription successful: {result['text'][:100]}...")
 
                 except Exception as local_error:
+                    # Check if this is a model not cached error
+                    from dpc_client_core.llm_manager import ModelNotCachedError
+                    if isinstance(local_error.__cause__, ModelNotCachedError) or isinstance(local_error, ModelNotCachedError):
+                        # Model needs to be downloaded - broadcast event to UI
+                        error_details = local_error.__cause__ if isinstance(local_error.__cause__, ModelNotCachedError) else local_error
+
+                        logger.info(f"Whisper model not cached, prompting user for download")
+
+                        await self.local_api.broadcast_event({
+                            "event": "whisper_model_download_required",
+                            "payload": {
+                                "model_name": error_details.model_name,
+                                "cache_path": error_details.cache_path,
+                                "download_size_gb": error_details.download_size_gb,
+                                "provider_alias": provider_obj.alias
+                            }
+                        })
+
+                        # Don't try fallback for this error - user needs to confirm download
+                        raise ValueError(
+                            f"Model '{error_details.model_name}' not cached locally. "
+                            f"Please confirm download in the dialog to proceed."
+                        ) from local_error
+
                     logger.warning(f"Local transcription failed: {local_error}")
 
                     # Check if fallback is enabled
@@ -2979,6 +3014,115 @@ class CoreService:
             await self.local_api.broadcast_event("whisper_model_loading_failed", {
                 "provider": provider_alias if provider_alias else "unknown",
                 "error": str(e)
+            })
+
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def download_whisper_model(self, provider_alias: str | None = None) -> dict:
+        """
+        Download Whisper model from HuggingFace to local cache.
+
+        Called by UI when user confirms download in the dialog.
+
+        Args:
+            provider_alias: Optional provider alias (default: first local_whisper provider)
+
+        Returns:
+            dict with status and info
+        """
+        try:
+            # Find Whisper provider
+            provider_obj = None
+
+            if provider_alias:
+                provider_obj = self.llm_manager.providers.get(provider_alias)
+                if not provider_obj or provider_obj.config.get("type") != "local_whisper":
+                    return {
+                        "status": "error",
+                        "error": f"Provider '{provider_alias}' is not a local Whisper provider"
+                    }
+            else:
+                # Find first local_whisper provider
+                for provider in self.llm_manager.providers.values():
+                    if provider.config.get("type") == "local_whisper":
+                        provider_obj = provider
+                        provider_alias = provider.alias
+                        break
+
+                if not provider_obj:
+                    return {
+                        "status": "error",
+                        "error": "No local Whisper provider configured"
+                    }
+
+            # Check if provider supports download
+            if not hasattr(provider_obj, 'download_model_async'):
+                return {
+                    "status": "error",
+                    "error": f"Provider '{provider_alias}' doesn't support model download"
+                }
+
+            # Broadcast download started event
+            await self.local_api.broadcast_event({
+                "event": "whisper_model_download_started",
+                "payload": {
+                    "provider": provider_alias,
+                    "model_name": provider_obj.config.get("model", "unknown")
+                }
+            })
+
+            # Download model (this runs in thread pool, so it won't block)
+            logger.info(f"Starting Whisper model download for provider '{provider_alias}'...")
+
+            result = await provider_obj.download_model_async()
+
+            if result.get("success"):
+                # Broadcast download completed event
+                await self.local_api.broadcast_event({
+                    "event": "whisper_model_download_completed",
+                    "payload": {
+                        "provider": provider_alias,
+                        "model_name": result.get("model_name"),
+                        "cache_path": result.get("cache_path")
+                    }
+                })
+
+                logger.info(f"Successfully downloaded Whisper model for provider '{provider_alias}'")
+
+                return {
+                    "status": "success",
+                    "provider": provider_alias,
+                    "model_name": result.get("model_name"),
+                    "message": result.get("message")
+                }
+            else:
+                # Broadcast download failed event
+                await self.local_api.broadcast_event({
+                    "event": "whisper_model_download_failed",
+                    "payload": {
+                        "provider": provider_alias,
+                        "error": result.get("message")
+                    }
+                })
+
+                return {
+                    "status": "error",
+                    "error": result.get("message")
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to download Whisper model: {e}", exc_info=True)
+
+            # Broadcast download failed event
+            await self.local_api.broadcast_event({
+                "event": "whisper_model_download_failed",
+                "payload": {
+                    "provider": provider_alias if provider_alias else "unknown",
+                    "error": str(e)
+                }
             })
 
             return {
@@ -3253,6 +3397,28 @@ class CoreService:
             logger.debug(f"Saved voice transcription settings for {len(self._voice_transcription_settings)} conversations")
         except Exception as e:
             logger.error(f"Failed to save voice transcription settings: {e}")
+
+    def _is_transcription_needed(self) -> bool:
+        """
+        Check if any active conversation has auto-transcribe enabled.
+
+        Returns:
+            True if at least one conversation needs transcription, False otherwise.
+
+        Used to determine if Whisper model can be safely unloaded.
+        """
+        # Check if global auto-transcribe is enabled
+        global_enabled = self.settings.get_bool('voice_messages', 'auto_transcribe', fallback=True)
+
+        if not global_enabled:
+            return False  # Global disable overrides all
+
+        # Check per-conversation settings
+        for node_id, enabled in self._voice_transcription_settings.items():
+            if enabled:
+                return True  # At least one conversation needs it
+
+        return False  # No conversations need transcription
 
     async def _check_transcription_capability(self, check_model_loaded: bool = True) -> bool:
         """
@@ -3562,6 +3728,41 @@ class CoreService:
             self._save_voice_transcription_settings()
 
             logger.info(f"Set auto-transcription for {node_id}: {enabled}")
+
+            # Check if we should unload the model
+            if not enabled:
+                # Check if any other conversation still needs transcription
+                if not self._is_transcription_needed():
+                    logger.info("Auto-transcribe disabled for all conversations, unloading Whisper model...")
+
+                    # Find the local_whisper provider
+                    whisper_provider = None
+                    for provider in self.llm_manager.providers:
+                        if provider.get('type') == 'local_whisper':
+                            provider_obj = self.llm_manager.get_provider(provider['alias'])
+                            if provider_obj and hasattr(provider_obj, 'unload_model_async'):
+                                whisper_provider = provider_obj
+                                break
+
+                    # Unload the model
+                    if whisper_provider:
+                        try:
+                            await whisper_provider.unload_model_async()
+
+                            # Broadcast unload event to UI
+                            await self.local_api.broadcast_event({
+                                "event": "whisper_model_unloaded",
+                                "payload": {
+                                    "reason": "auto_transcribe_disabled",
+                                    "vram_freed_gb": 3.0  # Approximate
+                                }
+                            })
+
+                            logger.info("Whisper model unloaded, ~3GB VRAM freed")
+                        except Exception as e:
+                            logger.error(f"Failed to unload Whisper model: {e}", exc_info=True)
+                    else:
+                        logger.debug("No local_whisper provider found to unload")
 
             return {
                 "status": "success",
