@@ -1221,6 +1221,59 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self.peer_context_cache = {}
         self.peer_device_context_cache = {}
 
+    def _remap_attachment_paths(self, attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remap file paths in attachments from peer's filesystem to local filesystem.
+
+        When importing chat history, voice/file attachments may have file_path
+        that points to the peer's filesystem (e.g., C:\\Users\\...\\file.webm on Windows).
+        This method checks if the file exists locally and remaps the path.
+
+        Args:
+            attachments: List of attachment dicts (may contain file_path)
+
+        Returns:
+            List of attachment dicts with remapped file_path (if file exists locally)
+        """
+        import os
+        from pathlib import Path
+
+        # Construct local files directory: ~/.dpc/conversations/{peer_id}/files/
+        dpc_home = Path.home() / ".dpc"
+        local_files_dir = dpc_home / "conversations" / self.conversation_id / "files"
+
+        remapped = []
+        for attachment in attachments:
+            # Make a copy to avoid modifying original
+            att = dict(attachment)
+
+            # Check if this attachment has a file_path (voice/file attachments)
+            if "file_path" in att and att["file_path"]:
+                peer_path = att["file_path"]
+
+                # Extract filename from peer's path (cross-platform)
+                # Handle both Unix (/) and Windows (\) separators
+                filename = os.path.basename(peer_path.replace("\\", "/"))
+
+                # Construct local path: ~/.dpc/conversations/{peer_id}/files/{filename}
+                local_file_path = local_files_dir / filename
+
+                # Check if file exists locally
+                if local_file_path.exists():
+                    # Replace with local path
+                    att["file_path"] = str(local_file_path)
+                    logger.debug(f"Remapped attachment path: {peer_path} -> {local_file_path}")
+                else:
+                    # File doesn't exist locally - keep peer's path but log warning
+                    logger.warning(
+                        f"Voice/file attachment not found locally: {filename}. "
+                        f"Expected at {local_file_path}. Voice message may not play."
+                    )
+                    # Keep the peer's path (will fail to play, but preserves history)
+
+            remapped.append(att)
+
+        return remapped
+
     def export_history(self) -> List[Dict[str, Any]]:
         """Export conversation history for syncing with peer
 
@@ -1265,7 +1318,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "content": msg.get("content", "")
             }
             if "attachments" in msg:
-                imported_msg["attachments"] = msg["attachments"]
+                # Fix file paths in attachments (convert peer's paths to local paths)
+                imported_msg["attachments"] = self._remap_attachment_paths(msg["attachments"])
             self.message_history.append(imported_msg)
 
         logger.info(f"Imported {len(messages)} messages into conversation history")
