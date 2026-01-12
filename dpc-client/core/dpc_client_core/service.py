@@ -3440,6 +3440,103 @@ class CoreService:
 
         return False  # No conversations need transcription
 
+    async def _retroactively_transcribe_conversation(self, node_id: str) -> None:
+        """
+        Retroactively transcribe all untranscribed voice messages in a conversation.
+
+        Called when user enables auto-transcribe checkbox. Scans conversation history
+        for voice messages without transcriptions and transcribes them in background.
+
+        Args:
+            node_id: Peer node ID for the conversation
+        """
+        try:
+            # Get conversation monitor
+            monitor = self.conversation_monitors.get(node_id)
+            if not monitor:
+                logger.debug(f"No conversation monitor for {node_id}, skipping retroactive transcription")
+                return
+
+            # Get message history
+            history = monitor.get_message_history()
+
+            # Find all voice messages without transcriptions
+            untranscribed_voices = []
+            for msg in history:
+                if "attachments" in msg:
+                    for attachment in msg["attachments"]:
+                        if attachment.get("type") == "voice":
+                            transfer_id = attachment.get("transfer_id")
+                            file_path_str = attachment.get("file_path")
+                            voice_metadata = attachment.get("voice_metadata")
+
+                            # Check if already transcribed
+                            if transfer_id and transfer_id not in self._voice_transcriptions:
+                                if file_path_str and voice_metadata:
+                                    file_path = Path(file_path_str)
+                                    if file_path.exists():
+                                        untranscribed_voices.append({
+                                            "transfer_id": transfer_id,
+                                            "file_path": file_path,
+                                            "voice_metadata": voice_metadata
+                                        })
+
+            if not untranscribed_voices:
+                logger.debug(f"No untranscribed voice messages found for {node_id}")
+                return
+
+            logger.info(f"Found {len(untranscribed_voices)} untranscribed voice messages for {node_id}, starting retroactive transcription")
+
+            # Broadcast start event to UI
+            await self.local_api.broadcast_event("retroactive_transcription_started", {
+                "node_id": node_id,
+                "total_count": len(untranscribed_voices)
+            })
+
+            # Transcribe each voice message
+            for idx, voice_data in enumerate(untranscribed_voices):
+                try:
+                    # Broadcast progress to UI
+                    await self.local_api.broadcast_event("retroactive_transcription_progress", {
+                        "node_id": node_id,
+                        "current": idx + 1,
+                        "total": len(untranscribed_voices)
+                    })
+
+                    # Use the existing transcription logic
+                    await self._maybe_transcribe_voice_message(
+                        transfer_id=voice_data["transfer_id"],
+                        node_id=node_id,
+                        file_path=voice_data["file_path"],
+                        voice_metadata=voice_data["voice_metadata"],
+                        is_sender=False  # Treat as receiver (no delay)
+                    )
+
+                    logger.debug(f"Retroactively transcribed {idx + 1}/{len(untranscribed_voices)} for {node_id}")
+
+                except Exception as e:
+                    logger.error(f"Failed to retroactively transcribe voice message {voice_data['transfer_id']}: {e}", exc_info=True)
+                    continue  # Continue with next message
+
+            # Broadcast completion event to UI
+            await self.local_api.broadcast_event("retroactive_transcription_completed", {
+                "node_id": node_id,
+                "transcribed_count": len(untranscribed_voices)
+            })
+
+            logger.info(f"Retroactive transcription completed for {node_id}: {len(untranscribed_voices)} messages transcribed")
+
+        except Exception as e:
+            logger.error(f"Error during retroactive transcription for {node_id}: {e}", exc_info=True)
+            # Broadcast error event to UI
+            try:
+                await self.local_api.broadcast_event("retroactive_transcription_error", {
+                    "node_id": node_id,
+                    "error": str(e)
+                })
+            except Exception:
+                pass  # Ignore broadcast errors
+
     async def _check_transcription_capability(self, check_model_loaded: bool = True) -> bool:
         """
         Check if this node has transcription capability (provider available AND ready).
@@ -3749,6 +3846,10 @@ class CoreService:
 
             logger.info(f"Set auto-transcription for {node_id}: {enabled}")
 
+            # If enabling auto-transcribe, retroactively transcribe previous untranscribed voice messages
+            if enabled:
+                asyncio.create_task(self._retroactively_transcribe_conversation(node_id))
+
             # Check if we should unload the model
             if not enabled:
                 # Check if any other conversation still needs transcription
@@ -3769,15 +3870,11 @@ class CoreService:
                             await whisper_provider.unload_model_async()
 
                             # Broadcast unload event to UI
-                            await self.local_api.broadcast_event({
-                                "event": "whisper_model_unloaded",
-                                "payload": {
-                                    "reason": "auto_transcribe_disabled",
-                                    "vram_freed_gb": 3.0  # Approximate
-                                }
+                            await self.local_api.broadcast_event("whisper_model_unloaded", {
+                                "reason": "auto_transcribe_disabled"
                             })
 
-                            logger.info("Whisper model unloaded, ~3GB VRAM freed")
+                            logger.info("Whisper model unloaded successfully")
                         except Exception as e:
                             logger.error(f"Failed to unload Whisper model: {e}", exc_info=True)
                     else:
