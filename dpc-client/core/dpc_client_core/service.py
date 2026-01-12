@@ -2858,14 +2858,11 @@ class CoreService:
 
                         logger.info(f"Whisper model not cached, prompting user for download")
 
-                        await self.local_api.broadcast_event({
-                            "event": "whisper_model_download_required",
-                            "payload": {
-                                "model_name": error_details.model_name,
-                                "cache_path": error_details.cache_path,
-                                "download_size_gb": error_details.download_size_gb,
-                                "provider_alias": provider_obj.alias
-                            }
+                        await self.local_api.broadcast_event("whisper_model_download_required", {
+                            "model_name": error_details.model_name,
+                            "cache_path": error_details.cache_path,
+                            "download_size_gb": error_details.download_size_gb,
+                            "provider_alias": provider_obj.alias
                         })
 
                         # Don't try fallback for this error - user needs to confirm download
@@ -3065,12 +3062,9 @@ class CoreService:
                 }
 
             # Broadcast download started event
-            await self.local_api.broadcast_event({
-                "event": "whisper_model_download_started",
-                "payload": {
-                    "provider": provider_alias,
-                    "model_name": provider_obj.config.get("model", "unknown")
-                }
+            await self.local_api.broadcast_event("whisper_model_download_started", {
+                "provider": provider_alias,
+                "model_name": provider_obj.config.get("model", "unknown")
             })
 
             # Download model (this runs in thread pool, so it won't block)
@@ -3080,13 +3074,10 @@ class CoreService:
 
             if result.get("success"):
                 # Broadcast download completed event
-                await self.local_api.broadcast_event({
-                    "event": "whisper_model_download_completed",
-                    "payload": {
-                        "provider": provider_alias,
-                        "model_name": result.get("model_name"),
-                        "cache_path": result.get("cache_path")
-                    }
+                await self.local_api.broadcast_event("whisper_model_download_completed", {
+                    "provider": provider_alias,
+                    "model_name": result.get("model_name"),
+                    "cache_path": result.get("cache_path")
                 })
 
                 logger.info(f"Successfully downloaded Whisper model for provider '{provider_alias}'")
@@ -3099,12 +3090,9 @@ class CoreService:
                 }
             else:
                 # Broadcast download failed event
-                await self.local_api.broadcast_event({
-                    "event": "whisper_model_download_failed",
-                    "payload": {
-                        "provider": provider_alias,
-                        "error": result.get("message")
-                    }
+                await self.local_api.broadcast_event("whisper_model_download_failed", {
+                    "provider": provider_alias,
+                    "error": result.get("message")
                 })
 
                 return {
@@ -3116,12 +3104,9 @@ class CoreService:
             logger.error(f"Failed to download Whisper model: {e}", exc_info=True)
 
             # Broadcast download failed event
-            await self.local_api.broadcast_event({
-                "event": "whisper_model_download_failed",
-                "payload": {
-                    "provider": provider_alias if provider_alias else "unknown",
-                    "error": str(e)
-                }
+            await self.local_api.broadcast_event("whisper_model_download_failed", {
+                "provider": provider_alias if provider_alias else "unknown",
+                "error": str(e)
             })
 
             return {
@@ -3209,7 +3194,8 @@ class CoreService:
         node_id: str,
         file_path: Path,
         voice_metadata: Dict[str, Any],
-        is_sender: bool
+        is_sender: bool,
+        allow_model_load: bool = False
     ) -> None:
         """
         Conditionally trigger auto-transcription for a voice message.
@@ -3224,6 +3210,7 @@ class CoreService:
             file_path: Path to voice file
             voice_metadata: Voice metadata dict (duration, codec, etc.)
             is_sender: True if this node sent the voice message, False if received
+            allow_model_load: If True, allow model loading even for receivers (for retroactive transcription)
         """
         # 1. Check if auto-transcription is enabled globally
         if not self.settings.get_voice_transcription_enabled():
@@ -3270,8 +3257,10 @@ class CoreService:
 
             # 7. Check if this node has transcription capability
             # For receivers: check if model is loaded (enables passive wait mode if not ready)
+            #   UNLESS allow_model_load=True (retroactive transcription case)
             # For senders: check if provider exists (allow lazy loading to handle model)
-            has_capability = await self._check_transcription_capability(check_model_loaded=not is_sender)
+            check_loaded = not is_sender and not allow_model_load
+            has_capability = await self._check_transcription_capability(check_model_loaded=check_loaded)
             if not has_capability:
                 # No local capability - wait for peer's transcription (passive mode)
                 if not is_sender:
@@ -3509,7 +3498,8 @@ class CoreService:
                         node_id=node_id,
                         file_path=voice_data["file_path"],
                         voice_metadata=voice_data["voice_metadata"],
-                        is_sender=False  # Treat as receiver (no delay)
+                        is_sender=False,  # Treat as receiver (no delay)
+                        allow_model_load=True  # v0.13.3: Allow model loading for retroactive transcription
                     )
 
                     logger.debug(f"Retroactively transcribed {idx + 1}/{len(untranscribed_voices)} for {node_id}")
