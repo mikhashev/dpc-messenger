@@ -691,12 +691,11 @@ class CoreService:
 
         # Unload Whisper model if loaded (free VRAM before shutdown)
         try:
-            for provider in self.llm_manager.providers:
-                if provider.get('type') == 'local_whisper':
-                    provider_obj = self.llm_manager.get_provider(provider['alias'])
-                    if provider_obj and hasattr(provider_obj, 'is_model_loaded') and provider_obj.is_model_loaded():
-                        logger.info(f"Unloading Whisper model during shutdown: {provider['alias']}")
-                        await provider_obj.unload_model_async()
+            for alias, provider in self.llm_manager.providers.items():
+                if provider.config.get('type') == 'local_whisper':
+                    if hasattr(provider, 'is_model_loaded') and provider.is_model_loaded():
+                        logger.info(f"Unloading Whisper model during shutdown: {alias}")
+                        await provider.unload_model_async()
         except Exception as e:
             logger.error(f"Error unloading Whisper model during shutdown: {e}", exc_info=True)
 
@@ -3758,11 +3757,10 @@ class CoreService:
 
                     # Find the local_whisper provider
                     whisper_provider = None
-                    for provider in self.llm_manager.providers:
-                        if provider.get('type') == 'local_whisper':
-                            provider_obj = self.llm_manager.get_provider(provider['alias'])
-                            if provider_obj and hasattr(provider_obj, 'unload_model_async'):
-                                whisper_provider = provider_obj
+                    for alias, provider in self.llm_manager.providers.items():
+                        if provider.config.get('type') == 'local_whisper':
+                            if hasattr(provider, 'unload_model_async'):
+                                whisper_provider = provider
                                 break
 
                     # Unload the model
@@ -4928,7 +4926,7 @@ class CoreService:
                 "model": model,
                 "type": provider_type,
                 "supports_vision": provider.supports_vision(),
-                "supports_voice": provider_type == "local_whisper"  # Mark transcription providers
+                "supports_voice": self._provider_supports_voice(provider)  # Mark transcription providers
             }
 
             # Categorize by provider type

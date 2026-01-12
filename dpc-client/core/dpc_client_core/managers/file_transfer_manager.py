@@ -390,13 +390,9 @@ class FileTransferManager:
         if active_uploads >= self.max_concurrent_transfers:
             raise RuntimeError(f"Max concurrent transfers ({self.max_concurrent_transfers}) exceeded")
 
-        # Check firewall permission
-        allowed, error_msg = await self._check_file_transfer_permission(node_id, file_path)
-        if not allowed:
-            if error_msg:
-                raise PermissionError(error_msg)
-            else:
-                raise PermissionError(f"Firewall denies file transfer to {node_id}")
+        # Receiver will check firewall permission upon FILE_OFFER receipt (receiver-only control)
+        # Sender-side permission check removed in v0.13.3 - receiver has full control
+        # See: file_offer_handler.py:107-123 for receiver-side permission enforcement
 
         # Compute file metadata
         file_size = file_path.stat().st_size

@@ -32,11 +32,38 @@ dpc-messenger/
 **Backend (Python):**
 ```bash
 cd dpc-client/core
-poetry install                    # Install dependencies
+poetry install                    # Install dependencies (default)
 poetry run python run_service.py  # Run backend service (ports 8888, 9999)
 poetry run pytest                 # Run tests
 poetry run pytest --cov=dpc_client_core  # Run with coverage
 ```
+
+**Platform-Specific Dependencies (macOS Apple Silicon):**
+
+The client supports GPU-accelerated Whisper transcription on Apple Silicon (M1/M2/M3/M4) via MLX, but this is **optional** and not installed by default.
+
+```bash
+cd dpc-client/core
+
+# Install without MLX (default, lightweight)
+poetry install
+
+# Install with MLX support (enables GPU-accelerated offline transcription)
+poetry install -E mlx
+```
+
+**Technical Details:**
+- **Dependencies**: `mlx>=0.4.0`, `mlx-whisper>=0.2.0`
+- **Platform Markers**: `sys_platform == 'darwin' and platform_machine == 'arm64'`
+- **Size Impact**: MLX packages add ~500MB to installation
+- **Defined In**: `[tool.poetry.extras] mlx = ["mlx", "mlx-whisper"]`
+- **Graceful Fallback**: If MLX not installed, client uses OpenAI-compatible API or skips transcription
+- **Cross-Platform Safety**: `-E mlx` flag is safely ignored on Windows/Linux (platform markers prevent installation)
+
+**Why Optional?**
+- Keeps default installation lightweight (~200MB vs ~700MB with MLX)
+- Not all users need offline transcription (can use cloud-based Whisper via OpenAI API)
+- Users can add MLX support later without reinstalling other dependencies
 
 **Frontend (Tauri + SvelteKit):**
 ```bash

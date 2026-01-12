@@ -688,7 +688,7 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
         if (expectsResponse) {
             return new Promise((resolve, reject) => {
                 // Calculate dynamic timeout for file operations and connections
-                let timeout = 10000;  // Default: 10s
+                let timeout = 25000;  // Default: 25s (increased from 10s in v0.13.3 for slow systems)
 
                 if (command === 'connect_to_peer' || command === 'connect_via_dht') {
                     // Connection timeout: 30s (includes pre-flight check + TLS handshake + HELLO)
