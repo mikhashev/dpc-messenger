@@ -72,7 +72,7 @@ class VoiceTranscriptionHandler(MessageHandler):
         # Find the voice message in conversation history and attach transcription
         conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
         if conversation_monitor:
-            # Iterate through message_history to find the voice attachment
+            # A. Update message_history attachments (existing code)
             for message in conversation_monitor.message_history:
                 attachments = message.get("attachments", [])
                 for attachment in attachments:
@@ -81,6 +81,19 @@ class VoiceTranscriptionHandler(MessageHandler):
                         attachment["transcription"] = transcription_data
                         self.logger.debug(f"Attached transcription to voice message in conversation history")
                         break
+
+            # B. Also update Message objects in extraction buffers (v0.14.0 fix)
+            transcription_text = transcription_data.get("text", "")
+            if transcription_text:
+                # Find and update Message objects in both buffers using transfer_id
+                for message_list in [conversation_monitor.message_buffer, conversation_monitor.full_conversation]:
+                    for msg_obj in message_list:
+                        if hasattr(msg_obj, 'attachment_transfer_id') and msg_obj.attachment_transfer_id == transfer_id:
+                            # Replace placeholder with actual transcription
+                            # Format: "Voice message: [transcription text]"
+                            msg_obj.text = f"Voice message: {transcription_text}"
+                            self.logger.debug(f"Updated Message object text with transcription: {transfer_id}")
+                            break
 
         # 4. Broadcast to UI
         await self.service.local_api.broadcast_event("voice_transcription_received", {

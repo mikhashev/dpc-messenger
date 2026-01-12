@@ -27,6 +27,7 @@ class Message:
     sender_name: str
     text: str
     timestamp: str
+    attachment_transfer_id: Optional[str] = None  # Link to attachment transfer (v0.14.0)
 
 
 class ConversationMonitor:
@@ -192,15 +193,21 @@ class ConversationMonitor:
 
         # Check if we should generate proposal
         if force or self.knowledge_score > self.knowledge_threshold:
-            # Generate proposal
-            proposal = await self._generate_commit_proposal()
+            try:
+                # Generate proposal
+                proposal = await self._generate_commit_proposal()
 
-            # Reset buffer
-            self.message_buffer = []
-            self.knowledge_score = 0.0
-            self.proposals_created += 1
+                # Reset buffer only if proposal generation succeeded (v0.14.0 fix)
+                if proposal is not None:
+                    self.message_buffer = []
+                    self.knowledge_score = 0.0
+                    self.proposals_created += 1
 
-            return proposal
+                return proposal
+            except Exception as e:
+                # Log error but DON'T clear buffer to allow retry (v0.14.0 fix)
+                logger.error(f"Error generating proposal (buffer preserved for retry): {e}", exc_info=True)
+                raise  # Re-raise so caller knows it failed
 
         return None
 
@@ -1174,7 +1181,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             sender_node_id=sender_node_id,
             sender_name=sender_name,
             text=content,
-            timestamp=datetime.now(timezone.utc).isoformat()
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            attachment_transfer_id=attachments[0].get("transfer_id") if attachments else None  # v0.14.0
         )
 
         self.message_buffer.append(message_obj)
@@ -1310,9 +1318,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             logger.info("No messages to import")
             return
 
-        # Replace current history (assume peer's history is authoritative)
+        # Replace all three message stores (v0.14.0 fix)
         self.message_history = []
+        self.message_buffer = []
+        self.full_conversation = []
+
+        import uuid
+
         for msg in messages:
+            # 1. Add to message_history (original format)
             imported_msg = {
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
@@ -1322,7 +1336,33 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 imported_msg["attachments"] = self._remap_attachment_paths(msg["attachments"])
             self.message_history.append(imported_msg)
 
-        logger.info(f"Imported {len(messages)} messages into conversation history")
+            # 2. Also create Message objects for extraction buffers (v0.14.0 fix)
+            # Map role to sender info
+            role = msg.get("role", "user")
+            if role == "user":
+                # User is the local node (first participant is always self)
+                sender_node_id = self.participants[0]["node_id"] if self.participants else "local"
+                sender_name = self.participants[0]["name"] if self.participants else "You"
+            else:  # role == "assistant" or "peer"
+                # Assistant/peer is the conversation partner (second participant)
+                sender_node_id = self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
+                sender_name = self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
+
+            # Create Message object (same as add_message() does)
+            message_obj = Message(
+                message_id=str(uuid.uuid4()),
+                conversation_id=self.conversation_id,
+                sender_node_id=sender_node_id,
+                sender_name=sender_name,
+                text=msg.get("content", ""),
+                timestamp=msg.get("timestamp", datetime.now(timezone.utc).isoformat())
+            )
+
+            # Add to both extraction buffers
+            self.message_buffer.append(message_obj)
+            self.full_conversation.append(message_obj)
+
+        logger.info(f"Imported {len(messages)} messages into all conversation buffers")
 
     # Phase 7: Peer context cache management methods
     def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):

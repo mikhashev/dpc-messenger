@@ -333,7 +333,15 @@ async def read_message(reader: asyncio.StreamReader) -> dict | None:
         logger.warning("Connection lost: %s", e)
         return None
     except ValueError as e:
-        logger.warning("Protocol error: invalid message format (%s)", e)
+        # Check if it looks like HTTP request (v0.14.0 - clearer error messages)
+        try:
+            header_str = header.decode(errors='ignore')
+            if any(header_str.startswith(method) for method in ['GET ', 'POST', 'PUT', 'DELETE', 'HEAD', 'OPTIONS']):
+                logger.warning(f"HTTP request received on DPC protocol port (first 10 bytes: {header_str!r}) - connection will be rejected")
+            else:
+                logger.warning("Protocol error: invalid message format (%s)", e)
+        except:
+            logger.warning("Protocol error: invalid message format (%s)", e)
         return None
 
 async def write_message(writer: asyncio.StreamWriter, data: dict):
