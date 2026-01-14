@@ -963,6 +963,13 @@ class LocalWhisperProvider(AIProvider):
                     # Run synchronous model loading in thread pool
                     await asyncio.to_thread(self._load_model)
 
+        # Clear CUDA cache before transcription to free fragmented memory (v0.14.1+)
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            free_mem_gb = torch.cuda.mem_get_info()[0] / 1024**3
+            logger.debug(f"Cleared CUDA cache before transcription. Free memory: {free_mem_gb:.2f} GB")
+
         try:
             # MLX path (Apple Silicon)
             if self.pipeline == "mlx":
@@ -1013,11 +1020,24 @@ class LocalWhisperProvider(AIProvider):
                 logger.info(f"Transcribing audio with local Whisper: {duration_seconds:.1f}s, model={self.model_name}")
                 start_time = asyncio.get_event_loop().time()
 
+                # Adaptive batch_size for long audio (up to 5 minutes / 300 seconds) - v0.14.1+
+                # Reduces VRAM usage for long Telegram voice messages by processing fewer chunks simultaneously
+                adaptive_batch_size = self.batch_size
+                if duration_seconds > 180:  # 3+ minutes
+                    adaptive_batch_size = max(1, self.batch_size // 8)  # 16 → 2
+                    logger.info(f"Long audio ({duration_seconds:.0f}s), reducing batch_size: {self.batch_size} → {adaptive_batch_size}")
+                elif duration_seconds > 120:  # 2+ minutes
+                    adaptive_batch_size = max(1, self.batch_size // 4)  # 16 → 4
+                    logger.info(f"Long audio ({duration_seconds:.0f}s), reducing batch_size: {self.batch_size} → {adaptive_batch_size}")
+                elif duration_seconds > 60:  # 1+ minutes
+                    adaptive_batch_size = max(1, self.batch_size // 2)  # 16 → 8
+                    logger.info(f"Medium audio ({duration_seconds:.0f}s), reducing batch_size: {self.batch_size} → {adaptive_batch_size}")
+
                 # Run transcription in thread pool (I/O + CPU bound)
                 result = await asyncio.to_thread(
                     self.pipeline,
                     audio_array,
-                    batch_size=self.batch_size
+                    batch_size=adaptive_batch_size
                 )
 
                 elapsed = asyncio.get_event_loop().time() - start_time
@@ -1030,6 +1050,11 @@ class LocalWhisperProvider(AIProvider):
 
                 logger.info(f"Local transcription completed in {elapsed:.1f}s ({duration_seconds/elapsed:.1f}x real-time): {len(text)} chars")
 
+                # Clear CUDA cache after transcription to free memory for next transcription (v0.14.1+)
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    logger.debug(f"Cleared CUDA cache after transcription")
+
                 return {
                     "text": text,
                     "language": detected_language,
@@ -1038,8 +1063,21 @@ class LocalWhisperProvider(AIProvider):
                 }
 
         except Exception as e:
-            logger.error(f"Local transcription failed: {e}", exc_info=True)
-            raise RuntimeError(f"Local Whisper transcription failed: {e}") from e
+            error_msg = str(e)
+
+            # Check if CUDA OOM error - provide helpful error message (v0.14.1+)
+            if "CUDA out of memory" in error_msg:
+                logger.warning(f"GPU OOM for {duration_seconds:.0f}s audio (need more VRAM or use turbo model)")
+
+                # Provide helpful error message for UI toast
+                raise RuntimeError(
+                    f"Voice message too long for available GPU VRAM ({duration_seconds:.0f}s). "
+                    f"Try: 1) Use 'openai/whisper-large-v3-turbo' model (less VRAM), "
+                    f"2) Send shorter voice messages, or 3) Close other GPU applications"
+                ) from e
+            else:
+                logger.error(f"Local transcription failed: {e}", exc_info=True)
+                raise RuntimeError(f"Local Whisper transcription failed: {e}") from e
 
     async def generate_response(self, prompt: str) -> str:
         """Not implemented - LocalWhisperProvider only supports transcription."""

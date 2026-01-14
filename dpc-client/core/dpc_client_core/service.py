@@ -2958,6 +2958,16 @@ class CoreService:
 
         except Exception as e:
             logger.error(f"Audio transcription failed: {e}", exc_info=True)
+
+            # Broadcast error toast to UI for OOM errors (v0.14.1+)
+            error_msg = str(e)
+            if "VRAM" in error_msg or "too long" in error_msg or "CUDA out of memory" in error_msg:
+                await self.local_api.broadcast_event("error_toast", {
+                    "title": "Transcription Failed",
+                    "message": error_msg,
+                    "duration": 5000  # Show for 5 seconds
+                })
+
             return {
                 "status": "error",
                 "error": str(e)

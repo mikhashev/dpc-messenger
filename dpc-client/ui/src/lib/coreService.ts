@@ -561,6 +561,19 @@ export function connectToCoreService() {
                     console.log("Telegram voice received:", message.payload);
                     telegramVoiceReceived.set(message.payload);
                 }
+                // Error toast notifications (v0.14.1+ - VRAM OOM warnings, etc.)
+                else if (message.event === "error_toast") {
+                    console.log("Error toast:", message.payload);
+                    const { title, message: toastMessage, duration } = message.payload;
+
+                    // Show alert for now - can be replaced with proper toast UI component later
+                    if (typeof window !== 'undefined') {
+                        alert(`${title}\n\n${toastMessage}`);
+                    }
+
+                    // Also log to console for debugging
+                    console.error(`[ERROR TOAST] ${title}: ${toastMessage}`);
+                }
 
                 // Whisper model loading events (v0.13.3+ model pre-loading)
                 else if (message.event === "whisper_model_loading_started") {
