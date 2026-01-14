@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramLinkedChats, sendToTelegram } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -268,6 +268,19 @@
           return newMap;
         });
         console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar`);
+
+        // Persist Telegram chats to localStorage for page refresh recovery
+        try {
+          const telegramChats = Object.fromEntries(
+            Array.from($aiChats.entries())
+              .filter(([_, info]) => info.provider === 'telegram')
+              .map(([id, info]) => [id, info])
+          );
+          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+          console.log('[Telegram] Persisted Telegram chats to localStorage:', Object.keys(telegramChats));
+        } catch (error) {
+          console.error('[Telegram] Failed to persist chats:', error);
+        }
       }
 
       // Add message to chatHistories
@@ -310,6 +323,19 @@
           return newMap;
         });
         console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar`);
+
+        // Persist Telegram chats to localStorage for page refresh recovery
+        try {
+          const telegramChats = Object.fromEntries(
+            Array.from($aiChats.entries())
+              .filter(([_, info]) => info.provider === 'telegram')
+              .map(([id, info]) => [id, info])
+          );
+          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+          console.log('[Telegram] Persisted Telegram chats to localStorage (from voice):', Object.keys(telegramChats));
+        } catch (error) {
+          console.error('[Telegram] Failed to persist chats:', error);
+        }
       }
 
       // Add voice message to chatHistories
@@ -349,6 +375,132 @@
 
       // Clear the received event after processing
       telegramVoiceReceived.set(null);
+    }
+  });
+
+  // Handle Telegram image messages
+  $effect(() => {
+    const imageEvent = $telegramImageReceived;
+    if (imageEvent) {
+      const { conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes } = imageEvent;
+      console.log(`[Telegram] Adding image to chat ${conversation_id}: ${filename}`);
+
+      // Auto-create conversation in aiChats if it doesn't exist
+      if (!$aiChats.has(conversation_id)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.set(conversation_id, {
+            name: `📱 Telegram (${sender_name})`,
+            provider: 'telegram',
+            instruction_set_name: 'general'
+          });
+          return newMap;
+        });
+        console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar (from image)`);
+
+        // Persist Telegram chats to localStorage
+        try {
+          const telegramChats = Object.fromEntries(
+            Array.from($aiChats.entries())
+              .filter(([_, info]) => info.provider === 'telegram')
+              .map(([id, info]) => [id, info])
+          );
+          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+        } catch (error) {
+          console.error('[Telegram] Failed to persist chats:', error);
+        }
+      }
+
+      // Add image to chatHistories
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const currentMessages = newMap.get(conversation_id) || [];
+        newMap.set(conversation_id, [
+          ...currentMessages,
+          {
+            id: `telegram-image-${Date.now()}`,
+            sender: `telegram-${telegram_chat_id}`,
+            senderName: sender_name,
+            text: caption || "Image",
+            timestamp: Date.now(),
+            attachments: [{
+              type: 'image',
+              filename: filename,
+              file_path: file_path,
+              size_bytes: size_bytes || 0
+            }]
+          }
+        ]);
+        return newMap;
+      });
+
+      // Clear the received event after processing
+      telegramImageReceived.set(null);
+    }
+  });
+
+  // Handle Telegram file/document messages
+  $effect(() => {
+    const fileEvent = $telegramFileReceived;
+    if (fileEvent) {
+      const { conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes, mime_type } = fileEvent;
+      console.log(`[Telegram] Adding file to chat ${conversation_id}: ${filename}`);
+
+      // Auto-create conversation in aiChats if it doesn't exist
+      if (!$aiChats.has(conversation_id)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.set(conversation_id, {
+            name: `📱 Telegram (${sender_name})`,
+            provider: 'telegram',
+            instruction_set_name: 'general'
+          });
+          return newMap;
+        });
+        console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar (from file)`);
+
+        // Persist Telegram chats to localStorage
+        try {
+          const telegramChats = Object.fromEntries(
+            Array.from($aiChats.entries())
+              .filter(([_, info]) => info.provider === 'telegram')
+              .map(([id, info]) => [id, info])
+          );
+          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+        } catch (error) {
+          console.error('[Telegram] Failed to persist chats:', error);
+        }
+      }
+
+      // Determine if it's an image or other file
+      const isImage = mime_type?.startsWith('image/');
+
+      // Add file to chatHistories
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const currentMessages = newMap.get(conversation_id) || [];
+        newMap.set(conversation_id, [
+          ...currentMessages,
+          {
+            id: `telegram-file-${Date.now()}`,
+            sender: `telegram-${telegram_chat_id}`,
+            senderName: sender_name,
+            text: caption || filename,
+            timestamp: Date.now(),
+            attachments: [{
+              type: isImage ? 'image' : 'file',
+              filename: filename,
+              file_path: file_path,
+              size_bytes: size_bytes || 0,
+              mime_type: mime_type
+            }]
+          }
+        ]);
+        return newMap;
+      });
+
+      // Clear the received event after processing
+      telegramFileReceived.set(null);
     }
   });
 
@@ -442,6 +594,50 @@
       }
     } catch (error) {
       console.error('Failed to load instruction sets:', error);
+    }
+
+    // Restore Telegram chats from localStorage (for page refresh recovery)
+    try {
+      const savedTelegramChats = localStorage.getItem('dpc-telegram-chats');
+      if (savedTelegramChats) {
+        const telegramChats = JSON.parse(savedTelegramChats);
+        let restoredCount = 0;
+
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          for (const [id, info] of Object.entries(telegramChats)) {
+            // Only restore if not already in aiChats
+            if (!newMap.has(id)) {
+              newMap.set(id, info as { name: string; provider: string; instruction_set_name?: string });
+              restoredCount++;
+            }
+          }
+          return newMap;
+        });
+
+        // Also populate telegramLinkedChats by extracting chat_id from conversation_id
+        // Format: telegram-{chat_id} -> {chat_id}
+        const restoredLinks: Record<string, string> = {};
+        for (const conversationId of Object.keys(telegramChats)) {
+          if (conversationId.startsWith('telegram-')) {
+            const chatId = conversationId.replace('telegram-', '');
+            restoredLinks[conversationId] = chatId;
+          }
+        }
+
+        if (Object.keys(restoredLinks).length > 0) {
+          import('$lib/coreService.js').then(({ telegramLinkedChats }) => {
+            telegramLinkedChats.set(new Map(Object.entries(restoredLinks)));
+            console.log(`[Telegram] Restored ${Object.keys(restoredLinks).length} conversation links from localStorage`);
+          });
+        }
+
+        if (restoredCount > 0) {
+          console.log(`[Telegram] Restored ${restoredCount} Telegram chats from localStorage`);
+        }
+      }
+    } catch (error) {
+      console.error('[Telegram] Failed to restore chats from localStorage:', error);
     }
   });
 
@@ -667,6 +863,9 @@
   let isPeerConnected = $derived(!activeChatId.startsWith('ai_') && activeChatId !== 'local_ai'
     ? ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
     : true); // AI chats don't require peer connection
+
+  // Reactive: Check if current chat is a Telegram chat (for UI adjustments)
+  let isTelegramChat = $derived(activeChatId.startsWith('telegram-'));
 
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
   // Handles page refresh scenario: frontend loses chatHistories, backend keeps conversation_monitors
@@ -1250,8 +1449,9 @@
       currentInput = "";
       pendingImage = null;
 
-      // Check if this is an AI chat or P2P chat (Phase 2.3: Fix P2P screenshot sharing)
-      if ($aiChats.has(activeChatId)) {
+      // Check if this is an AI chat, Telegram chat, or P2P chat (Phase 2.3: Fix P2P screenshot sharing)
+      // Note: Telegram chats are in $aiChats but should be handled separately (not as AI chats)
+      if ($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')) {
         // AI chat: Add to conversation history with attachment
         chatHistories.update(h => {
           const newMap = new Map(h);
@@ -1301,6 +1501,62 @@
           showFileOfferToast = true;
           setTimeout(() => showFileOfferToast = false, 5000);
           isLoading = false;  // Only clear loading on error
+        }
+      } else if (activeChatId.startsWith('telegram-')) {
+        // Telegram chat: Save image to temp file and send via Telegram
+        try {
+          // Convert data URL to blob and save to temp file
+          const response = await fetch(imageData.dataUrl);
+          const blob = await response.blob();
+          const arrayBuffer = await blob.arrayBuffer();
+          const uint8Array = new Uint8Array(arrayBuffer);
+
+          // Check if Tauri environment (same detection as line 424)
+          const isTauriEnv = typeof window !== 'undefined' && (
+            (window as any).isTauri === true ||
+            !!(window as any).__TAURI__
+          );
+
+          if (isTauriEnv) {
+            const { writeFile, BaseDirectory } = await import('@tauri-apps/plugin-fs');
+
+            const timestamp = Date.now();
+            const filename = imageData.filename || `screenshot_${timestamp}.png`;
+            const tempPath = `dpc-temp-${timestamp}-${filename}`;
+
+            await writeFile(tempPath, uint8Array, { baseDir: BaseDirectory.Temp });
+
+            // Send to Telegram with the temp file path
+            await sendToTelegram(activeChatId, text || '', [], undefined, undefined, undefined, tempPath);
+
+            // Add to local history
+            chatHistories.update(h => {
+              const newMap = new Map(h);
+              const hist = newMap.get(activeChatId) || [];
+              newMap.set(activeChatId, [...hist, {
+                id: crypto.randomUUID(),
+                sender: 'user',
+                text: text || '',
+                timestamp: Date.now(),
+                attachments: [{
+                  type: 'image',
+                  filename: filename,
+                  file_path: tempPath,
+                  size_bytes: uint8Array.length
+                }]
+              }]);
+              return newMap;
+            });
+
+            console.log('[Telegram] Screenshot sent to Telegram');
+          } else {
+            throw new Error('Telegram file transfer requires Tauri desktop app');
+          }
+        } catch (error) {
+          console.error('Error sending screenshot to Telegram:', error);
+          fileOfferToastMessage = `Failed to send screenshot to Telegram: ${error}`;
+          showFileOfferToast = true;
+          setTimeout(() => showFileOfferToast = false, 5000);
         }
       } else {
         // P2P chat: Send screenshot via file transfer
@@ -1355,8 +1611,9 @@
       return newMap;
     });
 
-    // Check if this is an AI chat (local_ai or ai_chat_*)
-    if ($aiChats.has(activeChatId)) {
+    // Check if this is an AI chat (local_ai or ai_chat_*), but NOT a Telegram chat
+    // Telegram chats are in $aiChats for sidebar display but should NOT trigger AI queries
+    if ($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')) {
       isLoading = true;
       const commandId = crypto.randomUUID();
 
@@ -1789,12 +2046,12 @@
 
   // File transfer handlers (Week 1)
   async function handleSendFile() {
-    // Only allow file transfer to P2P chats (not local_ai or ai_xxx chats)
+    // Only allow file transfer to P2P chats and Telegram chats (not local_ai or ai_xxx chats)
     if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
       if (ask) {
-        await ask("File transfer is only available in P2P chats.", { title: "D-PC Messenger", kind: "info" });
+        await ask("File transfer is only available in P2P and Telegram chats.", { title: "D-PC Messenger", kind: "info" });
       } else {
-        alert("File transfer is only available in P2P chats.");
+        alert("File transfer is only available in P2P and Telegram chats.");
       }
       return;
     }
@@ -1822,18 +2079,45 @@
       // Get file name from path
       const fileName = filePath.split(/[\\/]/).pop() || filePath;
 
-      // Get recipient name from peer info
-      const peer = $nodeStatus.peer_info.find((p: any) => p.node_id === activeChatId);
-      const recipientName = peer?.name || activeChatId.slice(0, 20) + '...';
+      // Check if this is a Telegram chat
+      if (activeChatId.startsWith('telegram-')) {
+        // Send directly to Telegram (no confirmation dialog needed)
+        console.log(`[Telegram] Sending file to Telegram: ${fileName}`);
+        await sendToTelegram(activeChatId, '', [], undefined, undefined, undefined, filePath);
 
-      // Store pending file send and show confirmation dialog
-      pendingFileSend = {
-        filePath,
-        fileName,
-        recipientId: activeChatId,
-        recipientName
-      };
-      showSendFileDialog = true;
+        // Add to local chat history (with minimal attachment data for UI display)
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          const hist = newMap.get(activeChatId) || [];
+          newMap.set(activeChatId, [...hist, {
+            id: crypto.randomUUID(),
+            sender: 'user',
+            text: '',
+            timestamp: Date.now(),
+            attachments: [{
+              type: 'file',
+              filename: fileName,
+              file_path: filePath,
+              size_bytes: 0  // Placeholder - actual size handled by backend
+            }]
+          }]);
+          return newMap;
+        });
+      } else {
+        // P2P file transfer with confirmation dialog (existing behavior)
+        // Get recipient name from peer info
+        const peer = $nodeStatus.peer_info.find((p: any) => p.node_id === activeChatId);
+        const recipientName = peer?.name || activeChatId.slice(0, 20) + '...';
+
+        // Store pending file send and show confirmation dialog
+        pendingFileSend = {
+          filePath,
+          fileName,
+          recipientId: activeChatId,
+          recipientName
+        };
+        showSendFileDialog = true;
+      }
     } catch (error) {
       console.error('Error sending file:', error);
       fileOfferToastMessage = `Failed to send file: ${error}`;
@@ -2407,8 +2691,8 @@
             </h2>
           </button>
 
-          <!-- Auto Transcribe toggle (P2P chats only) -->
-          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai'}
+          <!-- Auto Transcribe toggle (P2P chats only, NOT Telegram) -->
+          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai' && !activeChatId.startsWith('telegram-')}
             <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
               <input
                 type="checkbox"
@@ -2431,6 +2715,8 @@
         </div>
 
         {#if !chatHeaderCollapsed}
+          <!-- ProviderSelector and SessionControls: Hide for Telegram chats -->
+          {#if !activeChatId.startsWith('telegram-')}
           <ProviderSelector
             bind:selectedComputeHost
             bind:selectedTextProvider
@@ -2456,6 +2742,7 @@
           onNewSession={handleNewChat}
           onEndSession={handleEndSession}
         />
+          {/if}
         {/if}
       </div>
 
@@ -2468,8 +2755,8 @@
       />
 
       <div class="chat-input">
-        {#if $aiChats.has(activeChatId)}
-          <!-- Personal Context Toggle -->
+        {#if $aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')}
+          <!-- Personal Context Toggle (hidden for Telegram chats - not applicable) -->
           <div class="context-toggle">
             <button
               type="button"
@@ -2640,8 +2927,8 @@
             onkeydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                // Only send if peer is connected (or local AI chat) AND (has text OR has pending image)
-                if ((isPeerConnected || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) && (currentInput.trim() || pendingImage)) {
+                // Send if: peer connected, OR local AI chat, OR Telegram chat, OR AI_xxx chat AND (has text OR has pending image)
+                if ((isPeerConnected || isTelegramChat || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) && (currentInput.trim() || pendingImage)) {
                   handleSendMessage();
                 }
               }
@@ -2659,15 +2946,15 @@
           <button
             class="file-button"
             onclick={handleSendFile}
-            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || !isPeerConnected}
-            title={isPeerConnected ? "Send file (P2P chat only)" : "Peer disconnected"}
+            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || (!isPeerConnected && !isTelegramChat)}
+            title={isPeerConnected || isTelegramChat ? "Send file" : "Peer disconnected"}
           >
             📎
           </button>
           <button
             onclick={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || !isPeerConnected}
-            title={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer disconnected" : ""}
+            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || (!isPeerConnected && !isTelegramChat)}
+            title={!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer disconnected" : ""}
           >
             {#if isLoading}Sending...{:else}Send{/if}
           </button>

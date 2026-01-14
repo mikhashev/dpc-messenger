@@ -14,6 +14,8 @@
     "core:webview:allow-internal-toggle-devtools",
     "opener:default",
     "dialog:default",
-    "notification:default"
+    "notification:default",
+    "fs:allow-temp-write",
+    "fs:allow-write-file"
   ]
 }

@@ -4355,7 +4355,8 @@ class CoreService:
         attachments: Optional[List[Dict]] = None,
         voice_audio_base64: Optional[str] = None,
         voice_duration_seconds: Optional[float] = None,
-        voice_mime_type: Optional[str] = None
+        voice_mime_type: Optional[str] = None,
+        file_path: Optional[str] = None  # NEW: For sending files/images from UI
     ) -> Dict[str, Any]:
         """
         Send message from DPC to Telegram chat.
@@ -4367,6 +4368,7 @@ class CoreService:
             voice_audio_base64: Optional base64-encoded voice audio data (for recording from UI)
             voice_duration_seconds: Optional voice duration in seconds
             voice_mime_type: Optional voice MIME type (e.g., "audio/webm")
+            file_path: Optional path to file/image to send to Telegram
 
         Returns:
             Dict with status and message
@@ -4376,6 +4378,55 @@ class CoreService:
                 return {
                     "status": "error",
                     "message": "Telegram integration not enabled"
+                }
+
+            # Handle file path from UI (send file/image directly to Telegram)
+            if file_path:
+                from pathlib import Path
+                import mimetypes
+
+                path = Path(file_path)
+
+                if not path.exists():
+                    return {
+                        "status": "error",
+                        "message": f"File not found: {file_path}"
+                    }
+
+                # Get Telegram chat ID
+                telegram_chat_id = self.telegram_bridge._get_linked_chat_id(conversation_id)
+                if not telegram_chat_id:
+                    return {
+                        "status": "error",
+                        "message": "No linked Telegram chat for this conversation"
+                    }
+
+                # Determine file type and send appropriately
+                mime_type, _ = mimetypes.guess_type(str(path))
+                if mime_type and mime_type.startswith("image/"):
+                    # Send as photo
+                    success = await self.telegram_manager.send_photo(
+                        telegram_chat_id,
+                        path,
+                        caption=text if text else None
+                    )
+                else:
+                    # Send as document
+                    success = await self.telegram_manager.send_document(
+                        telegram_chat_id,
+                        path,
+                        caption=text if text else None
+                    )
+
+                if not success:
+                    return {
+                        "status": "error",
+                        "message": "Failed to send file to Telegram"
+                    }
+
+                return {
+                    "status": "success",
+                    "message": "File sent to Telegram"
                 }
 
             # Handle voice data from UI (save file and create attachment)
@@ -4518,7 +4569,7 @@ class CoreService:
         Get Telegram bot integration status.
 
         Returns:
-            Dict with status information
+            Dict with status information including conversation links
         """
         try:
             if not self.telegram_manager:
@@ -4529,6 +4580,13 @@ class CoreService:
                     "message": "Telegram integration not enabled"
                 }
 
+            # Include conversation links (telegram_chat_id -> conversation_id)
+            # Reverse it for frontend: (conversation_id -> telegram_chat_id)
+            conversation_links = {}
+            if self.telegram_bridge:
+                for telegram_chat_id, conversation_id in self.telegram_bridge.conversation_map.items():
+                    conversation_links[conversation_id] = telegram_chat_id
+
             return {
                 "status": "success",
                 "enabled": True,
@@ -4537,7 +4595,8 @@ class CoreService:
                 "whitelist_count": len(self.telegram_manager.allowed_chat_ids),
                 "transcription_enabled": self.telegram_manager.transcription_enabled,
                 "bridge_to_p2p": self.telegram_manager.bridge_to_p2p,
-                "conversation_links": len(self.telegram_bridge.conversation_map) if self.telegram_bridge else 0
+                "conversation_links_count": len(self.telegram_bridge.conversation_map) if self.telegram_bridge else 0,
+                "conversation_links": conversation_links  # Frontend needs: conversation_id -> telegram_chat_id
             }
 
         except Exception as e:

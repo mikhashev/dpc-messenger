@@ -17,6 +17,7 @@
   "dependencies": {
     "@humanspeak/svelte-markdown": "^0.8.13",
     "@tauri-apps/plugin-dialog": "^2.4.2",
+    "@tauri-apps/plugin-fs": "^2.2.0",
     "@tauri-apps/plugin-notification": "^2",
     "@tauri-apps/plugin-opener": "^2"
   },

@@ -325,10 +325,11 @@ class TelegramBridge:
                         logger.info(f"Transcribed voice message ({len(transcription_text)} chars, provider: {transcription_provider})")
 
                         # Send transcription back to Telegram
-                        await self.telegram.send_message(
-                            chat_id,
-                            f"📝 Transcription:\n{transcription_text}"
-                        )
+                        # NOTE: Commented out to avoid duplication - transcription is already shown in VoicePlayer
+                        # await self.telegram.send_message(
+                        #     chat_id,
+                        #     f"📝 Transcription:\n{transcription_text}"
+                        # )
                     else:
                         logger.warning("No voice provider configured, skipping transcription")
 
@@ -375,7 +376,8 @@ class TelegramBridge:
                 self.service.conversation_monitors[conversation_id] = monitor
 
             # Create message with voice attachment
-            message_text = f"Voice message: {transcription_text}" if transcription_text else "Voice message"
+            # NOTE: Transcription shown only in VoicePlayer attachment, not in message text (avoids duplication)
+            message_text = "Voice message"
             conv_message = ConvMessage(
                 message_id=f"telegram-voice-{message.message_id}",
                 conversation_id=conversation_id,
@@ -406,6 +408,196 @@ class TelegramBridge:
 
         except Exception as e:
             logger.error(f"Error handling Telegram voice message: {e}", exc_info=True)
+
+    async def handle_photo_message(self, update, context):
+        """
+        Handle incoming photo message from Telegram.
+
+        Downloads the photo and creates an image attachment in the DPC conversation.
+        """
+        try:
+            message = update.message
+            photo = message.photo[-1]  # Get largest size
+            chat_id = str(message.chat_id)
+
+            # Whitelist check
+            if not self.telegram.is_allowed(chat_id):
+                logger.warning(f"Photo from unauthorized chat_id {chat_id}, ignoring")
+                return
+
+            # Get or create conversation
+            conversation_id = self._get_or_create_conversation_id(chat_id)
+
+            # Download photo
+            photo_filename = f"telegram_photo_{message.message_id}.jpg"
+            photo_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            photo_dir.mkdir(parents=True, exist_ok=True)
+            photo_path = photo_dir / photo_filename
+
+            from telegram import Bot
+            bot: Bot = self.telegram.application.bot
+            file = await bot.get_file(photo.file_id)
+            await file.download_to_drive(photo_path)
+
+            logger.info(f"Downloaded photo to {photo_path}")
+
+            # Create image attachment
+            sender_name = message.from_user.full_name or message.from_user.username or f"User_{chat_id}"
+            file_size = photo.file_size or photo_path.stat().st_size
+
+            image_attachment = {
+                "type": "image",
+                "filename": photo_filename,
+                "file_path": str(photo_path),
+                "size_bytes": file_size,
+                "mime_type": "image/jpeg",
+                "source": "telegram",
+                "telegram_message_id": message.message_id
+            }
+
+            # Get or create monitor
+            from ..conversation_monitor import ConversationMonitor, Message as ConvMessage
+            monitor = self.service.conversation_monitors.get(conversation_id)
+            if not monitor:
+                monitor = ConversationMonitor(
+                    conversation_id=conversation_id,
+                    participants=[{"node_id": f"telegram-bot-{chat_id}", "name": sender_name}],
+                    llm_manager=self.service.llm_manager,
+                    knowledge_threshold=0.7,
+                    settings=self.service.settings,
+                    ai_query_func=self.service.send_ai_query,
+                    auto_detect=self.service.auto_knowledge_detection_enabled,
+                    instruction_set_name=self.service.instruction_set.default
+                )
+                self.service.conversation_monitors[conversation_id] = monitor
+
+            # Create message
+            caption = message.caption or "Image"
+            conv_message = ConvMessage(
+                message_id=f"telegram-photo-{message.message_id}",
+                conversation_id=conversation_id,
+                sender_node_id=f"telegram-bot-{chat_id}",
+                sender_name=sender_name,
+                text=caption,
+                timestamp=datetime.now(timezone.utc)
+            )
+            conv_message.attachments = [image_attachment]
+
+            # Add to monitor
+            await monitor.on_message(conv_message)
+
+            # Broadcast to UI
+            await self.service.local_api.broadcast_event("telegram_image_received", {
+                "conversation_id": conversation_id,
+                "telegram_chat_id": chat_id,
+                "sender_name": sender_name,
+                "filename": photo_filename,
+                "file_path": str(photo_path),
+                "caption": caption
+            })
+
+            logger.info(f"Processed Telegram photo from {chat_id}")
+
+        except Exception as e:
+            logger.error(f"Error handling Telegram photo: {e}", exc_info=True)
+
+    async def handle_document_message(self, update, context):
+        """
+        Handle incoming document/file message from Telegram.
+
+        Downloads the file and creates a file attachment in the DPC conversation.
+        """
+        try:
+            message = update.message
+            document = message.document
+            chat_id = str(message.chat_id)
+
+            # Whitelist check
+            if not self.telegram.is_allowed(chat_id):
+                logger.warning(f"Document from unauthorized chat_id {chat_id}, ignoring")
+                return
+
+            # Get or create conversation
+            conversation_id = self._get_or_create_conversation_id(chat_id)
+
+            # Get file extension from mime type or filename
+            import mimetypes
+            filename = document.file_name or f"telegram_document_{message.message_id}"
+            mime_type = document.mime_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+
+            # Download document
+            file_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            file_dir.mkdir(parents=True, exist_ok=True)
+            file_path = file_dir / filename
+
+            from telegram import Bot
+            bot: Bot = self.telegram.application.bot
+            file = await bot.get_file(document.file_id)
+            await file.download_to_drive(file_path)
+
+            logger.info(f"Downloaded document to {file_path}")
+
+            # Create file attachment
+            sender_name = message.from_user.full_name or message.from_user.username or f"User_{chat_id}"
+            file_size = document.file_size or file_path.stat().st_size
+
+            file_attachment = {
+                "type": "file",
+                "filename": filename,
+                "file_path": str(file_path),
+                "size_bytes": file_size,
+                "mime_type": mime_type,
+                "source": "telegram",
+                "telegram_message_id": message.message_id
+            }
+
+            # Get or create monitor
+            from ..conversation_monitor import ConversationMonitor, Message as ConvMessage
+            monitor = self.service.conversation_monitors.get(conversation_id)
+            if not monitor:
+                monitor = ConversationMonitor(
+                    conversation_id=conversation_id,
+                    participants=[{"node_id": f"telegram-bot-{chat_id}", "name": sender_name}],
+                    llm_manager=self.service.llm_manager,
+                    knowledge_threshold=0.7,
+                    settings=self.service.settings,
+                    ai_query_func=self.service.send_ai_query,
+                    auto_detect=self.service.auto_knowledge_detection_enabled,
+                    instruction_set_name=self.service.instruction_set.default
+                )
+                self.service.conversation_monitors[conversation_id] = monitor
+
+            # Create message
+            caption = message.caption or filename
+            conv_message = ConvMessage(
+                message_id=f"telegram-document-{message.message_id}",
+                conversation_id=conversation_id,
+                sender_node_id=f"telegram-bot-{chat_id}",
+                sender_name=sender_name,
+                text=caption,
+                timestamp=datetime.now(timezone.utc)
+            )
+            conv_message.attachments = [file_attachment]
+
+            # Add to monitor
+            await monitor.on_message(conv_message)
+
+            # Broadcast to UI
+            await self.service.local_api.broadcast_event("telegram_file_received", {
+                "conversation_id": conversation_id,
+                "telegram_chat_id": chat_id,
+                "sender_name": sender_name,
+                "filename": filename,
+                "file_path": str(file_path),
+                "caption": caption,
+                "mime_type": mime_type,
+                "size_bytes": file_size
+            })
+
+            logger.info(f"Processed Telegram document from {chat_id}")
+
+        except Exception as e:
+            logger.error(f"Error handling Telegram document: {e}", exc_info=True)
 
     async def forward_dpc_to_telegram(
         self,

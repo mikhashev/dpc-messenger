@@ -181,6 +181,20 @@ class TelegramBotManager:
                 )
                 self.application.add_handler(voice_handler)
 
+                # Photo messages handler
+                photo_handler = MessageHandler(
+                    filters.PHOTO,
+                    bridge.handle_photo_message
+                )
+                self.application.add_handler(photo_handler)
+
+                # Document messages handler
+                document_handler = MessageHandler(
+                    filters.Document.ALL,
+                    bridge.handle_document_message
+                )
+                self.application.add_handler(document_handler)
+
                 # Start the bot
                 if self.use_webhook:
                     # Webhook mode (production)
@@ -347,6 +361,88 @@ class TelegramBotManager:
             logger.error(f"Failed to queue voice: {e}", exc_info=True)
             return False
 
+    async def send_photo(
+        self,
+        chat_id: Any,
+        file_path: Path,
+        caption: Optional[str] = None
+    ) -> bool:
+        """
+        Send a photo to a Telegram chat.
+
+        Args:
+            chat_id: Target chat ID
+            file_path: Path to photo file
+            caption: Optional caption
+
+        Returns:
+            True if photo sent successfully, False otherwise
+        """
+        if not self._running:
+            logger.warning("Cannot send photo: bot is not running")
+            return False
+
+        if not self.is_allowed(chat_id):
+            logger.warning(f"Cannot send to chat_id {chat_id}: not in whitelist")
+            return False
+
+        if not file_path.exists():
+            logger.error(f"Photo file not found: {file_path}")
+            return False
+
+        try:
+            await self._outgoing_queue.put({
+                "type": "photo",
+                "chat_id": chat_id,
+                "file_path": file_path,
+                "caption": caption
+            })
+            return True
+        except Exception as e:
+            logger.error(f"Failed to queue photo: {e}", exc_info=True)
+            return False
+
+    async def send_document(
+        self,
+        chat_id: Any,
+        file_path: Path,
+        caption: Optional[str] = None
+    ) -> bool:
+        """
+        Send a document/file to a Telegram chat.
+
+        Args:
+            chat_id: Target chat ID
+            file_path: Path to document file
+            caption: Optional caption
+
+        Returns:
+            True if document sent successfully, False otherwise
+        """
+        if not self._running:
+            logger.warning("Cannot send document: bot is not running")
+            return False
+
+        if not self.is_allowed(chat_id):
+            logger.warning(f"Cannot send to chat_id {chat_id}: not in whitelist")
+            return False
+
+        if not file_path.exists():
+            logger.error(f"Document file not found: {file_path}")
+            return False
+
+        try:
+            await self._outgoing_queue.put({
+                "type": "document",
+                "chat_id": chat_id,
+                "file_path": file_path,
+                "caption": caption
+            })
+            return True
+        except Exception as e:
+            logger.error(f"Failed to queue document: {e}", exc_info=True)
+            return False
+
     async def _message_sender_loop(self):
         """
         Background task that sends queued messages to Telegram.
@@ -369,6 +465,10 @@ class TelegramBotManager:
                     await self._send_text_message(msg)
                 elif msg["type"] == "voice":
                     await self._send_voice_message(msg)
+                elif msg["type"] == "photo":
+                    await self._send_photo_message(msg)
+                elif msg["type"] == "document":
+                    await self._send_document_message(msg)
                 else:
                     logger.warning(f"Unknown message type: {msg['type']}")
 
@@ -417,3 +517,35 @@ class TelegramBotManager:
             logger.debug(f"Sent voice message to chat {msg['chat_id']}")
         except Exception as e:
             logger.error(f"Failed to send voice message: {e}", exc_info=True)
+
+    async def _send_photo_message(self, msg: Dict[str, Any]):
+        """Send a photo message via Telegram Bot API."""
+        try:
+            from telegram import Bot
+
+            bot: Bot = self.application.bot
+            with open(msg["file_path"], "rb") as f:
+                await bot.send_photo(
+                    chat_id=msg["chat_id"],
+                    photo=f,
+                    caption=msg.get("caption")
+                )
+            logger.debug(f"Sent photo to chat {msg['chat_id']}")
+        except Exception as e:
+            logger.error(f"Failed to send photo: {e}", exc_info=True)
+
+    async def _send_document_message(self, msg: Dict[str, Any]):
+        """Send a document message via Telegram Bot API."""
+        try:
+            from telegram import Bot
+
+            bot: Bot = self.application.bot
+            with open(msg["file_path"], "rb") as f:
+                await bot.send_document(
+                    chat_id=msg["chat_id"],
+                    document=f,
+                    caption=msg.get("caption")
+                )
+            logger.debug(f"Sent document to chat {msg['chat_id']}")
+        except Exception as e:
+            logger.error(f"Failed to send document: {e}", exc_info=True)

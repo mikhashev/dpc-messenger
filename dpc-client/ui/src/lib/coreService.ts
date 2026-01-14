@@ -108,6 +108,8 @@ export const telegramLinkedChats = writable<Map<string, string>>(new Map()); // 
 export const telegramMessages = writable<Map<string, any[]>>(new Map()); // conversation_id -> messages
 export const telegramMessageReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, text, timestamp}
 export const telegramVoiceReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, duration_seconds, transcription, transcription_provider}
+export const telegramImageReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes}
+export const telegramFileReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes, mime_type}
 export const telegramStatus = writable<any>(null);  // {enabled, connected, webhook_mode, whitelist_count, transcription_enabled, bridge_to_p2p, conversation_links}
 
 // Whisper model loading stores (v0.13.3 - model pre-loading)
@@ -230,6 +232,7 @@ export function connectToCoreService() {
             sendCommand("list_providers");
             sendCommand("get_default_providers");  // Fetch default text/vision providers
             sendCommand("get_providers_list");     // Fetch full provider list with vision flags
+            sendCommand("get_telegram_status");    // Fetch Telegram status including conversation links
 
             // Stop polling
             if (pollingInterval) {
@@ -262,6 +265,16 @@ export function connectToCoreService() {
                         console.log('[StatusUpdate] Received status_update with peer_info:', message.payload.peer_info);
                     }
                     nodeStatus.set({ ...message.payload });
+                }
+                // Handle get_telegram_status response to populate conversation links
+                else if (message.id && message.command === "get_telegram_status" && message.status === "OK") {
+                    const status = message.payload;
+                    console.log("Telegram status loaded:", status);
+                    if (status.enabled && status.conversation_links) {
+                        // Populate telegramLinkedChats store with conversation_id -> telegram_chat_id mappings
+                        telegramLinkedChats.set(new Map(Object.entries(status.conversation_links)));
+                        console.log(`[Telegram] Loaded ${Object.keys(status.conversation_links).length} conversation links from backend`);
+                    }
                 } else if (message.event === "new_p2p_message") {
                     p2pMessages.set(message.payload);
 
@@ -540,6 +553,13 @@ export function connectToCoreService() {
                     console.log("Telegram message received:", message.payload);
                     const { conversation_id, telegram_chat_id, sender_name, text, timestamp } = message.payload;
 
+                    // Store the mapping: conversation_id -> telegram_chat_id
+                    const currentLinkedChats = get(telegramLinkedChats);
+                    if (!currentLinkedChats.has(conversation_id)) {
+                        telegramLinkedChats.set(new Map(currentLinkedChats).set(conversation_id, telegram_chat_id));
+                        console.log(`[Telegram] Stored linked chat: ${conversation_id} -> ${telegram_chat_id}`);
+                    }
+
                     // Add to conversation messages
                     const currentMessages = get(telegramMessages).get(conversation_id) || [];
                     telegramMessages.set(new Map(get(telegramMessages)).set(conversation_id, [
@@ -560,6 +580,52 @@ export function connectToCoreService() {
                 else if (message.event === "telegram_voice_received") {
                     console.log("Telegram voice received:", message.payload);
                     telegramVoiceReceived.set(message.payload);
+                }
+                else if (message.event === "telegram_image_received") {
+                    console.log("Telegram image received:", message.payload);
+                    const { conversation_id, telegram_chat_id, sender_name, filename, caption } = message.payload;
+
+                    // Add to telegram messages store
+                    const currentMessages = get(telegramMessages).get(conversation_id) || [];
+                    telegramMessages.set(new Map(get(telegramMessages)).set(conversation_id, [
+                        ...currentMessages,
+                        {
+                            id: `telegram-${Date.now()}`,
+                            sender: `telegram-${telegram_chat_id}`,
+                            senderName: sender_name,
+                            text: caption || "Image",
+                            timestamp: Date.now(),
+                            attachments: [{
+                                type: 'image',
+                                filename: filename,
+                                file_path: message.payload.file_path
+                            }]
+                        }
+                    ]));
+                }
+                else if (message.event === "telegram_file_received") {
+                    console.log("Telegram file received:", message.payload);
+                    const { conversation_id, telegram_chat_id, sender_name, filename, caption } = message.payload;
+
+                    // Add to telegram messages store
+                    const currentMessages = get(telegramMessages).get(conversation_id) || [];
+                    telegramMessages.set(new Map(get(telegramMessages)).set(conversation_id, [
+                        ...currentMessages,
+                        {
+                            id: `telegram-${Date.now()}`,
+                            sender: `telegram-${telegram_chat_id}`,
+                            senderName: sender_name,
+                            text: caption || filename,
+                            timestamp: Date.now(),
+                            attachments: [{
+                                type: 'file',
+                                filename: filename,
+                                file_path: message.payload.file_path,
+                                mime_type: message.payload.mime_type,
+                                size_bytes: message.payload.size_bytes
+                            }]
+                        }
+                    ]));
                 }
                 // Error toast notifications (v0.14.1+ - VRAM OOM warnings, etc.)
                 else if (message.event === "error_toast") {
@@ -932,7 +998,8 @@ export async function sendToTelegram(
     attachments?: any[],
     voiceAudioBase64?: string,
     voiceDurationSeconds?: number,
-    voiceMimeType?: string
+    voiceMimeType?: string,
+    filePath?: string  // NEW: For sending files/images to Telegram
 ): Promise<any> {
     const payload: any = {
         conversation_id: conversationId,
@@ -949,6 +1016,10 @@ export async function sendToTelegram(
     }
     if (voiceMimeType !== undefined) {
         payload.voice_mime_type = voiceMimeType;
+    }
+    // Add file path if provided (for sending files/images to Telegram)
+    if (filePath !== undefined) {
+        payload.file_path = filePath;
     }
 
     return sendCommand('send_to_telegram', payload);

@@ -32,6 +32,12 @@ def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
         if len(original) > max_length:
             sanitized['image_base64'] = f"{original[:max_length]}... ({len(original)} chars)"
 
+    # Truncate voice_audio_base64 field if present
+    if 'voice_audio_base64' in sanitized and isinstance(sanitized['voice_audio_base64'], str):
+        original = sanitized['voice_audio_base64']
+        if len(original) > max_length:
+            sanitized['voice_audio_base64'] = f"{original[:max_length]}... ({len(original)} chars)"
+
     return sanitized
 
 
