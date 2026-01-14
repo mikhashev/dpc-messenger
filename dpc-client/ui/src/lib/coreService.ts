@@ -101,6 +101,15 @@ export const voiceTranscriptionReceived = writable<any>(null);  // {transfer_id,
 export const voiceTranscriptionComplete = writable<any>(null);  // {transfer_id, node_id, text, provider, ...} (local transcription completed)
 export const voiceTranscriptionConfig = writable<any>(null);  // Voice transcription settings updated
 
+// Telegram bot integration stores (v0.14.0+)
+export const telegramEnabled = writable<boolean>(false);
+export const telegramConnected = writable<boolean>(false);
+export const telegramLinkedChats = writable<Map<string, string>>(new Map()); // conversation_id -> chat_id
+export const telegramMessages = writable<Map<string, any[]>>(new Map()); // conversation_id -> messages
+export const telegramMessageReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, text, timestamp}
+export const telegramVoiceReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, duration_seconds, transcription, transcription_provider}
+export const telegramStatus = writable<any>(null);  // {enabled, connected, webhook_mode, whitelist_count, transcription_enabled, bridge_to_p2p, conversation_links}
+
 // Whisper model loading stores (v0.13.3 - model pre-loading)
 export const whisperModelLoadingStarted = writable<any>(null);  // {provider}
 export const whisperModelLoaded = writable<any>(null);  // {provider}
@@ -517,6 +526,42 @@ export function connectToCoreService() {
                     console.log("Voice transcription config updated:", message.payload);
                     voiceTranscriptionConfig.set(message.payload);
                 }
+                // Telegram bot integration events (v0.14.0+)
+                else if (message.event === "telegram_connected") {
+                    console.log("Telegram bot connected");
+                    telegramConnected.set(true);
+                    telegramEnabled.set(true);
+                }
+                else if (message.event === "telegram_disconnected") {
+                    console.log("Telegram bot disconnected");
+                    telegramConnected.set(false);
+                }
+                else if (message.event === "telegram_message_received") {
+                    console.log("Telegram message received:", message.payload);
+                    const { conversation_id, telegram_chat_id, sender_name, text, timestamp } = message.payload;
+
+                    // Add to conversation messages
+                    const currentMessages = get(telegramMessages).get(conversation_id) || [];
+                    telegramMessages.set(new Map(get(telegramMessages)).set(conversation_id, [
+                        ...currentMessages,
+                        {
+                            id: `telegram-${Date.now()}`,
+                            sender: `telegram-${telegram_chat_id}`,
+                            senderName: sender_name,
+                            text: text,
+                            timestamp: Date.now(),
+                            source: 'telegram'
+                        }
+                    ]));
+
+                    // Trigger event for UI
+                    telegramMessageReceived.set(message.payload);
+                }
+                else if (message.event === "telegram_voice_received") {
+                    console.log("Telegram voice received:", message.payload);
+                    telegramVoiceReceived.set(message.payload);
+                }
+
                 // Whisper model loading events (v0.13.3+ model pre-loading)
                 else if (message.event === "whisper_model_loading_started") {
                     console.log("Whisper model loading started:", message.payload);
@@ -865,4 +910,44 @@ export async function preloadWhisperModel(providerAlias?: string): Promise<any> 
     return sendCommand('preload_whisper_model', {
         provider_alias: providerAlias  // Optional: specify provider, or use first local_whisper
     });
+}
+
+// Telegram bot integration (v0.14.0+)
+export async function sendToTelegram(
+    conversationId: string,
+    text: string,
+    attachments?: any[],
+    voiceAudioBase64?: string,
+    voiceDurationSeconds?: number,
+    voiceMimeType?: string
+): Promise<any> {
+    const payload: any = {
+        conversation_id: conversationId,
+        text: text,
+        attachments: attachments || []
+    };
+
+    // Add voice parameters if provided
+    if (voiceAudioBase64 !== undefined) {
+        payload.voice_audio_base64 = voiceAudioBase64;
+    }
+    if (voiceDurationSeconds !== undefined) {
+        payload.voice_duration_seconds = voiceDurationSeconds;
+    }
+    if (voiceMimeType !== undefined) {
+        payload.voice_mime_type = voiceMimeType;
+    }
+
+    return sendCommand('send_to_telegram', payload);
+}
+
+export async function linkTelegramChat(conversationId: string, telegramChatId: string): Promise<any> {
+    return sendCommand('link_telegram_chat', {
+        conversation_id: conversationId,
+        telegram_chat_id: telegramChatId
+    });
+}
+
+export async function getTelegramStatus(): Promise<any> {
+    return sendCommand('get_telegram_status', {});
 }

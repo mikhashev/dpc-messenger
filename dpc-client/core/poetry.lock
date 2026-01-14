@@ -1411,6 +1411,102 @@ files = [
 ]
 
 [[package]]
+name = "mlx"
+version = "0.30.3"
+description = "A framework for machine learning on Apple silicon."
+optional = true
+python-versions = ">=3.10"
+groups = ["main"]
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and extra == \"mlx\""
+files = [
+    {file = "mlx-0.30.3-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:685051761e428336f8f19ae76a761ce99d29ff67c52738f15ce6409e2ff34e6b"},
+    {file = "mlx-0.30.3-cp310-cp310-macosx_15_0_arm64.whl", hash = "sha256:e405e6575e3b0b00dd6bd02bdb415b638cd5c2e5faedb696df2b2c8fbe871240"},
+    {file = "mlx-0.30.3-cp310-cp310-macosx_26_0_arm64.whl", hash = "sha256:46894eb528457483aec44227f61afdff424cb76d146a6e1727d03ea0f52be41b"},
+    {file = "mlx-0.30.3-cp310-cp310-manylinux_2_35_aarch64.whl", hash = "sha256:a18e1b380130a77feda83b8bb8a7ff5a24f78e7263af484c6627f23e4210bdaf"},
+    {file = "mlx-0.30.3-cp310-cp310-manylinux_2_35_x86_64.whl", hash = "sha256:c27f8e78b89cf97411d740a2ca46accf6c6e3fcc43d1e906389abff1f0e00376"},
+    {file = "mlx-0.30.3-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:794e79587a4906bdb3c5473ef936f45008eaaa609a3c498cc29a442b2c829621"},
+    {file = "mlx-0.30.3-cp311-cp311-macosx_15_0_arm64.whl", hash = "sha256:472cdc6eaca8610224621a1561e8c36477eab1a2f0dd3eb49b95484d739c4605"},
+    {file = "mlx-0.30.3-cp311-cp311-macosx_26_0_arm64.whl", hash = "sha256:a5d82be69c7e671dc4d5855d2f6aedcb507817e5985478903ab754b642d9ba01"},
+    {file = "mlx-0.30.3-cp311-cp311-manylinux_2_35_aarch64.whl", hash = "sha256:009a9a1d2e234b9b269f455729202feaf22eb1faf2c7b85818f2473f6c2f9cbe"},
+    {file = "mlx-0.30.3-cp311-cp311-manylinux_2_35_x86_64.whl", hash = "sha256:ba7141b6c251207d26a5611a0038d121cd13e367a59589d8c827e6af06b1f406"},
+    {file = "mlx-0.30.3-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:0b275168b80645a155b456e1a457a37fb5ee2c251e8fbd8db9e153351a9e2d2f"},
+    {file = "mlx-0.30.3-cp312-cp312-macosx_15_0_arm64.whl", hash = "sha256:6e818de14864982e832344198240a1dafba7d3316c4eb6f1b8e43b4dd25dd2ef"},
+    {file = "mlx-0.30.3-cp312-cp312-macosx_26_0_arm64.whl", hash = "sha256:d23b422209fd4b7ecacef59070321f8c6a122f906a5e9b6683a5fc9e1b8fcd5c"},
+    {file = "mlx-0.30.3-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:f487461ffd5c2411c012dd8cd0d347dd807f05f223b1dec1c13bad0815cdcefd"},
+    {file = "mlx-0.30.3-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:b78627f324790fd0e06c4fa6e79b88094b342c5c425f8909de7c3f2fa5d01302"},
+    {file = "mlx-0.30.3-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:743fac1e4f9e8e46c8262943c643a31139c255cdb256c99ad496958215ccac1e"},
+    {file = "mlx-0.30.3-cp313-cp313-macosx_15_0_arm64.whl", hash = "sha256:3b04ae81655aa0e63a6e8f2c749de3bbce64cf5b168ae10f39ed086dfa99e7f8"},
+    {file = "mlx-0.30.3-cp313-cp313-macosx_26_0_arm64.whl", hash = "sha256:ba9b5bdb1e929cc130af72efd7f73508c0f4e526d224489af7ec1c6419564659"},
+    {file = "mlx-0.30.3-cp313-cp313-manylinux_2_35_aarch64.whl", hash = "sha256:dfe5c5b64e55398a22100804abbf9681996b03129e720e36b1727ed704db12b5"},
+    {file = "mlx-0.30.3-cp313-cp313-manylinux_2_35_x86_64.whl", hash = "sha256:a3364924610929936e6aaf13c71106161258e5a5d3f7813a64c07cc2435f9f55"},
+    {file = "mlx-0.30.3-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:2c27fd8daaae14ca6cf407fcd236006a6e968f7708c8f61a2709116f2e754852"},
+    {file = "mlx-0.30.3-cp314-cp314-macosx_15_0_arm64.whl", hash = "sha256:b755fd4ed4b6a2ae4dee3766b5a2ea52fcbe83ebd1cf018458e18b74139409f3"},
+    {file = "mlx-0.30.3-cp314-cp314-macosx_26_0_arm64.whl", hash = "sha256:7e352c0369a2f7e54d4f317b434eab3333918ea9edde1c43c61d36386b6f76bf"},
+    {file = "mlx-0.30.3-cp314-cp314-manylinux_2_35_aarch64.whl", hash = "sha256:00ac867f3d003c1477a66a579442c2040ba7ea43ce3c174490d1f8bf379606bd"},
+    {file = "mlx-0.30.3-cp314-cp314-manylinux_2_35_x86_64.whl", hash = "sha256:5be7d0329036f09c6ed003ea3e307e97e3144f20a3e4711b01810d7d5013cf2c"},
+]
+
+[package.dependencies]
+mlx-metal = {version = "0.30.3", markers = "platform_system == \"Darwin\""}
+
+[package.extras]
+cpu = ["mlx-cpu (==0.30.3) ; platform_system == \"Linux\""]
+cuda = ["mlx-cuda-12 (==0.30.3) ; platform_system == \"Linux\""]
+cuda12 = ["mlx-cuda-12 (==0.30.3) ; platform_system == \"Linux\""]
+cuda13 = ["mlx-cuda-13 (==0.30.3) ; platform_system == \"Linux\""]
+dev = ["numpy (>=2)", "pre-commit", "torch (>=2.9)", "typing_extensions"]
+
+[[package]]
+name = "mlx-metal"
+version = "0.30.3"
+description = "A framework for machine learning on Apple silicon."
+optional = true
+python-versions = ">=3.10"
+groups = ["main"]
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and extra == \"mlx\" and platform_system == \"Darwin\""
+files = [
+    {file = "mlx_metal-0.30.3-py3-none-macosx_14_0_arm64.whl", hash = "sha256:6276312b02353714c7c6515169569fe1c4bebe3229c8ecf1fdb375a13e78c966"},
+    {file = "mlx_metal-0.30.3-py3-none-macosx_15_0_arm64.whl", hash = "sha256:c096c0a3428f3f96a06220f97a36f9528b18bc05173f821eb05bc8458e723fa8"},
+    {file = "mlx_metal-0.30.3-py3-none-macosx_26_0_arm64.whl", hash = "sha256:69068533bd1ee8b0379ce5de57ed5fd313577a10ecab58e1332fd1ff7248a75e"},
+]
+
+[[package]]
+name = "mlx-whisper"
+version = "0.4.3"
+description = "OpenAI Whisper on Apple silicon with MLX and the Hugging Face Hub"
+optional = true
+python-versions = ">=3.8"
+groups = ["main"]
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and extra == \"mlx\""
+files = [
+    {file = "mlx_whisper-0.4.3-py3-none-any.whl", hash = "sha256:6b82b6597a994643a3e5496c7bc229a672e5ca308458455bfe276e76ae024489"},
+]
+
+[package.dependencies]
+huggingface_hub = "*"
+mlx = ">=0.11"
+more-itertools = "*"
+numba = "*"
+numpy = "*"
+scipy = "*"
+tiktoken = "*"
+torch = "*"
+tqdm = "*"
+
+[[package]]
+name = "more-itertools"
+version = "10.8.0"
+description = "More routines for operating on iterables, beyond itertools"
+optional = true
+python-versions = ">=3.9"
+groups = ["main"]
+markers = "sys_platform == \"darwin\" and platform_machine == \"arm64\" and extra == \"mlx\""
+files = [
+    {file = "more_itertools-10.8.0-py3-none-any.whl", hash = "sha256:52d4362373dcf7c52546bc4af9a86ee7c4579df9a8dc268be0a2f949d376cc9b"},
+    {file = "more_itertools-10.8.0.tar.gz", hash = "sha256:f638ddf8a1a0d134181275fb5d58b086ead7c6a72429ad725c67503f13ba30bd"},
+]
+
+[[package]]
 name = "mpmath"
 version = "1.3.0"
 description = "Python library for arbitrary-precision floating-point arithmetic"
@@ -2426,6 +2522,32 @@ pytest = ">=7"
 
 [package.extras]
 testing = ["process-tests", "pytest-xdist", "virtualenv"]
+
+[[package]]
+name = "python-telegram-bot"
+version = "21.11.1"
+description = "We have made you a wrapper you can't refuse"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "python_telegram_bot-21.11.1-py3-none-any.whl", hash = "sha256:17f933a7a0569f519d9b672e06d71c29ab3688f1ec575ba59a3ca37922481113"},
+    {file = "python_telegram_bot-21.11.1.tar.gz", hash = "sha256:2abda5202f27a838f35e8140e5292af0f4f8fad6c2e5123b2defadd5f4e8ca02"},
+]
+
+[package.dependencies]
+httpx = ">=0.27,<1.0"
+
+[package.extras]
+all = ["aiolimiter (>=1.1,<1.3)", "apscheduler (>=3.10.4,<3.12.0)", "cachetools (>=5.3.3,<5.6.0)", "cffi (>=1.17.0rc1) ; python_version > \"3.12\"", "cryptography (>=39.0.1)", "httpx[http2]", "httpx[socks]", "tornado (>=6.4,<7.0)"]
+callback-data = ["cachetools (>=5.3.3,<5.6.0)"]
+ext = ["aiolimiter (>=1.1,<1.3)", "apscheduler (>=3.10.4,<3.12.0)", "cachetools (>=5.3.3,<5.6.0)", "tornado (>=6.4,<7.0)"]
+http2 = ["httpx[http2]"]
+job-queue = ["apscheduler (>=3.10.4,<3.12.0)"]
+passport = ["cffi (>=1.17.0rc1) ; python_version > \"3.12\"", "cryptography (>=39.0.1)"]
+rate-limiter = ["aiolimiter (>=1.1,<1.3)"]
+socks = ["httpx[socks]"]
+webhooks = ["tornado (>=6.4,<7.0)"]
 
 [[package]]
 name = "pyyaml"
@@ -3545,8 +3667,9 @@ pyjwt = ">=2.9.0,<3.0.0"
 
 [extras]
 dev = ["fastapi"]
+mlx = ["mlx", "mlx-whisper"]
 
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12"
-content-hash = "324b8663f360df7f7d0b38d8b0879382ec4e3e01bf90fd1d77baf45ec01ddf60"
+content-hash = "74df1883d9b2315c811ae3338221ad33d73452f4269e5fee050c88598540daa7"

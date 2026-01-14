@@ -377,6 +377,7 @@
               type="button"
               class="chat-button"
               class:active={activeChatId === chatId}
+              class:telegram-chat={chatInfo.provider === 'telegram'}
               onclick={() => activeChatId = chatId}
               title={chatInfo.provider ? `Provider: ${chatInfo.provider}` : 'Default AI Assistant'}
             >
@@ -824,6 +825,24 @@
   .chat-button.active {
     background: #e0e7ff;
     border-color: #c7d2fe;
+    font-weight: bold;
+  }
+
+  /* Telegram chat styling (v0.14.0+) */
+  .chat-button.telegram-chat {
+    background: linear-gradient(135deg, #e6f3ff 0%, #cce5ff 100%);
+    border-color: #99ccff;
+    color: #006699;
+  }
+
+  .chat-button.telegram-chat:hover {
+    background: linear-gradient(135deg, #cce5ff 0%, #b3d9ff 100%);
+    border-color: #66b3ff;
+  }
+
+  .chat-button.telegram-chat.active {
+    background: linear-gradient(135deg, #b3e0ff 0%, #99d6ff 100%);
+    border-color: #3399ff;
     font-weight: bold;
   }
 

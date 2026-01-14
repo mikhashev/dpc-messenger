@@ -218,6 +218,18 @@ class Settings:
             'thumbnail_quality': '85'  # Thumbnail JPEG quality (0-100)
         }
 
+        self._config['telegram'] = {
+            'enabled': 'false',  # Enable Telegram bot integration (v0.14.0+)
+            'bot_token': '',  # Bot token from @BotFather
+            'allowed_chat_ids': '[]',  # JSON array of whitelisted chat IDs (private access)
+            'use_webhook': 'false',  # Use webhook mode (true) or polling mode (false)
+            'webhook_url': '',  # Public URL for webhook (production)
+            'webhook_port': '8443',  # Local port for webhook server
+            'transcription_enabled': 'true',  # Auto-transcribe Telegram voice messages
+            'bridge_to_p2p': 'false',  # Forward Telegram messages to P2P peers
+            'conversation_links': '{}'  # JSON map of telegram_chat_id -> conversation_id
+        }
+
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
             'console': 'true',  # Enable console output
@@ -740,6 +752,63 @@ class Settings:
         """Check if lazy model loading is enabled (load on first use)."""
         value = self.get('local_transcription', 'lazy_loading', 'true')
         return value.lower() in ('true', '1', 'yes')
+
+    # Telegram Bot Integration Settings (v0.14.0+)
+
+    def get_telegram_enabled(self) -> bool:
+        """Check if Telegram bot integration is enabled."""
+        value = self.get('telegram', 'enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_bot_token(self) -> str:
+        """Get Telegram bot token."""
+        return self.get('telegram', 'bot_token', '')
+
+    def get_telegram_allowed_chat_ids(self) -> list:
+        """Get list of allowed Telegram chat IDs (whitelist)."""
+        import json
+        try:
+            chat_ids_str = self.get('telegram', 'allowed_chat_ids', '[]')
+            return json.loads(chat_ids_str)
+        except json.JSONDecodeError:
+            return []
+
+    def get_telegram_use_webhook(self) -> bool:
+        """Check if webhook mode is enabled (vs polling)."""
+        value = self.get('telegram', 'use_webhook', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_webhook_url(self) -> str:
+        """Get Telegram webhook URL."""
+        return self.get('telegram', 'webhook_url', '')
+
+    def get_telegram_webhook_port(self) -> int:
+        """Get Telegram webhook server port."""
+        return int(self.get('telegram', 'webhook_port', '8443'))
+
+    def get_telegram_transcription_enabled(self) -> bool:
+        """Check if Telegram voice transcription is enabled."""
+        value = self.get('telegram', 'transcription_enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_bridge_to_p2p(self) -> bool:
+        """Check if Telegram → P2P bridging is enabled."""
+        value = self.get('telegram', 'bridge_to_p2p', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_config(self) -> dict:
+        """Get all Telegram configuration as a dict."""
+        import json
+        return {
+            'enabled': self.get_telegram_enabled(),
+            'bot_token': self.get_telegram_bot_token(),
+            'allowed_chat_ids': self.get_telegram_allowed_chat_ids(),
+            'use_webhook': self.get_telegram_use_webhook(),
+            'webhook_url': self.get_telegram_webhook_url(),
+            'webhook_port': self.get_telegram_webhook_port(),
+            'transcription_enabled': self.get_telegram_transcription_enabled(),
+            'bridge_to_p2p': self.get_telegram_bridge_to_p2p()
+        }
 
     def reload(self):
         """Reload configuration from file."""

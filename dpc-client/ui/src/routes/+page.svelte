@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramLinkedChats, sendToTelegram } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -19,6 +19,7 @@
   import ImageMessage from "$lib/components/ImageMessage.svelte";
   import ChatPanel from "$lib/components/ChatPanel.svelte";
   import SessionControls from "$lib/components/SessionControls.svelte";
+  import TelegramStatus from "$lib/components/TelegramStatus.svelte";
   import FileTransferUI from "$lib/components/FileTransferUI.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
@@ -246,6 +247,108 @@
       console.error(`[Whisper] Model loading failed: ${$whisperModelLoadingFailed.error}`);
       whisperModelLoading = false;
       whisperModelLoadError = $whisperModelLoadingFailed.error;
+    }
+  });
+
+  // Telegram bot integration (v0.14.0+): Handle incoming Telegram messages
+  $effect(() => {
+    if ($telegramMessageReceived) {
+      const { conversation_id, telegram_chat_id, sender_name, text, timestamp } = $telegramMessageReceived;
+      console.log(`[Telegram] Adding message to chat ${conversation_id}: ${text}`);
+
+      // Auto-create conversation in aiChats if it doesn't exist
+      if (!$aiChats.has(conversation_id)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.set(conversation_id, {
+            name: `📱 Telegram (${sender_name})`,
+            provider: 'telegram',  // Unique provider for visual distinction
+            instruction_set_name: 'general'
+          });
+          return newMap;
+        });
+        console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar`);
+      }
+
+      // Add message to chatHistories
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const currentMessages = newMap.get(conversation_id) || [];
+        newMap.set(conversation_id, [
+          ...currentMessages,
+          {
+            id: `telegram-${Date.now()}`,
+            sender: `telegram-${telegram_chat_id}`,
+            senderName: sender_name,
+            text: text,
+            timestamp: new Date(timestamp).getTime()
+          }
+        ]);
+        return newMap;
+      });
+
+      // Clear the received event after processing
+      telegramMessageReceived.set(null);
+    }
+  });
+
+  // Handle Telegram voice messages
+  $effect(() => {
+    if ($telegramVoiceReceived) {
+      const { conversation_id, telegram_chat_id, sender_name, filename, file_path, duration_seconds, transcription } = $telegramVoiceReceived;
+      console.log(`[Telegram] Adding voice message to chat ${conversation_id}: ${filename}`);
+
+      // Auto-create conversation in aiChats if it doesn't exist
+      if (!$aiChats.has(conversation_id)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.set(conversation_id, {
+            name: `📱 Telegram (${sender_name})`,
+            provider: 'telegram',  // Unique provider for visual distinction
+            instruction_set_name: 'general'
+          });
+          return newMap;
+        });
+        console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar`);
+      }
+
+      // Add voice message to chatHistories
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const currentMessages = newMap.get(conversation_id) || [];
+        newMap.set(conversation_id, [
+          ...currentMessages,
+          {
+            id: `telegram-voice-${Date.now()}`,
+            sender: `telegram-${telegram_chat_id}`,
+            senderName: sender_name,
+            text: transcription ? `Voice message: ${transcription}` : 'Voice message',
+            timestamp: Date.now(),
+            attachments: [{
+              type: 'voice',
+              filename: filename,
+              file_path: file_path,  // Use actual file path from backend
+              size_bytes: 0,
+              mime_type: 'audio/ogg',
+              voice_metadata: {
+                duration_seconds: duration_seconds,
+                sample_rate: 48000,
+                channels: 1,
+                codec: 'opus',
+                recorded_at: new Date().toISOString()
+              },
+              transcription: transcription ? {
+                text: transcription,
+                provider: 'unknown'
+              } : undefined
+            }]
+          }
+        ]);
+        return newMap;
+      });
+
+      // Clear the received event after processing
+      telegramVoiceReceived.set(null);
     }
   });
 
@@ -1318,7 +1421,21 @@
         // Clean up the command mapping
         commandToChatMap.delete(commandId);
       }
+    } else if (activeChatId.startsWith('telegram-')) {
+      // Telegram chat: Send message to Telegram
+      try {
+        const linkedChatId = $telegramLinkedChats.get(activeChatId);
+        if (linkedChatId) {
+          await sendToTelegram(activeChatId, text);
+          console.log(`[Telegram] Sent message to Telegram chat ${linkedChatId}`);
+        } else {
+          console.warn(`[Telegram] No linked chat ID for ${activeChatId}, message not sent to Telegram`);
+        }
+      } catch (error) {
+        console.error('[Telegram] Failed to send message:', error);
+      }
     } else {
+      // P2P chat: Send via P2P
       sendCommand("send_p2p_message", { target_node_id: activeChatId, text });
     }
     
@@ -1880,9 +1997,66 @@
     if (!voicePreview) return;
 
     try {
-      // For P2P chats, send via file transfer
-      if (activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
-        await sendVoiceMessage(activeChatId, voicePreview.blob, voicePreview.duration);
+      // Store blob and duration locally to avoid null check issues after await
+      const blob = voicePreview.blob;
+      const duration = voicePreview.duration;
+
+      // Check if this is a Telegram chat
+      if (activeChatId.startsWith('telegram-')) {
+        // Convert blob to base64
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+
+        // Convert to base64 in chunks to avoid "Maximum call stack size exceeded"
+        let binaryString = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < uint8Array.length; i += chunkSize) {
+          const chunk = uint8Array.subarray(i, i + chunkSize);
+          binaryString += String.fromCharCode(...chunk);
+        }
+        const base64Audio = btoa(binaryString);
+
+        // Send to Telegram
+        await sendToTelegram(
+          activeChatId,
+          '', // Empty text for voice-only message
+          [],
+          base64Audio,
+          duration,
+          blob.type || 'audio/webm'
+        );
+
+        // Add message to local history
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          const hist = newMap.get(activeChatId) || [];
+          newMap.set(activeChatId, [...hist, {
+            id: crypto.randomUUID(),
+            sender: 'user',
+            text: 'Voice message',
+            timestamp: Date.now(),
+            attachments: [{
+              type: 'voice',
+              filename: `voice_${Date.now()}.${(blob.type || 'audio/webm').split('/')[1]}`,
+              file_path: '', // Will be filled by backend response
+              size_bytes: blob.size,
+              mime_type: blob.type || 'audio/webm',
+              voice_metadata: {
+                duration_seconds: duration,
+                sample_rate: 48000,
+                channels: 1,
+                codec: 'opus',
+                recorded_at: new Date().toISOString()
+              }
+            }]
+          }]);
+          return newMap;
+        });
+
+        console.log(`[Telegram] Sent voice message to Telegram`);
+      } else if (activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+        // For P2P chats, send via file transfer
+        await sendVoiceMessage(activeChatId, blob, duration);
       }
       // For AI chats, voice messages must be transcribed first (use handleTranscribeVoiceMessage instead)
 
@@ -2251,6 +2425,9 @@
               {/if}
             </label>
           {/if}
+
+          <!-- Telegram bot integration status (v0.14.0+) -->
+          <TelegramStatus conversationId={activeChatId} />
         </div>
 
         {#if !chatHeaderCollapsed}

@@ -504,6 +504,7 @@ class LocalWhisperProvider(AIProvider):
         self.pipeline = None
         self.model_loaded = False
         self._load_lock = None  # Will be set to asyncio.Lock when needed
+        self._detected_device = None  # Store detected device for state preservation
 
         logger.info(f"LocalWhisperProvider '{alias}' initialized (model={self.model_name}, device={self.device})")
 
@@ -570,8 +571,10 @@ class LocalWhisperProvider(AIProvider):
             # Determine device
             if self.device == "auto":
                 device = self._detect_device()
+                self._detected_device = device  # Store for state preservation
             else:
                 device = self.device
+                self._detected_device = device
 
             # Force HuggingFace to use offline mode (no network calls)
             # This applies to both MLX and PyTorch paths
@@ -1344,10 +1347,26 @@ class LLMManager:
         """
         Save provider configuration to JSON file and reload providers.
 
+        Preserves the loaded Whisper model state across reloads (v0.14.1+).
+
         Args:
             config_dict: Dictionary containing providers configuration
         """
         try:
+            # Preserve Whisper model state before clearing providers
+            whisper_state = {}
+            for alias, provider in list(self.providers.items()):
+                if provider.config.get('type') == 'local_whisper':
+                    if hasattr(provider, 'is_model_loaded') and provider.is_model_loaded():
+                        # Save the loaded state
+                        whisper_state[alias] = {
+                            'model_loaded': True,
+                            'pipeline': provider.pipeline,
+                            'device': getattr(provider, '_detected_device', provider.device),
+                            'load_lock': getattr(provider, '_load_lock', None)
+                        }
+                        logger.debug(f"Preserving loaded Whisper model state for '{alias}'")
+
             with open(self.config_path, 'w') as f:
                 json.dump(config_dict, f, indent=2)
             logger.info("Provider configuration saved to %s", self.config_path)
@@ -1355,6 +1374,21 @@ class LLMManager:
             # Reload providers
             self.providers.clear()
             self._load_providers_from_config()
+
+            # Restore Whisper model state for providers that were loaded
+            for alias, state in whisper_state.items():
+                if alias in self.providers:
+                    provider = self.providers[alias]
+                    if hasattr(provider, 'pipeline') and hasattr(provider, 'model_loaded'):
+                        # Restore the loaded state
+                        provider.pipeline = state['pipeline']
+                        provider.model_loaded = state['model_loaded']
+                        if hasattr(provider, '_detected_device'):
+                            provider._detected_device = state['device']
+                        if state.get('load_lock'):
+                            provider._load_lock = state['load_lock']
+                        logger.info(f"Restored loaded Whisper model state for '{alias}' (model stays in memory)")
+
         except Exception as e:
             logger.error("Error saving provider config: %s", e, exc_info=True)
             raise

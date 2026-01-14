@@ -9,7 +9,7 @@ import websockets
 import socket
 import sys
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,7 @@ from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, C
 from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
 )
+from .message_handlers.telegram_handler import TelegramIncomingHandler  # v0.14.0+ Telegram integration
 from .managers.file_transfer_manager import FileTransferManager
 from .managers.prompt_manager import PromptManager
 from .managers.instruction_manager import InstructionManager
@@ -232,6 +233,32 @@ class CoreService:
         self.session_manager.on_proposal_received = self._on_session_proposal_received
         self.session_manager.on_result_broadcast = self._broadcast_session_result
 
+        # Telegram bot integration (v0.14.0+)
+        self.telegram_manager = None
+        self.telegram_bridge = None
+        telegram_config = self.settings.get_telegram_config()
+        if telegram_config['enabled']:
+            try:
+                from .managers.telegram_manager import TelegramBotManager
+                from .coordinators.telegram_coordinator import TelegramBridge
+
+                # Initialize Telegram manager
+                self.telegram_manager = TelegramBotManager(self, telegram_config)
+
+                # Initialize Telegram bridge (depends on manager)
+                self.telegram_bridge = TelegramBridge(self, self.telegram_manager)
+
+                logger.info("Telegram bot integration initialized (whitelist: %d chat_ids)",
+                           len(telegram_config['allowed_chat_ids']))
+            except ImportError as e:
+                logger.warning(f"Failed to import telegram library: {e}. Install with: poetry install")
+                self.telegram_manager = None
+                self.telegram_bridge = None
+            except Exception as e:
+                logger.error(f"Failed to initialize Telegram integration: {e}", exc_info=True)
+                self.telegram_manager = None
+                self.telegram_bridge = None
+
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
@@ -368,6 +395,10 @@ class CoreService:
         self.message_router.register_handler(ProposeNewSessionHandler(self))
         self.message_router.register_handler(VoteNewSessionHandler(self))
         self.message_router.register_handler(NewSessionResultHandler(self))
+
+        # Telegram bot integration (v0.14.0+)
+        if self.telegram_manager:
+            self.message_router.register_handler(TelegramIncomingHandler(self))
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 
@@ -588,6 +619,13 @@ class CoreService:
         else:
             logger.warning("Phase 6 managers unavailable (DHT not initialized)")
 
+        # Start Telegram bot integration (v0.14.0+)
+        if self.telegram_manager:
+            logger.info("Starting Telegram bot integration...")
+            telegram_task = asyncio.create_task(self.telegram_manager.start())
+            telegram_task.set_name("telegram_bot")
+            self._background_tasks.add(telegram_task)
+
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
 
@@ -688,6 +726,11 @@ class CoreService:
         if hasattr(self, 'gossip_manager') and self.gossip_manager:
             logger.info("Stopping Gossip Manager...")
             await self.gossip_manager.stop()
+
+        # Shutdown Telegram bot integration (v0.14.0+)
+        if hasattr(self, 'telegram_manager') and self.telegram_manager:
+            logger.info("Stopping Telegram bot...")
+            await self.telegram_manager.stop()
 
         # Unload Whisper model if loaded (free VRAM before shutdown)
         try:
@@ -4288,6 +4331,207 @@ class CoreService:
 
         except Exception as e:
             logger.error("Error resetting conversation: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    # Telegram Bot Integration Commands (v0.14.0+)
+
+    async def send_to_telegram(
+        self,
+        conversation_id: str,
+        text: str,
+        attachments: Optional[List[Dict]] = None,
+        voice_audio_base64: Optional[str] = None,
+        voice_duration_seconds: Optional[float] = None,
+        voice_mime_type: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """
+        Send message from DPC to Telegram chat.
+
+        Args:
+            conversation_id: DPC conversation ID (must be linked to Telegram)
+            text: Message text
+            attachments: Optional list of attachments (voice, images, etc.)
+            voice_audio_base64: Optional base64-encoded voice audio data (for recording from UI)
+            voice_duration_seconds: Optional voice duration in seconds
+            voice_mime_type: Optional voice MIME type (e.g., "audio/webm")
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            if not self.telegram_bridge:
+                return {
+                    "status": "error",
+                    "message": "Telegram integration not enabled"
+                }
+
+            # Handle voice data from UI (save file and create attachment)
+            if voice_audio_base64:
+                import base64
+                from pathlib import Path
+                from datetime import datetime, timezone
+
+                # Decode audio data
+                try:
+                    audio_data = base64.b64decode(voice_audio_base64)
+                except Exception as e:
+                    return {
+                        "status": "error",
+                        "message": f"Failed to decode voice audio: {e}"
+                    }
+
+                # Generate filename with timestamp
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                extension = (voice_mime_type or "audio/webm").split("/")[-1].split(";")[0].strip()
+                filename = f"voice_{timestamp}.{extension}"
+
+                # Create directory for Telegram voice files
+                voice_dir = DPC_HOME_DIR / "conversations" / conversation_id / "files"
+                voice_dir.mkdir(parents=True, exist_ok=True)
+                voice_path = voice_dir / filename
+
+                # Handle filename collisions
+                if voice_path.exists():
+                    stem = voice_path.stem
+                    suffix = voice_path.suffix
+                    counter = 1
+                    while voice_path.exists():
+                        voice_path = voice_dir / f"{stem}_{counter}{suffix}"
+                        counter += 1
+
+                # Save voice file
+                try:
+                    with open(voice_path, "wb") as f:
+                        f.write(audio_data)
+                    logger.info(f"Saved Telegram voice message: {voice_path} ({len(audio_data)} bytes, {voice_duration_seconds}s)")
+                except Exception as e:
+                    return {
+                        "status": "error",
+                        "message": f"Failed to save voice file: {e}"
+                    }
+
+                # Create voice attachment
+                voice_attachment = {
+                    "type": "voice",
+                    "filename": filename,
+                    "file_path": str(voice_path),
+                    "size_bytes": len(audio_data),
+                    "voice_metadata": {
+                        "duration_seconds": voice_duration_seconds,
+                        "sample_rate": int(self.settings.get("voice_messages", "default_sample_rate", "48000")),
+                        "channels": int(self.settings.get("voice_messages", "default_channels", "1")),
+                        "codec": self.settings.get("voice_messages", "default_codec", "opus"),
+                        "recorded_at": datetime.now(timezone.utc).isoformat()
+                    }
+                }
+
+                # Add to attachments list
+                if not attachments:
+                    attachments = []
+                attachments.append(voice_attachment)
+
+            # Get sender name
+            sender_name = self.p2p_manager.get_display_name() or "You"
+
+            # Forward to Telegram
+            await self.telegram_bridge.forward_dpc_to_telegram(
+                conversation_id=conversation_id,
+                sender_name=sender_name,
+                text=text,
+                attachments=attachments or []
+            )
+
+            return {
+                "status": "success",
+                "message": "Sent to Telegram"
+            }
+
+        except Exception as e:
+            logger.error("Failed to send to Telegram: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def link_telegram_chat(
+        self,
+        conversation_id: str,
+        telegram_chat_id: str
+    ) -> Dict[str, Any]:
+        """
+        Link a DPC conversation to a Telegram chat.
+
+        Args:
+            conversation_id: DPC conversation ID
+            telegram_chat_id: Telegram chat ID to link
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            if not self.telegram_bridge:
+                return {
+                    "status": "error",
+                    "message": "Telegram integration not enabled"
+                }
+
+            # Validate chat_id is in whitelist
+            if not self.telegram_manager.is_allowed(telegram_chat_id):
+                return {
+                    "status": "error",
+                    "message": f"Chat ID {telegram_chat_id} not in whitelist"
+                }
+
+            # Store link
+            self.telegram_bridge.conversation_map[telegram_chat_id] = conversation_id
+            self.telegram_bridge._save_conversation_links()
+
+            logger.info(f"Linked conversation {conversation_id} to Telegram chat {telegram_chat_id}")
+
+            return {
+                "status": "success",
+                "message": f"Linked {conversation_id} to Telegram chat {telegram_chat_id}"
+            }
+
+        except Exception as e:
+            logger.error("Failed to link Telegram chat: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_telegram_status(self) -> Dict[str, Any]:
+        """
+        Get Telegram bot integration status.
+
+        Returns:
+            Dict with status information
+        """
+        try:
+            if not self.telegram_manager:
+                return {
+                    "status": "success",
+                    "enabled": False,
+                    "connected": False,
+                    "message": "Telegram integration not enabled"
+                }
+
+            return {
+                "status": "success",
+                "enabled": True,
+                "connected": self.telegram_manager._running,
+                "webhook_mode": self.telegram_manager.use_webhook,
+                "whitelist_count": len(self.telegram_manager.allowed_chat_ids),
+                "transcription_enabled": self.telegram_manager.transcription_enabled,
+                "bridge_to_p2p": self.telegram_manager.bridge_to_p2p,
+                "conversation_links": len(self.telegram_bridge.conversation_map) if self.telegram_bridge else 0
+            }
+
+        except Exception as e:
+            logger.error("Failed to get Telegram status: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
