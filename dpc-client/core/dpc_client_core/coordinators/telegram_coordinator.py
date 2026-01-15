@@ -91,6 +91,9 @@ class TelegramBridge:
         # Map telegram_chat_id → dpc_conversation_id
         self.conversation_map: Dict[str, str] = {}
 
+        # Track users who have received unknown user info (rate limiting - v0.15.0)
+        self._notified_unknown_users = set()
+
         # Load saved conversation links from settings
         self._load_conversation_links()
 
@@ -160,6 +163,29 @@ class TelegramBridge:
 
         return None
 
+    async def _send_unknown_user_info(self, chat_id: str, from_user):
+        """Send helpful message to unknown user with their chat_id (v0.15.0)."""
+        sender_name = from_user.full_name or from_user.username or f"User_{chat_id}"
+        username = from_user.username if from_user.username else "N/A"
+
+        message = (
+            f"⚠️ <b>Access Denied</b>\n\n"
+            f"Hello {sender_name}!\n\n"
+            f"Your Telegram User ID is: <code>{chat_id}</code>\n"
+            f"Username: @{username}\n\n"
+            f"This is a private bot. To be granted access:\n"
+            f"1. Send your User ID (above) to the bot owner\n"
+            f"2. Wait for the bot owner to add you to the whitelist\n"
+            f"3. Try sending your message again\n\n"
+            f"Your User ID: <code>{chat_id}</code>"
+        )
+
+        await self.telegram.bot.send_message(
+            chat_id=chat_id,
+            text=message,
+            parse_mode='HTML'
+        )
+
     async def handle_text_message(self, update, context):
         """
         Handle incoming text message from Telegram.
@@ -178,9 +204,14 @@ class TelegramBridge:
             message_id = message.message_id
             from_user = message.from_user
 
-            # Whitelist check
+            # Whitelist check with rate limiting (send info reply only once per user - v0.15.0)
             if not self.telegram.is_allowed(chat_id):
-                self.logger.warning(f"Message from unauthorized chat_id {chat_id}, ignoring")
+                if chat_id not in self._notified_unknown_users:
+                    self.logger.warning(f"Message from unauthorized chat_id {chat_id}, sending info reply")
+                    await self._send_unknown_user_info(chat_id, from_user)
+                    self._notified_unknown_users.add(chat_id)
+                else:
+                    self.logger.warning(f"Message from unauthorized chat_id {chat_id}, already notified")
                 return
 
             # Get sender info
@@ -267,10 +298,16 @@ class TelegramBridge:
             message = update.message
             voice = message.voice
             chat_id = str(message.chat_id)
+            from_user = message.from_user
 
-            # Whitelist check
+            # Whitelist check with rate limiting (v0.15.0)
             if not self.telegram.is_allowed(chat_id):
-                logger.warning(f"Voice message from unauthorized chat_id {chat_id}, ignoring")
+                if chat_id not in self._notified_unknown_users:
+                    logger.warning(f"Voice message from unauthorized chat_id {chat_id}, sending info reply")
+                    await self._send_unknown_user_info(chat_id, from_user)
+                    self._notified_unknown_users.add(chat_id)
+                else:
+                    logger.warning(f"Voice message from unauthorized chat_id {chat_id}, already notified")
                 return
 
             # Get voice metadata
@@ -324,12 +361,11 @@ class TelegramBridge:
 
                         logger.info(f"Transcribed voice message ({len(transcription_text)} chars, provider: {transcription_provider})")
 
-                        # Send transcription back to Telegram
-                        # NOTE: Commented out to avoid duplication - transcription is already shown in VoicePlayer
-                        # await self.telegram.send_message(
-                        #     chat_id,
-                        #     f"📝 Transcription:\n{transcription_text}"
-                        # )
+                        # Send transcription back to Telegram (v0.15.0 - re-enabled)
+                        await self.telegram.send_message(
+                            chat_id,
+                            f"📝 Transcription:\n{transcription_text}"
+                        )
                     else:
                         logger.warning("No voice provider configured, skipping transcription")
 
@@ -419,10 +455,16 @@ class TelegramBridge:
             message = update.message
             photo = message.photo[-1]  # Get largest size
             chat_id = str(message.chat_id)
+            from_user = message.from_user
 
-            # Whitelist check
+            # Whitelist check with rate limiting (v0.15.0)
             if not self.telegram.is_allowed(chat_id):
-                logger.warning(f"Photo from unauthorized chat_id {chat_id}, ignoring")
+                if chat_id not in self._notified_unknown_users:
+                    logger.warning(f"Photo from unauthorized chat_id {chat_id}, sending info reply")
+                    await self._send_unknown_user_info(chat_id, from_user)
+                    self._notified_unknown_users.add(chat_id)
+                else:
+                    logger.warning(f"Photo from unauthorized chat_id {chat_id}, already notified")
                 return
 
             # Get or create conversation
@@ -511,10 +553,16 @@ class TelegramBridge:
             message = update.message
             document = message.document
             chat_id = str(message.chat_id)
+            from_user = message.from_user
 
-            # Whitelist check
+            # Whitelist check with rate limiting (v0.15.0)
             if not self.telegram.is_allowed(chat_id):
-                logger.warning(f"Document from unauthorized chat_id {chat_id}, ignoring")
+                if chat_id not in self._notified_unknown_users:
+                    logger.warning(f"Document from unauthorized chat_id {chat_id}, sending info reply")
+                    await self._send_unknown_user_info(chat_id, from_user)
+                    self._notified_unknown_users.add(chat_id)
+                else:
+                    logger.warning(f"Document from unauthorized chat_id {chat_id}, already notified")
                 return
 
             # Get or create conversation

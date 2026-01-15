@@ -553,6 +553,16 @@ export function connectToCoreService() {
                     console.log("Telegram message received:", message.payload);
                     const { conversation_id, telegram_chat_id, sender_name, text, timestamp } = message.payload;
 
+                    // Track unread messages (v0.15.0) - only if this chat is not active
+                    if (conversation_id && typeof window !== 'undefined') {
+                        if (conversation_id !== activeChat) {
+                            const currentCounts = get(unreadMessageCounts);
+                            const currentCount = currentCounts.get(conversation_id) || 0;
+                            currentCounts.set(conversation_id, currentCount + 1);
+                            unreadMessageCounts.set(new Map(currentCounts));
+                        }
+                    }
+
                     // Store the mapping: conversation_id -> telegram_chat_id
                     const currentLinkedChats = get(telegramLinkedChats);
                     if (!currentLinkedChats.has(conversation_id)) {
@@ -579,11 +589,33 @@ export function connectToCoreService() {
                 }
                 else if (message.event === "telegram_voice_received") {
                     console.log("Telegram voice received:", message.payload);
+
+                    // Track unread messages (v0.15.0)
+                    const conversationId = message.payload.conversation_id;
+                    if (conversationId && typeof window !== 'undefined') {
+                        if (conversationId !== activeChat) {
+                            const currentCounts = get(unreadMessageCounts);
+                            const currentCount = currentCounts.get(conversationId) || 0;
+                            currentCounts.set(conversationId, currentCount + 1);
+                            unreadMessageCounts.set(new Map(currentCounts));
+                        }
+                    }
+
                     telegramVoiceReceived.set(message.payload);
                 }
                 else if (message.event === "telegram_image_received") {
                     console.log("Telegram image received:", message.payload);
                     const { conversation_id, telegram_chat_id, sender_name, filename, caption } = message.payload;
+
+                    // Track unread messages (v0.15.0)
+                    if (conversation_id && typeof window !== 'undefined') {
+                        if (conversation_id !== activeChat) {
+                            const currentCounts = get(unreadMessageCounts);
+                            const currentCount = currentCounts.get(conversation_id) || 0;
+                            currentCounts.set(conversation_id, currentCount + 1);
+                            unreadMessageCounts.set(new Map(currentCounts));
+                        }
+                    }
 
                     // Add to telegram messages store
                     const currentMessages = get(telegramMessages).get(conversation_id) || [];
@@ -606,6 +638,16 @@ export function connectToCoreService() {
                 else if (message.event === "telegram_file_received") {
                     console.log("Telegram file received:", message.payload);
                     const { conversation_id, telegram_chat_id, sender_name, filename, caption } = message.payload;
+
+                    // Track unread messages (v0.15.0)
+                    if (conversation_id && typeof window !== 'undefined') {
+                        if (conversation_id !== activeChat) {
+                            const currentCounts = get(unreadMessageCounts);
+                            const currentCount = currentCounts.get(conversation_id) || 0;
+                            currentCounts.set(conversation_id, currentCount + 1);
+                            unreadMessageCounts.set(new Map(currentCounts));
+                        }
+                    }
 
                     // Add to telegram messages store
                     const currentMessages = get(telegramMessages).get(conversation_id) || [];

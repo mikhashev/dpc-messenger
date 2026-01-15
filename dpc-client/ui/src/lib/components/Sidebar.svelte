@@ -378,10 +378,16 @@
               class="chat-button"
               class:active={activeChatId === chatId}
               class:telegram-chat={chatInfo.provider === 'telegram'}
-              onclick={() => activeChatId = chatId}
+              onclick={() => {
+                activeChatId = chatId;
+                onResetUnreadCount(chatId);
+              }}
               title={chatInfo.provider ? `Provider: ${chatInfo.provider}` : 'Default AI Assistant'}
             >
               {chatInfo.name}
+              {#if (unreadMessageCounts.get(chatId) ?? 0) > 0}
+                <span class="unread-badge">{unreadMessageCounts.get(chatId)}</span>
+              {/if}
             </button>
             {#if chatId !== 'local_ai'}
               <button

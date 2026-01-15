@@ -300,6 +300,16 @@
         return newMap;
       });
 
+      // Send notification if app is in background (v0.15.0)
+      (async () => {
+        const messagePreview = text.length > 50 ? text.slice(0, 50) + '...' : text;
+        const notified = await showNotificationIfBackground({
+          title: sender_name,
+          body: messagePreview
+        });
+        console.log(`[Notifications] Telegram message notification: ${notified ? 'system' : 'skip'}`);
+      })();
+
       // Clear the received event after processing
       telegramMessageReceived.set(null);
     }
@@ -373,6 +383,15 @@
         return newMap;
       });
 
+      // Send notification if app is in background (v0.15.0)
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: sender_name,
+          body: `🎤 Voice message (${duration_seconds}s)`
+        });
+        console.log(`[Notifications] Telegram voice notification: ${notified ? 'system' : 'skip'}`);
+      })();
+
       // Clear the received event after processing
       telegramVoiceReceived.set(null);
     }
@@ -433,6 +452,15 @@
         ]);
         return newMap;
       });
+
+      // Send notification if app is in background (v0.15.0)
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: sender_name,
+          body: `📷 Photo${caption ? ': ' + caption.slice(0, 30) : ''}`
+        });
+        console.log(`[Notifications] Telegram image notification: ${notified ? 'system' : 'skip'}`);
+      })();
 
       // Clear the received event after processing
       telegramImageReceived.set(null);
@@ -498,6 +526,15 @@
         ]);
         return newMap;
       });
+
+      // Send notification if app is in background (v0.15.0)
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: sender_name,
+          body: `📎 File: ${filename}`
+        });
+        console.log(`[Notifications] Telegram file notification: ${notified ? 'system' : 'skip'}`);
+      })();
 
       // Clear the received event after processing
       telegramFileReceived.set(null);
