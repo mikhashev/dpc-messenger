@@ -190,7 +190,9 @@ class Settings:
             'sender_transcribes': 'false',  # Should sender transcribe their own voice messages
             'recipient_delay_seconds': '3',  # Wait N seconds before recipients attempt transcription (coordination)
             'timeout_seconds': '240',  # Max wait time for peer's transcription before trying locally (increased to 240s for cold model loads that take 180+s)
-            'provider_priority': 'local_whisper_large,local_whisper,openai',  # Comma-separated provider priority (aliases from providers.json)
+            # NOTE: provider_priority overrides voice_provider from providers.json
+            # Provider aliases match HuggingFace model names for clarity (e.g., whisper-large-v3)
+            'provider_priority': 'whisper-large-v3,whisper-large-v3-turbo,whisper-medium,whisper-small,openai',  # Comma-separated provider priority (aliases from providers.json)
             'show_transcriber_name': 'false',  # Show who transcribed the message in UI
             'cache_transcriptions': 'true',  # Cache transcriptions in memory
             'fallback_to_openai': 'true'  # Fallback to OpenAI API if local Whisper unavailable
@@ -685,7 +687,8 @@ class Settings:
 
     def get_voice_transcription_provider_priority(self) -> list[str]:
         """Get ordered list of transcription provider aliases."""
-        priority_str = self.get('voice_transcription', 'provider_priority', 'local_whisper_large,local_whisper,openai')
+        # Fallback matches default config (aliases match HuggingFace model names)
+        priority_str = self.get('voice_transcription', 'provider_priority', 'whisper-large-v3,whisper-large-v3-turbo,whisper-medium,whisper-small,openai')
         return [p.strip() for p in priority_str.split(',') if p.strip()]
 
     def get_voice_transcription_show_transcriber_name(self) -> bool:

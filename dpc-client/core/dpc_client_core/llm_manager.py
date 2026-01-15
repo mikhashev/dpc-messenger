@@ -576,11 +576,6 @@ class LocalWhisperProvider(AIProvider):
                 device = self.device
                 self._detected_device = device
 
-            # Force HuggingFace to use offline mode (no network calls)
-            # This applies to both MLX and PyTorch paths
-            import os
-            os.environ['HF_HUB_OFFLINE'] = '1'
-
             # MLX path (Apple Silicon)
             if device == "mlx":
                 try:
@@ -856,10 +851,6 @@ class LocalWhisperProvider(AIProvider):
             cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
             os.makedirs(cache_dir, exist_ok=True)
 
-            # Temporarily enable online mode for download
-            original_offline = os.environ.get('HF_HUB_OFFLINE')
-            os.environ['HF_HUB_OFFLINE'] = '0'
-
             try:
                 # Determine device for dtype
                 if self.device == "auto":
@@ -913,13 +904,6 @@ class LocalWhisperProvider(AIProvider):
                     "model_name": self.model_name,
                     "cache_path": cache_dir
                 }
-
-            finally:
-                # Restore offline mode
-                if original_offline is not None:
-                    os.environ['HF_HUB_OFFLINE'] = original_offline
-                else:
-                    os.environ['HF_HUB_OFFLINE'] = '1'
 
         # Run download in thread pool (it's blocking I/O)
         if progress_callback:

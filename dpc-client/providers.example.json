@@ -3,7 +3,7 @@
 
   "default_provider": "ollama_text",
   "vision_provider": "ollama_vision",
-  "voice_provider": "local_whisper",
+  "voice_provider": "whisper-large-v3",
 
   "providers": [
     {
@@ -24,7 +24,8 @@
     },
     {
       "_comment": "Local Whisper transcription provider - Privacy-first voice messages (v0.13.1+)",
-      "alias": "local_whisper",
+      "_note": "Provider aliases match HuggingFace model names for clarity",
+      "alias": "whisper-large-v3",
       "type": "local_whisper",
       "model": "openai/whisper-large-v3",
       "device": "auto",
@@ -97,19 +98,44 @@
       "_setup": "Set environment variable: export OPENROUTER_API_KEY='sk-or-...'"
     },
 
-    "local_whisper_large": {
-      "alias": "local_whisper_large",
-      "type": "local_whisper",
-      "model": "openai/whisper-large-v3",
-      "device": "cuda",
-      "compile_model": true,
-      "use_flash_attention": false,
-      "chunk_length_s": 30,
-      "batch_size": 16,
-      "language": "auto",
-      "task": "transcribe",
-      "lazy_loading": true,
-      "_note": "NVIDIA GPU transcription (1.55B params, 99 languages, ~10-13x real-time)"
+    "whisper_variants": {
+      "_comment": "Example Whisper model variants - Aliases match HuggingFace model names",
+      "_note": "All use the same provider type 'local_whisper' with different model identifiers",
+      "_variants": [
+        {
+          "alias": "whisper-large-v3",
+          "model": "openai/whisper-large-v3",
+          "_note": "Full model, ~3GB, best accuracy (99 languages), ~10-13x real-time on RTX 3060"
+        },
+        {
+          "alias": "whisper-large-v3-turbo",
+          "model": "openai/whisper-large-v3-turbo",
+          "_note": "Faster variant, ~1.6GB, slightly less accuracy, ~15-20x real-time"
+        },
+        {
+          "alias": "whisper-medium",
+          "model": "openai/whisper-medium",
+          "_note": "Balance model, ~1.5GB, good accuracy, ~20-25x real-time"
+        },
+        {
+          "alias": "whisper-small",
+          "model": "openai/whisper-small",
+          "_note": "Fast model, ~500MB, decent accuracy, ~40-50x real-time"
+        }
+      ],
+      "_example_config": {
+        "alias": "whisper-large-v3",
+        "type": "local_whisper",
+        "model": "openai/whisper-large-v3",
+        "device": "cuda",
+        "compile_model": true,
+        "use_flash_attention": false,
+        "chunk_length_s": 30,
+        "batch_size": 16,
+        "language": "auto",
+        "task": "transcribe",
+        "lazy_loading": true
+      }
     },
 
     "apple_whisper_mlx": {
