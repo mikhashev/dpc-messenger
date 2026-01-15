@@ -62,7 +62,17 @@
       // Could emit an error event here for UI to display
       if (error instanceof Error) {
         if (error.name === 'NotAllowedError') {
-          alert('Microphone permission denied. Please allow microphone access to record voice messages.');
+          // Detect Linux for platform-specific guidance
+          const isLinux = typeof navigator !== 'undefined' && navigator.userAgent.includes('Linux');
+          if (isLinux) {
+            alert('Microphone access on Linux requires additional setup:\n\n' +
+                  '1. Install xdg-desktop-portal:\n' +
+                  '   sudo apt install xdg-desktop-portal xdg-desktop-portal-gtk\n\n' +
+                  '2. Restart the application\n\n' +
+                  'See: https://wiki.archlinux.org/title/Xdg_desktop_portal');
+          } else {
+            alert('Microphone permission denied. Please allow microphone access to record voice messages.');
+          }
         } else if (error.name === 'NotFoundError') {
           alert('No microphone found. Please connect a microphone to record voice messages.');
         } else {

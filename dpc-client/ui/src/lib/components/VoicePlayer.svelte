@@ -3,6 +3,7 @@
 
   // Detect if running in Tauri (check in onMount when window is ready)
   let isTauri = $state(false);
+  let isLinux = $state(false);  // Linux detection for audio playback workaround
   let convertFileSrc = $state<((filePath: string, protocol?: string) => string) | undefined>(undefined);
 
   onMount(() => {
@@ -11,7 +12,9 @@
       (window as any).isTauri === true ||  // Tauri 2.x official detection
       !!(window as any).__TAURI__           // Fallback for older versions
     );
-    console.log(`[VoicePlayer] Environment detected: ${isTauri ? 'Tauri' : 'Browser'}`);
+    // Detect Linux platform for audio playback workaround (asset:// doesn't work for audio on Linux WebView)
+    isLinux = typeof window !== 'undefined' && navigator.userAgent.includes('Linux');
+    console.log(`[VoicePlayer] Environment detected: ${isTauri ? 'Tauri' : 'Browser'}${isLinux ? ' (Linux)' : ''}`);
 
     // Load convertFileSrc if in Tauri
     if (isTauri) {
@@ -78,12 +81,30 @@
     }
 
     // In Tauri: Wait for convertFileSrc to load (effect will re-run when it's ready)
-    if (isTauri && !convertFileSrc) {
+    // Skip this for Linux since we'll use HTTP file server instead
+    if (isTauri && !convertFileSrc && !isLinux) {
       console.log('[VoicePlayer] Waiting for Tauri convertFileSrc to load...');
       return;
     }
 
-    // In Tauri: Convert filesystem path to asset:// protocol
+    // In Tauri on Linux: Use HTTP file server (asset:// doesn't support audio playback on Linux WebView)
+    if (isTauri && isLinux) {
+      const pathParts = cleanPath.split(/[/\\]/);  // Split by / or \
+      const conversationsIndex = pathParts.indexOf('conversations');
+      if (conversationsIndex !== -1 && conversationsIndex + 3 < pathParts.length) {
+        const peerId = pathParts[conversationsIndex + 1];
+        const filename = pathParts[pathParts.length - 1];  // Last part is filename
+        const httpUrl = `http://localhost:9998/files/${peerId}/${filename}`;
+        console.log(`[VoicePlayer] ✅ TAURI (Linux): Using HTTP file server: ${httpUrl}`);
+        actualAudioUrl = httpUrl;
+      } else {
+        console.warn('[VoicePlayer] ⚠️ TAURI (Linux): Could not parse file path:', cleanPath);
+        actualAudioUrl = audioUrl;
+      }
+      return;
+    }
+
+    // In Tauri (non-Linux): Convert filesystem path to asset:// protocol
     if (isTauri && convertFileSrc) {
       try {
         const converted = convertFileSrc(cleanPath);
