@@ -179,7 +179,7 @@ class Settings:
             'enabled': 'true',  # Enable voice message recording and playback (v0.13.0+)
             'max_duration_seconds': '300',  # Maximum recording duration in seconds (5 minutes)
             'max_size_mb': '10',  # Maximum voice message file size in MB
-            'mime_types': 'audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg',  # Supported audio formats
+            'mime_types': 'audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav',  # Supported audio formats (includes WAV for Tauri/Rust backend)
             'default_sample_rate': '48000',  # Default sample rate in Hz (48kHz for quality)
             'default_channels': '1',  # Default audio channels (1 = mono, 2 = stereo)
             'default_codec': 'opus'  # Default audio codec (opus for web compatibility)
