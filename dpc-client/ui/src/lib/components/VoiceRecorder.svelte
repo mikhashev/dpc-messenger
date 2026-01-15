@@ -9,11 +9,20 @@
 
   let { disabled = false, maxDuration = 300, onRecordingComplete }: VoiceRecorderProps = $props();
 
+  let isTauri = $state(false);
   let isRecording = $state(false);
   let recordingDuration = $state(0);
-  let mediaRecorder: MediaRecorder | null = null;
-  let audioChunks: Blob[] = [];
+  let recordingStartTime = $state<number | null>(null);
   let timerInterval: ReturnType<typeof setInterval> | null = null;
+
+  onMount(() => {
+    // Check for Tauri environment
+    isTauri = typeof window !== 'undefined' && (
+      (window as any).isTauri === true ||
+      !!(window as any).__TAURI__
+    );
+    console.log('[VoiceRecorder] Environment:', isTauri ? 'Tauri (using Rust backend)' : 'Browser (using getUserMedia)');
+  });
 
   // Format duration as MM:SS
   function formatDuration(seconds: number): string {
@@ -23,16 +32,60 @@
   }
 
   async function startRecording() {
-    // Reset duration for new recording (fixes issue where cancelled recordings kept old duration)
+    // Reset duration for new recording
     recordingDuration = 0;
+    recordingStartTime = Date.now();
 
+    if (isTauri) {
+      await startRecordingTauri();
+    } else {
+      await startRecordingBrowser();
+    }
+  }
+
+  // Tauri/Rust backend recording (works on Linux)
+  async function startRecordingTauri() {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+
+      // Get DPC home directory for temp files
+      const homeDir = await invoke('get_home_directory') as string;
+      const outputDir = `${homeDir}/.dpc/temp`;
+
+      console.log('[VoiceRecorder] Starting Rust backend recording to:', outputDir);
+
+      const result = await invoke('tauri_start_recording', {
+        outputDir,
+        maxDurationSeconds: maxDuration
+      });
+
+      console.log('[VoiceRecorder] Recording started:', result);
+
+      isRecording = true;
+
+      // Start timer
+      timerInterval = setInterval(() => {
+        recordingDuration = Math.floor((Date.now() - (recordingStartTime || Date.now())) / 1000);
+        if (recordingDuration >= maxDuration) {
+          stopRecording();
+        }
+      }, 1000);
+
+    } catch (error) {
+      console.error('[VoiceRecorder] Error starting recording (Tauri):', error);
+      alert(`Failed to start recording: ${error}`);
+    }
+  }
+
+  // Browser getUserMedia recording (original implementation)
+  async function startRecordingBrowser() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaRecorder = new MediaRecorder(stream, {
+      const mediaRecorder = new MediaRecorder(stream, {
         mimeType: getSupportedMimeType()
       });
 
-      audioChunks = [];
+      const audioChunks: Blob[] = [];
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) {
@@ -58,34 +111,10 @@
       }, 1000);
 
     } catch (error) {
-      console.error('Error starting voice recording:', error);
-      // Could emit an error event here for UI to display
+      console.error('[VoiceRecorder] Error starting recording (Browser):', error);
       if (error instanceof Error) {
         if (error.name === 'NotAllowedError') {
-          // Detect Linux for platform-specific guidance (check multiple sources for reliability)
-          const isLinux = typeof navigator !== 'undefined' && (
-            navigator.userAgent.includes('Linux') ||
-            navigator.userAgent.includes('X11') ||
-            navigator.platform.includes('Linux') ||
-            navigator.platform.includes('X11')
-          );
-          console.log('[VoiceRecorder] Platform detection:', {
-            userAgent: navigator.userAgent,
-            platform: navigator.platform,
-            detectedLinux: isLinux
-          });
-
-          if (isLinux) {
-            alert('Microphone access on Linux requires additional setup:\n\n' +
-                  '1. Install xdg-desktop-portal:\n' +
-                  '   sudo apt install xdg-desktop-portal xdg-desktop-portal-gtk\n\n' +
-                  '2. Ensure PipeWire is running:\n' +
-                  '   systemctl --user status pipewire pipewire-pulse\n\n' +
-                  '3. Restart the application\n\n' +
-                  'See: https://wiki.archlinux.org/title/Xdg_desktop_portal');
-          } else {
-            alert('Microphone permission denied. Please allow microphone access to record voice messages.');
-          }
+          alert('Microphone permission denied. Please allow microphone access to record voice messages.');
         } else if (error.name === 'NotFoundError') {
           alert('No microphone found. Please connect a microphone to record voice messages.');
         } else {
@@ -95,9 +124,48 @@
     }
   }
 
-  function stopRecording() {
-    if (mediaRecorder && isRecording) {
-      mediaRecorder.stop();
+  async function stopRecording() {
+    if (!isRecording) return;
+
+    if (isTauri) {
+      await stopRecordingTauri();
+    } else {
+      stopRecordingBrowser();
+    }
+  }
+
+  async function stopRecordingTauri() {
+    try {
+      const { invoke } = await import('@tauri-apps/api/core');
+
+      console.log('[VoiceRecorder] Stopping recording...');
+      const outputPath = await invoke('tauri_stop_recording') as string;
+
+      console.log('[VoiceRecorder] Recording saved to:', outputPath);
+
+      // Read the WAV file as binary using Tauri 2.x fs plugin
+      // Need to convert absolute path to relative path with BaseDirectory.Home
+      // Path format: C:\Users\username\.dpc\temp\voice_xxx.wav
+      const dpcIndex = outputPath.indexOf('.dpc');
+      if (dpcIndex === -1) {
+        throw new Error(`Invalid output path format: ${outputPath}`);
+      }
+
+      const { readFile, BaseDirectory } = await import('@tauri-apps/plugin-fs');
+      // Get path starting from .dpc (including the directory)
+      // Windows: C:\Users\username\.dpc\temp\voice.wav -> .dpc\temp\voice.wav
+      // Unix: /home/username/.dpc/temp/voice.wav -> .dpc/temp/voice.wav
+      const relativePath = outputPath.slice(dpcIndex); // e.g., ".dpc/temp/voice_xxx.wav"
+      const contents = await readFile(relativePath, { baseDir: BaseDirectory.Home });
+
+      // Create a blob from the WAV file
+      const blob = new Blob([contents], { type: 'audio/wav' });
+      onRecordingComplete(blob, recordingDuration);
+
+    } catch (error) {
+      console.error('[VoiceRecorder] Error stopping recording:', error);
+      alert(`Failed to stop recording: ${error}`);
+    } finally {
       isRecording = false;
       if (timerInterval) {
         clearInterval(timerInterval);
@@ -106,10 +174,24 @@
     }
   }
 
+  function stopRecordingBrowser() {
+    // This would be handled by the mediaRecorder.onstop callback
+    isRecording = false;
+    if (timerInterval) {
+      clearInterval(timerInterval);
+      timerInterval = null;
+    }
+  }
+
   function cancelRecording() {
-    stopRecording();
+    if (isRecording && isTauri) {
+      // Try to stop and delete the recording
+      stopRecording();
+    } else {
+      stopRecordingBrowser();
+    }
     recordingDuration = 0;
-    audioChunks = [];
+    recordingStartTime = null;
   }
 
   function getSupportedMimeType(): string {
@@ -131,10 +213,7 @@
   }
 
   function cleanup() {
-    // Stop all audio tracks
-    if (mediaRecorder && mediaRecorder.stream) {
-      mediaRecorder.stream.getTracks().forEach(track => track.stop());
-    }
+    // Browser-specific cleanup
   }
 
   // Cleanup on unmount

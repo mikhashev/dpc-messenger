@@ -5,6 +5,9 @@
 // Import the `Manager` trait to bring its methods into scope.
 use tauri::Manager;
 
+// Audio recording module (Linux workaround for getUserMedia)
+mod audio_recorder;
+
 // File metadata helper for dynamic timeout calculation (v0.11.2+)
 #[tauri::command]
 fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
@@ -37,7 +40,13 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_fs::init())
-        .invoke_handler(tauri::generate_handler![get_file_metadata, get_home_directory])
+        .invoke_handler(tauri::generate_handler![
+            get_file_metadata,
+            get_home_directory,
+            audio_recorder::tauri_start_recording,
+            audio_recorder::tauri_stop_recording,
+            audio_recorder::tauri_get_recording_status
+        ])
         .setup(|app| {
             #[cfg(debug_assertions)]
             {

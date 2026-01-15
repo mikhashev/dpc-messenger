@@ -16,6 +16,7 @@
     "dialog:default",
     "notification:default",
     "fs:allow-mkdir",
+    "fs:allow-read-file",
     "fs:allow-write-file",
     {
       "identifier": "fs:scope",
