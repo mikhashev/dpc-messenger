@@ -394,7 +394,7 @@
                 type="button"
                 class="disconnect-btn"
                 onclick={(e) => { e.stopPropagation(); onDeleteAIChat(chatId); }}
-                title="Delete AI chat"
+                title={chatInfo.provider === 'telegram' ? 'Delete Telegram chat' : 'Delete AI chat'}
               >
                 ×
               </button>

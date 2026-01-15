@@ -634,6 +634,9 @@ export function connectToCoreService() {
                             }]
                         }
                     ]));
+
+                    // Set telegramImageReceived store for +page.svelte to update chatHistories
+                    telegramImageReceived.set(message.payload);
                 }
                 else if (message.event === "telegram_file_received") {
                     console.log("Telegram file received:", message.payload);
@@ -668,6 +671,9 @@ export function connectToCoreService() {
                             }]
                         }
                     ]));
+
+                    // Set telegramFileReceived store for +page.svelte to update chatHistories
+                    telegramFileReceived.set(message.payload);
                 }
                 // Error toast notifications (v0.14.1+ - VRAM OOM warnings, etc.)
                 else if (message.event === "error_toast") {

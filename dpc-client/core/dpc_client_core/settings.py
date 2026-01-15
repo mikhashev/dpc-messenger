@@ -225,10 +225,15 @@ class Settings:
             'use_webhook': 'false',  # Use webhook mode (true) or polling mode (false)
             'webhook_url': '',  # Public URL for webhook (production)
             'webhook_port': '8443',  # Local port for webhook server
-            'transcription_enabled': 'true',  # Auto-transcribe Telegram voice messages
-            'bridge_to_p2p': 'false',  # Forward Telegram messages to P2P peers
+            'owner_contact': '',  # Bot owner contact info (shown to unauthorized users)
+            'access_denied_message': '',  # Custom access denied message (optional)
+            'transcription_enabled': 'true',  # Auto-transcribe Telegram voice messages (uses default voice provider)
+            'bridge_to_p2p': 'false',  # Forward Telegram messages to P2P peers (see NOTE below)
             'conversation_links': '{}'  # JSON map of telegram_chat_id -> conversation_id
         }
+        # NOTE: bridge_to_p2p currently forwards as N separate 1:1 messages (v0.15.0).
+        # Future: Will support group chat bridging (single message to DPC group).
+        # See telegram_coordinator.py:_forward_to_p2p_peers() for implementation details.
 
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -786,6 +791,14 @@ class Settings:
         """Get Telegram webhook server port."""
         return int(self.get('telegram', 'webhook_port', '8443'))
 
+    def get_telegram_owner_contact(self) -> str:
+        """Get bot owner contact information (shown to unauthorized users)."""
+        return self.get('telegram', 'owner_contact', '')
+
+    def get_telegram_access_denied_message(self) -> str:
+        """Get custom access denied message (optional)."""
+        return self.get('telegram', 'access_denied_message', '')
+
     def get_telegram_transcription_enabled(self) -> bool:
         """Check if Telegram voice transcription is enabled."""
         value = self.get('telegram', 'transcription_enabled', 'true')
@@ -806,6 +819,8 @@ class Settings:
             'use_webhook': self.get_telegram_use_webhook(),
             'webhook_url': self.get_telegram_webhook_url(),
             'webhook_port': self.get_telegram_webhook_port(),
+            'owner_contact': self.get_telegram_owner_contact(),
+            'access_denied_message': self.get_telegram_access_denied_message(),
             'transcription_enabled': self.get_telegram_transcription_enabled(),
             'bridge_to_p2p': self.get_telegram_bridge_to_p2p()
         }

@@ -56,6 +56,16 @@
   // Check if this is an AI conversation
   const isAIChat = $derived(conversationId === 'local_ai' || conversationId.startsWith('ai_'));
 
+  // Get thumbnail source (prefer file_path converted to asset URL, fall back to thumbnail data URL)
+  const thumbnailSrc = $derived(() => {
+    if (attachment.file_path) {
+      // Convert file path to Tauri asset URL for thumbnail display
+      return convertFileSrc(attachment.file_path);
+    }
+    // Fall back to thumbnail data URL (for AI chat or backward compat)
+    return attachment.thumbnail || '';
+  });
+
   // Get full-size image source (prefer file_path, fall back to thumbnail)
   const fullImageSrc = $derived(() => {
     if (attachment.file_path) {
@@ -68,7 +78,7 @@
 </script>
 
 <div class="image-message">
-  {#if attachment.thumbnail}
+  {#if attachment.thumbnail || attachment.file_path}
     <!-- Thumbnail with click to expand -->
     <div class="image-thumbnail-container">
       <button
@@ -77,7 +87,7 @@
         aria-label="Open full image: {attachment.filename}"
       >
         <img
-          src={attachment.thumbnail}
+          src={thumbnailSrc()}
           alt={attachment.filename}
           class="image-thumbnail"
         />

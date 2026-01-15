@@ -168,22 +168,50 @@ class TelegramBridge:
         sender_name = from_user.full_name or from_user.username or f"User_{chat_id}"
         username = from_user.username if from_user.username else "N/A"
 
-        message = (
-            f"⚠️ <b>Access Denied</b>\n\n"
-            f"Hello {sender_name}!\n\n"
-            f"Your Telegram User ID is: <code>{chat_id}</code>\n"
-            f"Username: @{username}\n\n"
-            f"This is a private bot. To be granted access:\n"
-            f"1. Send your User ID (above) to the bot owner\n"
-            f"2. Wait for the bot owner to add you to the whitelist\n"
-            f"3. Try sending your message again\n\n"
-            f"Your User ID: <code>{chat_id}</code>"
-        )
+        # Get bot owner contact from settings
+        owner_contact = self.service.settings.get_telegram_owner_contact()
+
+        # Check for custom access denied message
+        custom_message = self.service.settings.get_telegram_access_denied_message()
+        if custom_message:
+            # Use custom message with placeholders
+            message = custom_message.format(
+                user_name=sender_name,
+                user_id=chat_id,
+                username=username,
+                owner_contact=owner_contact or "the bot owner"
+            )
+        else:
+            # Use default message
+            if owner_contact:
+                # Enhanced message with owner contact info
+                message = (
+                    f"⚠️ <b>Access Denied</b>\n\n"
+                    f"Hello {sender_name}!\n\n"
+                    f"Your Telegram User ID is: <code>{chat_id}</code>\n"
+                    f"Username: @{username}\n\n"
+                    f"This is a private bot. To request access:\n"
+                    f"<b>Contact the bot owner:</b>\n{owner_contact}\n\n"
+                    f"Please send your User ID above to request access."
+                )
+            else:
+                # Default message without owner contact
+                message = (
+                    f"⚠️ <b>Access Denied</b>\n\n"
+                    f"Hello {sender_name}!\n\n"
+                    f"Your Telegram User ID is: <code>{chat_id}</code>\n"
+                    f"Username: @{username}\n\n"
+                    f"This is a private bot. To be granted access:\n"
+                    f"1. Send your User ID (above) to the bot owner\n"
+                    f"2. Wait for the bot owner to add you to the whitelist\n"
+                    f"3. Try sending your message again"
+                )
 
         await self.telegram.send_message(
             chat_id,
             message,
-            parse_mode='HTML'
+            parse_mode='HTML',
+            skip_whitelist_check=True  # Bypass whitelist for system messages to unknown users
         )
 
     async def handle_text_message(self, update, context):
@@ -207,11 +235,11 @@ class TelegramBridge:
             # Whitelist check with rate limiting (send info reply only once per user - v0.15.0)
             if not self.telegram.is_allowed(chat_id):
                 if chat_id not in self._notified_unknown_users:
-                    self.logger.warning(f"Message from unauthorized chat_id {chat_id}, sending info reply")
+                    logger.warning(f"Message from unauthorized chat_id {chat_id}, sending info reply")
                     await self._send_unknown_user_info(chat_id, from_user)
                     self._notified_unknown_users.add(chat_id)
                 else:
-                    self.logger.warning(f"Message from unauthorized chat_id {chat_id}, already notified")
+                    logger.warning(f"Message from unauthorized chat_id {chat_id}, already notified")
                 return
 
             # Get sender info
@@ -701,6 +729,29 @@ class TelegramBridge:
         """
         Forward Telegram message to P2P peers (if bridge_to_p2p enabled).
 
+        CURRENT LIMITATION (v0.15.0):
+        This implementation sends N separate 1:1 messages to each peer, creating
+        individual conversations instead of a group chat. This means:
+        - Each peer gets their own separate thread
+        - No cross-peer visibility (Peer A can't see Peer B received the message)
+        - Responses go to the bridge owner, not the group
+        - Inefficient: O(n) network cost instead of O(1)
+
+        FUTURE ENHANCEMENT (Group Chat Phase):
+        When DPC implements multiparty conversations (see session_manager.py),
+        this should be refactored to:
+        - Send to a DPC group chat instead of individual peers
+        - Use a dedicated TELEGRAM_FORWARD DPTP command with metadata
+        - Include original Telegram sender attribution
+        - Single message with O(1) network cost
+        - Proper threading and reply handling
+
+        Configuration needed for groups:
+        [telegram]
+        bridge_to_p2p = true
+        bridge_target_type = group  # or "all_peers" for current behavior
+        bridge_target_group_id = my-team-group
+
         Args:
             conversation_id: DPC conversation ID
             message: DPC message dict
@@ -713,11 +764,29 @@ class TelegramBridge:
                 logger.debug("No connected P2P peers to forward to")
                 return
 
-            # Forward to each peer
+            # FIXME: Group Chat Support (Next Phase)
+            # Current: Sends N separate 1:1 messages (creates individual conversations)
+            # Future: Send 1 message to a DPC group chat (single threaded conversation)
+            #
+            # Pseudo-code for group chat implementation:
+            # if self.telegram.bridge_target_type == "group":
+            #     await self.service.send_group_message(
+            #         group_id=self.telegram.bridge_target_group_id,
+            #         text=message["text"],
+            #         attachments=[],
+            #         metadata={
+            #             "source": "telegram",
+            #             "original_chat_id": telegram_chat_id,
+            #             "sender_name": sender_name
+            #         }
+            #     )
+            #     return
+
+            # Forward to each peer individually (current behavior)
             for peer_id in connected_peers:
                 try:
                     # Send as text message (for now)
-                    # In future, could use a TELEGRAM_FORWARD command
+                    # In future, could use a TELEGRAM_FORWARD command with metadata
                     await self.service.send_p2p_message(
                         node_id=peer_id,
                         text=message["text"],

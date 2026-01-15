@@ -61,6 +61,10 @@ class TelegramBotManager:
         webhook_port: Local port for webhook server
         transcription_enabled: Whether to auto-transcribe voice messages
         bridge_to_p2p: Whether to forward Telegram messages to P2P peers
+            NOTE (v0.15.0): Currently forwards as N separate 1:1 messages.
+            Future enhancement will support group chat bridging (single message
+            to DPC group with proper attribution). See telegram_coordinator.py
+            _forward_to_p2p_peers() for implementation details and FIXME comments.
 
     Example:
         >>> manager = TelegramBotManager(service, config)
@@ -280,7 +284,8 @@ class TelegramBotManager:
         chat_id: Any,
         text: str,
         parse_mode: str = "HTML",
-        disable_preview: bool = False
+        disable_preview: bool = False,
+        skip_whitelist_check: bool = False
     ) -> bool:
         """
         Send a text message to a Telegram chat.
@@ -290,6 +295,7 @@ class TelegramBotManager:
             text: Message text
             parse_mode: Parse mode (HTML, Markdown, None)
             disable_preview: Disable link preview
+            skip_whitelist_check: If True, bypass whitelist check (for system messages)
 
         Returns:
             True if message sent successfully, False otherwise
@@ -298,7 +304,7 @@ class TelegramBotManager:
             logger.warning("Cannot send message: bot is not running")
             return False
 
-        if not self.is_allowed(chat_id):
+        if not skip_whitelist_check and not self.is_allowed(chat_id):
             logger.warning(f"Cannot send to chat_id {chat_id}: not in whitelist")
             return False
 
