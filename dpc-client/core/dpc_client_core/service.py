@@ -4270,10 +4270,12 @@ class CoreService:
             Dict with status and proposal_id (for P2P) or status (for AI)
         """
         try:
-            # Check if this is an AI chat (local_ai or ai_chat_xxx)
-            if conversation_id == 'local_ai' or conversation_id.startswith('ai_'):
-                # AI chats: directly reset without proposal
-                logger.info("Resetting AI conversation: %s", conversation_id)
+            # Check if this is an AI chat (local_ai or ai_chat_xxx) or Telegram chat
+            if conversation_id == 'local_ai' or conversation_id.startswith('ai_') or conversation_id.startswith('telegram-'):
+                # AI chats and Telegram chats: directly reset without proposal
+                # Telegram chats don't support peer voting (no peer connection)
+                chat_type = "AI" if conversation_id.startswith('ai_') or conversation_id == 'local_ai' else "Telegram"
+                logger.info("Resetting %s conversation: %s", chat_type, conversation_id)
                 result = await self.reset_conversation(conversation_id)
                 return result
 

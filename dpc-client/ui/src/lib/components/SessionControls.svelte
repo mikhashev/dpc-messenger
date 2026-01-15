@@ -7,6 +7,7 @@
     showForChatId,
     isAIChat,
     isPeerConnected,
+    isTelegramChat = false,
     tokenUsed = 0,
     tokenLimit = 0,
     estimatedTokens = 0,
@@ -18,6 +19,7 @@
     showForChatId: string;
     isAIChat: boolean;
     isPeerConnected: boolean;
+    isTelegramChat?: boolean;
     tokenUsed?: number;
     tokenLimit?: number;
     estimatedTokens?: number;
@@ -44,8 +46,10 @@
     tokenUsagePercent >= 0.8
   );
 
+  // End session is disabled only for P2P chats when peer is offline
+  // AI chats and Telegram chats can always end session (no peer voting required)
   let endSessionDisabled = $derived(
-    !isPeerConnected && !isAIChat  // Disabled for P2P if peer offline
+    !isPeerConnected && !isAIChat && !isTelegramChat
   );
 
   let endSessionTitle = $derived(

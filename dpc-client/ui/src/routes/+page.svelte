@@ -91,6 +91,9 @@
   let selectedRemoteModel = $state("");  // Selected model when using remote compute host
   let selectedPeerContexts = $state(new Set<string>());  // Set of peer node_ids to fetch context from
 
+  // Store draft input text per chat (preserves text when switching chats)
+  let chatDraftInputs = $state(new Map<string, string>());
+
   // Voice message state (v0.13.0 - Voice Messages)
   let voicePreview = $state<{ blob: Blob; duration: number } | null>(null);
 
@@ -904,6 +907,10 @@
   // Reactive: Check if current chat is a Telegram chat (for UI adjustments)
   let isTelegramChat = $derived(activeChatId.startsWith('telegram-'));
 
+  // Reactive: Check if current chat is an AI chat (excluding Telegram which are stored in aiChats for sidebar)
+  // Telegram chats are in $aiChats for sidebar display but are NOT AI chats
+  let isActuallyAIChat = $derived($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-'));
+
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
   // Handles page refresh scenario: frontend loses chatHistories, backend keeps conversation_monitors
   $effect(() => {
@@ -994,20 +1001,31 @@
       return;
     }
 
-    // Clear pending image and voice preview when actually switching to a different chat
+    // When actually switching to a different chat
     if (currentChat !== previousChatId) {
+      // 1. Save draft for previous chat
+      chatDraftInputs = new Map(chatDraftInputs).set(previousChatId, currentInput);
+
+      // 2. Restore draft for new chat (if exists)
+      const draft = chatDraftInputs.get(currentChat);
+      currentInput = draft !== undefined ? draft : "";
+
+      // 3. Clear pending image and voice preview
       if (pendingImage !== null) {
         pendingImage = null;
       }
       if (voicePreview !== null) {
         voicePreview = null;
       }
+
+      // 4. Update tracking
       previousChatId = currentChat;
     }
   });
 
   // Phase 7: Reactive: Check if context window is full (100% or more) - uses estimated total
-  let isContextWindowFull = $derived($aiChats.has(activeChatId) && estimatedUsage.percentage >= 1.0);
+  // Only applies to actual AI chats (not Telegram, which are in aiChats for sidebar)
+  let isContextWindowFull = $derived(isActuallyAIChat && estimatedUsage.percentage >= 1.0);
 
   // Reactive: Handle knowledge extraction failures (Phase 4)
   $effect(() => {
@@ -1482,8 +1500,9 @@
       const text = currentInput.trim();
       const imageData = pendingImage;
 
-      // Clear input and pending image
+      // Clear input, draft, and pending image
       currentInput = "";
+      chatDraftInputs = new Map(chatDraftInputs).set(activeChatId, "");
       pendingImage = null;
 
       // Check if this is an AI chat, Telegram chat, or P2P chat (Phase 2.3: Fix P2P screenshot sharing)
@@ -1640,6 +1659,9 @@
 
     const text = currentInput.trim();
     currentInput = "";
+
+    // Clear draft for this chat after sending
+    chatDraftInputs = new Map(chatDraftInputs).set(activeChatId, "");
 
     chatHistories.update(h => {
       const newMap = new Map(h);
@@ -2675,6 +2697,14 @@
   });
 
   let activeMessages = $derived($chatHistories.get(activeChatId) || []);
+
+  // Auto-scroll when activeMessages change (for all chat types)
+  $effect(() => {
+    // Track activeMessages length to detect new messages
+    activeMessages.length;
+    // Scroll to bottom when messages are added for the active chat
+    autoScroll();
+  });
 </script>
 
 <main class="container">
@@ -2720,7 +2750,7 @@
           >
             <h2>
               <span class="collapse-indicator">{chatHeaderCollapsed ? '▶' : '▼'}</span>
-              {#if $aiChats.has(activeChatId)}
+              {#if isActuallyAIChat}
                 {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
               {:else}
                 Chat with {getPeerDisplayName(activeChatId)}
@@ -2728,8 +2758,8 @@
             </h2>
           </button>
 
-          <!-- Auto Transcribe toggle (P2P chats only, NOT Telegram) -->
-          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai' && !activeChatId.startsWith('telegram-')}
+          <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI chats) -->
+          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai'}
             <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
               <input
                 type="checkbox"
@@ -2752,34 +2782,36 @@
         </div>
 
         {#if !chatHeaderCollapsed}
-          <!-- ProviderSelector and SessionControls: Hide for Telegram chats -->
-          {#if !activeChatId.startsWith('telegram-')}
+          <!-- ProviderSelector: AI chats only (not Telegram) -->
+          {#if isActuallyAIChat}
           <ProviderSelector
             bind:selectedComputeHost
             bind:selectedTextProvider
             bind:selectedVisionProvider
             bind:selectedVoiceProvider
             showForChatId={activeChatId}
-            isAIChat={$aiChats.has(activeChatId)}
+            isAIChat={isActuallyAIChat}
             providersList={$providersList}
             peerProviders={$peerProviders}
             nodeStatus={$nodeStatus}
             defaultProviders={$defaultProviders}
           />
-
-        <SessionControls
-          showForChatId={activeChatId}
-          isAIChat={$aiChats.has(activeChatId)}
-          isPeerConnected={isPeerConnected}
-          tokenUsed={effectiveTokenUsage.used}
-          tokenLimit={effectiveTokenUsage.limit}
-          estimatedTokens={estimatedUsage.estimated}
-          showEstimation={estimatedUsage.isEstimated}
-          bind:enableMarkdown
-          onNewSession={handleNewChat}
-          onEndSession={handleEndSession}
-        />
           {/if}
+
+          <!-- SessionControls: AI chats, P2P chats, and Telegram chats -->
+          <SessionControls
+            showForChatId={activeChatId}
+            isAIChat={isActuallyAIChat}
+            isPeerConnected={isPeerConnected}
+            isTelegramChat={isTelegramChat}
+            tokenUsed={effectiveTokenUsage.used}
+            tokenLimit={effectiveTokenUsage.limit}
+            estimatedTokens={estimatedUsage.estimated}
+            showEstimation={estimatedUsage.isEstimated}
+            bind:enableMarkdown
+            onNewSession={handleNewChat}
+            onEndSession={handleEndSession}
+          />
         {/if}
       </div>
 
