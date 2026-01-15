@@ -46,7 +46,7 @@
   },
   "plugins": {
     "fs": {
-      "scope": ["$HOME/.dpc/**", "$TEMP/**"]
+      "requireLiteralLeadingDot": false
     }
   }
 }

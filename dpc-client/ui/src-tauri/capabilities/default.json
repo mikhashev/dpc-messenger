@@ -15,7 +15,11 @@
     "opener:default",
     "dialog:default",
     "notification:default",
-    "fs:allow-temp-write",
-    "fs:allow-write-file"
+    "fs:allow-mkdir",
+    "fs:allow-write-file",
+    {
+      "identifier": "fs:scope",
+      "allow": ["$HOME/.dpc/**"]
+    }
   ]
 }

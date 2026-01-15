@@ -1013,7 +1013,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         lines = []
         for msg in messages:
-            timestamp = msg.timestamp.split('T')[1][:8] if 'T' in msg.timestamp else msg.timestamp
+            # Handle both string and datetime timestamp formats
+            if isinstance(msg.timestamp, str):
+                timestamp = msg.timestamp.split('T')[1][:8] if 'T' in msg.timestamp else msg.timestamp
+            else:
+                # datetime object - format as HH:MM:SS
+                timestamp = msg.timestamp.strftime('%H:%M:%S')
             lines.append(f"[{timestamp}] {msg.sender_name}: {msg.text}")
         return "\n".join(lines)
 

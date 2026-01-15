@@ -180,9 +180,9 @@ class TelegramBridge:
             f"Your User ID: <code>{chat_id}</code>"
         )
 
-        await self.telegram.bot.send_message(
-            chat_id=chat_id,
-            text=message,
+        await self.telegram.send_message(
+            chat_id,
+            message,
             parse_mode='HTML'
         )
 

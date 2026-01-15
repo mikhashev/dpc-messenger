@@ -17,6 +17,14 @@ fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
     })
 }
 
+// Get home directory path (v0.15.0+)
+#[tauri::command]
+fn get_home_directory() -> Result<String, String> {
+    Ok(std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string()))
+}
+
 #[derive(serde::Serialize)]
 struct FileMetadata {
     size: u64,
@@ -28,7 +36,8 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![get_file_metadata])
+        .plugin(tauri_plugin_fs::init())
+        .invoke_handler(tauri::generate_handler![get_file_metadata, get_home_directory])
         .setup(|app| {
             #[cfg(debug_assertions)]
             {

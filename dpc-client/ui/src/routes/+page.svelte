@@ -1574,16 +1574,25 @@
           );
 
           if (isTauriEnv) {
-            const { writeFile, BaseDirectory } = await import('@tauri-apps/plugin-fs');
+            const { writeFile, BaseDirectory, mkdir } = await import('@tauri-apps/plugin-fs');
+            const { invoke } = await import('@tauri-apps/api/core');
 
             const timestamp = Date.now();
             const filename = imageData.filename || `screenshot_${timestamp}.png`;
-            const tempPath = `dpc-temp-${timestamp}-${filename}`;
+            const relativePath = `.dpc/temp/${filename}`;
 
-            await writeFile(tempPath, uint8Array, { baseDir: BaseDirectory.Temp });
+            // Ensure temp directory exists
+            await mkdir('.dpc/temp', { baseDir: BaseDirectory.Home, recursive: true });
 
-            // Send to Telegram with the temp file path
-            await sendToTelegram(activeChatId, text || '', [], undefined, undefined, undefined, tempPath);
+            // Write file to home directory
+            await writeFile(relativePath, uint8Array, { baseDir: BaseDirectory.Home });
+
+            // Get home directory path and construct full path for backend
+            const homeDir = await invoke<string>('get_home_directory');
+            const fullPath = `${homeDir}/${relativePath}`;
+
+            // Send to Telegram with the full file path
+            await sendToTelegram(activeChatId, text || '', [], undefined, undefined, undefined, fullPath);
 
             // Add to local history
             chatHistories.update(h => {
@@ -1597,7 +1606,7 @@
                 attachments: [{
                   type: 'image',
                   filename: filename,
-                  file_path: tempPath,
+                  file_path: fullPath,
                   size_bytes: uint8Array.length
                 }]
               }]);
