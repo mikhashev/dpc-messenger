@@ -13,8 +13,18 @@
       !!(window as any).__TAURI__           // Fallback for older versions
     );
     // Detect Linux platform for audio playback workaround (asset:// doesn't work for audio on Linux WebView)
-    isLinux = typeof window !== 'undefined' && navigator.userAgent.includes('Linux');
+    // Check multiple sources for reliability
+    isLinux = typeof window !== 'undefined' && (
+      navigator.userAgent.includes('Linux') ||
+      navigator.userAgent.includes('X11') ||
+      navigator.platform.includes('Linux') ||
+      navigator.platform.includes('X11')
+    );
     console.log(`[VoicePlayer] Environment detected: ${isTauri ? 'Tauri' : 'Browser'}${isLinux ? ' (Linux)' : ''}`);
+    console.log('[VoicePlayer] Platform info:', {
+      userAgent: navigator.userAgent,
+      platform: navigator.platform
+    });
 
     // Load convertFileSrc if in Tauri
     if (isTauri) {
