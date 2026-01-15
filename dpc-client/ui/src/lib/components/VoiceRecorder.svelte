@@ -158,7 +158,8 @@
       const relativePath = outputPath.slice(dpcIndex); // e.g., ".dpc/temp/voice_xxx.wav"
       const contents = await readFile(relativePath, { baseDir: BaseDirectory.Home });
 
-      // Create a blob from the WAV file
+      // Create a blob from the WAV file (48 kHz mono, 16-bit PCM)
+      // Python backend will transcode to OGG/Opus for transmission
       const blob = new Blob([contents], { type: 'audio/wav' });
       onRecordingComplete(blob, recordingDuration);
 

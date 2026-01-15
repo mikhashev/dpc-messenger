@@ -996,10 +996,19 @@ class LocalWhisperProvider(AIProvider):
                 import librosa
 
                 # Load audio file
-                audio_array, sample_rate = librosa.load(audio_path, sr=16000)  # Whisper requires 16kHz
+                try:
+                    audio_array, sample_rate = librosa.load(audio_path, sr=16000)  # Whisper requires 16kHz
+                except Exception as load_error:
+                    logger.error(f"Failed to load audio file with librosa: {load_error}")
+                    raise RuntimeError(f"Failed to load audio file '{audio_path}'. The file may be corrupted or in an unsupported format.") from load_error
 
                 # Calculate duration
                 duration_seconds = len(audio_array) / sample_rate
+
+                # Validate audio was loaded successfully
+                if duration_seconds == 0:
+                    logger.error(f"Audio file appears to be empty or corrupted: {audio_path}")
+                    raise RuntimeError(f"Audio file '{audio_path}' appears to be empty or corrupted. Loaded {len(audio_array)} samples at {sample_rate}Hz.")
 
                 logger.info(f"Transcribing audio with local Whisper: {duration_seconds:.1f}s, model={self.model_name}")
                 start_time = asyncio.get_event_loop().time()
@@ -1029,8 +1038,12 @@ class LocalWhisperProvider(AIProvider):
 
                 # Try to extract language from result
                 detected_language = "unknown"
-                if result.get("chunks") and len(result["chunks"]) > 0:
-                    detected_language = result["chunks"][0].get("language", "unknown")
+                chunks = result.get("chunks")
+                if chunks:
+                    # Convert chunks to list if it's a generator (avoids StopIteration in async context)
+                    chunks_list = list(chunks) if hasattr(chunks, '__iter__') else chunks
+                    if len(chunks_list) > 0:
+                        detected_language = chunks_list[0].get("language", "unknown")
 
                 logger.info(f"Local transcription completed in {elapsed:.1f}s ({duration_seconds/elapsed:.1f}x real-time): {len(text)} chars")
 

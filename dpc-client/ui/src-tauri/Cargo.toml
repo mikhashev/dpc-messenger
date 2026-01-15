@@ -28,5 +28,6 @@ serde_json = "1"
 
 # Audio recording for voice messages (Linux workaround for getUserMedia)
 cpal = "0.15"
-hound = "3.5"
+wav = "1.0"                # WAV file format (simple, no complex codecs)
+byteorder = "1.4"          # Little-endian byte order for WAV files
 
