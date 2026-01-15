@@ -2656,7 +2656,7 @@ class CoreService:
         # 3. Get voice settings
         max_duration = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
         max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
-        supported_mime_types = self.settings.get("voice_messages", "mime_types", "audio/webm,audio/opus").split(",")
+        supported_mime_types = self.settings.get("voice_messages", "mime_types", "audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav").split(",")
 
         # 4. Validate duration
         if duration_seconds > max_duration:
