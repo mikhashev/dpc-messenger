@@ -3414,11 +3414,24 @@ class CoreService:
 
                 self._voice_transcriptions[transfer_id] = transcription_data
 
-                # 11. Broadcast transcription to peers (only if not empty)
+                # 11. Update conversation monitor with transcribed text (v0.15.1 fix)
+                # This ensures proposals include the actual transcription instead of placeholder
+                monitor = self._get_or_create_conversation_monitor(node_id)
+                if monitor:
+                    # Find and update Message objects in buffer with transcription
+                    for message_list in [monitor.message_buffer, monitor.full_conversation]:
+                        for msg_obj in message_list:
+                            if hasattr(msg_obj, 'attachment_transfer_id') and msg_obj.attachment_transfer_id == transfer_id:
+                                # Replace placeholder with actual transcription
+                                msg_obj.text = transcription_text
+                                logger.debug(f"Updated local transcription in Message object: {transfer_id}")
+                                break
+
+                # 12. Broadcast transcription to peers (only if not empty)
                 logger.info(f"Broadcasting transcription to peer {node_id}: {len(transcription_text)} chars")
                 await self._broadcast_voice_transcription(node_id, transfer_id, transcription_data)
 
-                # 12. Notify UI
+                # 13. Notify UI
                 await self.local_api.broadcast_event("voice_transcription_complete", {
                     "transfer_id": transfer_id,
                     "node_id": node_id,
@@ -5443,6 +5456,15 @@ class CoreService:
         """
         try:
             logger.info("Commit Applied - reloading local context after commit %s", commit.commit_id)
+
+            # Clear conversation monitor buffer for this conversation (v0.15.1 fix)
+            # Buffer is now cleared only after all peers approve, not when proposal is generated
+            if commit.conversation_id:
+                monitor = self._get_or_create_conversation_monitor(commit.conversation_id)
+                if monitor.message_buffer:
+                    logger.info("Clearing buffer for %s after commit approval", commit.conversation_id)
+                    monitor.message_buffer = []
+                    monitor.knowledge_score = 0.0
 
             # Reload context from disk
             context = self.pcm_core.load_context()
