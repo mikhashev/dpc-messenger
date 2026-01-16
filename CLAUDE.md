@@ -461,15 +461,43 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
 {"command": "FILE_OFFER", "payload": {"transfer_id": "...", "filename": "voice_2026-01-04_12-34-56.webm", "size_bytes": 245000, "hash": "sha256:...", "mime_type": "audio/webm", "voice_metadata": {"duration_seconds": 30.5, "sample_rate": 48000, "channels": 1, "codec": "opus", "recorded_at": "2026-01-04T12:34:56Z"}}}
 ```
 
-**Voice Messages (v0.13.0):**
+**Voice Messages (v0.13.0-v0.15.0):**
 
 Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CHUNK/FILE_COMPLETE) with additional `voice_metadata` in the payload. Voice files are stored in `~/.dpc/conversations/{peer_id}/files/` and displayed in the chat with audio player controls.
+
+**Recording:**
+- **Format**: WAV (16-bit PCM, 48kHz mono) via Tauri Rust backend (`audio_recorder.rs`)
+- **Cross-platform**:
+  - Windows: Native via Edge WebView2
+  - Linux: Rust cpal library with ALSA/PipeWire support (v0.15.0+)
+  - macOS: Requires Info.plist permissions (see `docs/VOICE_MESSAGES_KNOWN_ISSUES.md`)
+- **Storage**: `~/.dpc/conversations/{peer_id}/files/`
+
+**Transcription:**
+- **Local Whisper**: `LocalWhisperProvider` in `llm_manager.py`
+- **GPU Acceleration**:
+  - MLX (Apple Silicon M1/M2/M3/M4) - Optional via `poetry install -E mlx`
+  - CUDA (NVIDIA GPUs) - Auto-detected
+  - MPS (macOS Metal) - Fallback
+  - CPU - Universal fallback
+- **Features**:
+  - Lazy loading (model loads on first use)
+  - Adaptive batch_size (reduces VRAM for long messages)
+  - VRAM management with `unload_model_async()`
+  - Retroactive transcription (v0.13.1+)
+  - Offline mode with interactive download (v0.13.1+)
+
+**VRAM Management (v0.15.0):**
+- Models unload when auto-transcribe disabled
+- `torch.cuda.empty_cache()` called after unloading
+- **CRITICAL TODO**: Whisper model must be unloaded before loading a different Whisper model to prevent VRAM conflicts
+- See `llm_manager.py:792-814` for implementation
 
 **Voice Metadata Fields:**
 - `duration_seconds` (number): Recording duration in seconds
 - `sample_rate` (integer): Audio sample rate in Hz (e.g., 48000)
 - `channels` (integer): Number of audio channels (1 = mono, 2 = stereo)
-- `codec` (string): Audio codec used (e.g., "opus", "aac")
+- `codec` (string): Audio codec used (e.g., "wav", "opus")
 - `recorded_at` (string): ISO 8601 timestamp when voice was recorded
 
 **Configuration:**
@@ -478,16 +506,48 @@ Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CH
 enabled = true
 max_duration_seconds = 300  # 5 minutes
 max_size_mb = 10
-mime_types = audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg
+mime_types = audio/wav,audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg
 ```
 
 **Frontend Components:**
-- `VoiceRecorder.svelte` - Recording UI with MediaRecorder API integration
+- `VoiceRecorder.svelte` - Recording UI with MediaRecorder/Tauri backend integration
 - `VoicePlayer.svelte` - Audio playback with play/pause, seek, volume, speed control
 - `ChatPanel.svelte` - Renders voice attachments using VoicePlayer
 
 **Backend Commands:**
 - `send_voice_message` (WebSocket) - Send voice message via file transfer
+- `VOICE_TRANSCRIPTION` (DPTP) - Share transcriptions with peers
+
+---
+
+**Telegram Bot Integration (v0.14.0+):**
+
+Complete Telegram bot integration for voice transcription and messaging bridging.
+
+**Architecture:**
+- `managers/telegram_manager.py` - Bot lifecycle, whitelist, message sending
+- `coordinators/telegram_coordinator.py` - Message bridge and routing
+- `message_handlers/telegram_handler.py` - Telegram-specific handlers
+
+**Features:**
+- Voice message transcription using local Whisper
+- Two-way messaging bridge (Telegram ↔ DPC)
+- Whitelist-only access control
+- File transfer support (images, documents)
+- Notifications and unread counters
+- Auto-linking to conversations
+
+**Configuration (`~/.dpc/config.ini`):**
+```ini
+[telegram]
+enabled = true
+bot_token = 123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+allowed_chat_ids = ["123456789"]
+transcription_enabled = true
+bridge_to_p2p = false
+```
+
+**See:** [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for complete guide
 
 ### Conversation History & Context Inclusion (Phase 7+)
 
@@ -1208,6 +1268,36 @@ Z.AI uses concurrency-based rate limiting (not token-based):
 
 ---
 
+### Context7 Plugin Integration
+
+D-PC Messenger can leverage the Context7 plugin for intelligent library documentation retrieval when AI agents suggest tools or libraries based on code analysis.
+
+**When AI Suggests Libraries:**
+1. AI analyzes codebase and identifies relevant libraries/frameworks
+2. Context7 plugin retrieves up-to-date documentation
+3. Examples provided are from official documentation sources
+4. Ensures cross-platform compatibility before suggesting
+
+**Cross-Platform Safety:**
+- AI checks platform compatibility before suggesting libraries
+- Context7 retrieves platform-specific documentation
+- Prevents suggesting macOS-only libraries for Windows builds
+
+**Before Suggesting Libraries, Verify:**
+- **Windows**: WebView2 (Edge), MSVC compatibility, WASAPI for audio
+- **Linux**: WebKitGTK limitations, ALSA/PipeWire for audio
+- **macOS**: WKWebView limitations, Core Audio for audio, Metal for GPU
+- **Tauri constraints**: No `getUserMedia` on macOS WKWebView
+
+**Example Workflow:**
+```
+User: "How do I add video recording?"
+AI: Analyzes code → Detects Tauri 2.x → Suggests @tauri-apps/plugin-screen-capture
+→ Uses Context7 to fetch latest API docs → Provides code examples
+```
+
+---
+
 ## Technology Stack
 
 ### Backend
@@ -1217,6 +1307,8 @@ Z.AI uses concurrency-based rate limiting (not token-based):
 - SQLAlchemy + asyncpg + Alembic (Hub database)
 - cryptography library (PKI)
 - ollama, openai, anthropic, zai-sdk (AI SDKs)
+- transformers, torch, librosa, soundfile (Whisper transcription)
+- python-telegram-bot 21.x (Telegram integration)
 
 ### Frontend
 - SvelteKit 5.0 (Svelte 5 with runes)
@@ -1224,6 +1316,8 @@ Z.AI uses concurrency-based rate limiting (not token-based):
 - TypeScript 5.6
 - Vite 6.0
 - adapter-static (SPA mode)
+- **Testing**: Vitest (unit tests), Playwright (E2E tests - in development)
+- **Audio**: cpal (Rust) for cross-platform recording
 
 ### Infrastructure
 - Docker + Docker Compose
