@@ -2,6 +2,78 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
+## [0.13.0] - 2026-01-04
+
+### MAJOR FEATURES
+
+#### Voice Messages (Production-Ready)
+- **Voice Recording** - Record voice messages directly in the chat interface
+- **Voice Playback** - Full audio player with play/pause, seek, volume, and speed control (1x, 1.5x, 2x)
+- **P2P Voice Transfer** - Send voice messages via file transfer infrastructure
+- **Voice Metadata** - Duration, sample rate, channels, codec info preserved
+- **Auto-Accept <10MB** - Small voice files auto-accepted like images
+- **Max 5 Minutes** - Configurable max duration (300 seconds default)
+- **Max 10MB Files** - Configurable size limit
+- **Download Support** - Save voice messages locally
+- Files: VoiceRecorder.svelte, VoicePlayer.svelte, voice message handlers
+
+#### Protocol Enhancements
+- **FILE_OFFER Extended** - Added `voice_metadata` field for voice transfers (DPTP v1.3)
+- **Voice Event Broadcasting** - `voice_offer_received` event for UI integration
+- **Configuration** - New `[voice_messages]` section in config.ini
+
+---
+
+### ENHANCEMENTS
+
+#### Frontend Components
+- **VoiceRecorder.svelte** - MediaRecorder API integration, codec detection, duration display
+- **VoicePlayer.svelte** - HTML5 audio with progress bar, volume control, playback speed cycling
+- **ChatPanel.svelte** - Voice attachment rendering with VoicePlayer component
+- **ImageMessage.svelte** - Extended to accept 'voice' type in attachment union
+
+#### Backend Changes
+- **file_transfer_manager.py** - Added `voice_metadata` field to FileTransfer dataclass, `send_file()` extended
+- **image_handler.py** - Handles voice messages (mime_type detection, `voice_offer_received` event)
+- **service.py** - Added `send_voice_message()` WebSocket command
+- **settings.py** - Added `voice_messages` configuration section
+- **coreService.ts** - Added `sendVoiceMessage()` function, voice event handlers
+
+---
+
+### CONFIGURATION
+
+New `~/.dpc/config.ini` section:
+```ini
+[voice_messages]
+enabled = true
+max_duration_seconds = 300  # 5 minutes
+max_size_mb = 10
+mime_types = audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg
+```
+
+---
+
+### DPTP v1.3 Protocol Changes
+
+FILE_OFFER payload extended with `voice_metadata`:
+```json
+{
+  "command": "FILE_OFFER",
+  "payload": {
+    "voice_metadata": {
+      "duration_seconds": 30.5,
+      "sample_rate": 48000,
+      "channels": 1,
+      "codec": "opus",
+      "recorded_at": "2026-01-04T12:34:56Z"
+    }
+  }
+}
+```
+
+---
+
 ## [0.12.0] - 2025-12-29
 
 ### MAJOR FEATURES

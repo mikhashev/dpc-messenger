@@ -175,12 +175,67 @@ class Settings:
             'preparation_progress_interval_chunks': '10000'  # Emit progress every N chunks during CRC32
         }
 
+        self._config['voice_messages'] = {
+            'enabled': 'true',  # Enable voice message recording and playback (v0.13.0+)
+            'max_duration_seconds': '300',  # Maximum recording duration in seconds (5 minutes)
+            'max_size_mb': '10',  # Maximum voice message file size in MB
+            'mime_types': 'audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav',  # Supported audio formats (includes WAV for Tauri/Rust backend)
+            'default_sample_rate': '48000',  # Default sample rate in Hz (48kHz for quality)
+            'default_channels': '1',  # Default audio channels (1 = mono, 2 = stereo)
+            'default_codec': 'opus'  # Default audio codec (opus for web compatibility)
+        }
+
+        self._config['voice_transcription'] = {
+            'enabled': 'true',  # Enable auto-transcription of received voice messages (v0.13.2+)
+            'sender_transcribes': 'false',  # Should sender transcribe their own voice messages
+            'recipient_delay_seconds': '3',  # Wait N seconds before recipients attempt transcription (coordination)
+            'timeout_seconds': '240',  # Max wait time for peer's transcription before trying locally (increased to 240s for cold model loads that take 180+s)
+            # NOTE: provider_priority overrides voice_provider from providers.json
+            # Provider aliases match HuggingFace model names for clarity (e.g., whisper-large-v3)
+            'provider_priority': 'whisper-large-v3,whisper-large-v3-turbo,whisper-medium,whisper-small,openai',  # Comma-separated provider priority (aliases from providers.json)
+            'show_transcriber_name': 'false',  # Show who transcribed the message in UI
+            'cache_transcriptions': 'true',  # Cache transcriptions in memory
+            'fallback_to_openai': 'true'  # Fallback to OpenAI API if local Whisper unavailable
+        }
+
+        self._config['local_transcription'] = {
+            'enabled': 'true',  # Enable local Whisper transcription (v0.13.1+)
+            'model': 'openai/whisper-large-v3',  # Model name (HuggingFace)
+            'device': 'auto',  # Device: 'cuda', 'cpu', or 'auto' (auto-detects CUDA)
+            'compile_model': 'true',  # Use torch.compile for 4.5x speedup (PyTorch 2.4+)
+            'use_flash_attention': 'false',  # Use Flash Attention 2 (requires flash-attn package)
+            'chunk_length_s': '30',  # Chunk length for long-form transcription (speed vs accuracy)
+            'batch_size': '16',  # Batch size for chunked transcription (higher = faster, more VRAM)
+            'language': 'auto',  # Language: 'auto' (detect) or ISO 639-1 code (e.g., 'en', 'es')
+            'task': 'transcribe',  # Task: 'transcribe' or 'translate' (to English)
+            'fallback_to_openai': 'true',  # Fallback to OpenAI API if local fails
+            'max_file_size_mb': '25',  # Max audio file size for local transcription (VRAM limit)
+            'lazy_loading': 'true'  # Load model on first use (faster startup)
+        }
+
         self._config['vision'] = {
             'enabled': 'true',  # Enable vision API features (screenshot paste, image analysis)
             'default_provider': 'openai',  # Default AI provider for vision: 'openai' or 'anthropic'
             'max_image_size_mb': '5',  # Maximum image size in MB (clipboard paste and uploads)
             'thumbnail_quality': '85'  # Thumbnail JPEG quality (0-100)
         }
+
+        self._config['telegram'] = {
+            'enabled': 'false',  # Enable Telegram bot integration (v0.14.0+)
+            'bot_token': '',  # Bot token from @BotFather
+            'allowed_chat_ids': '[]',  # JSON array of whitelisted chat IDs (private access)
+            'use_webhook': 'false',  # Use webhook mode (true) or polling mode (false)
+            'webhook_url': '',  # Public URL for webhook (production)
+            'webhook_port': '8443',  # Local port for webhook server
+            'owner_contact': '',  # Bot owner contact info (shown to unauthorized users)
+            'access_denied_message': '',  # Custom access denied message (optional)
+            'transcription_enabled': 'true',  # Auto-transcribe Telegram voice messages (uses default voice provider)
+            'bridge_to_p2p': 'false',  # Forward Telegram messages to P2P peers (see NOTE below)
+            'conversation_links': '{}'  # JSON map of telegram_chat_id -> conversation_id
+        }
+        # NOTE: bridge_to_p2p currently forwards as N separate 1:1 messages (v0.15.0).
+        # Future: Will support group chat bridging (single message to DPC group).
+        # See telegram_coordinator.py:_forward_to_p2p_peers() for implementation details.
 
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -609,6 +664,169 @@ class Settings:
     def get_vision_thumbnail_quality(self) -> int:
         """Get thumbnail JPEG quality (0-100)."""
         return int(self.get('vision', 'thumbnail_quality', '85'))
+
+    # Voice Transcription Settings (v0.13.2+)
+
+    def get_voice_transcription_enabled(self) -> bool:
+        """Check if auto-transcription of voice messages is enabled."""
+        value = self.get('voice_transcription', 'enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_voice_transcription_sender_transcribes(self) -> bool:
+        """Check if sender should transcribe their own voice messages."""
+        value = self.get('voice_transcription', 'sender_transcribes', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_voice_transcription_recipient_delay_seconds(self) -> int:
+        """Get delay in seconds before recipients attempt transcription."""
+        return int(self.get('voice_transcription', 'recipient_delay_seconds', '3'))
+
+    def get_voice_transcription_timeout_seconds(self) -> int:
+        """Get max wait time in seconds for peer's transcription before trying locally (v0.13.3+)."""
+        return int(self.get('voice_transcription', 'timeout_seconds', '240'))
+
+    def get_voice_transcription_provider_priority(self) -> list[str]:
+        """Get ordered list of transcription provider aliases."""
+        # Fallback matches default config (aliases match HuggingFace model names)
+        priority_str = self.get('voice_transcription', 'provider_priority', 'whisper-large-v3,whisper-large-v3-turbo,whisper-medium,whisper-small,openai')
+        return [p.strip() for p in priority_str.split(',') if p.strip()]
+
+    def get_voice_transcription_show_transcriber_name(self) -> bool:
+        """Check if transcriber name should be shown in UI."""
+        value = self.get('voice_transcription', 'show_transcriber_name', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_voice_transcription_cache_enabled(self) -> bool:
+        """Check if transcription caching is enabled."""
+        value = self.get('voice_transcription', 'cache_transcriptions', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_voice_transcription_fallback_to_openai(self) -> bool:
+        """Check if OpenAI fallback is enabled."""
+        value = self.get('voice_transcription', 'fallback_to_openai', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    # Local Transcription Settings (v0.13.1+)
+
+    def get_local_transcription_enabled(self) -> bool:
+        """Check if local Whisper transcription is enabled."""
+        value = self.get('local_transcription', 'enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_local_transcription_model(self) -> str:
+        """Get the Whisper model name for local transcription."""
+        return self.get('local_transcription', 'model', 'openai/whisper-large-v3')
+
+    def get_local_transcription_device(self) -> str:
+        """Get the device for local transcription ('cuda', 'cpu', or 'auto')."""
+        return self.get('local_transcription', 'device', 'auto')
+
+    def get_local_transcription_compile_model(self) -> bool:
+        """Check if torch.compile is enabled for local transcription."""
+        value = self.get('local_transcription', 'compile_model', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_local_transcription_use_flash_attention(self) -> bool:
+        """Check if Flash Attention 2 is enabled for local transcription."""
+        value = self.get('local_transcription', 'use_flash_attention', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_local_transcription_chunk_length_s(self) -> int:
+        """Get chunk length for long-form transcription in seconds."""
+        return int(self.get('local_transcription', 'chunk_length_s', '30'))
+
+    def get_local_transcription_batch_size(self) -> int:
+        """Get batch size for chunked transcription."""
+        return int(self.get('local_transcription', 'batch_size', '16'))
+
+    def get_local_transcription_language(self) -> str:
+        """Get language for transcription ('auto' for auto-detect)."""
+        return self.get('local_transcription', 'language', 'auto')
+
+    def get_local_transcription_task(self) -> str:
+        """Get transcription task ('transcribe' or 'translate')."""
+        return self.get('local_transcription', 'task', 'transcribe')
+
+    def get_local_transcription_fallback_to_openai(self) -> bool:
+        """Check if fallback to OpenAI API is enabled when local fails."""
+        value = self.get('local_transcription', 'fallback_to_openai', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_local_transcription_max_file_size_mb(self) -> int:
+        """Get max file size for local transcription in MB."""
+        return int(self.get('local_transcription', 'max_file_size_mb', '25'))
+
+    def get_local_transcription_lazy_loading(self) -> bool:
+        """Check if lazy model loading is enabled (load on first use)."""
+        value = self.get('local_transcription', 'lazy_loading', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    # Telegram Bot Integration Settings (v0.14.0+)
+
+    def get_telegram_enabled(self) -> bool:
+        """Check if Telegram bot integration is enabled."""
+        value = self.get('telegram', 'enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_bot_token(self) -> str:
+        """Get Telegram bot token."""
+        return self.get('telegram', 'bot_token', '')
+
+    def get_telegram_allowed_chat_ids(self) -> list:
+        """Get list of allowed Telegram chat IDs (whitelist)."""
+        import json
+        try:
+            chat_ids_str = self.get('telegram', 'allowed_chat_ids', '[]')
+            return json.loads(chat_ids_str)
+        except json.JSONDecodeError:
+            return []
+
+    def get_telegram_use_webhook(self) -> bool:
+        """Check if webhook mode is enabled (vs polling)."""
+        value = self.get('telegram', 'use_webhook', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_webhook_url(self) -> str:
+        """Get Telegram webhook URL."""
+        return self.get('telegram', 'webhook_url', '')
+
+    def get_telegram_webhook_port(self) -> int:
+        """Get Telegram webhook server port."""
+        return int(self.get('telegram', 'webhook_port', '8443'))
+
+    def get_telegram_owner_contact(self) -> str:
+        """Get bot owner contact information (shown to unauthorized users)."""
+        return self.get('telegram', 'owner_contact', '')
+
+    def get_telegram_access_denied_message(self) -> str:
+        """Get custom access denied message (optional)."""
+        return self.get('telegram', 'access_denied_message', '')
+
+    def get_telegram_transcription_enabled(self) -> bool:
+        """Check if Telegram voice transcription is enabled."""
+        value = self.get('telegram', 'transcription_enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_bridge_to_p2p(self) -> bool:
+        """Check if Telegram → P2P bridging is enabled."""
+        value = self.get('telegram', 'bridge_to_p2p', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_config(self) -> dict:
+        """Get all Telegram configuration as a dict."""
+        import json
+        return {
+            'enabled': self.get_telegram_enabled(),
+            'bot_token': self.get_telegram_bot_token(),
+            'allowed_chat_ids': self.get_telegram_allowed_chat_ids(),
+            'use_webhook': self.get_telegram_use_webhook(),
+            'webhook_url': self.get_telegram_webhook_url(),
+            'webhook_port': self.get_telegram_webhook_port(),
+            'owner_contact': self.get_telegram_owner_contact(),
+            'access_denied_message': self.get_telegram_access_denied_message(),
+            'transcription_enabled': self.get_telegram_transcription_enabled(),
+            'bridge_to_p2p': self.get_telegram_bridge_to_p2p()
+        }
 
     def reload(self):
         """Reload configuration from file."""

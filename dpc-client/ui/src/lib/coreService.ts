@@ -9,11 +9,13 @@ export interface ProviderInfo {
     model: string;
     type: string;
     supports_vision: boolean;
+    supports_voice?: boolean;  // v0.13.0+: Voice transcription support
 }
 
 export interface DefaultProvidersResponse {
     default_provider: string;
     vision_provider: string;
+    voice_provider?: string;  // v0.13.0+
 }
 
 export interface ProvidersListResponse {
@@ -90,6 +92,37 @@ export const newSessionResult = writable<any>(null);  // {proposal_id, result, c
 
 // Conversation reset store (v0.11.3 - for AI chats and approved P2P session resets)
 export const conversationReset = writable<any>(null);  // {conversation_id}
+
+// Voice message stores (v0.13.0 - voice recording and playback)
+export const voiceOfferReceived = writable<any>(null);  // {transfer_id, node_id, sender_name, filename, size_bytes, duration_seconds, ...voice_metadata}
+
+// Voice transcription stores (v0.13.2 - auto-transcription)
+export const voiceTranscriptionReceived = writable<any>(null);  // {transfer_id, node_id, text, provider, transcriber_node_id, confidence, language, timestamp}
+export const voiceTranscriptionComplete = writable<any>(null);  // {transfer_id, node_id, text, provider, ...} (local transcription completed)
+export const voiceTranscriptionConfig = writable<any>(null);  // Voice transcription settings updated
+
+// Telegram bot integration stores (v0.14.0+)
+export const telegramEnabled = writable<boolean>(false);
+export const telegramConnected = writable<boolean>(false);
+export const telegramLinkedChats = writable<Map<string, string>>(new Map()); // conversation_id -> chat_id
+export const telegramMessages = writable<Map<string, any[]>>(new Map()); // conversation_id -> messages
+export const telegramMessageReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, text, timestamp}
+export const telegramVoiceReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, duration_seconds, transcription, transcription_provider}
+export const telegramImageReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes}
+export const telegramFileReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes, mime_type}
+export const telegramStatus = writable<any>(null);  // {enabled, connected, webhook_mode, whitelist_count, transcription_enabled, bridge_to_p2p, conversation_links}
+
+// Whisper model loading stores (v0.13.3 - model pre-loading)
+export const whisperModelLoadingStarted = writable<any>(null);  // {provider}
+export const whisperModelLoaded = writable<any>(null);  // {provider}
+export const whisperModelLoadingFailed = writable<any>(null);  // {provider, error}
+export const whisperModelUnloaded = writable<any>(null);  // {reason, vram_freed_gb} (v0.13.4+ VRAM unloading)
+
+// Whisper model download stores (v0.13.5+ - interactive download dialog)
+export const whisperModelDownloadRequired = writable<any>(null);  // {model_name, cache_path, download_size_gb, provider_alias}
+export const whisperModelDownloadStarted = writable<any>(null);  // {provider, model_name}
+export const whisperModelDownloadCompleted = writable<any>(null);  // {provider, model_name, cache_path}
+export const whisperModelDownloadFailed = writable<any>(null);  // {provider, error}
 
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
@@ -199,6 +232,7 @@ export function connectToCoreService() {
             sendCommand("list_providers");
             sendCommand("get_default_providers");  // Fetch default text/vision providers
             sendCommand("get_providers_list");     // Fetch full provider list with vision flags
+            sendCommand("get_telegram_status");    // Fetch Telegram status including conversation links
 
             // Stop polling
             if (pollingInterval) {
@@ -231,6 +265,16 @@ export function connectToCoreService() {
                         console.log('[StatusUpdate] Received status_update with peer_info:', message.payload.peer_info);
                     }
                     nodeStatus.set({ ...message.payload });
+                }
+                // Handle get_telegram_status response to populate conversation links
+                else if (message.id && message.command === "get_telegram_status" && message.status === "OK") {
+                    const status = message.payload;
+                    console.log("Telegram status loaded:", status);
+                    if (status.enabled && status.conversation_links) {
+                        // Populate telegramLinkedChats store with conversation_id -> telegram_chat_id mappings
+                        telegramLinkedChats.set(new Map(Object.entries(status.conversation_links)));
+                        console.log(`[Telegram] Loaded ${Object.keys(status.conversation_links).length} conversation links from backend`);
+                    }
                 } else if (message.event === "new_p2p_message") {
                     p2pMessages.set(message.payload);
 
@@ -360,6 +404,11 @@ export function connectToCoreService() {
                     sendCommand("get_providers_list");     // Reload full provider list
                     sendCommand("get_default_providers");  // Reload defaults
                 }
+                // Handle default_providers_updated event (v0.13.0+: voice/text/vision default changed)
+                else if (message.event === "default_providers_updated") {
+                    console.log("Default providers updated, reloading defaults");
+                    sendCommand("get_default_providers");  // Reload defaults
+                }
                 // Handle firewall_rules_updated event
                 // NOTE: This event is triggered when user saves firewall rules via FirewallEditor.
                 // It allows UI components to reload data from privacy_rules.json without page refresh.
@@ -444,38 +493,236 @@ export function connectToCoreService() {
                 else if (message.event === "image_offer_received") {
                     console.log("Image offer received:", message.payload);
 
-                    // Get auto-accept threshold from firewall rules (default 25MB)
-                    const autoAcceptThresholdMB = 25; // TODO: Read from firewall rules store
-                    const sizeMB = message.payload.size_bytes / (1024 * 1024);
-
-                    if (sizeMB <= autoAcceptThresholdMB) {
-                        // Auto-accept small images
-                        console.log(`Auto-accepting image (${sizeMB.toFixed(2)} MB ≤ ${autoAcceptThresholdMB} MB)`);
-
-                        // Immediately accept transfer
-                        sendCommand("accept_file_transfer", {
-                            transfer_id: message.payload.transfer_id
+                    // Backend auto-accepts images (v0.13.0+) - no dialog needed
+                    // Just add to active transfers for progress tracking
+                    activeFileTransfers.update(map => {
+                        const newMap = new Map(map);
+                        newMap.set(message.payload.transfer_id, {
+                            ...message.payload,
+                            status: "downloading",
+                            progress: 0,
+                            auto_accepted: true
                         });
+                        return newMap;
+                    });
 
-                        // Add to active transfers for progress tracking
-                        activeFileTransfers.update(map => {
-                            const newMap = new Map(map);
-                            newMap.set(message.payload.transfer_id, {
-                                ...message.payload,
-                                status: "downloading",
-                                progress: 0,
-                                auto_accepted: true
-                            });
-                            return newMap;
+                    console.log(`Auto-downloading image from ${message.payload.sender_name}: ${message.payload.filename}`);
+                }
+                else if (message.event === "voice_offer_received") {
+                    console.log("Voice offer received:", message.payload);
+
+                    // Backend auto-accepts voice messages (v0.13.0+) - no dialog needed
+                    // Just add to active transfers for progress tracking
+                    activeFileTransfers.update(map => {
+                        const newMap = new Map(map);
+                        newMap.set(message.payload.transfer_id, {
+                            ...message.payload,
+                            status: "downloading",
+                            progress: 0,
+                            auto_accepted: true
                         });
+                        return newMap;
+                    });
 
-                        // Log for user notification (optional)
-                        console.log(`Auto-downloading image from ${message.payload.sender_name}: ${message.payload.filename}`);
-                    } else {
-                        // Large image: Show acceptance dialog
-                        console.log(`Large image (${sizeMB.toFixed(2)} MB), prompting user`);
-                        fileTransferOffer.set(message.payload); // Reuse existing dialog
+                    console.log(`Auto-downloading voice message from ${message.payload.sender_name}: ${message.payload.filename} (${message.payload.duration_seconds}s)`);
+                }
+                // Voice transcription events (v0.13.2+ auto-transcription)
+                else if (message.event === "voice_transcription_received") {
+                    console.log("Voice transcription received:", message.payload);
+                    voiceTranscriptionReceived.set(message.payload);
+                }
+                else if (message.event === "voice_transcription_complete") {
+                    console.log("Voice transcription complete:", message.payload);
+                    voiceTranscriptionComplete.set(message.payload);
+                }
+                else if (message.event === "voice_transcription_config_updated") {
+                    console.log("Voice transcription config updated:", message.payload);
+                    voiceTranscriptionConfig.set(message.payload);
+                }
+                // Telegram bot integration events (v0.14.0+)
+                else if (message.event === "telegram_connected") {
+                    console.log("Telegram bot connected");
+                    telegramConnected.set(true);
+                    telegramEnabled.set(true);
+                }
+                else if (message.event === "telegram_disconnected") {
+                    console.log("Telegram bot disconnected");
+                    telegramConnected.set(false);
+                }
+                else if (message.event === "telegram_message_received") {
+                    console.log("Telegram message received:", message.payload);
+                    const { conversation_id, telegram_chat_id, sender_name, text, timestamp } = message.payload;
+
+                    // Track unread messages (v0.15.0) - only if this chat is not active
+                    if (conversation_id && typeof window !== 'undefined') {
+                        if (conversation_id !== activeChat) {
+                            const currentCounts = get(unreadMessageCounts);
+                            const currentCount = currentCounts.get(conversation_id) || 0;
+                            currentCounts.set(conversation_id, currentCount + 1);
+                            unreadMessageCounts.set(new Map(currentCounts));
+                        }
                     }
+
+                    // Store the mapping: conversation_id -> telegram_chat_id
+                    const currentLinkedChats = get(telegramLinkedChats);
+                    if (!currentLinkedChats.has(conversation_id)) {
+                        telegramLinkedChats.set(new Map(currentLinkedChats).set(conversation_id, telegram_chat_id));
+                        console.log(`[Telegram] Stored linked chat: ${conversation_id} -> ${telegram_chat_id}`);
+                    }
+
+                    // Add to conversation messages
+                    const currentMessages = get(telegramMessages).get(conversation_id) || [];
+                    telegramMessages.set(new Map(get(telegramMessages)).set(conversation_id, [
+                        ...currentMessages,
+                        {
+                            id: `telegram-${Date.now()}`,
+                            sender: `telegram-${telegram_chat_id}`,
+                            senderName: sender_name,
+                            text: text,
+                            timestamp: Date.now(),
+                            source: 'telegram'
+                        }
+                    ]));
+
+                    // Trigger event for UI
+                    telegramMessageReceived.set(message.payload);
+                }
+                else if (message.event === "telegram_voice_received") {
+                    console.log("Telegram voice received:", message.payload);
+
+                    // Track unread messages (v0.15.0)
+                    const conversationId = message.payload.conversation_id;
+                    if (conversationId && typeof window !== 'undefined') {
+                        if (conversationId !== activeChat) {
+                            const currentCounts = get(unreadMessageCounts);
+                            const currentCount = currentCounts.get(conversationId) || 0;
+                            currentCounts.set(conversationId, currentCount + 1);
+                            unreadMessageCounts.set(new Map(currentCounts));
+                        }
+                    }
+
+                    telegramVoiceReceived.set(message.payload);
+                }
+                else if (message.event === "telegram_image_received") {
+                    console.log("Telegram image received:", message.payload);
+                    const { conversation_id, telegram_chat_id, sender_name, filename, caption } = message.payload;
+
+                    // Track unread messages (v0.15.0)
+                    if (conversation_id && typeof window !== 'undefined') {
+                        if (conversation_id !== activeChat) {
+                            const currentCounts = get(unreadMessageCounts);
+                            const currentCount = currentCounts.get(conversation_id) || 0;
+                            currentCounts.set(conversation_id, currentCount + 1);
+                            unreadMessageCounts.set(new Map(currentCounts));
+                        }
+                    }
+
+                    // Add to telegram messages store
+                    const currentMessages = get(telegramMessages).get(conversation_id) || [];
+                    telegramMessages.set(new Map(get(telegramMessages)).set(conversation_id, [
+                        ...currentMessages,
+                        {
+                            id: `telegram-${Date.now()}`,
+                            sender: `telegram-${telegram_chat_id}`,
+                            senderName: sender_name,
+                            text: caption || "Image",
+                            timestamp: Date.now(),
+                            attachments: [{
+                                type: 'image',
+                                filename: filename,
+                                file_path: message.payload.file_path
+                            }]
+                        }
+                    ]));
+
+                    // Set telegramImageReceived store for +page.svelte to update chatHistories
+                    telegramImageReceived.set(message.payload);
+                }
+                else if (message.event === "telegram_file_received") {
+                    console.log("Telegram file received:", message.payload);
+                    const { conversation_id, telegram_chat_id, sender_name, filename, caption } = message.payload;
+
+                    // Track unread messages (v0.15.0)
+                    if (conversation_id && typeof window !== 'undefined') {
+                        if (conversation_id !== activeChat) {
+                            const currentCounts = get(unreadMessageCounts);
+                            const currentCount = currentCounts.get(conversation_id) || 0;
+                            currentCounts.set(conversation_id, currentCount + 1);
+                            unreadMessageCounts.set(new Map(currentCounts));
+                        }
+                    }
+
+                    // Add to telegram messages store
+                    const currentMessages = get(telegramMessages).get(conversation_id) || [];
+                    telegramMessages.set(new Map(get(telegramMessages)).set(conversation_id, [
+                        ...currentMessages,
+                        {
+                            id: `telegram-${Date.now()}`,
+                            sender: `telegram-${telegram_chat_id}`,
+                            senderName: sender_name,
+                            text: caption || filename,
+                            timestamp: Date.now(),
+                            attachments: [{
+                                type: 'file',
+                                filename: filename,
+                                file_path: message.payload.file_path,
+                                mime_type: message.payload.mime_type,
+                                size_bytes: message.payload.size_bytes
+                            }]
+                        }
+                    ]));
+
+                    // Set telegramFileReceived store for +page.svelte to update chatHistories
+                    telegramFileReceived.set(message.payload);
+                }
+                // Error toast notifications (v0.14.1+ - VRAM OOM warnings, etc.)
+                else if (message.event === "error_toast") {
+                    console.log("Error toast:", message.payload);
+                    const { title, message: toastMessage, duration } = message.payload;
+
+                    // Show alert for now - can be replaced with proper toast UI component later
+                    if (typeof window !== 'undefined') {
+                        alert(`${title}\n\n${toastMessage}`);
+                    }
+
+                    // Also log to console for debugging
+                    console.error(`[ERROR TOAST] ${title}: ${toastMessage}`);
+                }
+
+                // Whisper model loading events (v0.13.3+ model pre-loading)
+                else if (message.event === "whisper_model_loading_started") {
+                    console.log("Whisper model loading started:", message.payload);
+                    whisperModelLoadingStarted.set(message.payload);
+                }
+                else if (message.event === "whisper_model_loaded") {
+                    console.log("Whisper model loaded successfully:", message.payload);
+                    whisperModelLoaded.set(message.payload);
+                }
+                else if (message.event === "whisper_model_loading_failed") {
+                    console.error("Whisper model loading failed:", message.payload);
+                    whisperModelLoadingFailed.set(message.payload);
+                }
+                else if (message.event === "whisper_model_unloaded") {
+                    console.log("Whisper model unloaded:", message.payload);
+                    whisperModelUnloaded.set(message.payload);
+                    // Optional: Show toast notification about VRAM freed
+                    // console.log(`💾 Voice transcription model unloaded (~${message.payload.vram_freed_gb}GB VRAM freed)`);
+                }
+                else if (message.event === "whisper_model_download_required") {
+                    console.log("Whisper model download required:", message.payload);
+                    whisperModelDownloadRequired.set(message.payload);
+                }
+                else if (message.event === "whisper_model_download_started") {
+                    console.log("Whisper model download started:", message.payload);
+                    whisperModelDownloadStarted.set(message.payload);
+                }
+                else if (message.event === "whisper_model_download_completed") {
+                    console.log("Whisper model download completed:", message.payload);
+                    whisperModelDownloadCompleted.set(message.payload);
+                }
+                else if (message.event === "whisper_model_download_failed") {
+                    console.error("Whisper model download failed:", message.payload);
+                    whisperModelDownloadFailed.set(message.payload);
                 }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)
@@ -602,13 +849,18 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'delete_instruction_set',  // Instruction management
             'rename_instruction_set',  // Instruction management
             'set_default_instruction_set',  // Instruction management
-            'get_instruction_set'  // Instruction management
+            'get_instruction_set',  // Instruction management
+            'transcribe_audio',  // v0.13.1 - voice message transcription
+            'get_voice_transcription_config',  // v0.13.2 - auto-transcription config
+            'save_voice_transcription_config',  // v0.13.2 - auto-transcription config
+            'set_conversation_transcription',  // v0.13.2 - per-conversation transcription control
+            'get_conversation_transcription'  // v0.13.2 - per-conversation transcription control
         ].includes(command);
 
         if (expectsResponse) {
             return new Promise((resolve, reject) => {
                 // Calculate dynamic timeout for file operations and connections
-                let timeout = 10000;  // Default: 10s
+                let timeout = 25000;  // Default: 25s (increased from 10s in v0.13.3 for slow systems)
 
                 if (command === 'connect_to_peer' || command === 'connect_via_dht') {
                     // Connection timeout: 30s (includes pre-flight check + TLS handshake + HELLO)
@@ -616,6 +868,11 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                 } else if (command === 'ai_assisted_instruction_creation_remote') {
                     // AI instruction creation timeout: 60s (remote LLM processing can take time)
                     timeout = 60000;
+                } else if (command === 'transcribe_audio') {
+                    // Voice transcription timeout: 240s (v0.13.1+)
+                    // First use: model download (~3GB, 1-2min) + load (~20s) + compile (~30s) + transcribe (~5s)
+                    // Subsequent uses: ~5-10s
+                    timeout = 240000;
                 } else if (command === 'send_file') {
                     // Dynamic timeout based on file size (v0.11.2+)
                     const fileSizeBytes = payload.file_size_bytes || 0;
@@ -711,6 +968,29 @@ export async function cancelFileTransfer(transferId: string, reason: string = "u
     });
 }
 
+// Voice message function (v0.13.0 - Voice Messages)
+export async function sendVoiceMessage(
+    nodeId: string,
+    audioBlob: Blob,
+    durationSeconds: number
+): Promise<any> {
+    // Convert blob to base64
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    const base64 = btoa(
+        new Uint8Array(arrayBuffer).reduce(
+            (data, byte) => data + String.fromCharCode(byte),
+            ''
+        )
+    );
+
+    return sendCommand('send_voice_message', {
+        node_id: nodeId,
+        audio_base64: base64,
+        duration_seconds: durationSeconds,
+        mime_type: audioBlob.type || 'audio/webm'
+    });
+}
+
 // Helper function to reset unread count when chat becomes active (v0.9.3)
 export function resetUnreadCount(peerId: string) {
     const currentCounts = get(unreadMessageCounts);
@@ -732,4 +1012,74 @@ export async function voteNewSession(proposalId: string, vote: boolean): Promise
         proposal_id: proposalId,
         vote: vote
     });
+}
+
+// Voice transcription config commands (v0.13.2+)
+export async function getVoiceTranscriptionConfig(): Promise<any> {
+    return sendCommand('get_voice_transcription_config', {});
+}
+
+export async function saveVoiceTranscriptionConfig(config: any): Promise<any> {
+    return sendCommand('save_voice_transcription_config', { config });
+}
+
+// Per-conversation transcription control (v0.13.2+ checkbox)
+export async function setConversationTranscription(nodeId: string, enabled: boolean): Promise<any> {
+    return sendCommand('set_conversation_transcription', { node_id: nodeId, enabled });
+}
+
+export async function getConversationTranscription(nodeId: string): Promise<any> {
+    return sendCommand('get_conversation_transcription', { node_id: nodeId });
+}
+
+// Whisper model pre-loading (v0.13.3+ - load model before first transcription)
+export async function preloadWhisperModel(providerAlias?: string): Promise<any> {
+    return sendCommand('preload_whisper_model', {
+        provider_alias: providerAlias  // Optional: specify provider, or use first local_whisper
+    });
+}
+
+// Telegram bot integration (v0.14.0+)
+export async function sendToTelegram(
+    conversationId: string,
+    text: string,
+    attachments?: any[],
+    voiceAudioBase64?: string,
+    voiceDurationSeconds?: number,
+    voiceMimeType?: string,
+    filePath?: string  // NEW: For sending files/images to Telegram
+): Promise<any> {
+    const payload: any = {
+        conversation_id: conversationId,
+        text: text,
+        attachments: attachments || []
+    };
+
+    // Add voice parameters if provided
+    if (voiceAudioBase64 !== undefined) {
+        payload.voice_audio_base64 = voiceAudioBase64;
+    }
+    if (voiceDurationSeconds !== undefined) {
+        payload.voice_duration_seconds = voiceDurationSeconds;
+    }
+    if (voiceMimeType !== undefined) {
+        payload.voice_mime_type = voiceMimeType;
+    }
+    // Add file path if provided (for sending files/images to Telegram)
+    if (filePath !== undefined) {
+        payload.file_path = filePath;
+    }
+
+    return sendCommand('send_to_telegram', payload);
+}
+
+export async function linkTelegramChat(conversationId: string, telegramChatId: string): Promise<any> {
+    return sendCommand('link_telegram_chat', {
+        conversation_id: conversationId,
+        telegram_chat_id: telegramChatId
+    });
+}
+
+export async function getTelegramStatus(): Promise<any> {
+    return sendCommand('get_telegram_status', {});
 }

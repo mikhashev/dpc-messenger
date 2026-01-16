@@ -40,6 +40,9 @@ class ContextFirewall:
         # Parse compute sharing settings
         self._parse_compute_settings()
 
+        # Parse transcription sharing settings
+        self._parse_transcription_settings()
+
         # Parse notification settings
         self._parse_notification_settings()
 
@@ -53,6 +56,17 @@ class ContextFirewall:
         logger.debug("Compute sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
                      self.compute_enabled, len(self.compute_allowed_nodes),
                      len(self.compute_allowed_groups), len(self.compute_allowed_models))
+
+    def _parse_transcription_settings(self):
+        """Parse transcription sharing settings from the config."""
+        transcription = self.rules.get('transcription', {})
+        self.transcription_enabled = transcription.get('enabled', False)
+        self.transcription_allowed_nodes: List[str] = transcription.get('allow_nodes', [])
+        self.transcription_allowed_groups: List[str] = transcription.get('allow_groups', [])
+        self.transcription_allowed_models: List[str] = transcription.get('allowed_models', [])
+        logger.debug("Transcription sharing settings updated: enabled=%s, allowed_nodes=%d, allowed_groups=%d, allowed_models=%d",
+                     self.transcription_enabled, len(self.transcription_allowed_nodes),
+                     len(self.transcription_allowed_groups), len(self.transcription_allowed_models))
 
     def _parse_notification_settings(self):
         """Parse notification settings from the config."""
@@ -113,6 +127,13 @@ class ContextFirewall:
                     "allow_groups": ["friends"],
                     "allow_nodes": ["dpc-node-alice-123"],
                     "allowed_models": ["llama3.1:8b", "llama3:70b"]
+                },
+                "transcription": {
+                    "_comment": "Transcription sharing settings - Allow peers to use your Whisper model for voice transcription",
+                    "enabled": False,
+                    "allow_groups": ["friends"],
+                    "allow_nodes": ["dpc-node-alice-123"],
+                    "allowed_models": ["openai/whisper-large-v3", "openai/whisper-medium"]
                 },
                 "nodes": {
                     "_comment": "Per-node access rules - Most specific, overrides group rules",
@@ -591,6 +612,40 @@ class ContextFirewall:
         # Not authorized
         return False
 
+    def can_request_transcription(self, requester_node_id: str, model: str = None) -> bool:
+        """
+        Checks if a peer can request remote transcription on this node.
+
+        Args:
+            requester_node_id: The node_id of the requesting peer
+            model: Optional model name to check if allowed
+
+        Returns:
+            True if the peer can request transcription (and use the specified model if provided)
+        """
+        # Check if transcription sharing is enabled
+        if not self.transcription_enabled:
+            return False
+
+        # Check if requester is in allowed nodes list
+        if requester_node_id in self.transcription_allowed_nodes:
+            # Node is explicitly allowed, check model if specified
+            if model and self.transcription_allowed_models:
+                return model in self.transcription_allowed_models
+            return True
+
+        # Check if requester is in any allowed group
+        requester_groups = self._get_groups_for_node(requester_node_id)
+        for group in requester_groups:
+            if group in self.transcription_allowed_groups:
+                # Node is in an allowed group, check model if specified
+                if model and self.transcription_allowed_models:
+                    return model in self.transcription_allowed_models
+                return True
+
+        # Not authorized
+        return False
+
     def get_available_models_for_peer(self, requester_node_id: str, all_models: List[str]) -> List[str]:
         """
         Returns the list of models that a peer is allowed to use.
@@ -738,7 +793,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', '_comment']
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -799,6 +854,24 @@ class ContextFirewall:
                     if 'allowed_models' in compute and not isinstance(compute['allowed_models'], list):
                         errors.append("'compute.allowed_models' must be a list")
 
+            # Validate transcription section
+            if 'transcription' in config_dict:
+                transcription = config_dict['transcription']
+                if not isinstance(transcription, dict):
+                    errors.append("'transcription' section must be a dictionary")
+                else:
+                    if 'enabled' in transcription and not isinstance(transcription['enabled'], bool):
+                        errors.append("'transcription.enabled' must be a boolean (true or false)")
+
+                    if 'allow_nodes' in transcription and not isinstance(transcription['allow_nodes'], list):
+                        errors.append("'transcription.allow_nodes' must be a list")
+
+                    if 'allow_groups' in transcription and not isinstance(transcription['allow_groups'], list):
+                        errors.append("'transcription.allow_groups' must be a list")
+
+                    if 'allowed_models' in transcription and not isinstance(transcription['allowed_models'], list):
+                        errors.append("'transcription.allowed_models' must be a list")
+
             # Validate nodes section
             if 'nodes' in config_dict:
                 if not isinstance(config_dict['nodes'], dict):
@@ -813,6 +886,8 @@ class ContextFirewall:
                             errors.append(f"Rules for node '{node_id}' must be a dictionary")
                         else:
                             for resource_path, action in rules.items():
+                                if resource_path.startswith('_'):  # Skip nested comment fields
+                                    continue
                                 if action not in ['allow', 'deny']:
                                     errors.append(f"Invalid action for node '{node_id}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
 
@@ -828,6 +903,8 @@ class ContextFirewall:
                             errors.append(f"Rules for group '{group_name}' must be a dictionary")
                         else:
                             for resource_path, action in rules.items():
+                                if resource_path.startswith('_'):  # Skip nested comment fields
+                                    continue
                                 if action not in ['allow', 'deny']:
                                     errors.append(f"Invalid action for group '{group_name}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
 
@@ -843,6 +920,8 @@ class ContextFirewall:
                             errors.append(f"Rules for AI scope '{scope_name}' must be a dictionary")
                         else:
                             for resource_path, action in rules.items():
+                                if resource_path.startswith('_'):  # Skip nested comment fields
+                                    continue
                                 if action not in ['allow', 'deny']:
                                     errors.append(f"Invalid action for AI scope '{scope_name}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
 
@@ -858,6 +937,8 @@ class ContextFirewall:
                             errors.append(f"Rules for device sharing scope '{sharing_scope}' must be a dictionary")
                         else:
                             for resource_path, action in rules.items():
+                                if resource_path.startswith('_'):  # Skip nested comment fields
+                                    continue
                                 if action not in ['allow', 'deny']:
                                     errors.append(f"Invalid action for device sharing scope '{sharing_scope}': '{resource_path} = {action}' (should be 'allow' or 'deny')")
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "dpc-messenger",
-  "version": "0.12.0",
+  "version": "0.15.0",
   "identifier": "com.mike.dpc-messenger",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "dpc-messenger",
         "width": 1000,
         "height": 700,
@@ -23,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": null,
+      "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval' http://localhost:* ws://localhost:* https://fonts.googleapis.com https://fonts.gstatic.com; media-src 'self' mediastream: blob: https://asset.localhost asset:;",
       "assetProtocol": {
         "enable": true,
         "scope": [
@@ -41,6 +42,22 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "linux": {
+      "deb": {
+        "depends": [
+          "libasound2",
+          "libasound2t64"
+        ]
+      },
+      "appimage": {
+        "bundleMediaFramework": false
+      }
+    }
+  },
+  "plugins": {
+    "fs": {
+      "requireLiteralLeadingDot": false
+    }
   }
 }

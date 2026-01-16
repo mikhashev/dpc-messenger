@@ -21,6 +21,13 @@
       allow_groups: string[];
       allowed_models: string[];
     };
+    transcription?: {
+      _comment?: string;
+      enabled: boolean;
+      allow_nodes: string[];
+      allow_groups: string[];
+      allowed_models: string[];
+    };
     file_transfer?: {
       _comment?: string;
       groups?: Record<string, any>;
@@ -52,10 +59,15 @@
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
 
-  // Intermediate string variables for textarea editing
+  // Intermediate string variables for textarea editing (compute sharing)
   let allowNodesText: string = '';
   let allowGroupsText: string = '';
   let allowedModelsText: string = '';
+
+  // Intermediate string variables for textarea editing (transcription sharing)
+  let transcriptionAllowNodesText: string = '';
+  let transcriptionAllowGroupsText: string = '';
+  let transcriptionAllowedModelsText: string = '';
 
   // Load rules when modal opens
   $: if (open && !rules) {
@@ -67,6 +79,13 @@
     allowNodesText = editedRules.compute.allow_nodes.join('\n');
     allowGroupsText = editedRules.compute.allow_groups.join('\n');
     allowedModelsText = editedRules.compute.allowed_models.join('\n');
+  }
+
+  // Sync transcription string variables with arrays when entering edit mode
+  $: if (editMode && editedRules?.transcription) {
+    transcriptionAllowNodesText = editedRules.transcription.allow_nodes.join('\n');
+    transcriptionAllowGroupsText = editedRules.transcription.allow_groups.join('\n');
+    transcriptionAllowedModelsText = editedRules.transcription.allowed_models.join('\n');
   }
 
   async function loadRules() {
@@ -482,14 +501,11 @@
       <div class="modal-header">
         <h2 id="firewall-dialog-title">Firewall Access Control</h2>
         <div class="header-actions">
-          {#if !editMode}
-            <button class="btn btn-edit" on:click={startEditing}>Edit</button>
-          {:else}
-            <button class="btn btn-save" on:click={saveChanges} disabled={isSaving}>
-              {isSaving ? 'Saving...' : 'Save'}
-            </button>
-            <button class="btn btn-cancel" on:click={cancelEditing}>Cancel</button>
-          {/if}
+          <button class="btn btn-edit" class:hidden={editMode} on:click={startEditing}>Edit</button>
+          <button class="btn btn-save" class:hidden={!editMode} on:click={saveChanges} disabled={isSaving}>
+            {isSaving ? 'Saving...' : 'Save'}
+          </button>
+          <button class="btn btn-cancel" class:hidden={!editMode} on:click={cancelEditing}>Cancel</button>
         </div>
         <button class="close-btn" on:click={close}>&times;</button>
       </div>
@@ -617,9 +633,7 @@
             <h3>Node Groups</h3>
             <p class="help-text">Define groups of nodes for easier permission management.</p>
 
-            {#if editMode && editedRules}
-              <button class="btn btn-add" on:click={addNodeGroup}>+ Add Group</button>
-            {/if}
+            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addNodeGroup}>+ Add Group</button>
 
             <div class="groups-list">
               {#if displayRules?.node_groups}
@@ -628,32 +642,26 @@
                     <div class="group-card">
                       <div class="group-header">
                         <h4>{groupName}</h4>
-                        {#if editMode}
-                          <button class="btn-icon" on:click={() => removeNodeGroup(groupName)}>
-                            🗑️
-                          </button>
-                        {/if}
+                        <button class="btn-icon" class:hidden={!editMode} on:click={() => removeNodeGroup(groupName)}>
+                          🗑️
+                        </button>
                       </div>
 
                       <div class="node-list">
                         {#each nodeList as nodeId}
                           <div class="node-item">
                             <code>{nodeId}</code>
-                            {#if editMode}
-                              <button class="btn-icon-small" on:click={() => removeNodeFromGroup(groupName, nodeId)}>
-                                ×
-                              </button>
-                            {/if}
+                            <button class="btn-icon-small" class:hidden={!editMode} on:click={() => removeNodeFromGroup(groupName, nodeId)}>
+                              ×
+                            </button>
                           </div>
                         {:else}
                           <p class="empty-small">No nodes in this group</p>
                         {/each}
 
-                        {#if editMode}
-                          <button class="btn-small" on:click={() => addNodeToGroup(groupName)}>
-                            + Add Node
-                          </button>
-                        {/if}
+                        <button class="btn-small" class:hidden={!editMode} on:click={() => addNodeToGroup(groupName)}>
+                          + Add Node
+                        </button>
                       </div>
                     </div>
                   {/if}
@@ -682,32 +690,26 @@
                     <div class="group-card">
                       <div class="group-header">
                         <h4>{groupName}</h4>
-                        {#if editMode}
-                          <button class="btn-icon" on:click={() => removeFileGroup(groupName)}>
-                            🗑️
-                          </button>
-                        {/if}
+                        <button class="btn-icon" class:hidden={!editMode} on:click={() => removeFileGroup(groupName)}>
+                          🗑️
+                        </button>
                       </div>
 
                       <div class="node-list">
                         {#each patternList as pattern}
                           <div class="node-item">
                             <code>{pattern}</code>
-                            {#if editMode}
-                              <button class="btn-icon-small" on:click={() => removeFilePatternFromGroup(groupName, pattern)}>
-                                ×
-                              </button>
-                            {/if}
+                            <button class="btn-icon-small" class:hidden={!editMode} on:click={() => removeFilePatternFromGroup(groupName, pattern)}>
+                              ×
+                            </button>
                           </div>
                         {:else}
                           <p class="empty-small">No file patterns in this group</p>
                         {/each}
 
-                        {#if editMode}
-                          <button class="btn-small" on:click={() => addFilePatternToGroup(groupName)}>
-                            + Add Pattern
-                          </button>
-                        {/if}
+                        <button class="btn-small" class:hidden={!editMode} on:click={() => addFilePatternToGroup(groupName)}>
+                          + Add Pattern
+                        </button>
                       </div>
                     </div>
                   {/if}
@@ -845,14 +847,125 @@
             {/if}
           </div>
 
+          <!-- Transcription Sharing Section -->
+          <div class="section">
+            <h3>Transcription Sharing (Remote Whisper)</h3>
+            <p class="help-text">Allow peers to use your local Whisper model for voice transcription.</p>
+
+            {#if displayRules?.transcription}
+              <div class="compute-settings">
+                <div class="setting-item">
+                  <label>
+                    {#if editMode && editedRules && editedRules.transcription}
+                      <input id="transcription-enabled" name="transcription-enabled" type="checkbox" bind:checked={editedRules.transcription.enabled} />
+                    {:else}
+                      <input id="transcription-enabled-display" name="transcription-enabled-display" type="checkbox" checked={displayRules.transcription.enabled} disabled />
+                    {/if}
+                    <strong>Enable Transcription Sharing</strong>
+                  </label>
+                </div>
+
+                {#if displayRules.transcription.enabled}
+                  <div class="subsection">
+                    <h4>Allowed Nodes</h4>
+                    {#if editMode && editedRules}
+                      <textarea
+                        id="transcription-allow-nodes"
+                        name="transcription-allow-nodes"
+                        class="edit-textarea"
+                        rows="3"
+                        placeholder="Enter node IDs (one per line)"
+                        bind:value={transcriptionAllowNodesText}
+                        on:blur={() => {
+                          if (editedRules?.transcription) {
+                            const nodes = transcriptionAllowNodesText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.transcription.allow_nodes = [...new Set(nodes)];
+                            transcriptionAllowNodesText = editedRules.transcription.allow_nodes.join('\n');
+                          }
+                        }}
+                      ></textarea>
+                    {:else}
+                      <div class="tags">
+                        {#each displayRules.transcription.allow_nodes as nodeId}
+                          <span class="tag">{nodeId}</span>
+                        {:else}
+                          <span class="empty-small">No specific nodes allowed</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="subsection">
+                    <h4>Allowed Groups</h4>
+                    {#if editMode && editedRules}
+                      <textarea
+                        id="transcription-allow-groups"
+                        name="transcription-allow-groups"
+                        class="edit-textarea"
+                        rows="2"
+                        placeholder="Enter group names (one per line)"
+                        bind:value={transcriptionAllowGroupsText}
+                        on:blur={() => {
+                          if (editedRules?.transcription) {
+                            const groups = transcriptionAllowGroupsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.transcription.allow_groups = [...new Set(groups)];
+                            transcriptionAllowGroupsText = editedRules.transcription.allow_groups.join('\n');
+                          }
+                        }}
+                      ></textarea>
+                    {:else}
+                      <div class="tags">
+                        {#each displayRules.transcription.allow_groups as groupName}
+                          <span class="tag">{groupName}</span>
+                        {:else}
+                          <span class="empty-small">No groups allowed</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+
+                  <div class="subsection">
+                    <h4>Allowed Models</h4>
+                    <p class="help-text-small">Leave empty to allow all Whisper models.</p>
+                    {#if editMode && editedRules}
+                      <textarea
+                        id="transcription-allowed-models"
+                        name="transcription-allowed-models"
+                        class="edit-textarea"
+                        rows="3"
+                        placeholder="Enter model names (one per line, e.g., openai/whisper-large-v3)"
+                        bind:value={transcriptionAllowedModelsText}
+                        on:blur={() => {
+                          if (editedRules?.transcription) {
+                            const models = transcriptionAllowedModelsText.split('\n').map(s => s.trim()).filter(s => s.length > 0);
+                            editedRules.transcription.allowed_models = [...new Set(models)];
+                            transcriptionAllowedModelsText = editedRules.transcription.allowed_models.join('\n');
+                          }
+                        }}
+                      ></textarea>
+                    {:else}
+                      <div class="tags">
+                        {#each displayRules.transcription.allowed_models as model}
+                          <span class="tag">{model}</span>
+                        {:else}
+                          <span class="empty-small">All models allowed</span>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              <p class="empty">Transcription sharing not configured.</p>
+            {/if}
+          </div>
+
         {:else if selectedTab === 'ai-scopes'}
           <div class="section">
             <h3>AI Scopes</h3>
             <p class="help-text">Control what your local AI can access in different modes (e.g., work mode vs personal mode).</p>
 
-            {#if editMode && editedRules}
-              <button class="btn btn-add" on:click={addAIScope}>+ Add AI Scope</button>
-            {/if}
+            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addAIScope}>+ Add AI Scope</button>
 
             {#if displayRules?.ai_scopes && Object.keys(displayRules.ai_scopes).length > 0}
               {#each Object.entries(displayRules.ai_scopes) as [scopeName, rules]}
@@ -860,11 +973,9 @@
                   <div class="peer-card">
                     <div class="group-header">
                       <h5>Scope: {scopeName}</h5>
-                      {#if editMode}
-                        <button class="btn-icon" on:click={() => removeAIScope(scopeName)} title="Delete scope">
-                          🗑️
-                        </button>
-                      {/if}
+                      <button class="btn-icon" class:hidden={!editMode} on:click={() => removeAIScope(scopeName)} title="Delete scope">
+                        🗑️
+                      </button>
                     </div>
 
                     <div class="rule-list">
@@ -894,11 +1005,9 @@
                       {/each}
                     </div>
 
-                    {#if editMode}
-                      <button class="btn-small" on:click={() => addRuleToAIScope(scopeName)} style="margin-top: 0.5rem;">
-                        + Add Rule
-                      </button>
-                    {/if}
+                    <button class="btn-small" class:hidden={!editMode} on:click={() => addRuleToAIScope(scopeName)} style="margin-top: 0.5rem;">
+                      + Add Rule
+                    </button>
                   </div>
                 {/if}
               {/each}
@@ -918,9 +1027,7 @@
             <h3>Device Sharing Presets</h3>
             <p class="help-text">Define presets for sharing device context information (hardware, software, etc.).</p>
 
-            {#if editMode && editedRules}
-              <button class="btn btn-add" on:click={addDeviceSharingPreset}>+ Add Preset</button>
-            {/if}
+            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addDeviceSharingPreset}>+ Add Preset</button>
 
             {#if displayRules?.device_sharing && Object.keys(displayRules.device_sharing).length > 0}
               {#each Object.entries(displayRules.device_sharing) as [presetName, rules]}
@@ -928,11 +1035,9 @@
                   <div class="peer-card">
                     <div class="group-header">
                       <h5>Preset: {presetName}</h5>
-                      {#if editMode}
-                        <button class="btn-icon" on:click={() => removeDeviceSharingPreset(presetName)} title="Delete preset">
-                          🗑️
-                        </button>
-                      {/if}
+                      <button class="btn-icon" class:hidden={!editMode} on:click={() => removeDeviceSharingPreset(presetName)} title="Delete preset">
+                        🗑️
+                      </button>
                     </div>
 
                     <div class="rule-list">
@@ -962,11 +1067,9 @@
                       {/each}
                     </div>
 
-                    {#if editMode}
-                      <button class="btn-small" on:click={() => addRuleToDeviceSharingPreset(presetName)} style="margin-top: 0.5rem;">
-                        + Add Rule
-                      </button>
-                    {/if}
+                    <button class="btn-small" class:hidden={!editMode} on:click={() => addRuleToDeviceSharingPreset(presetName)} style="margin-top: 0.5rem;">
+                      + Add Rule
+                    </button>
                   </div>
                 {/if}
               {/each}
@@ -989,9 +1092,7 @@
             {#if displayRules?.file_transfer}
               <!-- Group Permissions Section -->
               <h4>Group Permissions</h4>
-              {#if editMode && editedRules}
-                <button class="btn btn-add" on:click={addFileTransferGroup}>+ Add Group</button>
-              {/if}
+              <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addFileTransferGroup}>+ Add Group</button>
 
               {#if displayRules.file_transfer.groups && Object.keys(displayRules.file_transfer.groups).length > 0}
                 {#each Object.entries(displayRules.file_transfer.groups) as [groupName, groupSettings]}
@@ -999,11 +1100,9 @@
                     <div class="peer-card">
                       <div class="group-header">
                         <h5>Group: {groupName}</h5>
-                        {#if editMode}
-                          <button class="btn-icon" on:click={() => removeFileTransferGroup(groupName)} title="Delete group">
-                            🗑️
-                          </button>
-                        {/if}
+                        <button class="btn-icon" class:hidden={!editMode} on:click={() => removeFileTransferGroup(groupName)} title="Delete group">
+                          🗑️
+                        </button>
                       </div>
                       <div class="subsection">
                         <div class="setting-item">
@@ -1067,9 +1166,7 @@
 
               <!-- Node Permissions Section -->
               <h4>Individual Node Permissions</h4>
-              {#if editMode && editedRules}
-                <button class="btn btn-add" on:click={addFileTransferNode}>+ Add Node</button>
-              {/if}
+              <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addFileTransferNode}>+ Add Node</button>
 
               {#if displayRules.file_transfer.nodes && Object.keys(displayRules.file_transfer.nodes).length > 0}
                 {#each Object.entries(displayRules.file_transfer.nodes) as [nodeId, nodeSettings]}
@@ -1077,11 +1174,9 @@
                     <div class="peer-card">
                       <div class="group-header">
                         <h5>{nodeId}</h5>
-                        {#if editMode}
-                          <button class="btn-icon" on:click={() => removeFileTransferNode(nodeId)} title="Delete node">
-                            🗑️
-                          </button>
-                        {/if}
+                        <button class="btn-icon" class:hidden={!editMode} on:click={() => removeFileTransferNode(nodeId)} title="Delete node">
+                          🗑️
+                        </button>
                       </div>
                       <div class="subsection">
                         <div class="setting-item">
@@ -1373,9 +1468,7 @@
 
             <!-- Individual Nodes Section -->
             <h4>Individual Nodes</h4>
-            {#if editMode && editedRules}
-              <button class="btn btn-add" on:click={addNodePermission}>+ Add Node</button>
-            {/if}
+            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addNodePermission}>+ Add Node</button>
 
             {#if displayRules?.nodes && Object.keys(displayRules.nodes).length > 0}
               {#each Object.entries(displayRules.nodes) as [nodeId, rules]}
@@ -1383,11 +1476,9 @@
                   <div class="peer-card">
                     <div class="group-header">
                       <h5>{nodeId}</h5>
-                      {#if editMode}
-                        <button class="btn-icon" on:click={() => removeNodePermission(nodeId)} title="Delete node">
-                          🗑️
-                        </button>
-                      {/if}
+                      <button class="btn-icon" class:hidden={!editMode} on:click={() => removeNodePermission(nodeId)} title="Delete node">
+                        🗑️
+                      </button>
                     </div>
 
                     <div class="rule-list">
@@ -1417,11 +1508,9 @@
                       {/each}
                     </div>
 
-                    {#if editMode}
-                      <button class="btn-small" on:click={() => addRuleToNode(nodeId)} style="margin-top: 0.5rem;">
-                        + Add Rule
-                      </button>
-                    {/if}
+                    <button class="btn-small" class:hidden={!editMode} on:click={() => addRuleToNode(nodeId)} style="margin-top: 0.5rem;">
+                      + Add Rule
+                    </button>
                   </div>
                 {/if}
               {/each}
@@ -1431,9 +1520,7 @@
 
             <!-- Group Permissions Section -->
             <h4 style="margin-top: 1.5rem;">Group Permissions</h4>
-            {#if editMode && editedRules}
-              <button class="btn btn-add" on:click={addGroupPermission}>+ Add Group</button>
-            {/if}
+            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addGroupPermission}>+ Add Group</button>
 
             {#if displayRules?.groups && Object.keys(displayRules.groups).length > 0}
               {#each Object.entries(displayRules.groups) as [groupName, rules]}
@@ -1441,11 +1528,9 @@
                   <div class="peer-card">
                     <div class="group-header">
                       <h5>Group: {groupName}</h5>
-                      {#if editMode}
-                        <button class="btn-icon" on:click={() => removeGroupPermission(groupName)} title="Delete group">
-                          🗑️
-                        </button>
-                      {/if}
+                      <button class="btn-icon" class:hidden={!editMode} on:click={() => removeGroupPermission(groupName)} title="Delete group">
+                        🗑️
+                      </button>
                     </div>
 
                     <div class="rule-list">
@@ -1475,11 +1560,9 @@
                       {/each}
                     </div>
 
-                    {#if editMode}
-                      <button class="btn-small" on:click={() => addRuleToGroup(groupName)} style="margin-top: 0.5rem;">
-                        + Add Rule
-                      </button>
-                    {/if}
+                    <button class="btn-small" class:hidden={!editMode} on:click={() => addRuleToGroup(groupName)} style="margin-top: 0.5rem;">
+                      + Add Rule
+                    </button>
                   </div>
                 {/if}
               {/each}
@@ -1985,5 +2068,10 @@
   .event-name {
     text-transform: capitalize;
     font-size: 0.9rem;
+  }
+
+  /* v0.13.3: Fix for macOS WebKit event handler detachment issue */
+  .hidden {
+    display: none !important;
   }
 </style>

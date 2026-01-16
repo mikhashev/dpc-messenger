@@ -9,7 +9,7 @@ import websockets
 import socket
 import sys
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +19,7 @@ from .hub_client import HubClient
 from .p2p_manager import P2PManager
 from .llm_manager import LLMManager
 from .local_api import LocalApiServer
+from .file_server import FileServer
 from .context_cache import ContextCache
 from .settings import Settings
 from .token_cache import TokenCache
@@ -44,6 +45,9 @@ from .message_handlers.context_handler import (
 from .message_handlers.inference_handler import (
     RemoteInferenceRequestHandler, RemoteInferenceResponseHandler
 )
+from .message_handlers.transcription_handler import (
+    RemoteTranscriptionRequestHandler, RemoteTranscriptionResponseHandler
+)
 from .message_handlers.provider_handler import GetProvidersHandler, ProvidersResponseHandler
 from .message_handlers.knowledge_handler import (
     ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler,
@@ -59,11 +63,12 @@ from .message_handlers.file_chunk_handler import FileChunkHandler
 from .message_handlers.file_complete_handler import FileCompleteHandler
 from .message_handlers.file_cancel_handler import FileCancelHandler
 from .message_handlers.file_chunk_retry_handler import FileChunkRetryHandler
-from .message_handlers.image_handler import ImageOfferHandler
+from .message_handlers.voice_transcription_handler import VoiceTranscriptionHandler  # v0.13.2+ auto-transcription
 from .message_handlers.chat_history_handlers import RequestChatHistoryHandler, ChatHistoryResponseHandler
 from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
 )
+from .message_handlers.telegram_handler import TelegramIncomingHandler  # v0.14.0+ Telegram integration
 from .managers.file_transfer_manager import FileTransferManager
 from .managers.prompt_manager import PromptManager
 from .managers.instruction_manager import InstructionManager
@@ -122,6 +127,7 @@ class CoreService:
         self.cache = ContextCache()
 
         self.local_api = LocalApiServer(core_service=self)
+        self.file_server = FileServer(dpc_home_dir=DPC_HOME_DIR, host="127.0.0.1", port=9998)
 
         # Knowledge Architecture components (Phase 1-6)
         self.pcm_core = PCMCore(DPC_HOME_DIR / PERSONAL_CONTEXT)
@@ -227,6 +233,32 @@ class CoreService:
         self.session_manager.on_proposal_received = self._on_session_proposal_received
         self.session_manager.on_result_broadcast = self._broadcast_session_result
 
+        # Telegram bot integration (v0.14.0+)
+        self.telegram_manager = None
+        self.telegram_bridge = None
+        telegram_config = self.settings.get_telegram_config()
+        if telegram_config['enabled']:
+            try:
+                from .managers.telegram_manager import TelegramBotManager
+                from .coordinators.telegram_coordinator import TelegramBridge
+
+                # Initialize Telegram manager
+                self.telegram_manager = TelegramBotManager(self, telegram_config)
+
+                # Initialize Telegram bridge (depends on manager)
+                self.telegram_bridge = TelegramBridge(self, self.telegram_manager)
+
+                logger.info("Telegram bot integration initialized (whitelist: %d chat_ids)",
+                           len(telegram_config['allowed_chat_ids']))
+            except ImportError as e:
+                logger.warning(f"Failed to import telegram library: {e}. Install with: poetry install")
+                self.telegram_manager = None
+                self.telegram_bridge = None
+            except Exception as e:
+                logger.error(f"Failed to initialize Telegram integration: {e}", exc_info=True)
+                self.telegram_manager = None
+                self.telegram_bridge = None
+
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
@@ -251,6 +283,15 @@ class CoreService:
 
         # Track pending inference requests (for request-response matching)
         self._pending_inference_requests: Dict[str, asyncio.Future] = {}
+
+        # Track pending transcription requests (for request-response matching)
+        self._pending_transcription_requests: Dict[str, asyncio.Future] = {}
+
+        # Voice transcription tracking (v0.13.2+ auto-transcription)
+        self._voice_transcriptions: Dict[str, Dict[str, Any]] = {}  # transfer_id -> transcription_data
+        self._transcription_locks: Dict[str, asyncio.Lock] = {}  # transfer_id -> lock (prevents concurrent transcription)
+        self._voice_transcription_settings: Dict[str, bool] = {}  # node_id -> enabled (per-conversation setting)
+        self._load_voice_transcription_settings()  # Load from disk
 
         # Hub reconnection settings
         self._hub_reconnect_attempts = 0
@@ -309,6 +350,10 @@ class CoreService:
         self.message_router.register_handler(RemoteInferenceRequestHandler(self))
         self.message_router.register_handler(RemoteInferenceResponseHandler(self))
 
+        # Remote transcription (voice transcription sharing)
+        self.message_router.register_handler(RemoteTranscriptionRequestHandler(self))
+        self.message_router.register_handler(RemoteTranscriptionResponseHandler(self))
+
         # Provider discovery
         self.message_router.register_handler(GetProvidersHandler(self))
         self.message_router.register_handler(ProvidersResponseHandler(self))
@@ -331,13 +376,16 @@ class CoreService:
         self.message_router.register_handler(RelayMessageHandler(self))  # Message forwarding
         self.message_router.register_handler(RelayDisconnectHandler(self))  # Session cleanup
 
-        # File transfer handlers (v0.11.3: ImageOfferHandler replaces FileOfferHandler, handles both files and images)
-        self.message_router.register_handler(ImageOfferHandler(self))
+        # File transfer handlers (v0.13.0: FileOfferHandler handles images, voice messages, and regular files)
+        self.message_router.register_handler(FileOfferHandler(self))
         self.message_router.register_handler(FileAcceptHandler(self))
         self.message_router.register_handler(FileChunkHandler(self))
         self.message_router.register_handler(FileCompleteHandler(self))
         self.message_router.register_handler(FileCancelHandler(self))
         self.message_router.register_handler(FileChunkRetryHandler(self))  # v0.11.1
+
+        # Voice transcription (v0.13.2+)
+        self.message_router.register_handler(VoiceTranscriptionHandler(self))
 
         # Chat history sync handlers (v0.11.2)
         self.message_router.register_handler(RequestChatHistoryHandler(self))
@@ -347,6 +395,10 @@ class CoreService:
         self.message_router.register_handler(ProposeNewSessionHandler(self))
         self.message_router.register_handler(VoteNewSessionHandler(self))
         self.message_router.register_handler(NewSessionResultHandler(self))
+
+        # Telegram bot integration (v0.14.0+)
+        if self.telegram_manager:
+            self.message_router.register_handler(TelegramIncomingHandler(self))
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
 
@@ -453,6 +505,10 @@ class CoreService:
         api_task = asyncio.create_task(self.local_api.start())
         api_task.set_name("local_api")
         self._background_tasks.add(api_task)
+
+        # Start file server for browser file access (v0.13.3+)
+        self.file_server.start()
+        logger.info("File server started on http://127.0.0.1:9998")
 
         # Start STUN discovery task (background, non-blocking)
         stun_task = asyncio.create_task(self._discover_external_ip())
@@ -563,6 +619,13 @@ class CoreService:
         else:
             logger.warning("Phase 6 managers unavailable (DHT not initialized)")
 
+        # Start Telegram bot integration (v0.14.0+)
+        if self.telegram_manager:
+            logger.info("Starting Telegram bot integration...")
+            telegram_task = asyncio.create_task(self.telegram_manager.start())
+            telegram_task.set_name("telegram_bot")
+            self._background_tasks.add(telegram_task)
+
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
 
@@ -664,9 +727,25 @@ class CoreService:
             logger.info("Stopping Gossip Manager...")
             await self.gossip_manager.stop()
 
+        # Shutdown Telegram bot integration (v0.14.0+)
+        if hasattr(self, 'telegram_manager') and self.telegram_manager:
+            logger.info("Stopping Telegram bot...")
+            await self.telegram_manager.stop()
+
+        # Unload Whisper model if loaded (free VRAM before shutdown)
+        try:
+            for alias, provider in self.llm_manager.providers.items():
+                if provider.config.get('type') == 'local_whisper':
+                    if hasattr(provider, 'is_model_loaded') and provider.is_model_loaded():
+                        logger.info(f"Unloading Whisper model during shutdown: {alias}")
+                        await provider.unload_model_async()
+        except Exception as e:
+            logger.error(f"Error unloading Whisper model during shutdown: {e}", exc_info=True)
+
         # Shutdown core components
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()
+        self.file_server.stop()  # Stop HTTP file server
         await self.hub_client.close()
         logger.info("D-PC Core Service shut down")
 
@@ -893,9 +972,10 @@ class CoreService:
                 metadata={"last_connection_type": connection_type}
             )
 
-            # Auto-request chat history if our history is empty (v0.11.2)
+            # Auto-request chat history if our history is empty (v0.11.2+)
             # This handles reconnection after app restart
-            conversation_monitor = self.conversation_monitors.get(peer_id)
+            # Always create conversation monitor on connect to ensure both sides can sync
+            conversation_monitor = self._get_or_create_conversation_monitor(peer_id)
             if conversation_monitor:
                 history = conversation_monitor.get_message_history()
                 # Only request if: (1) history is empty AND (2) we haven't already requested for this peer
@@ -1323,10 +1403,12 @@ class CoreService:
             Dictionary with:
             - default_provider: str (text provider alias)
             - vision_provider: str (vision provider alias)
+            - voice_provider: str (voice transcription provider alias) v0.13.0+
         """
         return {
             "default_provider": self.llm_manager.default_provider or "",
-            "vision_provider": self.llm_manager.vision_provider or ""
+            "vision_provider": self.llm_manager.vision_provider or "",
+            "voice_provider": self.llm_manager.voice_provider or ""  # v0.13.0+
         }
 
     async def get_providers_list(self) -> Dict[str, Any]:
@@ -1335,24 +1417,116 @@ class CoreService:
 
         Returns:
             Dictionary with:
-            - providers: List of provider dicts with alias, model, type, supports_vision
+            - providers: List of provider dicts with alias, model, type, supports_vision, supports_voice
             - default_provider: Default text provider alias
             - vision_provider: Default vision provider alias
+            - voice_provider: Default voice transcription provider alias v0.13.0+
         """
         providers_info = []
         for alias, provider in self.llm_manager.providers.items():
-            providers_info.append({
+            provider_dict = {
                 "alias": alias,
                 "model": provider.model,
                 "type": provider.__class__.__name__.replace("Provider", ""),  # "Ollama", "OpenAICompatible", etc.
-                "supports_vision": provider.supports_vision()
-            })
+                "supports_vision": provider.supports_vision(),
+            }
+            # v0.13.0+: Add supports_voice flag for Whisper-capable providers
+            provider_dict["supports_voice"] = self._provider_supports_voice(provider)
+            providers_info.append(provider_dict)
 
         return {
             "providers": providers_info,
             "default_provider": self.llm_manager.default_provider or "",
-            "vision_provider": self.llm_manager.vision_provider or ""
+            "vision_provider": self.llm_manager.vision_provider or "",
+            "voice_provider": self.llm_manager.voice_provider or ""  # v0.13.0+
         }
+
+    def _provider_supports_voice(self, provider: Any) -> bool:
+        """
+        Check if a provider supports voice transcription (Whisper).
+
+        v0.13.1+: Updated to support LocalWhisperProvider.
+
+        Args:
+            provider: AIProvider instance
+
+        Returns:
+            True if provider supports voice transcription, False otherwise
+        """
+        provider_type = provider.__class__.__name__.replace("Provider", "")
+
+        # Local Whisper provider (offline transcription)
+        if provider_type == "LocalWhisper":
+            return True
+
+        # OpenAI/OpenAI-compatible providers (cloud-based transcription)
+        if provider_type == "OpenAICompatible":
+            return True
+
+        # Other providers (Ollama, Anthropic, Z.AI) do not support voice transcription
+        return False
+
+    async def set_voice_provider(self, provider_alias: str) -> Dict[str, Any]:
+        """
+        Set the default voice provider for transcription.
+
+        v0.13.0+: Sets the voice_provider field in providers.json.
+
+        Args:
+            provider_alias: Alias of the provider to set as default for voice transcription
+
+        Returns:
+            Dictionary with status and message
+        """
+        import json
+
+        # Validate provider exists and supports voice
+        if provider_alias not in self.llm_manager.providers:
+            return {
+                "status": "error",
+                "message": f"Provider '{provider_alias}' not found"
+            }
+
+        provider = self.llm_manager.providers[provider_alias]
+        if not self._provider_supports_voice(provider):
+            return {
+                "status": "error",
+                "message": f"Provider '{provider_alias}' does not support voice transcription"
+            }
+
+        try:
+            # Read current config
+            config_path = self.llm_manager.config_path
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+
+            # Update voice_provider
+            config["voice_provider"] = provider_alias
+
+            # Save updated config
+            with open(config_path, 'w') as f:
+                json.dump(config, f, indent=2)
+
+            # Reload providers
+            self.llm_manager.providers.clear()
+            self.llm_manager._load_providers_from_config()
+
+            # Broadcast event
+            await self.local_api.broadcast_event("default_providers_updated", {
+                "voice_provider": provider_alias
+            })
+
+            logger.info(f"Voice provider set to '{provider_alias}'")
+            return {
+                "status": "success",
+                "message": f"Voice provider set to '{provider_alias}'"
+            }
+        except Exception as e:
+            logger.error(f"Failed to set voice provider: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": f"Failed to set voice provider: {e}"
+            }
 
     async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1473,7 +1647,7 @@ class CoreService:
 
             if "type" not in provider:
                 errors.append(f"{prefix}: Missing 'type'")
-            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic"]:
+            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper"]:
                 errors.append(f"{prefix}: Invalid type '{provider['type']}'")
 
             if "model" not in provider:
@@ -2442,6 +2616,599 @@ class CoreService:
             "mime_type": mime_type
         }
 
+    async def send_voice_message(
+        self,
+        node_id: str,
+        audio_base64: str,
+        duration_seconds: float,
+        mime_type: str = "audio/webm"
+    ) -> dict:
+        """
+        Send voice message to peer via file transfer with voice metadata.
+
+        Args:
+            node_id: Target peer node ID
+            audio_base64: Base64-encoded audio data (raw, not data URL)
+            duration_seconds: Recording duration in seconds
+            mime_type: Audio MIME type (default: audio/webm)
+
+        Returns:
+            dict with transfer_id, file_path, size_bytes, voice_metadata
+
+        Raises:
+            ValueError: Invalid data, peer not connected, or privacy rules violation
+        """
+        from datetime import datetime, timezone
+        import base64
+        from pathlib import Path
+
+        # 1. Validate peer connection
+        connected_peers = self.p2p_coordinator.get_connected_peers()
+        if node_id not in connected_peers:
+            raise ValueError(f"Peer {node_id} not connected")
+
+        # 2. Decode audio data
+        try:
+            audio_data = base64.b64decode(audio_base64)
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 audio data: {e}")
+
+        # 3. Get voice settings
+        max_duration = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
+        max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
+        supported_mime_types = self.settings.get("voice_messages", "mime_types", "audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg,audio/wav").split(",")
+
+        # 4. Validate duration
+        if duration_seconds > max_duration:
+            raise ValueError(f"Voice message too long ({duration_seconds}s > {max_duration}s limit)")
+
+        # 5. Validate size
+        size_mb = len(audio_data) / (1024 * 1024)
+        if size_mb > max_size_mb:
+            raise ValueError(f"Voice message too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+
+        # 6. Validate mime type (strip parameters like ";codecs=opus")
+        mime_type_base = mime_type.split(";")[0].strip()
+        if mime_type_base not in supported_mime_types:
+            raise ValueError(f"Unsupported audio format: {mime_type}. Supported: {', '.join(supported_mime_types)}")
+
+        # 7. Check privacy rules (file_transfer rules apply)
+        rules = self.firewall.rules.get("file_transfer", {})
+        max_size_mb_rules = rules.get("max_size_mb", 100)
+        if size_mb > max_size_mb_rules:
+            raise ValueError(f"File too large by firewall rules ({size_mb:.2f} MB > {max_size_mb_rules} MB limit)")
+
+        # 8. Generate filename with timestamp
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        # Strip codec suffix from extension (e.g., "webm;codecs=opus" -> "webm")
+        extension = mime_type.split("/")[-1].split(";")[0].strip()
+        filename = f"voice_{timestamp}.{extension}"
+
+        # 9. Create voice messages directory
+        peer_files_dir = DPC_HOME_DIR / "conversations" / node_id / "files"
+        peer_files_dir.mkdir(parents=True, exist_ok=True)
+
+        # 10. Save voice file
+        file_path = peer_files_dir / filename
+
+        # Handle filename collisions
+        if file_path.exists():
+            stem = file_path.stem
+            suffix = file_path.suffix
+            counter = 1
+            while file_path.exists():
+                file_path = peer_files_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+        try:
+            with open(file_path, "wb") as f:
+                f.write(audio_data)
+            logger.info(f"Saved voice message: {file_path} ({len(audio_data)} bytes, {duration_seconds}s)")
+        except Exception as e:
+            raise ValueError(f"Failed to save voice file: {e}")
+
+        # 11. Send via file transfer with voice_metadata
+        voice_metadata = {
+            "duration_seconds": duration_seconds,
+            "sample_rate": int(self.settings.get("voice_messages", "default_sample_rate", "48000")),
+            "channels": int(self.settings.get("voice_messages", "default_channels", "1")),
+            "codec": self.settings.get("voice_messages", "default_codec", "opus"),
+            "recorded_at": datetime.now(timezone.utc).isoformat()
+        }
+
+        try:
+            transfer_id = await self.file_transfer_manager.send_file(
+                node_id=node_id,
+                file_path=file_path,
+                voice_metadata=voice_metadata
+            )
+        except Exception as e:
+            # Clean up file if transfer fails to start
+            if file_path.exists():
+                file_path.unlink()
+            raise ValueError(f"Failed to start voice transfer: {e}")
+
+        # 12. Return details for frontend
+        return {
+            "transfer_id": transfer_id,
+            "file_path": str(file_path),
+            "size_bytes": len(audio_data),
+            "duration_seconds": duration_seconds,
+            "voice_metadata": voice_metadata,
+            "mime_type": mime_type
+        }
+
+    async def transcribe_audio(
+        self,
+        audio_base64: str,
+        mime_type: str = "audio/webm",
+        provider_alias: str | None = None
+    ) -> dict:
+        """
+        Transcribe audio to text using local Whisper (primary), OpenAI API (fallback), or remote peer.
+
+        v0.13.1+: Hybrid local/cloud/remote transcription with automatic fallback.
+        v0.14.0+: Remote transcription support for P2P Whisper sharing.
+
+        Priority:
+        1. Remote peer (if provider_alias format is "remote:node_id:alias")
+        2. LocalWhisperProvider (if enabled and configured)
+        3. OpenAI/OpenAI-compatible provider (fallback)
+
+        Args:
+            audio_base64: Base64-encoded audio data (raw, not data URL)
+            mime_type: Audio MIME type (default: audio/webm)
+            provider_alias: Optional provider alias to use for transcription
+                           Format: "local:alias" or "remote:node_id:alias"
+
+        Returns:
+            dict with transcription text and provider info
+
+        Raises:
+            ValueError: Invalid data or transcription failed
+        """
+        import base64
+        import tempfile
+        from pathlib import Path
+
+        # 0. Check if this is a remote transcription request
+        if provider_alias and provider_alias.startswith("remote:"):
+            # Parse remote provider: "remote:node_id:alias"
+            parts = provider_alias.split(":", 2)
+            if len(parts) < 3:
+                raise ValueError(f"Invalid remote provider format: {provider_alias}. Expected 'remote:node_id:alias'")
+
+            node_id = parts[1]
+            remote_alias = parts[2]
+
+            logger.info(f"Remote transcription requested from peer {node_id[:20]}... using provider '{remote_alias}'")
+
+            try:
+                # Call remote peer for transcription
+                result = await self._request_transcription_from_peer(
+                    peer_id=node_id,
+                    audio_base64=audio_base64,
+                    mime_type=mime_type,
+                    provider=remote_alias,
+                    timeout=120.0  # 2-minute timeout for remote transcription
+                )
+
+                # Format result to match local transcription response
+                return {
+                    "text": result.get("text", ""),
+                    "language": result.get("language", "unknown"),
+                    "duration": result.get("duration_seconds", 0),
+                    "provider": f"remote_{result.get('provider', remote_alias)}",
+                    "remote_node_id": node_id
+                }
+
+            except Exception as e:
+                logger.error(f"Remote transcription failed: {e}", exc_info=True)
+                raise ValueError(f"Remote transcription failed: {e}")
+
+        # 1. Decode audio data
+        try:
+            audio_data = base64.b64decode(audio_base64)
+        except Exception as e:
+            raise ValueError(f"Failed to decode base64 audio data: {e}")
+
+        # 2. Validate size
+        max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
+        size_mb = len(audio_data) / (1024 * 1024)
+        if size_mb > max_size_mb:
+            raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+
+        # 3. Save to temporary file
+        with tempfile.NamedTemporaryFile(
+            delete=False,
+            suffix=f".{mime_type.split('/')[-1]}"
+        ) as temp_file:
+            temp_file.write(audio_data)
+            temp_path = temp_file.name
+
+        try:
+            # 4. Determine transcription method (local vs cloud)
+            transcription_method = None
+            provider_config = None
+            provider_obj = None
+
+            if provider_alias and provider_alias in self.llm_manager.providers:
+                # Use selected provider
+                provider_obj = self.llm_manager.providers[provider_alias]
+                provider_config = provider_obj.config
+                provider_type = provider_obj.config.get("type", "")
+
+                if provider_type == "local_whisper":
+                    transcription_method = "local_whisper"
+                elif provider_type == "openai" or provider_type == "openai_compatible":
+                    transcription_method = "openai"
+                else:
+                    raise ValueError(f"Provider '{provider_alias}' does not support voice transcription. Type: {provider_type}")
+
+                logger.info(f"Using selected voice provider: {provider_alias} ({transcription_method})")
+            else:
+                # Auto-detect: Try local first, then cloud
+                local_enabled = self.settings.get_local_transcription_enabled()
+
+                if local_enabled:
+                    # Check for LocalWhisperProvider in providers
+                    for provider in self.llm_manager.providers.values():
+                        if provider.config.get("type") == "local_whisper":
+                            provider_obj = provider
+                            provider_config = provider.config
+                            transcription_method = "local_whisper"
+
+                            # Check file size limit for local transcription
+                            local_max_mb = self.settings.get_local_transcription_max_file_size_mb()
+                            if size_mb > local_max_mb:
+                                logger.warning(f"Audio file ({size_mb:.2f} MB) exceeds local transcription limit ({local_max_mb} MB), skipping to cloud")
+                                transcription_method = None
+                            else:
+                                break
+
+                # Fallback to OpenAI if local not available or file too large
+                if not transcription_method:
+                    for provider in self.llm_manager.providers.values():
+                        if provider.config.get("type") == "openai" or provider.config.get("type") == "openai_compatible":
+                            provider_obj = provider
+                            provider_config = provider.config
+                            transcription_method = "openai"
+                            break
+
+            if not provider_config:
+                raise ValueError(
+                    "No voice transcription provider found. Please add a local_whisper or OpenAI-compatible provider.\n"
+                    "Recommended: Add a local_whisper provider for privacy, with OpenAI as fallback."
+                )
+
+            logger.info(f"Transcribing audio using {transcription_method}: {len(audio_data)} bytes, mime_type={mime_type}")
+
+            # 5. Perform transcription
+            result = None
+
+            if transcription_method == "local_whisper":
+                try:
+                    # Use local Whisper provider
+                    result = await provider_obj.transcribe(temp_path)
+                    logger.info(f"Local transcription successful: {result['text'][:100]}...")
+
+                except Exception as local_error:
+                    # Check if this is a model not cached error
+                    from dpc_client_core.llm_manager import ModelNotCachedError
+                    if isinstance(local_error.__cause__, ModelNotCachedError) or isinstance(local_error, ModelNotCachedError):
+                        # Model needs to be downloaded - broadcast event to UI
+                        error_details = local_error.__cause__ if isinstance(local_error.__cause__, ModelNotCachedError) else local_error
+
+                        logger.info(f"Whisper model not cached, prompting user for download")
+
+                        await self.local_api.broadcast_event("whisper_model_download_required", {
+                            "model_name": error_details.model_name,
+                            "cache_path": error_details.cache_path,
+                            "download_size_gb": error_details.download_size_gb,
+                            "provider_alias": provider_obj.alias
+                        })
+
+                        # Don't try fallback for this error - user needs to confirm download
+                        raise ValueError(
+                            f"Model '{error_details.model_name}' not cached locally. "
+                            f"Please confirm download in the dialog to proceed."
+                        ) from local_error
+
+                    logger.warning(f"Local transcription failed: {local_error}")
+
+                    # Check if fallback is enabled
+                    fallback_enabled = self.settings.get_local_transcription_fallback_to_openai()
+
+                    if fallback_enabled:
+                        logger.info("Falling back to OpenAI API transcription...")
+
+                        # Find OpenAI provider for fallback
+                        fallback_provider = None
+                        for provider in self.llm_manager.providers.values():
+                            if provider.config.get("type") == "openai" or provider.config.get("type") == "openai_compatible":
+                                fallback_provider = provider
+                                break
+
+                        if not fallback_provider:
+                            raise ValueError("Local transcription failed and no OpenAI provider available for fallback") from local_error
+
+                        # Use OpenAI API
+                        result = await self._transcribe_with_openai(temp_path, fallback_provider.config)
+                        result["fallback_reason"] = str(local_error)
+                    else:
+                        raise RuntimeError(f"Local transcription failed and fallback disabled: {local_error}") from local_error
+
+            elif transcription_method == "openai":
+                # Use OpenAI API
+                result = await self._transcribe_with_openai(temp_path, provider_config)
+
+            else:
+                raise ValueError(f"Unknown transcription method: {transcription_method}")
+
+            logger.info(f"Transcription successful ({result['provider']}): {len(result['text'])} characters")
+
+            return {
+                "status": "success",
+                "text": result["text"],
+                "provider": result["provider"],
+                "language": result.get("language", "unknown"),
+                "duration": result.get("duration", 0),
+                "fallback_reason": result.get("fallback_reason")
+            }
+
+        except Exception as e:
+            logger.error(f"Audio transcription failed: {e}", exc_info=True)
+
+            # Broadcast error toast to UI for OOM errors (v0.14.1+)
+            error_msg = str(e)
+            if "VRAM" in error_msg or "too long" in error_msg or "CUDA out of memory" in error_msg:
+                await self.local_api.broadcast_event("error_toast", {
+                    "title": "Transcription Failed",
+                    "message": error_msg,
+                    "duration": 5000  # Show for 5 seconds
+                })
+
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+        finally:
+            # Clean up temp file
+            try:
+                Path(temp_path).unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    async def preload_whisper_model(self, provider_alias: str | None = None) -> dict:
+        """
+        Pre-load Whisper model into memory/GPU for faster first transcription.
+
+        Called by UI when user enables auto-transcribe to avoid delays on first voice message.
+
+        Args:
+            provider_alias: Optional provider alias (default: first local_whisper provider)
+
+        Returns:
+            dict with status and info
+        """
+        try:
+            # Find Whisper provider
+            provider_obj = None
+
+            if provider_alias:
+                provider_obj = self.llm_manager.providers.get(provider_alias)
+                if not provider_obj or provider_obj.config.get("type") != "local_whisper":
+                    return {
+                        "status": "error",
+                        "error": f"Provider '{provider_alias}' is not a local Whisper provider"
+                    }
+            else:
+                # Find first local_whisper provider
+                for provider in self.llm_manager.providers.values():
+                    if provider.config.get("type") == "local_whisper":
+                        provider_obj = provider
+                        provider_alias = provider.alias
+                        break
+
+                if not provider_obj:
+                    return {
+                        "status": "error",
+                        "error": "No local Whisper provider configured"
+                    }
+
+            # Check if already loaded
+            if hasattr(provider_obj, 'is_model_loaded') and provider_obj.is_model_loaded():
+                logger.info(f"Whisper model already loaded for provider '{provider_alias}'")
+                return {
+                    "status": "success",
+                    "provider": provider_alias,
+                    "already_loaded": True
+                }
+
+            # Broadcast loading started event
+            await self.local_api.broadcast_event("whisper_model_loading_started", {
+                "provider": provider_alias
+            })
+
+            # Load model (this runs in thread pool, so it won't block)
+            logger.info(f"Pre-loading Whisper model for provider '{provider_alias}'...")
+
+            if hasattr(provider_obj, 'ensure_model_loaded'):
+                await provider_obj.ensure_model_loaded()
+            else:
+                # Fallback: trigger loading via a dummy transcription (silent audio)
+                logger.warning(f"Provider '{provider_alias}' doesn't support ensure_model_loaded(), using fallback")
+                return {
+                    "status": "error",
+                    "error": "Provider doesn't support pre-loading"
+                }
+
+            # Broadcast loading completed event
+            await self.local_api.broadcast_event("whisper_model_loaded", {
+                "provider": provider_alias
+            })
+
+            logger.info(f"Successfully pre-loaded Whisper model for provider '{provider_alias}'")
+
+            return {
+                "status": "success",
+                "provider": provider_alias,
+                "already_loaded": False
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to pre-load Whisper model: {e}", exc_info=True)
+
+            # Broadcast loading failed event
+            await self.local_api.broadcast_event("whisper_model_loading_failed", {
+                "provider": provider_alias if provider_alias else "unknown",
+                "error": str(e)
+            })
+
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def download_whisper_model(self, provider_alias: str | None = None) -> dict:
+        """
+        Download Whisper model from HuggingFace to local cache.
+
+        Called by UI when user confirms download in the dialog.
+
+        Args:
+            provider_alias: Optional provider alias (default: first local_whisper provider)
+
+        Returns:
+            dict with status and info
+        """
+        try:
+            # Find Whisper provider
+            provider_obj = None
+
+            if provider_alias:
+                provider_obj = self.llm_manager.providers.get(provider_alias)
+                if not provider_obj or provider_obj.config.get("type") != "local_whisper":
+                    return {
+                        "status": "error",
+                        "error": f"Provider '{provider_alias}' is not a local Whisper provider"
+                    }
+            else:
+                # Find first local_whisper provider
+                for provider in self.llm_manager.providers.values():
+                    if provider.config.get("type") == "local_whisper":
+                        provider_obj = provider
+                        provider_alias = provider.alias
+                        break
+
+                if not provider_obj:
+                    return {
+                        "status": "error",
+                        "error": "No local Whisper provider configured"
+                    }
+
+            # Check if provider supports download
+            if not hasattr(provider_obj, 'download_model_async'):
+                return {
+                    "status": "error",
+                    "error": f"Provider '{provider_alias}' doesn't support model download"
+                }
+
+            # Broadcast download started event
+            await self.local_api.broadcast_event("whisper_model_download_started", {
+                "provider": provider_alias,
+                "model_name": provider_obj.config.get("model", "unknown")
+            })
+
+            # Download model (this runs in thread pool, so it won't block)
+            logger.info(f"Starting Whisper model download for provider '{provider_alias}'...")
+
+            result = await provider_obj.download_model_async()
+
+            if result.get("success"):
+                # Broadcast download completed event
+                await self.local_api.broadcast_event("whisper_model_download_completed", {
+                    "provider": provider_alias,
+                    "model_name": result.get("model_name"),
+                    "cache_path": result.get("cache_path")
+                })
+
+                logger.info(f"Successfully downloaded Whisper model for provider '{provider_alias}'")
+
+                return {
+                    "status": "success",
+                    "provider": provider_alias,
+                    "model_name": result.get("model_name"),
+                    "message": result.get("message")
+                }
+            else:
+                # Broadcast download failed event
+                await self.local_api.broadcast_event("whisper_model_download_failed", {
+                    "provider": provider_alias,
+                    "error": result.get("message")
+                })
+
+                return {
+                    "status": "error",
+                    "error": result.get("message")
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to download Whisper model: {e}", exc_info=True)
+
+            # Broadcast download failed event
+            await self.local_api.broadcast_event("whisper_model_download_failed", {
+                "provider": provider_alias if provider_alias else "unknown",
+                "error": str(e)
+            })
+
+            return {
+                "status": "error",
+                "error": str(e)
+            }
+
+    async def _transcribe_with_openai(self, audio_path: str, provider_config: dict) -> dict:
+        """
+        Transcribe audio using OpenAI Whisper API.
+
+        Args:
+            audio_path: Path to audio file
+            provider_config: Provider configuration dict
+
+        Returns:
+            Dict with transcription results
+        """
+        import os
+        from openai import AsyncOpenAI
+
+        # Get API key
+        api_key = provider_config.get("api_key_env")
+        if not api_key:
+            raise ValueError("OpenAI API key not configured")
+
+        api_key_value = os.environ.get(api_key)
+        if not api_key_value:
+            raise ValueError(f"OpenAI API key environment variable '{api_key}' not set")
+
+        # Create client
+        base_url = provider_config.get("base_url", "https://api.openai.com/v1")
+        client = AsyncOpenAI(api_key=api_key_value, base_url=base_url)
+
+        # Transcribe
+        with open(audio_path, "rb") as audio_file:
+            transcript = await client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file,
+                response_format="text"
+            )
+
+        return {
+            "text": transcript,
+            "language": "unknown",  # OpenAI API doesn't return language in text format
+            "duration": 0,  # OpenAI API doesn't return duration
+            "provider": "openai"
+        }
+
     async def get_token_usage(self, conversation_id: str) -> Dict[str, Any]:
         """Get token usage statistics for a conversation
 
@@ -2471,6 +3238,426 @@ class CoreService:
                 "token_limit": 100000,
                 "usage_percent": 0.0
             }
+
+    # Voice Transcription Methods (v0.13.2+ auto-transcription)
+
+    async def _maybe_transcribe_voice_message(
+        self,
+        transfer_id: str,
+        node_id: str,
+        file_path: Path,
+        voice_metadata: Dict[str, Any],
+        is_sender: bool,
+        allow_model_load: bool = False
+    ) -> None:
+        """
+        Conditionally trigger auto-transcription for a voice message.
+
+        Implements distributed transcription protocol:
+        - Sender: Optionally transcribes immediately (if sender_transcribes=true)
+        - Recipients: Wait N seconds, then check if transcription exists. If not, first capable recipient transcribes.
+
+        Args:
+            transfer_id: Unique transfer identifier
+            node_id: Peer node ID
+            file_path: Path to voice file
+            voice_metadata: Voice metadata dict (duration, codec, etc.)
+            is_sender: True if this node sent the voice message, False if received
+            allow_model_load: If True, allow model loading even for receivers (for retroactive transcription)
+        """
+        # 1. Check if auto-transcription is enabled globally
+        if not self.settings.get_voice_transcription_enabled():
+            logger.debug(f"Auto-transcription disabled globally, skipping transfer {transfer_id}")
+            return
+
+        # 2. Check per-conversation transcription setting (frontend checkbox)
+        # Default to True if not set (backward compatibility)
+        per_conversation_enabled = self._voice_transcription_settings.get(node_id, True)
+        if not per_conversation_enabled:
+            logger.debug(f"Auto-transcription disabled for conversation with {node_id}, skipping transfer {transfer_id}")
+            return
+
+        # 3. Check if already transcribed (deduplication)
+        if transfer_id in self._voice_transcriptions:
+            logger.debug(f"Transfer {transfer_id} already transcribed, skipping")
+            return
+
+        # 4. Check if this is a sender and sender_transcribes is disabled
+        if is_sender and not self.settings.get_voice_transcription_sender_transcribes():
+            logger.debug(f"Sender transcription disabled, skipping transfer {transfer_id}")
+            return
+
+        # 5. Acquire transcription lock to prevent race conditions
+        if transfer_id not in self._transcription_locks:
+            self._transcription_locks[transfer_id] = asyncio.Lock()
+
+        async with self._transcription_locks[transfer_id]:
+            # Double-check after acquiring lock
+            if transfer_id in self._voice_transcriptions:
+                logger.debug(f"Transfer {transfer_id} was transcribed while waiting for lock")
+                return
+
+            # 6. Recipients wait N seconds before attempting transcription (gives sender time to transcribe first)
+            if not is_sender:
+                delay = self.settings.get_voice_transcription_recipient_delay_seconds()
+                logger.debug(f"Recipient waiting {delay}s before checking transcription for {transfer_id}")
+                await asyncio.sleep(delay)
+
+                # Check again after delay
+                if transfer_id in self._voice_transcriptions:
+                    logger.debug(f"Transfer {transfer_id} was transcribed during delay period")
+                    return
+
+            # 7. Check if this node has transcription capability
+            # For receivers: check if model is loaded (enables passive wait mode if not ready)
+            #   UNLESS allow_model_load=True (retroactive transcription case)
+            # For senders: check if provider exists (allow lazy loading to handle model)
+            check_loaded = not is_sender and not allow_model_load
+            has_capability = await self._check_transcription_capability(check_model_loaded=check_loaded)
+            if not has_capability:
+                # No local capability - wait for peer's transcription (passive mode)
+                if not is_sender:
+                    timeout_seconds = self.settings.get_voice_transcription_timeout_seconds() or 240
+                    # Log start of passive wait mode (v0.13.3+ - better UX logging)
+                    logger.info(f"Starting passive wait mode for {transfer_id}: waiting {timeout_seconds}s for sender's transcription")
+                    # Wait for peer to send transcription with progress logging
+                    for i in range(timeout_seconds):
+                        await asyncio.sleep(1)
+
+                        # Log progress every 30 seconds (v0.13.3+)
+                        if i > 0 and i % 30 == 0:
+                            logger.info(f"Still waiting for sender's transcription for {transfer_id}: {i}/{timeout_seconds}s elapsed")
+
+                        if transfer_id in self._voice_transcriptions:
+                            logger.info(f"Received transcription from sender for {transfer_id} after {i}s")
+                            return
+
+                    # Timeout expired - transcribe locally (v0.13.3+ - clearer logging)
+                    logger.warning(f"Timeout after {timeout_seconds}s: No transcription received from sender for {transfer_id}")
+                    logger.info(f"Starting local transcription for {transfer_id} (will load Whisper model if needed)")
+
+                    has_capability_lazy = await self._check_transcription_capability(check_model_loaded=False)
+                    if not has_capability_lazy:
+                        logger.error(f"No transcription provider configured at all for {transfer_id}, giving up")
+                        return
+                    # Fall through to transcribe locally
+                    logger.info(f"Transcription capability found (lazy loading), proceeding to transcribe {transfer_id}")
+                else:
+                    logger.info(f"Sender has no transcription provider configured for {transfer_id}, skipping")
+                    return
+
+            # 7. Read audio file and convert to base64
+            try:
+                with open(file_path, "rb") as f:
+                    audio_data = f.read()
+                import base64
+                audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+            except Exception as e:
+                logger.error(f"Failed to read audio file for transcription: {e}")
+                return
+
+            # 8. Final check: Did peer send transcription while we were preparing?
+            # This prevents duplicate work if sender took long to load model but finished before us
+            if transfer_id in self._voice_transcriptions:
+                logger.info(f"Transcription received from peer while preparing, cancelling local attempt for {transfer_id}")
+                return
+
+            # 9. Transcribe audio using configured provider
+            try:
+                mime_type = voice_metadata.get("mime_type", "audio/webm")
+
+                # Use provider priority list
+                provider_priority = self.settings.get_voice_transcription_provider_priority()
+                result = None
+
+                for provider_alias in provider_priority:
+                    try:
+                        logger.info(f"Attempting transcription with provider: {provider_alias}")
+                        result = await self.transcribe_audio(audio_base64, mime_type, provider_alias)
+                        break  # Success, stop trying providers
+                    except Exception as e:
+                        logger.warning(f"Transcription failed with {provider_alias}: {e}")
+                        continue  # Try next provider
+
+                if result is None:
+                    logger.error(f"All transcription providers failed for transfer {transfer_id}")
+                    return
+
+                # 9. Validate transcription result (ensure not empty)
+                transcription_text = result.get("text", "").strip()
+                if not transcription_text:
+                    logger.error(f"Transcription returned empty text for transfer {transfer_id}, result: {result}")
+                    return
+
+                # 9a. Final check before storing: Did peer send transcription while we were transcribing?
+                # Prefer peer's transcription over ours if both completed (first-wins deduplication)
+                existing = self._voice_transcriptions.get(transfer_id)
+                if existing and existing.get("success", False):
+                    logger.info(f"Peer's transcription arrived while we were transcribing {transfer_id}, discarding local result")
+                    return
+
+                # 10. Store transcription locally
+                from datetime import datetime, timezone
+                transcription_data = {
+                    "text": transcription_text,
+                    "transcriber_node_id": self.p2p_manager.node_id,  # Orchestrator
+                    "provider": result.get("provider", "unknown"),
+                    "confidence": result.get("confidence", 0.0),
+                    "language": result.get("language", "unknown"),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "success": True  # Mark as successful transcription
+                }
+
+                # Add remote provider credit if used (v0.13.2+ remote transcription)
+                if "remote_node_id" in result:
+                    transcription_data["remote_provider_node_id"] = result["remote_node_id"]
+
+                self._voice_transcriptions[transfer_id] = transcription_data
+
+                # 11. Broadcast transcription to peers (only if not empty)
+                logger.info(f"Broadcasting transcription to peer {node_id}: {len(transcription_text)} chars")
+                await self._broadcast_voice_transcription(node_id, transfer_id, transcription_data)
+
+                # 12. Notify UI
+                await self.local_api.broadcast_event("voice_transcription_complete", {
+                    "transfer_id": transfer_id,
+                    "node_id": node_id,
+                    **transcription_data
+                })
+
+                logger.info(f"Successfully transcribed voice message {transfer_id} using {result.get('provider')} ({len(transcription_text)} chars)")
+
+            except Exception as e:
+                logger.error(f"Transcription failed for transfer {transfer_id}: {e}", exc_info=True)
+
+    def _load_voice_transcription_settings(self) -> None:
+        """
+        Load per-conversation voice transcription settings from disk.
+
+        Settings stored in ~/.dpc/voice_transcription_settings.json:
+        {
+            "node_id_1": true,
+            "node_id_2": false,
+            ...
+        }
+        """
+        settings_file = DPC_HOME_DIR / "voice_transcription_settings.json"
+        if settings_file.exists():
+            try:
+                import json
+                with open(settings_file, 'r') as f:
+                    self._voice_transcription_settings = json.load(f)
+                logger.debug(f"Loaded voice transcription settings for {len(self._voice_transcription_settings)} conversations")
+            except Exception as e:
+                logger.warning(f"Failed to load voice transcription settings: {e}")
+                self._voice_transcription_settings = {}
+        else:
+            logger.debug("No voice transcription settings file found, using empty settings")
+            self._voice_transcription_settings = {}
+
+    def _save_voice_transcription_settings(self) -> None:
+        """Save per-conversation voice transcription settings to disk."""
+        settings_file = DPC_HOME_DIR / "voice_transcription_settings.json"
+        try:
+            import json
+            with open(settings_file, 'w') as f:
+                json.dump(self._voice_transcription_settings, f, indent=2)
+            logger.debug(f"Saved voice transcription settings for {len(self._voice_transcription_settings)} conversations")
+        except Exception as e:
+            logger.error(f"Failed to save voice transcription settings: {e}")
+
+    def _is_transcription_needed(self) -> bool:
+        """
+        Check if any active conversation has auto-transcribe enabled.
+
+        Returns:
+            True if at least one conversation needs transcription, False otherwise.
+
+        Used to determine if Whisper model can be safely unloaded.
+        """
+        # Check if global auto-transcribe is enabled
+        value = self.settings.get('voice_messages', 'auto_transcribe', fallback='true')
+        global_enabled = value.lower() in ('true', '1', 'yes')
+
+        if not global_enabled:
+            return False  # Global disable overrides all
+
+        # Check per-conversation settings
+        for node_id, enabled in self._voice_transcription_settings.items():
+            if enabled:
+                return True  # At least one conversation needs it
+
+        return False  # No conversations need transcription
+
+    async def _retroactively_transcribe_conversation(self, node_id: str) -> None:
+        """
+        Retroactively transcribe all untranscribed voice messages in a conversation.
+
+        Called when user enables auto-transcribe checkbox. Scans conversation history
+        for voice messages without transcriptions and transcribes them in background.
+
+        Args:
+            node_id: Peer node ID for the conversation
+        """
+        try:
+            # Get conversation monitor
+            monitor = self.conversation_monitors.get(node_id)
+            if not monitor:
+                logger.debug(f"No conversation monitor for {node_id}, skipping retroactive transcription")
+                return
+
+            # Get message history
+            history = monitor.get_message_history()
+
+            # Find all voice messages without transcriptions
+            untranscribed_voices = []
+            for msg in history:
+                if "attachments" in msg:
+                    for attachment in msg["attachments"]:
+                        if attachment.get("type") == "voice":
+                            transfer_id = attachment.get("transfer_id")
+                            file_path_str = attachment.get("file_path")
+                            voice_metadata = attachment.get("voice_metadata")
+
+                            # Check if already transcribed
+                            if transfer_id and transfer_id not in self._voice_transcriptions:
+                                if file_path_str and voice_metadata:
+                                    file_path = Path(file_path_str)
+                                    if file_path.exists():
+                                        untranscribed_voices.append({
+                                            "transfer_id": transfer_id,
+                                            "file_path": file_path,
+                                            "voice_metadata": voice_metadata
+                                        })
+
+            if not untranscribed_voices:
+                logger.debug(f"No untranscribed voice messages found for {node_id}")
+                return
+
+            logger.info(f"Found {len(untranscribed_voices)} untranscribed voice messages for {node_id}, starting retroactive transcription")
+
+            # Broadcast start event to UI
+            await self.local_api.broadcast_event("retroactive_transcription_started", {
+                "node_id": node_id,
+                "total_count": len(untranscribed_voices)
+            })
+
+            # Transcribe each voice message
+            for idx, voice_data in enumerate(untranscribed_voices):
+                try:
+                    # Broadcast progress to UI
+                    await self.local_api.broadcast_event("retroactive_transcription_progress", {
+                        "node_id": node_id,
+                        "current": idx + 1,
+                        "total": len(untranscribed_voices)
+                    })
+
+                    # Use the existing transcription logic
+                    await self._maybe_transcribe_voice_message(
+                        transfer_id=voice_data["transfer_id"],
+                        node_id=node_id,
+                        file_path=voice_data["file_path"],
+                        voice_metadata=voice_data["voice_metadata"],
+                        is_sender=False,  # Treat as receiver (no delay)
+                        allow_model_load=True  # v0.13.3: Allow model loading for retroactive transcription
+                    )
+
+                    logger.debug(f"Retroactively transcribed {idx + 1}/{len(untranscribed_voices)} for {node_id}")
+
+                except Exception as e:
+                    logger.error(f"Failed to retroactively transcribe voice message {voice_data['transfer_id']}: {e}", exc_info=True)
+                    continue  # Continue with next message
+
+            # Broadcast completion event to UI
+            await self.local_api.broadcast_event("retroactive_transcription_completed", {
+                "node_id": node_id,
+                "transcribed_count": len(untranscribed_voices)
+            })
+
+            logger.info(f"Retroactive transcription completed for {node_id}: {len(untranscribed_voices)} messages transcribed")
+
+        except Exception as e:
+            logger.error(f"Error during retroactive transcription for {node_id}: {e}", exc_info=True)
+            # Broadcast error event to UI
+            try:
+                await self.local_api.broadcast_event("retroactive_transcription_error", {
+                    "node_id": node_id,
+                    "error": str(e)
+                })
+            except Exception:
+                pass  # Ignore broadcast errors
+
+    async def _check_transcription_capability(self, check_model_loaded: bool = True) -> bool:
+        """
+        Check if this node has transcription capability (provider available AND ready).
+
+        Args:
+            check_model_loaded: If True, check if local_whisper model is loaded in memory.
+                               If False, only check if provider exists (allow lazy loading).
+                               Use False for senders, True for receivers.
+
+        For local_whisper providers, optionally checks if model is actually loaded in memory.
+        This prevents failed transcription attempts when model is not ready.
+
+        Returns:
+            True if at least one transcription provider is available (and loaded if check_model_loaded=True)
+        """
+        provider_priority = self.settings.get_voice_transcription_provider_priority()
+        logger.debug(f"Checking transcription capability with provider priority: {provider_priority} (check_loaded={check_model_loaded})")
+        logger.debug(f"Available LLM providers: {list(self.llm_manager.providers.keys())}")
+
+        for provider_alias in provider_priority:
+            # Check if provider exists in LLM manager
+            if provider_alias in self.llm_manager.providers:
+                provider = self.llm_manager.providers[provider_alias]
+                # Check if provider supports voice (has whisper or audio capabilities)
+                provider_type = provider.config.get("type", "")
+                logger.debug(f"Provider '{provider_alias}' has type '{provider_type}'")
+
+                if provider_type in ["local_whisper", "openai", "openai_compatible"]:
+                    # For local_whisper, optionally check if model is actually loaded
+                    if check_model_loaded and provider_type == "local_whisper":
+                        if hasattr(provider, 'is_model_loaded') and not provider.is_model_loaded():
+                            logger.info(f"Provider '{provider_alias}' exists but model not loaded yet, skipping")
+                            continue  # Try next provider
+
+                    logger.info(f"Found transcription capability: {provider_alias} ({provider_type})")
+                    return True
+            else:
+                logger.debug(f"Provider '{provider_alias}' not found in LLM manager")
+
+        logger.warning(f"No transcription providers found in priority list: {provider_priority}")
+        return False
+
+    async def _broadcast_voice_transcription(
+        self,
+        node_id: str,
+        transfer_id: str,
+        transcription_data: Dict[str, Any]
+    ) -> None:
+        """
+        Broadcast VOICE_TRANSCRIPTION message to peer(s).
+
+        Args:
+            node_id: Peer node ID to send to
+            transfer_id: Voice message transfer ID
+            transcription_data: Transcription result
+        """
+        message = {
+            "command": "VOICE_TRANSCRIPTION",
+            "payload": {
+                "transfer_id": transfer_id,
+                "transcription_text": transcription_data.get("text", ""),
+                **transcription_data
+            }
+        }
+
+        # Send to specific peer
+        try:
+            await self.p2p_manager.send_message_to_peer(node_id, message)
+            logger.debug(f"Broadcasted VOICE_TRANSCRIPTION for {transfer_id} to {node_id}")
+        except Exception as e:
+            logger.error(f"Failed to broadcast transcription to {node_id}: {e}")
 
     async def get_firewall_rules(self) -> Dict[str, Any]:
         """Get current firewall rules as JSON dict for editor.
@@ -2620,6 +3807,168 @@ class CoreService:
             return {
                 "status": "error",
                 "message": str(e)
+            }
+
+    async def get_voice_transcription_config(self) -> Dict[str, Any]:
+        """
+        Get voice transcription configuration.
+
+        UI Integration: Called when user opens voice transcription settings.
+
+        Returns:
+            Dict with voice transcription settings
+        """
+        try:
+            return {
+                "status": "success",
+                "enabled": self.settings.get_voice_transcription_enabled(),
+                "sender_transcribes": self.settings.get_voice_transcription_sender_transcribes(),
+                "recipient_delay_seconds": self.settings.get_voice_transcription_recipient_delay_seconds(),
+                "provider_priority": self.settings.get_voice_transcription_provider_priority(),
+                "show_transcriber_name": self.settings.get_voice_transcription_show_transcriber_name(),
+                "cache_enabled": self.settings.get_voice_transcription_cache_enabled(),
+                "fallback_to_openai": self.settings.get_voice_transcription_fallback_to_openai()
+            }
+        except Exception as e:
+            logger.error("Error getting voice transcription config: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def save_voice_transcription_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Save voice transcription configuration.
+
+        UI Integration: Called when user saves voice transcription settings.
+
+        Args:
+            config: Voice transcription configuration dict
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            # Update settings
+            for key, value in config.items():
+                if key == "status":  # Skip status field from request
+                    continue
+                config_value = str(value) if not isinstance(value, list) else ",".join(value)
+                self.settings.set('voice_transcription', key, config_value)
+
+            # Persist to disk
+            self.settings.save()
+
+            # Broadcast update event to UI
+            await self.local_api.broadcast_event("voice_transcription_config_updated", config)
+
+            return {
+                "status": "success",
+                "message": "Voice transcription settings saved successfully"
+            }
+
+        except Exception as e:
+            logger.error("Error saving voice transcription config: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def set_conversation_transcription(self, node_id: str, enabled: bool) -> Dict[str, Any]:
+        """
+        Set per-conversation auto-transcription setting (v0.13.2+ UI checkbox control).
+
+        UI Integration: Called when user toggles "Auto Transcribe" checkbox in chat header.
+
+        Args:
+            node_id: Peer node ID for the conversation
+            enabled: True to enable auto-transcription, False to disable
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            # Update in-memory setting
+            self._voice_transcription_settings[node_id] = enabled
+
+            # Persist to disk
+            self._save_voice_transcription_settings()
+
+            logger.info(f"Set auto-transcription for {node_id}: {enabled}")
+
+            # If enabling auto-transcribe, retroactively transcribe previous untranscribed voice messages
+            if enabled:
+                asyncio.create_task(self._retroactively_transcribe_conversation(node_id))
+
+            # Check if we should unload the model
+            if not enabled:
+                # Check if any other conversation still needs transcription
+                if not self._is_transcription_needed():
+                    logger.info("Auto-transcribe disabled for all conversations, unloading Whisper model...")
+
+                    # Find the local_whisper provider
+                    whisper_provider = None
+                    for alias, provider in self.llm_manager.providers.items():
+                        if provider.config.get('type') == 'local_whisper':
+                            if hasattr(provider, 'unload_model_async'):
+                                whisper_provider = provider
+                                break
+
+                    # Unload the model
+                    if whisper_provider:
+                        try:
+                            await whisper_provider.unload_model_async()
+
+                            # Broadcast unload event to UI
+                            await self.local_api.broadcast_event("whisper_model_unloaded", {
+                                "reason": "auto_transcribe_disabled"
+                            })
+
+                            logger.info("Whisper model unloaded successfully")
+                        except Exception as e:
+                            logger.error(f"Failed to unload Whisper model: {e}", exc_info=True)
+                    else:
+                        logger.debug("No local_whisper provider found to unload")
+
+            return {
+                "status": "success",
+                "message": f"Auto-transcription {'enabled' if enabled else 'disabled'} for conversation"
+            }
+
+        except Exception as e:
+            logger.error(f"Error setting conversation transcription for {node_id}: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_conversation_transcription(self, node_id: str) -> Dict[str, Any]:
+        """
+        Get per-conversation auto-transcription setting (v0.13.2+ UI checkbox state).
+
+        UI Integration: Called when chat loads to restore checkbox state.
+
+        Args:
+            node_id: Peer node ID for the conversation
+
+        Returns:
+            Dict with status and enabled flag
+        """
+        try:
+            # Default to True if not set (backward compatibility)
+            enabled = self._voice_transcription_settings.get(node_id, True)
+
+            return {
+                "status": "success",
+                "enabled": enabled
+            }
+
+        except Exception as e:
+            logger.error(f"Error getting conversation transcription for {node_id}: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+                "enabled": True  # Default to enabled on error
             }
 
     async def vote_knowledge_commit(
@@ -2864,6 +4213,7 @@ class CoreService:
             history = monitor.get_message_history()
 
             # Convert to frontend format (role, content, attachments)
+            # v0.13.2+: Merge transcription data into voice attachments from _voice_transcriptions
             messages = []
             for msg in history:
                 message_dict = {
@@ -2871,7 +4221,29 @@ class CoreService:
                     "content": msg["content"]
                 }
                 if "attachments" in msg:
-                    message_dict["attachments"] = msg["attachments"]
+                    # Deep copy attachments to avoid mutating original
+                    attachments = []
+                    for attachment in msg["attachments"]:
+                        attachment_copy = attachment.copy()
+
+                        # Merge transcription data for voice messages
+                        if attachment_copy.get("type") == "voice":
+                            transfer_id = attachment_copy.get("transfer_id")
+                            if transfer_id and transfer_id in self._voice_transcriptions:
+                                transcription_data = self._voice_transcriptions[transfer_id]
+                                attachment_copy["transcription"] = {
+                                    "text": transcription_data.get("text", ""),
+                                    "provider": transcription_data.get("provider", ""),
+                                    "transcriber_node_id": transcription_data.get("transcriber_node_id", ""),
+                                    "confidence": transcription_data.get("confidence"),
+                                    "language": transcription_data.get("language", ""),
+                                    "timestamp": transcription_data.get("timestamp", "")
+                                }
+                                logger.debug(f"Merged transcription for transfer_id={transfer_id} into history")
+
+                        attachments.append(attachment_copy)
+
+                    message_dict["attachments"] = attachments
                 messages.append(message_dict)
 
             logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
@@ -2905,10 +4277,12 @@ class CoreService:
             Dict with status and proposal_id (for P2P) or status (for AI)
         """
         try:
-            # Check if this is an AI chat (local_ai or ai_chat_xxx)
-            if conversation_id == 'local_ai' or conversation_id.startswith('ai_'):
-                # AI chats: directly reset without proposal
-                logger.info("Resetting AI conversation: %s", conversation_id)
+            # Check if this is an AI chat (local_ai or ai_chat_xxx) or Telegram chat
+            if conversation_id == 'local_ai' or conversation_id.startswith('ai_') or conversation_id.startswith('telegram-'):
+                # AI chats and Telegram chats: directly reset without proposal
+                # Telegram chats don't support peer voting (no peer connection)
+                chat_type = "AI" if conversation_id.startswith('ai_') or conversation_id == 'local_ai' else "Telegram"
+                logger.info("Resetting %s conversation: %s", chat_type, conversation_id)
                 result = await self.reset_conversation(conversation_id)
                 return result
 
@@ -2976,6 +4350,266 @@ class CoreService:
 
         except Exception as e:
             logger.error("Error resetting conversation: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    # Telegram Bot Integration Commands (v0.14.0+)
+
+    async def send_to_telegram(
+        self,
+        conversation_id: str,
+        text: str,
+        attachments: Optional[List[Dict]] = None,
+        voice_audio_base64: Optional[str] = None,
+        voice_duration_seconds: Optional[float] = None,
+        voice_mime_type: Optional[str] = None,
+        file_path: Optional[str] = None  # NEW: For sending files/images from UI
+    ) -> Dict[str, Any]:
+        """
+        Send message from DPC to Telegram chat.
+
+        Args:
+            conversation_id: DPC conversation ID (must be linked to Telegram)
+            text: Message text
+            attachments: Optional list of attachments (voice, images, etc.)
+            voice_audio_base64: Optional base64-encoded voice audio data (for recording from UI)
+            voice_duration_seconds: Optional voice duration in seconds
+            voice_mime_type: Optional voice MIME type (e.g., "audio/webm")
+            file_path: Optional path to file/image to send to Telegram
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            if not self.telegram_bridge:
+                return {
+                    "status": "error",
+                    "message": "Telegram integration not enabled"
+                }
+
+            # Handle file path from UI (send file/image directly to Telegram)
+            if file_path:
+                from pathlib import Path
+                import mimetypes
+
+                path = Path(file_path)
+
+                if not path.exists():
+                    return {
+                        "status": "error",
+                        "message": f"File not found: {file_path}"
+                    }
+
+                # Get Telegram chat ID
+                telegram_chat_id = self.telegram_bridge._get_linked_chat_id(conversation_id)
+                if not telegram_chat_id:
+                    return {
+                        "status": "error",
+                        "message": "No linked Telegram chat for this conversation"
+                    }
+
+                # Determine file type and send appropriately
+                mime_type, _ = mimetypes.guess_type(str(path))
+                if mime_type and mime_type.startswith("image/"):
+                    # Send as photo
+                    success = await self.telegram_manager.send_photo(
+                        telegram_chat_id,
+                        path,
+                        caption=text if text else None
+                    )
+                else:
+                    # Send as document
+                    success = await self.telegram_manager.send_document(
+                        telegram_chat_id,
+                        path,
+                        caption=text if text else None
+                    )
+
+                if not success:
+                    return {
+                        "status": "error",
+                        "message": "Failed to send file to Telegram"
+                    }
+
+                return {
+                    "status": "success",
+                    "message": "File sent to Telegram"
+                }
+
+            # Handle voice data from UI (save file and create attachment)
+            if voice_audio_base64:
+                import base64
+                from pathlib import Path
+                from datetime import datetime, timezone
+
+                # Decode audio data
+                try:
+                    audio_data = base64.b64decode(voice_audio_base64)
+                except Exception as e:
+                    return {
+                        "status": "error",
+                        "message": f"Failed to decode voice audio: {e}"
+                    }
+
+                # Generate filename with timestamp
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                extension = (voice_mime_type or "audio/webm").split("/")[-1].split(";")[0].strip()
+                filename = f"voice_{timestamp}.{extension}"
+
+                # Create directory for Telegram voice files
+                voice_dir = DPC_HOME_DIR / "conversations" / conversation_id / "files"
+                voice_dir.mkdir(parents=True, exist_ok=True)
+                voice_path = voice_dir / filename
+
+                # Handle filename collisions
+                if voice_path.exists():
+                    stem = voice_path.stem
+                    suffix = voice_path.suffix
+                    counter = 1
+                    while voice_path.exists():
+                        voice_path = voice_dir / f"{stem}_{counter}{suffix}"
+                        counter += 1
+
+                # Save voice file
+                try:
+                    with open(voice_path, "wb") as f:
+                        f.write(audio_data)
+                    logger.info(f"Saved Telegram voice message: {voice_path} ({len(audio_data)} bytes, {voice_duration_seconds}s)")
+                except Exception as e:
+                    return {
+                        "status": "error",
+                        "message": f"Failed to save voice file: {e}"
+                    }
+
+                # Create voice attachment
+                voice_attachment = {
+                    "type": "voice",
+                    "filename": filename,
+                    "file_path": str(voice_path),
+                    "size_bytes": len(audio_data),
+                    "voice_metadata": {
+                        "duration_seconds": voice_duration_seconds,
+                        "sample_rate": int(self.settings.get("voice_messages", "default_sample_rate", "48000")),
+                        "channels": int(self.settings.get("voice_messages", "default_channels", "1")),
+                        "codec": self.settings.get("voice_messages", "default_codec", "opus"),
+                        "recorded_at": datetime.now(timezone.utc).isoformat()
+                    }
+                }
+
+                # Add to attachments list
+                if not attachments:
+                    attachments = []
+                attachments.append(voice_attachment)
+
+            # Get sender name
+            sender_name = self.p2p_manager.get_display_name() or "You"
+
+            # Forward to Telegram
+            await self.telegram_bridge.forward_dpc_to_telegram(
+                conversation_id=conversation_id,
+                sender_name=sender_name,
+                text=text,
+                attachments=attachments or []
+            )
+
+            return {
+                "status": "success",
+                "message": "Sent to Telegram"
+            }
+
+        except Exception as e:
+            logger.error("Failed to send to Telegram: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def link_telegram_chat(
+        self,
+        conversation_id: str,
+        telegram_chat_id: str
+    ) -> Dict[str, Any]:
+        """
+        Link a DPC conversation to a Telegram chat.
+
+        Args:
+            conversation_id: DPC conversation ID
+            telegram_chat_id: Telegram chat ID to link
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            if not self.telegram_bridge:
+                return {
+                    "status": "error",
+                    "message": "Telegram integration not enabled"
+                }
+
+            # Validate chat_id is in whitelist
+            if not self.telegram_manager.is_allowed(telegram_chat_id):
+                return {
+                    "status": "error",
+                    "message": f"Chat ID {telegram_chat_id} not in whitelist"
+                }
+
+            # Store link
+            self.telegram_bridge.conversation_map[telegram_chat_id] = conversation_id
+            self.telegram_bridge._save_conversation_links()
+
+            logger.info(f"Linked conversation {conversation_id} to Telegram chat {telegram_chat_id}")
+
+            return {
+                "status": "success",
+                "message": f"Linked {conversation_id} to Telegram chat {telegram_chat_id}"
+            }
+
+        except Exception as e:
+            logger.error("Failed to link Telegram chat: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_telegram_status(self) -> Dict[str, Any]:
+        """
+        Get Telegram bot integration status.
+
+        Returns:
+            Dict with status information including conversation links
+        """
+        try:
+            if not self.telegram_manager:
+                return {
+                    "status": "success",
+                    "enabled": False,
+                    "connected": False,
+                    "message": "Telegram integration not enabled"
+                }
+
+            # Include conversation links (telegram_chat_id -> conversation_id)
+            # Reverse it for frontend: (conversation_id -> telegram_chat_id)
+            conversation_links = {}
+            if self.telegram_bridge:
+                for telegram_chat_id, conversation_id in self.telegram_bridge.conversation_map.items():
+                    conversation_links[conversation_id] = telegram_chat_id
+
+            return {
+                "status": "success",
+                "enabled": True,
+                "connected": self.telegram_manager._running,
+                "webhook_mode": self.telegram_manager.use_webhook,
+                "whitelist_count": len(self.telegram_manager.allowed_chat_ids),
+                "transcription_enabled": self.telegram_manager.transcription_enabled,
+                "bridge_to_p2p": self.telegram_manager.bridge_to_p2p,
+                "conversation_links_count": len(self.telegram_bridge.conversation_map) if self.telegram_bridge else 0,
+                "conversation_links": conversation_links  # Frontend needs: conversation_id -> telegram_chat_id
+            }
+
+        except Exception as e:
+            logger.error("Failed to get Telegram status: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)
@@ -3543,18 +5177,142 @@ class CoreService:
             except Exception as send_err:
                 logger.error("Error sending inference error response to %s: %s", peer_id, send_err, exc_info=True)
 
+    async def _handle_transcription_request(self, peer_id: str, request_id: str, audio_base64: str, mime_type: str, model: str = None, provider: str = None, language: str = "auto", task: str = "transcribe"):
+        """
+        Handle incoming remote transcription request from a peer.
+        Check firewall permissions, run transcription, and send response.
+
+        Args:
+            peer_id: Node ID of the requesting peer
+            request_id: Unique request identifier
+            audio_base64: Base64-encoded audio data
+            mime_type: Audio MIME type (e.g., audio/webm)
+            model: Optional model name
+            provider: Optional provider alias
+            language: Language code or "auto" for detection
+            task: "transcribe" or "translate"
+        """
+        from dpc_protocol.protocol import create_remote_transcription_response
+        import base64
+        import tempfile
+        import os
+
+        logger.debug("Handling transcription request from %s (request_id: %s, mime_type: %s)", peer_id, request_id, mime_type)
+
+        # Check if peer is allowed to request transcription
+        if not self.firewall.can_request_transcription(peer_id, model):
+            logger.warning("Access denied: %s cannot request transcription%s", peer_id, f" for model {model}" if model else "")
+            error_response = create_remote_transcription_response(
+                request_id=request_id,
+                error=f"Access denied: You are not authorized to request transcription" + (f" for model {model}" if model else "")
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as e:
+                logger.error("Error sending transcription error response to %s: %s", peer_id, e, exc_info=True)
+            return
+
+        # Run transcription
+        temp_audio_path = None
+        try:
+            logger.info("Running transcription for %s (model: %s, provider: %s, language: %s, task: %s)",
+                       peer_id, model or 'default', provider or 'default', language, task)
+
+            # Decode base64 audio data and save to temporary file
+            audio_data = base64.b64decode(audio_base64)
+
+            # Determine file extension from MIME type
+            ext_map = {
+                "audio/webm": ".webm",
+                "audio/opus": ".opus",
+                "audio/ogg": ".ogg",
+                "audio/wav": ".wav",
+                "audio/mp3": ".mp3",
+                "audio/mp4": ".mp4",
+                "audio/mpeg": ".mp3"
+            }
+            file_ext = ext_map.get(mime_type, ".webm")
+
+            # Create temporary file
+            with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as temp_file:
+                temp_audio_path = temp_file.name
+                temp_file.write(audio_data)
+
+            # Determine which provider to use
+            provider_alias_to_use = provider
+
+            if model and not provider:
+                # Find provider by model name
+                found_alias = self.llm_manager.find_provider_by_model(model)
+                if found_alias:
+                    provider_alias_to_use = found_alias
+                    logger.debug("Found provider '%s' for model '%s'", found_alias, model)
+                else:
+                    raise ValueError(f"No provider found for model '{model}'")
+
+            # Get the provider instance
+            provider_instance = self.llm_manager.get_provider(provider_alias_to_use)
+
+            # Check if provider supports transcription
+            if not hasattr(provider_instance, 'transcribe'):
+                raise ValueError(f"Provider '{provider_alias_to_use}' does not support transcription")
+
+            # Update provider settings for this transcription
+            if language != "auto":
+                provider_instance.language = language
+            if task:
+                provider_instance.task = task
+
+            # Run transcription
+            result = await provider_instance.transcribe(temp_audio_path)
+            logger.info("Transcription completed successfully for %s", peer_id)
+
+            # Send success response
+            success_response = create_remote_transcription_response(
+                request_id=request_id,
+                text=result.get("text", ""),
+                language=result.get("language"),
+                duration_seconds=result.get("duration"),
+                provider=result.get("provider") or provider_alias_to_use
+            )
+            await self.p2p_manager.send_message_to_peer(peer_id, success_response)
+            logger.debug("Sent transcription result to %s", peer_id)
+
+        except Exception as e:
+            logger.error("Transcription failed for %s: %s", peer_id, e, exc_info=True)
+            error_response = create_remote_transcription_response(
+                request_id=request_id,
+                error=str(e)
+            )
+            try:
+                await self.p2p_manager.send_message_to_peer(peer_id, error_response)
+            except Exception as send_err:
+                logger.error("Error sending transcription error response to %s: %s", peer_id, send_err, exc_info=True)
+
+        finally:
+            # Clean up temporary file
+            if temp_audio_path and os.path.exists(temp_audio_path):
+                try:
+                    os.unlink(temp_audio_path)
+                except Exception as cleanup_err:
+                    logger.warning("Failed to delete temporary audio file %s: %s", temp_audio_path, cleanup_err)
+
     async def _handle_get_providers_request(self, peer_id: str):
         """
         Handle GET_PROVIDERS request from a peer.
         Check firewall permissions and send available providers that the peer can use.
+        Supports both compute sharing (AI inference) and transcription sharing (Whisper).
         """
         from dpc_protocol.protocol import create_providers_response
 
         logger.debug("Handling GET_PROVIDERS request from %s", peer_id)
 
-        # Check if compute sharing is enabled and peer is authorized
-        if not self.firewall.can_request_inference(peer_id):
-            logger.warning("Access denied: %s cannot access compute resources", peer_id)
+        # Check if peer has access to compute OR transcription resources
+        has_compute_access = self.firewall.can_request_inference(peer_id)
+        has_transcription_access = self.firewall.can_request_transcription(peer_id)
+
+        if not has_compute_access and not has_transcription_access:
+            logger.warning("Access denied: %s cannot access compute or transcription resources", peer_id)
             # Send empty provider list (no access)
             response = create_providers_response([])
             try:
@@ -3565,30 +5323,53 @@ class CoreService:
 
         # Get all available providers
         all_providers = []
-        all_models = []
+        compute_models = []
+        transcription_models = []
 
         for alias, provider in self.llm_manager.providers.items():
             model = provider.model
             provider_type = provider.config.get("type", "unknown")
 
-            all_providers.append({
+            provider_info = {
                 "alias": alias,
                 "model": model,
                 "type": provider_type,
-                "supports_vision": provider.supports_vision()  # Phase 2: Add vision capability flag
-            })
-            all_models.append(model)
+                "supports_vision": provider.supports_vision(),
+                "supports_voice": self._provider_supports_voice(provider)  # Mark transcription providers
+            }
 
-        # Filter providers based on firewall allowed_models setting
-        allowed_models = self.firewall.get_available_models_for_peer(peer_id, all_models)
+            # Categorize by provider type
+            if provider_type == "local_whisper":
+                transcription_models.append(model)
+            else:
+                compute_models.append(model)
 
-        # Only include providers with allowed models
-        filtered_providers = [
-            p for p in all_providers
-            if p["model"] in allowed_models
-        ]
+            all_providers.append(provider_info)
 
-        logger.debug("Sending %d providers to %s (filtered from %d total)", len(filtered_providers), peer_id, len(all_providers))
+        # Filter providers based on firewall permissions
+        filtered_providers = []
+
+        for provider_info in all_providers:
+            provider_type = provider_info["type"]
+            model = provider_info["model"]
+
+            # Check transcription providers
+            if provider_type == "local_whisper":
+                if has_transcription_access:
+                    # Check if model is allowed for transcription
+                    if self.firewall.can_request_transcription(peer_id, model):
+                        filtered_providers.append(provider_info)
+                        logger.debug("Including transcription provider '%s' for %s", provider_info["alias"], peer_id[:20])
+            # Check compute providers (text/vision models)
+            else:
+                if has_compute_access:
+                    # Check if model is allowed for compute
+                    if self.firewall.can_request_inference(peer_id, model):
+                        filtered_providers.append(provider_info)
+                        logger.debug("Including compute provider '%s' for %s", provider_info["alias"], peer_id[:20])
+
+        logger.debug("Sending %d providers to %s (filtered from %d total, compute_access=%s, transcription_access=%s)",
+                    len(filtered_providers), peer_id[:20], len(all_providers), has_compute_access, has_transcription_access)
 
         # Send response with filtered providers
         response = create_providers_response(filtered_providers)
@@ -3942,6 +5723,85 @@ class CoreService:
             logger.error("Error requesting inference from %s: %s", peer_id, e, exc_info=True)
             raise
 
+    async def _request_transcription_from_peer(
+        self, peer_id: str, audio_base64: str, mime_type: str,
+        model: str = None, provider: str = None, language: str = "auto",
+        task: str = "transcribe", timeout: float = 120.0
+    ) -> Dict[str, Any]:
+        """
+        Request remote transcription from a specific peer.
+        Uses async request-response pattern with Future.
+
+        Args:
+            peer_id: The node_id of the peer to request transcription from
+            audio_base64: Base64-encoded audio data
+            mime_type: Audio MIME type (e.g., audio/webm)
+            model: Optional model name to use
+            provider: Optional provider alias to use
+            language: Language code or "auto" for detection
+            task: "transcribe" (default) or "translate" (to English)
+            timeout: Timeout in seconds (default 120s for transcription)
+
+        Returns:
+            Dict containing transcription result with keys:
+                - text: Transcribed text
+                - language: Detected language
+                - duration_seconds: Audio duration
+                - provider: Provider used
+
+        Raises:
+            ConnectionError: If peer is not connected
+            TimeoutError: If request times out
+            RuntimeError: If transcription fails on remote peer
+        """
+        from dpc_protocol.protocol import create_remote_transcription_request
+
+        logger.debug("Requesting transcription from peer: %s (mime_type: %s, language: %s)",
+                    peer_id, mime_type, language)
+
+        if peer_id not in self.p2p_manager.peers:
+            raise ConnectionError(f"Peer {peer_id} is not connected")
+
+        try:
+            # Generate unique request ID
+            request_id = str(uuid.uuid4())
+
+            # Create Future to wait for response
+            response_future = asyncio.Future()
+            self._pending_transcription_requests[request_id] = response_future
+
+            # Create transcription request message
+            request_message = create_remote_transcription_request(
+                request_id=request_id,
+                audio_base64=audio_base64,
+                mime_type=mime_type,
+                model=model,
+                provider=provider,
+                language=language,
+                task=task
+            )
+
+            # Send request
+            await self.p2p_manager.send_message_to_peer(peer_id, request_message)
+
+            # Wait for response with timeout
+            try:
+                result = await asyncio.wait_for(response_future, timeout=timeout)
+                logger.info("Received transcription result from %s: %d chars",
+                           peer_id, len(result.get("text", "")))
+                return result
+
+            except asyncio.TimeoutError:
+                logger.warning("Timeout waiting for transcription from %s", peer_id)
+                raise TimeoutError(f"Transcription request to {peer_id} timed out after {timeout}s")
+            finally:
+                # Clean up pending request
+                self._pending_transcription_requests.pop(request_id, None)
+
+        except Exception as e:
+            logger.error("Error requesting transcription from %s: %s", peer_id, e, exc_info=True)
+            raise
+
     async def _aggregate_contexts(self, query: str, peer_ids: List[str] = None) -> Dict[str, PersonalContext]:
         """
         Aggregate contexts from local user and connected peers.
@@ -4014,7 +5874,14 @@ class CoreService:
                     "Please end the session to save knowledge and start a new conversation."
                 )
                 logger.warning("BLOCKED: %s", error_msg)
-                raise RuntimeError(error_msg)
+                # Send error response immediately instead of raising exception
+                await self.local_api.send_response_to_all(
+                    command_id=command_id,
+                    command="execute_ai_query",
+                    status="ERROR",
+                    payload={"message": error_msg}
+                )
+                return
 
         # Simplified context inclusion: Always include when checkbox checked
         # Rationale: Modern AI models have large context windows (128K+ tokens)
@@ -4157,7 +6024,14 @@ class CoreService:
 
             if not is_valid:
                 logger.warning("BLOCKED (pre-query validation): %s", error_msg)
-                raise RuntimeError(error_msg)
+                # Send error response immediately instead of raising exception
+                await self.local_api.send_response_to_all(
+                    command_id=command_id,
+                    command="execute_ai_query",
+                    status="ERROR",
+                    payload={"message": error_msg}
+                )
+                return
 
         response_payload = {}
         status = "OK"

@@ -250,6 +250,98 @@ Returns the result of a remote inference request.
 
 ---
 
+### 3.4.1 Remote Audio Transcription
+
+#### REMOTE_TRANSCRIPTION_REQUEST
+
+Requests the peer to transcribe audio using their local Whisper model.
+
+**Format:**
+```json
+{
+  "command": "REMOTE_TRANSCRIPTION_REQUEST",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "audio_base64": "SGVsbG8gV29ybGQh...",
+    "mime_type": "audio/webm",
+    "model": "openai/whisper-large-v3",  // Optional
+    "provider": "local_whisper",         // Optional
+    "language": "auto",                   // Optional
+    "task": "transcribe"                  // Optional: "transcribe" or "translate"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): UUID for request/response correlation
+- `audio_base64` (string, required): Base64-encoded audio data
+- `mime_type` (string, required): Audio MIME type (e.g., `audio/webm`, `audio/opus`, `audio/wav`)
+- `model` (string, optional): Specific Whisper model to use
+- `provider` (string, optional): Transcription provider (e.g., `local_whisper`)
+- `language` (string, optional): Language code (`auto` for automatic detection, `en`, `es`, etc.)
+- `task` (string, optional): `transcribe` (default) or `translate` (to English)
+
+**Response:** REMOTE_TRANSCRIPTION_RESPONSE message
+
+**Security:** Peer may reject request based on firewall rules (`privacy_rules.json` → `transcription.enabled`)
+
+**Size Limits:** Audio data should be reasonable size (recommended max: 10MB base64-encoded)
+
+---
+
+#### REMOTE_TRANSCRIPTION_RESPONSE
+
+Returns the result of a remote transcription request.
+
+**Success Format:**
+```json
+{
+  "command": "REMOTE_TRANSCRIPTION_RESPONSE",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "success",
+    "text": "Hello, this is a transcribed message.",
+    "language": "en",
+    "duration_seconds": 5.2,
+    "provider": "local_whisper"
+  }
+}
+```
+
+**Error Format:**
+```json
+{
+  "command": "REMOTE_TRANSCRIPTION_RESPONSE",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "status": "error",
+    "error": "Transcription not enabled in firewall rules"
+  }
+}
+```
+
+**Fields (Success):**
+- `request_id` (string, required): Matches request UUID
+- `status` (string, required): `"success"`
+- `text` (string, required): Transcribed text
+- `language` (string, optional): Detected language code
+- `duration_seconds` (number, optional): Audio duration in seconds
+- `provider` (string, optional): Provider used for transcription
+
+**Fields (Error):**
+- `request_id` (string, required): Matches request UUID
+- `status` (string, required): `"error"`
+- `error` (string, required): Human-readable error message
+
+**Common Error Codes:**
+- `Transcription not enabled in firewall rules` - Peer has disabled remote transcription
+- `Model not available` - Requested Whisper model not installed
+- `Invalid audio format` - Unsupported MIME type
+- `Audio too large` - Exceeds peer's size limits
+- `Transcription failed` - Processing error
+
+---
+
 ### 3.5 Provider Discovery
 
 #### GET_PROVIDERS
@@ -725,6 +817,12 @@ Offers a file to the peer for transfer.
   - `thumbnail_base64` (string, required): Data URL of thumbnail (max 100KB)
   - `source` (string, required): Source of image (e.g., "clipboard", "file", "screenshot")
   - `captured_at` (string, optional): ISO 8601 timestamp when image was captured
+- `voice_metadata` (object, optional): Metadata for voice message transfers (v0.13.0)
+  - `duration_seconds` (number, required): Recording duration in seconds
+  - `sample_rate` (integer, required): Audio sample rate in Hz (e.g., 48000)
+  - `channels` (integer, required): Number of audio channels (1 = mono, 2 = stereo)
+  - `codec` (string, required): Audio codec used (e.g., "opus", "aac")
+  - `recorded_at` (string, required): ISO 8601 timestamp when voice was recorded
 
 **Response:** FILE_ACCEPT (if accepted) or FILE_CANCEL (if rejected)
 
@@ -927,7 +1025,120 @@ verify_hash = true
 
 ---
 
-### 3.12 Relay Protocol Messages (v0.10.0)
+### 3.12 Voice Transcription Messages (v0.13.2)
+
+Distributed voice message transcription with automatic deduplication to prevent duplicate work in group chats.
+
+**Overview:**
+When a voice message is received, participants coordinate to ensure only ONE peer transcribes the audio and shares the result with all others. This prevents wasteful duplicate transcription in group conversations.
+
+**Distributed Transcription Flow:**
+1. Alice sends voice message → Bob & Charlie receive
+2. Bob waits 3 seconds (recipient delay), checks if transcription exists
+3. If Bob has Whisper capability: transcribes and broadcasts VOICE_TRANSCRIPTION to all participants
+4. Charlie waits 3 seconds, sees Bob already transcribed, skips transcription
+5. Charlie receives VOICE_TRANSCRIPTION from Bob and displays result
+
+**Deduplication:**
+- Uses `transfer_id` (from FILE_OFFER) as unique key
+- Per-transfer locks prevent race conditions
+- First transcription wins (subsequent messages ignored)
+
+#### VOICE_TRANSCRIPTION
+
+Broadcasts transcription result to all participants in a voice message conversation.
+
+**Format:**
+```json
+{
+  "command": "VOICE_TRANSCRIPTION",
+  "payload": {
+    "transfer_id": "550e8400-e29b-41d4-a716-446655440000",
+    "transcription_text": "Hello, this is a test voice message.",
+    "transcriber_node_id": "dpc-node-bob-abc123",
+    "provider": "local_whisper",
+    "confidence": 0.95,
+    "language": "en",
+    "timestamp": "2026-01-06T12:34:56Z",
+    "remote_provider_node_id": "dpc-node-charlie-xyz789"
+  }
+}
+```
+
+**Fields:**
+- `transfer_id` (string, required): Matches FILE_OFFER transfer_id for the voice message
+- `transcription_text` (string, required): Transcribed text content
+- `transcriber_node_id` (string, required): Node ID of orchestrator who initiated transcription
+- `provider` (string, required): Transcription provider used (e.g., "local_whisper", "openai", "remote:charlie:local_whisper")
+- `confidence` (float, required): Transcription confidence score (0.0 to 1.0)
+- `language` (string, required): Detected language code (e.g., "en", "es", "zh")
+- `timestamp` (string, required): ISO 8601 timestamp when transcription was created
+- `remote_provider_node_id` (string, optional): Node ID of remote compute provider (if using remote Whisper)
+
+**Response:** None (broadcast message, no acknowledgment required)
+
+**Behavior:**
+- Receiver checks for duplicate (via `transfer_id` in registry)
+- If duplicate: ignores message (transcription already stored)
+- If new: stores transcription data in registry
+- Updates conversation history (attaches transcription to voice message attachment)
+- Broadcasts `voice_transcription_received` event to UI
+
+**Remote Whisper Scenario:**
+When Bob uses Charlie's remote Whisper to transcribe Alice's voice message:
+- `transcriber_node_id`: Bob (orchestrator who decided to transcribe)
+- `provider`: "remote:charlie:local_whisper" (shows remote usage)
+- `remote_provider_node_id`: Charlie (compute provider who did actual work)
+- UI attribution (if enabled): "Transcribed by Bob using Charlie's local_whisper"
+
+**Privacy:**
+- Transcription text stored locally in conversation history
+- No Hub involvement (pure P2P broadcast)
+- Only participants who received original voice message get transcription
+
+---
+
+**Voice Transcription Configuration:**
+
+Client configuration (`~/.dpc/config.ini`):
+```ini
+[voice_transcription]
+enabled = true
+sender_transcribes = false
+recipient_delay_seconds = 3
+provider_priority = local_whisper,openai
+show_transcriber_name = false
+cache_transcriptions = true
+fallback_to_openai = true
+```
+
+**Settings:**
+- `enabled`: Master toggle for auto-transcription
+- `sender_transcribes`: Whether sender should transcribe their own voice messages (default: false)
+- `recipient_delay_seconds`: Wait time before recipients attempt transcription (default: 3 seconds)
+- `provider_priority`: Comma-separated list of providers to try (default: local_whisper,openai)
+- `show_transcriber_name`: Show attribution in UI (default: false for privacy)
+- `cache_transcriptions`: Store transcriptions in conversation history (default: true)
+- `fallback_to_openai`: Use OpenAI API if local Whisper unavailable (default: true)
+
+**UI Display:**
+- Transcription shown **below** voice player (original audio always visible)
+- Checkmark icon indicates transcription status
+- Optional attribution shows transcriber and provider
+- Warning icon (⚠️) for low confidence transcriptions (<0.8)
+
+**Edge Cases:**
+- **No Whisper available**: No transcription occurs (graceful degradation, voice player only)
+- **Multiple simultaneous recipients**: Recipient delay + locks prevent duplicate work
+- **Offline peer**: Transcription happens when peer reconnects and receives voice message
+
+**Token Usage:**
+- Transcription metadata: ~50 tokens per voice message (text + attribution)
+- Stored in conversation history for persistent display
+
+---
+
+### 3.13 Relay Protocol Messages (v0.10.0)
 
 Server-side relay functionality enabling NAT traversal for 100% peer connectivity. Volunteer relay nodes forward encrypted messages between peers without decrypting content.
 
@@ -1619,6 +1830,13 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.3 (January 2026)
+- **FILE_OFFER enhancement:**
+  - Added `voice_metadata` field for voice message transfers (v0.13.0)
+  - Includes duration_seconds, sample_rate, channels, codec, recorded_at timestamp
+  - Enables audio preview with playback controls before accepting transfer
+  - Reuses file transfer infrastructure (FILE_OFFER/FILE_CHUNK/FILE_COMPLETE)
 
 ### v1.2 (December 2025)
 - **New message types: Vision & Image Support (v0.12.0)**

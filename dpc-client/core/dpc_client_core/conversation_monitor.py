@@ -27,6 +27,7 @@ class Message:
     sender_name: str
     text: str
     timestamp: str
+    attachment_transfer_id: Optional[str] = None  # Link to attachment transfer (v0.14.0)
 
 
 class ConversationMonitor:
@@ -192,15 +193,21 @@ class ConversationMonitor:
 
         # Check if we should generate proposal
         if force or self.knowledge_score > self.knowledge_threshold:
-            # Generate proposal
-            proposal = await self._generate_commit_proposal()
+            try:
+                # Generate proposal
+                proposal = await self._generate_commit_proposal()
 
-            # Reset buffer
-            self.message_buffer = []
-            self.knowledge_score = 0.0
-            self.proposals_created += 1
+                # Reset buffer only if proposal generation succeeded (v0.14.0 fix)
+                if proposal is not None:
+                    self.message_buffer = []
+                    self.knowledge_score = 0.0
+                    self.proposals_created += 1
 
-            return proposal
+                return proposal
+            except Exception as e:
+                # Log error but DON'T clear buffer to allow retry (v0.14.0 fix)
+                logger.error(f"Error generating proposal (buffer preserved for retry): {e}", exc_info=True)
+                raise  # Re-raise so caller knows it failed
 
         return None
 
@@ -751,6 +758,11 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         messages_to_analyze = self.full_conversation if self.full_conversation else self.message_buffer
         messages_text = self._format_messages_for_analysis(messages_to_analyze)
 
+        # Extract voice transcriptions from message_history (v0.13.2+)
+        # Includes transcribed text for knowledge extraction
+        transcriptions_text = self._extract_transcriptions_from_history()
+        messages_text += transcriptions_text
+
         # Build cultural context section (conditional)
         cultural_section = ""
         if cultural_perspectives_enabled:
@@ -911,6 +923,34 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Calculate average confidence
             avg_confidence = sum(e.confidence for e in entries) / len(entries) if entries else 1.0
 
+            # Sanitize alternatives (convert objects to strings if needed)
+            raw_alternatives = result.get('alternatives', [])
+            alternatives = []
+            for alt in raw_alternatives:
+                if isinstance(alt, str):
+                    alternatives.append(alt)
+                elif isinstance(alt, dict):
+                    # Extract string from dict (common AI response pattern)
+                    alternatives.append(alt.get('description') or alt.get('text') or alt.get('content') or str(alt))
+                else:
+                    alternatives.append(str(alt))
+
+            # Sanitize devil_advocate (convert object to string if needed)
+            raw_devil_advocate = result.get('devil_advocate')
+            if raw_devil_advocate is None:
+                devil_advocate = None
+            elif isinstance(raw_devil_advocate, str):
+                devil_advocate = raw_devil_advocate
+            elif isinstance(raw_devil_advocate, dict):
+                # Extract string from dict (common AI response pattern)
+                devil_advocate = (raw_devil_advocate.get('critique') or
+                                 raw_devil_advocate.get('analysis') or
+                                 raw_devil_advocate.get('text') or
+                                 raw_devil_advocate.get('content') or
+                                 str(raw_devil_advocate))
+            else:
+                devil_advocate = str(raw_devil_advocate)
+
             # Create proposal (extraction_model_name and extraction_host_name already determined above)
             proposal = KnowledgeCommitProposal(
                 conversation_id=self.conversation_id,
@@ -920,9 +960,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 participants=[p['node_id'] for p in self.participants],
                 proposed_by='ai',
                 cultural_perspectives=result.get('cultural_perspectives', []),
-                alternatives=result.get('alternatives', []),
+                alternatives=alternatives,
                 flagged_assumptions=result.get('flagged_assumptions', []),
-                devil_advocate=result.get('devil_advocate'),
+                devil_advocate=devil_advocate,
                 avg_confidence=avg_confidence,
                 extraction_model=extraction_model_name,
                 extraction_host=extraction_host_name,
@@ -933,7 +973,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         except Exception as e:
             logger.error("Error generating commit proposal: %s", e, exc_info=True)
-            logger.error("  LLM Response preview: %s...", response[:300] if 'response' in locals() else 'N/A')
+            logger.error("  LLM Response preview: %s...", response[:300] if 'response' in locals() and response is not None and isinstance(response, str) else 'N/A')
 
             # Determine error message based on exception type
             error_msg = 'Failed to extract knowledge'
@@ -973,9 +1013,50 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """
         lines = []
         for msg in messages:
-            timestamp = msg.timestamp.split('T')[1][:8] if 'T' in msg.timestamp else msg.timestamp
+            # Handle both string and datetime timestamp formats
+            if isinstance(msg.timestamp, str):
+                timestamp = msg.timestamp.split('T')[1][:8] if 'T' in msg.timestamp else msg.timestamp
+            else:
+                # datetime object - format as HH:MM:SS
+                timestamp = msg.timestamp.strftime('%H:%M:%S')
             lines.append(f"[{timestamp}] {msg.sender_name}: {msg.text}")
         return "\n".join(lines)
+
+    def _extract_transcriptions_from_history(self) -> str:
+        """Extract voice transcription text from message_history
+
+        Scans message_history for voice attachments with transcriptions and
+        formats them for inclusion in knowledge extraction prompts.
+
+        Returns:
+            Formatted string with voice transcriptions, or empty string if none found
+        """
+        transcriptions = []
+
+        for msg in self.message_history:
+            attachments = msg.get("attachments", [])
+            for attachment in attachments:
+                if attachment.get("type") == "voice":
+                    transcription = attachment.get("transcription")
+                    if transcription and transcription.get("text"):
+                        # Format: "Voice message from [sender]: [transcription text]"
+                        role = msg.get("role", "user")
+                        sender_label = "You" if role == "user" else "Peer"
+
+                        text = transcription["text"]
+                        provider = transcription.get("provider", "unknown")
+                        confidence = transcription.get("confidence", 0.0)
+
+                        # Format with metadata for context
+                        transcriptions.append(
+                            f"{sender_label} (voice message, transcribed by {provider}, "
+                            f"confidence: {confidence:.2f}): {text}"
+                        )
+
+        if transcriptions:
+            return "\n\nVOICE MESSAGE TRANSCRIPTIONS:\n" + "\n".join(transcriptions)
+        else:
+            return ""
 
     def reset(self):
         """Reset monitor state"""
@@ -1072,15 +1153,45 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """Add a message to the conversation history
 
         Args:
-            role: 'user' or 'assistant'
+            role: 'user' or 'assistant' (or 'peer')
             content: Message content
             attachments: Optional list of attachment metadata dicts
                 Example: [{"type": "file", "filename": "...", "size_bytes": 123, ...}]
+
+        Note: This also adds to message_buffer and full_conversation for knowledge extraction.
         """
-        message = {"role": role, "content": content}
+        # Add to message_history (for chat history sync)
+        message_dict = {"role": role, "content": content}
         if attachments:
-            message["attachments"] = attachments
-        self.message_history.append(message)
+            message_dict["attachments"] = attachments
+        self.message_history.append(message_dict)
+
+        # Also add to knowledge extraction buffers (v0.13.2 fix for voice messages)
+        # Map role to sender info
+        if role == "user":
+            # User is the local node (first participant is always self)
+            sender_node_id = self.participants[0]["node_id"] if self.participants else "local"
+            sender_name = self.participants[0]["name"] if self.participants else "You"
+        else:  # role == "assistant" or "peer"
+            # Assistant/peer is the conversation partner (second participant)
+            sender_node_id = self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
+            sender_name = self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
+
+        # Create Message object for knowledge extraction
+        from datetime import datetime, timezone
+        import uuid
+        message_obj = Message(
+            message_id=str(uuid.uuid4()),
+            conversation_id=self.conversation_id,
+            sender_node_id=sender_node_id,
+            sender_name=sender_name,
+            text=content,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            attachment_transfer_id=attachments[0].get("transfer_id") if attachments else None  # v0.14.0
+        )
+
+        self.message_buffer.append(message_obj)
+        self.full_conversation.append(message_obj)
 
     def get_message_history(self) -> List[Dict[str, str]]:
         """Get the full conversation history
@@ -1123,6 +1234,59 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self.peer_context_cache = {}
         self.peer_device_context_cache = {}
 
+    def _remap_attachment_paths(self, attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Remap file paths in attachments from peer's filesystem to local filesystem.
+
+        When importing chat history, voice/file attachments may have file_path
+        that points to the peer's filesystem (e.g., C:\\Users\\...\\file.webm on Windows).
+        This method checks if the file exists locally and remaps the path.
+
+        Args:
+            attachments: List of attachment dicts (may contain file_path)
+
+        Returns:
+            List of attachment dicts with remapped file_path (if file exists locally)
+        """
+        import os
+        from pathlib import Path
+
+        # Construct local files directory: ~/.dpc/conversations/{peer_id}/files/
+        dpc_home = Path.home() / ".dpc"
+        local_files_dir = dpc_home / "conversations" / self.conversation_id / "files"
+
+        remapped = []
+        for attachment in attachments:
+            # Make a copy to avoid modifying original
+            att = dict(attachment)
+
+            # Check if this attachment has a file_path (voice/file attachments)
+            if "file_path" in att and att["file_path"]:
+                peer_path = att["file_path"]
+
+                # Extract filename from peer's path (cross-platform)
+                # Handle both Unix (/) and Windows (\) separators
+                filename = os.path.basename(peer_path.replace("\\", "/"))
+
+                # Construct local path: ~/.dpc/conversations/{peer_id}/files/{filename}
+                local_file_path = local_files_dir / filename
+
+                # Check if file exists locally
+                if local_file_path.exists():
+                    # Replace with local path
+                    att["file_path"] = str(local_file_path)
+                    logger.debug(f"Remapped attachment path: {peer_path} -> {local_file_path}")
+                else:
+                    # File doesn't exist locally - keep peer's path but log warning
+                    logger.warning(
+                        f"Voice/file attachment not found locally: {filename}. "
+                        f"Expected at {local_file_path}. Voice message may not play."
+                    )
+                    # Keep the peer's path (will fail to play, but preserves history)
+
+            remapped.append(att)
+
+        return remapped
+
     def export_history(self) -> List[Dict[str, Any]]:
         """Export conversation history for syncing with peer
 
@@ -1159,18 +1323,51 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             logger.info("No messages to import")
             return
 
-        # Replace current history (assume peer's history is authoritative)
+        # Replace all three message stores (v0.14.0 fix)
         self.message_history = []
+        self.message_buffer = []
+        self.full_conversation = []
+
+        import uuid
+
         for msg in messages:
+            # 1. Add to message_history (original format)
             imported_msg = {
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", "")
             }
             if "attachments" in msg:
-                imported_msg["attachments"] = msg["attachments"]
+                # Fix file paths in attachments (convert peer's paths to local paths)
+                imported_msg["attachments"] = self._remap_attachment_paths(msg["attachments"])
             self.message_history.append(imported_msg)
 
-        logger.info(f"Imported {len(messages)} messages into conversation history")
+            # 2. Also create Message objects for extraction buffers (v0.14.0 fix)
+            # Map role to sender info
+            role = msg.get("role", "user")
+            if role == "user":
+                # User is the local node (first participant is always self)
+                sender_node_id = self.participants[0]["node_id"] if self.participants else "local"
+                sender_name = self.participants[0]["name"] if self.participants else "You"
+            else:  # role == "assistant" or "peer"
+                # Assistant/peer is the conversation partner (second participant)
+                sender_node_id = self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
+                sender_name = self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
+
+            # Create Message object (same as add_message() does)
+            message_obj = Message(
+                message_id=str(uuid.uuid4()),
+                conversation_id=self.conversation_id,
+                sender_node_id=sender_node_id,
+                sender_name=sender_name,
+                text=msg.get("content", ""),
+                timestamp=msg.get("timestamp", datetime.now(timezone.utc).isoformat())
+            )
+
+            # Add to both extraction buffers
+            self.message_buffer.append(message_obj)
+            self.full_conversation.append(message_obj)
+
+        logger.info(f"Imported {len(messages)} messages into all conversation buffers")
 
     # Phase 7: Peer context cache management methods
     def cache_peer_context(self, node_id: str, context: Any, device_context: dict = None):

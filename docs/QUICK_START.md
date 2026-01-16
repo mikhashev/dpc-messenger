@@ -37,6 +37,17 @@ rustc --version    # Should show rust version
 docker --version   # Should show docker version (if using Hub)
 ```
 
+### Linux-Specific Dependencies (Ubuntu/Debian)
+
+**For voice recording feature (development):**
+```bash
+sudo apt-get update
+sudo apt-get install libasound2-dev pkg-config libpulse-dev
+```
+
+**For production users:**
+The `.deb` installer will automatically install required runtime dependencies (`libasound2`, `libasound2t64`).
+
 ---
 
 ## Option A: Local Network Testing (Fastest)

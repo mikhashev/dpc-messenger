@@ -9,7 +9,7 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper';
 
   type Provider = {
     alias: string;
@@ -20,11 +20,21 @@
     api_key?: string;        // Plaintext (local providers only)
     api_key_env?: string;    // Environment variable (cloud providers)
     context_window?: number; // Optional override
+    // Local Whisper specific (v0.13.1+)
+    device?: string;         // 'cuda', 'cpu', or 'auto'
+    compile_model?: boolean; // torch.compile optimization
+    use_flash_attention?: boolean; // Flash Attention 2 (optional)
+    chunk_length_s?: number; // Chunked transcription
+    batch_size?: number;     // Batch size for processing
+    language?: string;       // 'auto' or specific language code
+    task?: string;           // 'transcribe' or 'translate'
+    lazy_loading?: boolean;  // Load model on first use
   };
 
   type ProvidersConfig = {
     default_provider: string;
     vision_provider?: string;  // Optional vision provider for image queries
+    voice_provider?: string;   // v0.13.0+: Optional voice provider for transcription
     providers: Provider[];
   };
 
@@ -177,6 +187,10 @@
       if (editedConfig.vision_provider === provider.alias) {
         editedConfig.vision_provider = editedConfig.providers[0]?.alias || '';
       }
+      // v0.13.0+: If deleted provider was voice default, reset voice default
+      if (editedConfig.voice_provider === provider.alias) {
+        editedConfig.voice_provider = editedConfig.providers[0]?.alias || '';
+      }
       editedConfig = editedConfig; // Trigger reactivity
     }
   }
@@ -192,6 +206,13 @@
   function setVisionDefault(alias: string) {
     if (!editedConfig) return;
     editedConfig.vision_provider = alias;
+    editedConfig = editedConfig; // Trigger reactivity
+  }
+
+  // Set voice default provider (v0.13.0+)
+  function setVoiceDefault(alias: string) {
+    if (!editedConfig) return;
+    editedConfig.voice_provider = alias;
     editedConfig = editedConfig; // Trigger reactivity
   }
 
@@ -218,6 +239,11 @@
     // Auto-update vision_provider if this was the vision default
     if (editedConfig.vision_provider === oldAlias) {
       editedConfig.vision_provider = newAlias;
+    }
+
+    // v0.13.0+: Auto-update voice_provider if this was the voice default
+    if (editedConfig.voice_provider === oldAlias) {
+      editedConfig.voice_provider = newAlias;
     }
 
     // Update the tracked alias
@@ -282,6 +308,19 @@
       provider.api_key_env = 'OPENAI_API_KEY';
     } else if (newProvider.type === 'anthropic') {
       provider.api_key_env = 'ANTHROPIC_API_KEY';
+    } else if (newProvider.type === 'zai') {
+      provider.api_key_env = 'ZAI_API_KEY';
+      provider.model = 'glm-4.7';
+      provider.context_window = 128000;
+    } else if (newProvider.type === 'local_whisper') {
+      provider.device = 'auto';
+      provider.compile_model = true;
+      provider.use_flash_attention = false;
+      provider.chunk_length_s = 30;
+      provider.batch_size = 16;
+      provider.language = 'auto';
+      provider.task = 'transcribe';
+      provider.lazy_loading = true;
     }
 
     editedConfig.providers.push(provider);
@@ -403,6 +442,7 @@
                     {provider.alias}
                     {#if provider.alias === displayConfig.default_provider}<span class="default-badge">⭐ Text Default</span>{/if}
                     {#if provider.alias === displayConfig.vision_provider}<span class="default-badge vision-badge">👁️ Vision Default</span>{/if}
+                    {#if provider.alias === displayConfig.voice_provider}<span class="default-badge voice-badge">🎤 Voice Default</span>{/if}
                   </h3>
                   {#if editMode}
                     <button class="btn-delete" on:click={() => deleteProvider(i)}>Delete</button>
@@ -421,7 +461,7 @@
                         on:blur={() => handleAliasBlur(i)}
                         placeholder="my_provider"
                       />
-                      {#if editedConfig.default_provider === provider.alias || editedConfig.vision_provider === provider.alias}
+                      {#if editedConfig.default_provider === provider.alias || editedConfig.vision_provider === provider.alias || editedConfig.voice_provider === provider.alias}
                         <p class="help-text">💡 Renaming will automatically update default settings</p>
                       {/if}
                     </div>
@@ -432,6 +472,8 @@
                         <option value="ollama">Ollama</option>
                         <option value="openai_compatible">OpenAI Compatible</option>
                         <option value="anthropic">Anthropic</option>
+                        <option value="zai">Z.AI</option>
+                        <option value="local_whisper">Local Whisper</option>
                       </select>
                     </div>
 
@@ -527,6 +569,128 @@
                       </div>
                     {/if}
 
+                    {#if editedConfig.providers[i].type === 'zai'}
+                      <div class="form-group">
+                        <label for="api-key-env-{i}">API Key Environment Variable</label>
+                        <input
+                          id="api-key-env-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].api_key_env}
+                          placeholder="ZAI_API_KEY"
+                        />
+                        <p class="help-text">Recommended: Store API key in environment variable</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="api-key-{i}">API Key (plaintext, alternative)</label>
+                        <form on:submit|preventDefault>
+                          <input
+                            id="api-key-{i}"
+                            type="password"
+                            bind:value={editedConfig.providers[i].api_key}
+                            placeholder="Leave blank to use environment variable"
+                            autocomplete="off"
+                          />
+                        </form>
+                        <p class="help-text warn">⚠️ Not recommended: Stores key in config file</p>
+                      </div>
+                    {/if}
+
+                    {#if editedConfig.providers[i].type === 'local_whisper'}
+                      <div class="form-group">
+                        <label for="device-{i}">Device</label>
+                        <select id="device-{i}" bind:value={editedConfig.providers[i].device}>
+                          <option value="auto">Auto (detect best available)</option>
+                          <option value="mlx">MLX (Apple Silicon - M1/M2/M3/M4)</option>
+                          <option value="cuda">CUDA (NVIDIA GPU)</option>
+                          <option value="mps">MPS (macOS Metal)</option>
+                          <option value="cpu">CPU</option>
+                        </select>
+                        <p class="help-text">GPU recommended for fast transcription (~10-15x real-time)</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="compile-model-{i}">
+                          <input
+                            id="compile-model-{i}"
+                            type="checkbox"
+                            bind:checked={editedConfig.providers[i].compile_model}
+                          />
+                          Enable torch.compile (4.5x speedup)
+                        </label>
+                        <p class="help-text">First transcription will be slower (model compilation)</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="use-flash-attention-{i}">
+                          <input
+                            id="use-flash-attention-{i}"
+                            type="checkbox"
+                            bind:checked={editedConfig.providers[i].use_flash_attention}
+                          />
+                          Use Flash Attention 2 (20% speedup)
+                        </label>
+                        <p class="help-text warn">⚠️ Requires flash-attn package (difficult to install on Windows)</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="chunk-length-{i}">Chunk Length (seconds)</label>
+                        <input
+                          id="chunk-length-{i}"
+                          type="number"
+                          bind:value={editedConfig.providers[i].chunk_length_s}
+                          placeholder="30"
+                          min="10"
+                          max="60"
+                        />
+                        <p class="help-text">Smaller = faster but less accurate for long audio</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="batch-size-{i}">Batch Size</label>
+                        <input
+                          id="batch-size-{i}"
+                          type="number"
+                          bind:value={editedConfig.providers[i].batch_size}
+                          placeholder="16"
+                          min="1"
+                          max="32"
+                        />
+                        <p class="help-text">Higher = faster processing (more VRAM required)</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="language-{i}">Language</label>
+                        <input
+                          id="language-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].language}
+                          placeholder="auto"
+                        />
+                        <p class="help-text">'auto' or language code (e.g., 'en', 'ru', 'fr')</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="task-{i}">Task</label>
+                        <select id="task-{i}" bind:value={editedConfig.providers[i].task}>
+                          <option value="transcribe">Transcribe (same language)</option>
+                          <option value="translate">Translate (to English)</option>
+                        </select>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="lazy-loading-{i}">
+                          <input
+                            id="lazy-loading-{i}"
+                            type="checkbox"
+                            bind:checked={editedConfig.providers[i].lazy_loading}
+                          />
+                          Lazy Loading (load on first use)
+                        </label>
+                        <p class="help-text">Model loads on first transcription (~3GB download)</p>
+                      </div>
+                    {/if}
+
                     <div class="form-group">
                       <label for="context-window-{i}">Context Window (optional)</label>
                       <select
@@ -578,6 +742,13 @@
                       >
                         {provider.alias === displayConfig.vision_provider ? '✓ Vision Default' : 'Set as Vision Default'}
                       </button>
+                      <button
+                        class="btn-set-default"
+                        class:active={provider.alias === displayConfig.voice_provider}
+                        on:click={() => setVoiceDefault(provider.alias)}
+                      >
+                        {provider.alias === displayConfig.voice_provider ? '✓ Voice Default' : 'Set as Voice Default'}
+                      </button>
                     </div>
                   </div>
                 {:else}
@@ -607,6 +778,21 @@
                       {:else}
                         <p class="warn">⚠️ No API key configured</p>
                       {/if}
+                    {/if}
+
+                    {#if provider.type === 'local_whisper'}
+                      <p><strong>Device:</strong> {provider.device || 'auto'}</p>
+                      <p><strong>Torch Compile:</strong> {provider.compile_model ? 'Enabled' : 'Disabled'}</p>
+                      <p><strong>Flash Attention:</strong> {provider.use_flash_attention ? 'Enabled' : 'Disabled'}</p>
+                      {#if provider.chunk_length_s}
+                        <p><strong>Chunk Length:</strong> {provider.chunk_length_s}s</p>
+                      {/if}
+                      {#if provider.batch_size}
+                        <p><strong>Batch Size:</strong> {provider.batch_size}</p>
+                      {/if}
+                      <p><strong>Language:</strong> {provider.language || 'auto'}</p>
+                      <p><strong>Task:</strong> {provider.task || 'transcribe'}</p>
+                      <p><strong>Lazy Loading:</strong> {provider.lazy_loading !== false ? 'Enabled' : 'Disabled'}</p>
                     {/if}
 
                     {#if provider.context_window}
@@ -644,6 +830,8 @@
                 <option value="ollama">Ollama</option>
                 <option value="openai_compatible">OpenAI Compatible</option>
                 <option value="anthropic">Anthropic</option>
+                <option value="zai">Z.AI</option>
+                <option value="local_whisper">Local Whisper</option>
               </select>
             </div>
 
@@ -656,6 +844,8 @@
                 placeholder={
                   newProvider.type === 'ollama' ? 'llama3.1:8b' :
                   newProvider.type === 'openai_compatible' ? 'gpt-4o' :
+                  newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
+                  newProvider.type === 'zai' ? 'glm-4.7' :
                   'claude-3-5-sonnet-20240620'
                 }
               />
@@ -670,6 +860,10 @@
                 <p>API key will use environment variable: OPENAI_API_KEY</p>
               {:else if newProvider.type === 'anthropic'}
                 <p>API key will use environment variable: ANTHROPIC_API_KEY</p>
+              {:else if newProvider.type === 'local_whisper'}
+                <p>Device: Auto-detect (CUDA if available)</p>
+                <p>Model will download on first use (~3GB)</p>
+                <p>GPU acceleration recommended for fast transcription</p>
               {/if}
             </div>
 
@@ -956,6 +1150,16 @@
 
   .default-badge {
     color: #ffd700;
+    margin-left: 8px;
+  }
+
+  .vision-badge {
+    color: #00bcd4;
+    margin-left: 8px;
+  }
+
+  .voice-badge {
+    color: #9C27B0;
     margin-left: 8px;
   }
 

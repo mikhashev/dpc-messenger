@@ -5,6 +5,9 @@
 // Import the `Manager` trait to bring its methods into scope.
 use tauri::Manager;
 
+// Audio recording module (Linux workaround for getUserMedia)
+mod audio_recorder;
+
 // File metadata helper for dynamic timeout calculation (v0.11.2+)
 #[tauri::command]
 fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
@@ -15,6 +18,14 @@ fn get_file_metadata(path: String) -> Result<FileMetadata, String> {
         size: metadata.len(),
         is_file: metadata.is_file(),
     })
+}
+
+// Get home directory path (v0.15.0+)
+#[tauri::command]
+fn get_home_directory() -> Result<String, String> {
+    Ok(std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .unwrap_or_else(|_| ".".to_string()))
 }
 
 #[derive(serde::Serialize)]
@@ -28,7 +39,14 @@ fn main() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .invoke_handler(tauri::generate_handler![get_file_metadata])
+        .plugin(tauri_plugin_fs::init())
+        .invoke_handler(tauri::generate_handler![
+            get_file_metadata,
+            get_home_directory,
+            audio_recorder::tauri_start_recording,
+            audio_recorder::tauri_stop_recording,
+            audio_recorder::tauri_get_recording_status
+        ])
         .setup(|app| {
             #[cfg(debug_assertions)]
             {

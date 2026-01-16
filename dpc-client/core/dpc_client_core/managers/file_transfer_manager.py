@@ -83,6 +83,8 @@ class FileTransfer:
         chunks_failed: Set of chunk indices that failed verification (v0.11.1)
         retry_count: Dict mapping chunk index to retry attempt count (v0.11.1)
         max_retries: Maximum retry attempts per chunk (default: 3)
+        image_metadata: Optional dict with image metadata (dimensions, thumbnail, etc.) for v0.12.0+
+        voice_metadata: Optional dict with voice metadata (duration, sample_rate, codec, etc.) for v0.13.0+
     """
     transfer_id: str
     filename: str
@@ -102,7 +104,8 @@ class FileTransfer:
     chunks_failed: Optional[set] = None  # Failed chunk indices
     retry_count: Optional[dict] = None   # Chunk index -> retry count
     max_retries: int = 3                 # Max retries per chunk
-    image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.)
+    image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.) v0.12.0+
+    voice_metadata: Optional[dict] = None  # Voice metadata (duration, sample_rate, codec) v0.13.0+
 
 
 class FileTransferManager:
@@ -349,7 +352,8 @@ class FileTransferManager:
         node_id: str,
         file_path: Path,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
-        image_metadata: Optional[Dict[str, Any]] = None
+        image_metadata: Optional[Dict[str, Any]] = None,
+        voice_metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -363,6 +367,12 @@ class FileTransferManager:
                 - thumbnail_base64: str (data URL)
                 - source: str (e.g., "clipboard")
                 - captured_at: str (ISO timestamp)
+            voice_metadata: Optional voice metadata (for voice transfers only):
+                - duration_seconds: float (recording duration)
+                - sample_rate: int (e.g., 48000)
+                - channels: int (e.g., 1 for mono)
+                - codec: str (e.g., "opus")
+                - recorded_at: str (ISO timestamp)
 
         Returns:
             transfer_id: Unique transfer identifier
@@ -380,13 +390,9 @@ class FileTransferManager:
         if active_uploads >= self.max_concurrent_transfers:
             raise RuntimeError(f"Max concurrent transfers ({self.max_concurrent_transfers}) exceeded")
 
-        # Check firewall permission
-        allowed, error_msg = await self._check_file_transfer_permission(node_id, file_path)
-        if not allowed:
-            if error_msg:
-                raise PermissionError(error_msg)
-            else:
-                raise PermissionError(f"Firewall denies file transfer to {node_id}")
+        # Receiver will check firewall permission upon FILE_OFFER receipt (receiver-only control)
+        # Sender-side permission check removed in v0.13.3 - receiver has full control
+        # See: file_offer_handler.py:107-123 for receiver-side permission enforcement
 
         # Compute file metadata
         file_size = file_path.stat().st_size
@@ -411,7 +417,12 @@ class FileTransferManager:
                 "total_chunks": len(chunk_hashes)
             })
 
-        mime_type = self._detect_mime_type(file_path)
+        # Detect MIME type (but override for voice messages to ensure audio/webm)
+        if voice_metadata:
+            # Force audio MIME type for voice messages (.webm can be detected as video/webm)
+            mime_type = "audio/webm"
+        else:
+            mime_type = self._detect_mime_type(file_path)
         total_chunks = (file_size + self.chunk_size - 1) // self.chunk_size
 
         logger.info(f"Computed {len(chunk_hashes)} chunk hashes ({len(chunk_hashes) * 8} bytes) for {file_path.name}")
@@ -433,11 +444,12 @@ class FileTransferManager:
             file_path=file_path,
             progress_callback=progress_callback,
             chunk_hashes=chunk_hashes,  # v0.11.1: Store for retry requests
-            image_metadata=image_metadata  # Store image metadata for screenshots
+            image_metadata=image_metadata,  # Store image metadata for screenshots (v0.12.0+)
+            voice_metadata=voice_metadata   # Store voice metadata for voice messages (v0.13.0+)
         )
         self.active_transfers[transfer_id] = transfer
 
-        # Send FILE_OFFER (with optional image_metadata for Phase 2.3)
+        # Send FILE_OFFER (with optional image_metadata for v0.12.0+ or voice_metadata for v0.13.0+)
         payload = {
             "transfer_id": transfer_id,
             "filename": transfer.filename,
@@ -448,9 +460,13 @@ class FileTransferManager:
             "chunk_hashes": chunk_hashes  # v0.11.1: CRC32 per chunk for integrity
         }
 
-        # Add image metadata if provided (Phase 2.3: Vision + P2P Image Transfer)
+        # Add image metadata if provided (v0.12.0+: Vision + P2P Image Transfer)
         if image_metadata:
             payload["image_metadata"] = image_metadata
+
+        # Add voice metadata if provided (v0.13.0+: Voice Messages)
+        if voice_metadata:
+            payload["voice_metadata"] = voice_metadata
 
         await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_OFFER",
@@ -689,13 +705,14 @@ class FileTransferManager:
 
             size_mb = round(transfer.size_bytes / (1024 * 1024), 2)
 
-            # Detect if this is an image transfer
+            # Detect if this is an image or voice transfer
             is_image = (transfer.mime_type and transfer.mime_type.startswith("image/")
                        and transfer.image_metadata is not None)
+            is_voice = transfer.voice_metadata is not None
 
             # Build attachment
             attachment = {
-                "type": "image" if is_image else "file",
+                "type": "image" if is_image else ("voice" if is_voice else "file"),
                 "filename": transfer.filename,
                 "size_bytes": transfer.size_bytes,
                 "size_mb": size_mb,
@@ -714,6 +731,14 @@ class FileTransferManager:
                     attachment["dimensions"] = transfer.image_metadata.get("dimensions", {})
                     attachment["thumbnail"] = transfer.image_metadata.get("thumbnail_base64", "")
 
+            # Add voice-specific fields (v0.13.0+)
+            if is_voice:
+                # Voice messages always need file_path for playback
+                if file_path:
+                    attachment["file_path"] = str(file_path)
+                if transfer.voice_metadata:
+                    attachment["voice_metadata"] = transfer.voice_metadata
+
             # Extract text caption from image_metadata if available
             caption_text = ""
             if is_image and transfer.image_metadata:
@@ -726,7 +751,7 @@ class FileTransferManager:
                 "message_id": message_id,
                 "attachments": [attachment]
             })
-            logger.debug(f"Broadcasted {'image' if is_image else 'file'} received message to UI: {transfer.filename}")
+            logger.debug(f"Broadcasted {'image' if is_image else 'voice' if is_voice else 'file'} received message to UI: {transfer.filename}")
 
             # Broadcast completion event to hide active transfer panel
             await self.local_api.broadcast_event("file_transfer_complete", {
@@ -740,6 +765,35 @@ class FileTransferManager:
                 "mime_type": transfer.mime_type,
                 "status": "completed"
             })
+
+            # Add to backend conversation monitor (RECEIVER SIDE)
+            # This ensures transcriptions can be attached and knowledge extraction works
+            conversation_monitor = self.service._get_or_create_conversation_monitor(node_id)
+            if conversation_monitor:
+                # Determine message content based on attachment type
+                if is_voice:
+                    message_content = f"Received voice message: {transfer.filename} ({size_mb} MB)"
+                elif is_image:
+                    message_content = f"Received screenshot: {transfer.filename} ({size_mb} MB)"
+                else:
+                    message_content = f"Received file: {transfer.filename} ({size_mb} MB)"
+
+                # Add as "assistant" role (peer's message from receiver's perspective)
+                conversation_monitor.add_message("assistant", message_content, [attachment])
+                logger.debug(f"Added received {attachment['type']} to conversation history: {transfer.filename}")
+
+        # Auto-transcribe voice messages if enabled (v0.13.2+ recipient-side)
+        if is_voice and transfer.voice_metadata and save_to_disk:
+            import asyncio
+            asyncio.create_task(
+                self.service._maybe_transcribe_voice_message(
+                    transfer_id=transfer.transfer_id,
+                    node_id=node_id,
+                    file_path=file_path,
+                    voice_metadata=transfer.voice_metadata,
+                    is_sender=False  # Recipient-side transcription
+                )
+            )
 
         # Cleanup (chunk_data will be freed when transfer is deleted)
         del self.active_transfers[transfer.transfer_id]  # Remove from active transfers

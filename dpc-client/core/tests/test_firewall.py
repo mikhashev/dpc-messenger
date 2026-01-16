@@ -717,5 +717,42 @@ class TestAIScopeFiltering:
         assert filtered.instruction is None or filtered.instruction == {}
 
 
+def test_validate_config_with_nested_comments():
+    """Test that nested _comment fields are properly ignored during validation."""
+    from dpc_client_core.firewall import ContextFirewall
+
+    config = {
+        "nodes": {
+            "dpc-node-test-123": {
+                "_comment": "Test node with comment",
+                "personal.json:profile.*": "allow"
+            }
+        },
+        "groups": {
+            "test_group": {
+                "_comment": "Test group with comment",
+                "personal.json:knowledge.*": "allow"
+            }
+        },
+        "ai_scopes": {
+            "work": {
+                "_comment": "Work mode - Access work files",
+                "@work:*": "allow"
+            }
+        },
+        "device_sharing": {
+            "full": {
+                "_comment": "Full device access",
+                "device_context.json:*": "allow"
+            }
+        }
+    }
+
+    # Should validate successfully (no errors)
+    is_valid, errors = ContextFirewall.validate_config(config)
+    assert is_valid is True, f"Validation should pass with nested comments"
+    assert len(errors) == 0, f"Validation should have no errors, but got: {errors}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

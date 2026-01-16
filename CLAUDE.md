@@ -32,11 +32,38 @@ dpc-messenger/
 **Backend (Python):**
 ```bash
 cd dpc-client/core
-poetry install                    # Install dependencies
+poetry install                    # Install dependencies (default)
 poetry run python run_service.py  # Run backend service (ports 8888, 9999)
 poetry run pytest                 # Run tests
 poetry run pytest --cov=dpc_client_core  # Run with coverage
 ```
+
+**Platform-Specific Dependencies (macOS Apple Silicon):**
+
+The client supports GPU-accelerated Whisper transcription on Apple Silicon (M1/M2/M3/M4) via MLX, but this is **optional** and not installed by default.
+
+```bash
+cd dpc-client/core
+
+# Install without MLX (default, lightweight)
+poetry install
+
+# Install with MLX support (enables GPU-accelerated offline transcription)
+poetry install -E mlx
+```
+
+**Technical Details:**
+- **Dependencies**: `mlx>=0.4.0`, `mlx-whisper>=0.2.0`
+- **Platform Markers**: `sys_platform == 'darwin' and platform_machine == 'arm64'`
+- **Size Impact**: MLX packages add ~500MB to installation
+- **Defined In**: `[tool.poetry.extras] mlx = ["mlx", "mlx-whisper"]`
+- **Graceful Fallback**: If MLX not installed, client uses OpenAI-compatible API or skips transcription
+- **Cross-Platform Safety**: `-E mlx` flag is safely ignored on Windows/Linux (platform markers prevent installation)
+
+**Why Optional?**
+- Keeps default installation lightweight (~200MB vs ~700MB with MLX)
+- Not all users need offline transcription (can use cloud-based Whisper via OpenAI API)
+- Users can add MLX support later without reinstalling other dependencies
 
 **Frontend (Tauri + SvelteKit):**
 ```bash
@@ -429,7 +456,98 @@ Messages use binary framing: 10-byte ASCII length header + JSON payload
 {"command": "FILE_CHUNK", "payload": {"transfer_id": "...", "chunk_index": 0, "total_chunks": 10, "data": "base64..."}}
 {"command": "FILE_COMPLETE", "payload": {"transfer_id": "...", "hash": "sha256:..."}}
 {"command": "FILE_CANCEL", "payload": {"transfer_id": "...", "reason": "user_cancelled|timeout|hash_mismatch"}}
+
+# Voice Messages (v0.13.0) - Reuses FILE_OFFER with voice_metadata
+{"command": "FILE_OFFER", "payload": {"transfer_id": "...", "filename": "voice_2026-01-04_12-34-56.webm", "size_bytes": 245000, "hash": "sha256:...", "mime_type": "audio/webm", "voice_metadata": {"duration_seconds": 30.5, "sample_rate": 48000, "channels": 1, "codec": "opus", "recorded_at": "2026-01-04T12:34:56Z"}}}
 ```
+
+**Voice Messages (v0.13.0-v0.15.0):**
+
+Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CHUNK/FILE_COMPLETE) with additional `voice_metadata` in the payload. Voice files are stored in `~/.dpc/conversations/{peer_id}/files/` and displayed in the chat with audio player controls.
+
+**Recording:**
+- **Format**: WAV (16-bit PCM, 48kHz mono) via Tauri Rust backend (`audio_recorder.rs`)
+- **Cross-platform**:
+  - Windows: Native via Edge WebView2
+  - Linux: Rust cpal library with ALSA/PipeWire support (v0.15.0+)
+  - macOS: Requires Info.plist permissions (see `docs/VOICE_MESSAGES_KNOWN_ISSUES.md`)
+- **Storage**: `~/.dpc/conversations/{peer_id}/files/`
+
+**Transcription:**
+- **Local Whisper**: `LocalWhisperProvider` in `llm_manager.py`
+- **GPU Acceleration**:
+  - MLX (Apple Silicon M1/M2/M3/M4) - Optional via `poetry install -E mlx`
+  - CUDA (NVIDIA GPUs) - Auto-detected
+  - MPS (macOS Metal) - Fallback
+  - CPU - Universal fallback
+- **Features**:
+  - Lazy loading (model loads on first use)
+  - Adaptive batch_size (reduces VRAM for long messages)
+  - VRAM management with `unload_model_async()`
+  - Retroactive transcription (v0.13.1+)
+  - Offline mode with interactive download (v0.13.1+)
+
+**VRAM Management (v0.15.0):**
+- Models unload when auto-transcribe disabled
+- `torch.cuda.empty_cache()` called after unloading
+- **CRITICAL TODO**: Whisper model must be unloaded before loading a different Whisper model to prevent VRAM conflicts
+- See `llm_manager.py:792-814` for implementation
+
+**Voice Metadata Fields:**
+- `duration_seconds` (number): Recording duration in seconds
+- `sample_rate` (integer): Audio sample rate in Hz (e.g., 48000)
+- `channels` (integer): Number of audio channels (1 = mono, 2 = stereo)
+- `codec` (string): Audio codec used (e.g., "wav", "opus")
+- `recorded_at` (string): ISO 8601 timestamp when voice was recorded
+
+**Configuration:**
+```ini
+[voice_messages]
+enabled = true
+max_duration_seconds = 300  # 5 minutes
+max_size_mb = 10
+mime_types = audio/wav,audio/webm,audio/opus,audio/ogg,audio/mp4,audio/mpeg
+```
+
+**Frontend Components:**
+- `VoiceRecorder.svelte` - Recording UI with MediaRecorder/Tauri backend integration
+- `VoicePlayer.svelte` - Audio playback with play/pause, seek, volume, speed control
+- `ChatPanel.svelte` - Renders voice attachments using VoicePlayer
+
+**Backend Commands:**
+- `send_voice_message` (WebSocket) - Send voice message via file transfer
+- `VOICE_TRANSCRIPTION` (DPTP) - Share transcriptions with peers
+
+---
+
+**Telegram Bot Integration (v0.14.0+):**
+
+Complete Telegram bot integration for voice transcription and messaging bridging.
+
+**Architecture:**
+- `managers/telegram_manager.py` - Bot lifecycle, whitelist, message sending
+- `coordinators/telegram_coordinator.py` - Message bridge and routing
+- `message_handlers/telegram_handler.py` - Telegram-specific handlers
+
+**Features:**
+- Voice message transcription using local Whisper
+- Two-way messaging bridge (Telegram ↔ DPC)
+- Whitelist-only access control
+- File transfer support (images, documents)
+- Notifications and unread counters
+- Auto-linking to conversations
+
+**Configuration (`~/.dpc/config.ini`):**
+```ini
+[telegram]
+enabled = true
+bot_token = 123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+allowed_chat_ids = ["123456789"]
+transcription_enabled = true
+bridge_to_p2p = false
+```
+
+**See:** [docs/TELEGRAM_SETUP.md](docs/TELEGRAM_SETUP.md) for complete guide
 
 ### Conversation History & Context Inclusion (Phase 7+)
 
@@ -1077,6 +1195,109 @@ poetry run pytest tests/test_turn_connectivity.py
 
 ---
 
+## AI Providers
+
+D-PC Messenger supports multiple AI providers for local and cloud-based inference:
+
+### Supported Providers
+- **Ollama**: Local models (llama3, mistral, qwen, etc.) via Ollama API
+- **OpenAI Compatible**: OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
+- **Anthropic**: Claude models (Claude 3.5 Sonnet, Claude Opus, etc.)
+- **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)
+
+### Z.AI Setup
+
+Z.AI provides access to the GLM series of language models, including both text and vision capabilities.
+
+**Installation:**
+```bash
+cd dpc-client/core
+poetry install  # Installs zai-sdk automatically
+```
+
+**Configuration:**
+1. Get API key from [docs.z.ai](https://docs.z.ai)
+2. Set environment variable:
+   ```bash
+   export ZAI_API_KEY="your_key_here"
+   ```
+3. Add to `~/.dpc/providers.json`:
+   ```json
+   {
+     "alias": "zai_glm47",
+     "type": "zai",
+     "model": "glm-4.7",
+     "api_key_env": "ZAI_API_KEY",
+     "context_window": 128000
+   }
+   ```
+
+**Available Models:**
+- **Text Models:** `glm-4.7`, `glm-4.6`, `glm-4.5`, `glm-4.5-air`, `glm-4.5-airx`, `glm-4.5-flash`, `glm-4-plus`, `glm-4-128-0414-128k`
+- **Vision Models:** `glm-4.6v-flash`, `glm-4.5v`, `glm-4.0v`
+
+**Rate Limits:**
+Z.AI uses concurrency-based rate limiting (not token-based):
+- GLM-4.7: 2 concurrent requests
+- GLM-4.6: 3 concurrent requests
+- GLM-4.5: 10 concurrent requests
+- GLM-4-Plus: 20 concurrent requests
+
+**Example Usage:**
+```json
+{
+  "default_provider": "zai_glm47",
+  "providers": [
+    {
+      "alias": "zai_glm47",
+      "type": "zai",
+      "model": "glm-4.7",
+      "api_key_env": "ZAI_API_KEY"
+    },
+    {
+      "alias": "zai_vision",
+      "type": "zai",
+      "model": "glm-4.6v-flash",
+      "api_key_env": "ZAI_API_KEY"
+    }
+  ]
+}
+```
+
+**See also:** `dpc-client/providers.example.json` for complete configuration examples
+
+---
+
+### Context7 Plugin Integration
+
+D-PC Messenger can leverage the Context7 plugin for intelligent library documentation retrieval when AI agents suggest tools or libraries based on code analysis.
+
+**When AI Suggests Libraries:**
+1. AI analyzes codebase and identifies relevant libraries/frameworks
+2. Context7 plugin retrieves up-to-date documentation
+3. Examples provided are from official documentation sources
+4. Ensures cross-platform compatibility before suggesting
+
+**Cross-Platform Safety:**
+- AI checks platform compatibility before suggesting libraries
+- Context7 retrieves platform-specific documentation
+- Prevents suggesting macOS-only libraries for Windows builds
+
+**Before Suggesting Libraries, Verify:**
+- **Windows**: WebView2 (Edge), MSVC compatibility, WASAPI for audio
+- **Linux**: WebKitGTK limitations, ALSA/PipeWire for audio
+- **macOS**: WKWebView limitations, Core Audio for audio, Metal for GPU
+- **Tauri constraints**: No `getUserMedia` on macOS WKWebView
+
+**Example Workflow:**
+```
+User: "How do I add video recording?"
+AI: Analyzes code → Detects Tauri 2.x → Suggests @tauri-apps/plugin-screen-capture
+→ Uses Context7 to fetch latest API docs → Provides code examples
+```
+
+---
+
 ## Technology Stack
 
 ### Backend
@@ -1085,7 +1306,9 @@ poetry run pytest tests/test_turn_connectivity.py
 - aiortc (WebRTC implementation)
 - SQLAlchemy + asyncpg + Alembic (Hub database)
 - cryptography library (PKI)
-- ollama, openai, anthropic (AI SDKs)
+- ollama, openai, anthropic, zai-sdk (AI SDKs)
+- transformers, torch, librosa, soundfile (Whisper transcription)
+- python-telegram-bot 21.x (Telegram integration)
 
 ### Frontend
 - SvelteKit 5.0 (Svelte 5 with runes)
@@ -1093,6 +1316,8 @@ poetry run pytest tests/test_turn_connectivity.py
 - TypeScript 5.6
 - Vite 6.0
 - adapter-static (SPA mode)
+- **Testing**: Vitest (unit tests), Playwright (E2E tests - in development)
+- **Audio**: cpal (Rust) for cross-platform recording
 
 ### Infrastructure
 - Docker + Docker Compose

@@ -64,7 +64,24 @@ cd dpc-client/ui
 npm run check                           # TypeScript checks pass
 npm run build                           # Build succeeds
 npm run tauri dev                       # App launches and functions
+npm run test                            # Vitest tests pass
 ```
+
+**Frontend E2E Testing (Playwright - In Development):**
+```bash
+cd dpc-client/ui
+npm run test:e2e                        # Run Playwright tests (when implemented)
+npm run test:e2e:ui                     # Run with UI mode
+npm run test:e2e:debug                  # Debug mode with inspector
+```
+
+**Status:** Playwright tests are planned but not yet implemented. Current testing uses Vitest for unit tests only.
+
+**Planned Test Coverage:**
+- [ ] User authentication flows
+- [ ] P2P connection establishment
+- [ ] Voice message recording and playback
+- [ ] File transfer UI
 
 **Hub Testing (if applicable):**
 ```bash
@@ -122,11 +139,21 @@ chore: maintenance tasks (dependencies, config)
 
 ### Example: Current State
 
-**Current Status (2025-12-29):**
-- `main`: Stable v0.12.0 (Vision, Token Counting, AI Instruction Wizard)
-- `dev`: v0.12.1+ development (future features)
+**Current Status (2025-01-16):**
+- `main`: Stable v0.12.0
+- `dev`: v0.15.0 development (92 commits ahead of main)
 
-**Release v0.12.0 includes:**
+**Upcoming Release v0.15.0 includes:**
+- Voice messages with local Whisper transcription (v0.13.0-v0.13.3)
+- Telegram bot integration (v0.14.0+)
+- Linux audio recording support via Rust (v0.15.0)
+- Z.AI provider for GLM models (v0.14.0+)
+- Token usage estimation with progressive warnings
+- Whisper VRAM management and model unloading
+- WAV format support for cross-platform compatibility
+- 40+ bug fixes and improvements
+
+**Release v0.12.0 (Previous):**
 - Vision/Image support (screenshot sharing, remote vision inference)
 - Session management with voting
 - Chat history synchronization

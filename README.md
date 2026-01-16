@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.12.0
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.15.0
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
@@ -71,6 +71,11 @@ If this vision resonates with you, let's connect:
 - **Rich Markdown Rendering** - AI responses display with GitHub-style formatting, intelligent caching (50-200x faster)
 - **Knowledge Commits** - Git-like versioning for AI-extracted knowledge with bias mitigation ([architecture](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - **File Transfer** - Secure peer-to-peer file sharing with chunked transfers, progress tracking, and SHA256 verification (v0.11.0)
+- **Voice Messages** - Cross-platform voice recording with local Whisper transcription (v0.13.0)
+- **Telegram Integration** - Bot integration for voice transcription and messaging bridge (v0.14.0)
+- **Linux Support** - Native audio recording via Rust, ALSA/PipeWire support (v0.15.0)
+- **Token Usage Tracking** - Real-time estimation with progressive warnings (v0.12.0+)
+- **Z.AI Provider** - GLM model support with concurrency-based rate limiting (v0.14.0+)
 - **Local-First** - Your data stays on your device
 - **Universal Connectivity** - Intelligent 6-tier connection orchestrator ensures connectivity in nearly any network condition (IPv6, IPv4, WebRTC, UDP hole punching, volunteer relays, gossip)
 - **Hub-Optional Architecture** - Works with DHT bootstrap (pre-configured seeds or initial Hub connection), then fully autonomous via direct connections, hole punching, and relay nodes

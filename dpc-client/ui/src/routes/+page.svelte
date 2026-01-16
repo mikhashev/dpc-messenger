@@ -4,20 +4,33 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
+  import ModelDownloadDialog from "$lib/components/ModelDownloadDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
+  import ProviderSelector from "$lib/components/ProviderSelector.svelte";
   import Toast from "$lib/components/Toast.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
   import ImageMessage from "$lib/components/ImageMessage.svelte";
-  import { ask, open } from '@tauri-apps/plugin-dialog';
-  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import ChatPanel from "$lib/components/ChatPanel.svelte";
+  import SessionControls from "$lib/components/SessionControls.svelte";
+  import TelegramStatus from "$lib/components/TelegramStatus.svelte";
+  import FileTransferUI from "$lib/components/FileTransferUI.svelte";
+  import Sidebar from "$lib/components/Sidebar.svelte";
+  import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
+  import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
+  import VoicePlayer from "$lib/components/VoicePlayer.svelte";
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
+  import { estimateConversationUsage } from '$lib/tokenEstimator';
+
+  // Tauri APIs - will be loaded in onMount if in Tauri environment
+  let ask: any = null;
+  let open: any = null;
 
   console.log("Full D-PC Messenger loading...");
   
@@ -30,8 +43,8 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
-    attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4)
-      type: 'file' | 'image';
+    attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
+      type: 'file' | 'image' | 'voice';
       filename: string;
       file_path?: string;  // Full-size image file path (for P2P file transfers)
       size_bytes: number;
@@ -45,6 +58,24 @@
       thumbnail?: string;  // Base64 data URL
       vision_analyzed?: boolean;  // AI chat only: was vision API used?
       vision_result?: string;  // AI chat only: vision analysis text
+      // Voice-specific fields (v0.13.0):
+      voice_metadata?: {
+        duration_seconds: number;
+        sample_rate: number;
+        channels: number;
+        codec: string;
+        recorded_at: string;
+      };
+      // Voice transcription (v0.13.2+):
+      transcription?: {
+        text: string;
+        provider: string;
+        transcriber_node_id?: string;
+        confidence?: number;
+        language?: string;
+        timestamp?: string;
+        remote_provider_node_id?: string;
+      };
     }>;
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
@@ -54,44 +85,33 @@
   let activeChatId = $state('local_ai');
   let currentInput = $state("");
   let isLoading = $state(false);
-  let chatWindow: HTMLElement;
+  let chatWindow = $state<HTMLElement>();  // Bound to ChatPanel's chatWindowElement
   let peerInput = $state("");  // RENAMED from peerUri for clarity
   let selectedComputeHost = $state("local");  // "local" or node_id for remote inference
   let selectedRemoteModel = $state("");  // Selected model when using remote compute host
   let selectedPeerContexts = $state(new Set<string>());  // Set of peer node_ids to fetch context from
 
+  // Store draft input text per chat (preserves text when switching chats)
+  let chatDraftInputs = $state(new Map<string, string>());
+
+  // Voice message state (v0.13.0 - Voice Messages)
+  let voicePreview = $state<{ blob: Blob; duration: number } | null>(null);
+
+  // Auto-transcribe toggle state (v0.13.2+ Auto-Transcription)
+  let autoTranscribeEnabled = $state(true);  // Default ON
+
+  // Whisper model loading state (v0.13.3+ Model Pre-loading)
+  let whisperModelLoading = $state(false);
+  let whisperModelLoadError = $state<string | null>(null);
+
   // Dual provider selection (Phase 1: separate text and vision providers)
+  // Managed by ProviderSelector component (extracted)
   let selectedTextProvider = $state("");  // Provider for text-only queries
   let selectedVisionProvider = $state("");  // Provider for image queries
-
-  // Merged provider lists (Phase 2: combines local + remote providers)
-  // Phase 2.3: Add uniqueId to track provider source for remote vision routing
-  const mergedProviders = $derived(() => {
-    const local = ($providersList || []).map(p => ({
-      ...p,
-      source: 'local' as const,
-      displayText: `${p.alias} (${p.model}) - local`,
-      uniqueId: `local:${p.alias}`  // Unique identifier for selection tracking
-    }));
-
-    if (selectedComputeHost === "local") {
-      return local;
-    }
-
-    const remote = ($peerProviders.get(selectedComputeHost) || []).map(p => ({
-      ...p,
-      source: 'remote' as const,
-      displayText: `${p.alias} (${p.model}) - remote`,
-      uniqueId: `remote:${selectedComputeHost}:${p.alias}`  // Include node_id for routing
-    }));
-
-    return [...local, ...remote];
-  });
-
-  const mergedTextProviders = $derived(() => mergedProviders());
-  const mergedVisionProviders = $derived(() => mergedProviders().filter(p => p.supports_vision));
+  let selectedVoiceProvider = $state("");  // v0.13.0+: Provider for voice transcription
 
   // Helper function to parse provider selection (Phase 2.3)
+  // Used by parent for routing remote inference requests
   function parseProviderSelection(uniqueId: string): { source: 'local' | 'remote', alias: string, nodeId?: string } {
     if (!uniqueId) return { source: 'local', alias: '' };
 
@@ -137,7 +157,10 @@
   let showProvidersEditor = $state(false);
   let showCommitDialog = $state(false);
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
-  let autoKnowledgeDetection = $state(false);  // Default: disabled
+  // Initialize from localStorage (browser-safe)
+  let autoKnowledgeDetection = $state(
+    typeof window !== 'undefined' && localStorage.getItem('autoKnowledgeDetection') === 'true'
+  );
 
   // Token tracking state (Phase 2)
   let tokenUsageMap = $state(new Map<string, {used: number, limit: number}>());
@@ -154,6 +177,14 @@
   let commitResultType = $state<"info" | "error" | "warning">("info");
   let showVoteResultDialog = $state(false);
   let currentVoteResult = $state<any>(null);
+
+  // Model download dialog state (v0.13.5)
+  let showModelDownloadDialog = $state(false);
+  let modelDownloadInfo = $state<any>(null);
+  let isDownloadingModel = $state(false);
+  let showModelDownloadToast = $state(false);
+  let modelDownloadToastMessage = $state("");
+  let modelDownloadToastType = $state<"info" | "error" | "warning">("info");
 
   // Add AI Chat dialog state
   let showAddAIChatDialog = $state(false);
@@ -190,11 +221,326 @@
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
   });
 
-  // Initialize provider selections from defaults (Phase 2.3: use uniqueId format)
+  // Save auto-knowledge detection preference to localStorage when changed
   $effect(() => {
-    if ($defaultProviders && !selectedTextProvider && !selectedVisionProvider) {
-      selectedTextProvider = `local:${$defaultProviders.default_provider}`;
-      selectedVisionProvider = `local:${$defaultProviders.vision_provider}`;
+    if (typeof window !== 'undefined') {
+      localStorage.setItem('autoKnowledgeDetection', autoKnowledgeDetection.toString());
+    }
+  });
+
+  // Whisper model loading event handlers (v0.13.3+ Model Pre-loading)
+  $effect(() => {
+    if ($whisperModelLoadingStarted) {
+      console.log(`[Whisper] Model loading started: ${$whisperModelLoadingStarted.provider}`);
+      whisperModelLoading = true;
+      whisperModelLoadError = null;
+    }
+  });
+
+  $effect(() => {
+    if ($whisperModelLoaded) {
+      console.log(`[Whisper] Model loaded successfully: ${$whisperModelLoaded.provider}`);
+      whisperModelLoading = false;
+      whisperModelLoadError = null;
+    }
+  });
+
+  $effect(() => {
+    if ($whisperModelLoadingFailed) {
+      console.error(`[Whisper] Model loading failed: ${$whisperModelLoadingFailed.error}`);
+      whisperModelLoading = false;
+      whisperModelLoadError = $whisperModelLoadingFailed.error;
+    }
+  });
+
+  // Telegram bot integration (v0.14.0+): Handle incoming Telegram messages
+  $effect(() => {
+    if ($telegramMessageReceived) {
+      const { conversation_id, telegram_chat_id, sender_name, text, timestamp } = $telegramMessageReceived;
+      console.log(`[Telegram] Adding message to chat ${conversation_id}: ${text}`);
+
+      // Auto-create conversation in aiChats if it doesn't exist
+      if (!$aiChats.has(conversation_id)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.set(conversation_id, {
+            name: `📱 Telegram (${sender_name})`,
+            provider: 'telegram',  // Unique provider for visual distinction
+            instruction_set_name: 'general'
+          });
+          return newMap;
+        });
+        console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar`);
+
+        // Persist Telegram chats to localStorage for page refresh recovery
+        try {
+          const telegramChats = Object.fromEntries(
+            Array.from($aiChats.entries())
+              .filter(([_, info]) => info.provider === 'telegram')
+              .map(([id, info]) => [id, info])
+          );
+          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+          console.log('[Telegram] Persisted Telegram chats to localStorage:', Object.keys(telegramChats));
+        } catch (error) {
+          console.error('[Telegram] Failed to persist chats:', error);
+        }
+      }
+
+      // Add message to chatHistories
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const currentMessages = newMap.get(conversation_id) || [];
+        newMap.set(conversation_id, [
+          ...currentMessages,
+          {
+            id: `telegram-${Date.now()}`,
+            sender: `telegram-${telegram_chat_id}`,
+            senderName: sender_name,
+            text: text,
+            timestamp: new Date(timestamp).getTime()
+          }
+        ]);
+        return newMap;
+      });
+
+      // Send notification if app is in background (v0.15.0)
+      (async () => {
+        const messagePreview = text.length > 50 ? text.slice(0, 50) + '...' : text;
+        const notified = await showNotificationIfBackground({
+          title: sender_name,
+          body: messagePreview
+        });
+        console.log(`[Notifications] Telegram message notification: ${notified ? 'system' : 'skip'}`);
+      })();
+
+      // Clear the received event after processing
+      telegramMessageReceived.set(null);
+    }
+  });
+
+  // Handle Telegram voice messages
+  $effect(() => {
+    if ($telegramVoiceReceived) {
+      const { conversation_id, telegram_chat_id, sender_name, filename, file_path, duration_seconds, transcription } = $telegramVoiceReceived;
+      console.log(`[Telegram] Adding voice message to chat ${conversation_id}: ${filename}`);
+
+      // Auto-create conversation in aiChats if it doesn't exist
+      if (!$aiChats.has(conversation_id)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.set(conversation_id, {
+            name: `📱 Telegram (${sender_name})`,
+            provider: 'telegram',  // Unique provider for visual distinction
+            instruction_set_name: 'general'
+          });
+          return newMap;
+        });
+        console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar`);
+
+        // Persist Telegram chats to localStorage for page refresh recovery
+        try {
+          const telegramChats = Object.fromEntries(
+            Array.from($aiChats.entries())
+              .filter(([_, info]) => info.provider === 'telegram')
+              .map(([id, info]) => [id, info])
+          );
+          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+          console.log('[Telegram] Persisted Telegram chats to localStorage (from voice):', Object.keys(telegramChats));
+        } catch (error) {
+          console.error('[Telegram] Failed to persist chats:', error);
+        }
+      }
+
+      // Add voice message to chatHistories
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const currentMessages = newMap.get(conversation_id) || [];
+        newMap.set(conversation_id, [
+          ...currentMessages,
+          {
+            id: `telegram-voice-${Date.now()}`,
+            sender: `telegram-${telegram_chat_id}`,
+            senderName: sender_name,
+            text: transcription ? `Voice message: ${transcription}` : 'Voice message',
+            timestamp: Date.now(),
+            attachments: [{
+              type: 'voice',
+              filename: filename,
+              file_path: file_path,  // Use actual file path from backend
+              size_bytes: 0,
+              mime_type: 'audio/ogg',
+              voice_metadata: {
+                duration_seconds: duration_seconds,
+                sample_rate: 48000,
+                channels: 1,
+                codec: 'opus',
+                recorded_at: new Date().toISOString()
+              },
+              transcription: transcription ? {
+                text: transcription,
+                provider: 'unknown'
+              } : undefined
+            }]
+          }
+        ]);
+        return newMap;
+      });
+
+      // Send notification if app is in background (v0.15.0)
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: sender_name,
+          body: `🎤 Voice message (${duration_seconds}s)`
+        });
+        console.log(`[Notifications] Telegram voice notification: ${notified ? 'system' : 'skip'}`);
+      })();
+
+      // Clear the received event after processing
+      telegramVoiceReceived.set(null);
+    }
+  });
+
+  // Handle Telegram image messages
+  $effect(() => {
+    const imageEvent = $telegramImageReceived;
+    if (imageEvent) {
+      const { conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes } = imageEvent;
+      console.log(`[Telegram] Adding image to chat ${conversation_id}: ${filename}`);
+
+      // Auto-create conversation in aiChats if it doesn't exist
+      if (!$aiChats.has(conversation_id)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.set(conversation_id, {
+            name: `📱 Telegram (${sender_name})`,
+            provider: 'telegram',
+            instruction_set_name: 'general'
+          });
+          return newMap;
+        });
+        console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar (from image)`);
+
+        // Persist Telegram chats to localStorage
+        try {
+          const telegramChats = Object.fromEntries(
+            Array.from($aiChats.entries())
+              .filter(([_, info]) => info.provider === 'telegram')
+              .map(([id, info]) => [id, info])
+          );
+          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+        } catch (error) {
+          console.error('[Telegram] Failed to persist chats:', error);
+        }
+      }
+
+      // Add image to chatHistories
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const currentMessages = newMap.get(conversation_id) || [];
+        newMap.set(conversation_id, [
+          ...currentMessages,
+          {
+            id: `telegram-image-${Date.now()}`,
+            sender: `telegram-${telegram_chat_id}`,
+            senderName: sender_name,
+            text: caption || "Image",
+            timestamp: Date.now(),
+            attachments: [{
+              type: 'image',
+              filename: filename,
+              file_path: file_path,
+              size_bytes: size_bytes || 0
+            }]
+          }
+        ]);
+        return newMap;
+      });
+
+      // Send notification if app is in background (v0.15.0)
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: sender_name,
+          body: `📷 Photo${caption ? ': ' + caption.slice(0, 30) : ''}`
+        });
+        console.log(`[Notifications] Telegram image notification: ${notified ? 'system' : 'skip'}`);
+      })();
+
+      // Clear the received event after processing
+      telegramImageReceived.set(null);
+    }
+  });
+
+  // Handle Telegram file/document messages
+  $effect(() => {
+    const fileEvent = $telegramFileReceived;
+    if (fileEvent) {
+      const { conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes, mime_type } = fileEvent;
+      console.log(`[Telegram] Adding file to chat ${conversation_id}: ${filename}`);
+
+      // Auto-create conversation in aiChats if it doesn't exist
+      if (!$aiChats.has(conversation_id)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.set(conversation_id, {
+            name: `📱 Telegram (${sender_name})`,
+            provider: 'telegram',
+            instruction_set_name: 'general'
+          });
+          return newMap;
+        });
+        console.log(`[Telegram] Auto-created chat ${conversation_id} in sidebar (from file)`);
+
+        // Persist Telegram chats to localStorage
+        try {
+          const telegramChats = Object.fromEntries(
+            Array.from($aiChats.entries())
+              .filter(([_, info]) => info.provider === 'telegram')
+              .map(([id, info]) => [id, info])
+          );
+          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+        } catch (error) {
+          console.error('[Telegram] Failed to persist chats:', error);
+        }
+      }
+
+      // Determine if it's an image or other file
+      const isImage = mime_type?.startsWith('image/');
+
+      // Add file to chatHistories
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const currentMessages = newMap.get(conversation_id) || [];
+        newMap.set(conversation_id, [
+          ...currentMessages,
+          {
+            id: `telegram-file-${Date.now()}`,
+            sender: `telegram-${telegram_chat_id}`,
+            senderName: sender_name,
+            text: caption || filename,
+            timestamp: Date.now(),
+            attachments: [{
+              type: isImage ? 'image' : 'file',
+              filename: filename,
+              file_path: file_path,
+              size_bytes: size_bytes || 0,
+              mime_type: mime_type
+            }]
+          }
+        ]);
+        return newMap;
+      });
+
+      // Send notification if app is in background (v0.15.0)
+      (async () => {
+        const notified = await showNotificationIfBackground({
+          title: sender_name,
+          body: `📎 File: ${filename}`
+        });
+        console.log(`[Notifications] Telegram file notification: ${notified ? 'system' : 'skip'}`);
+      })();
+
+      // Clear the received event after processing
+      telegramFileReceived.set(null);
     }
   });
 
@@ -240,8 +586,29 @@
 
   // Initialize window focus tracking and notification permission (runs once on mount)
   onMount(async () => {
+    // Detect if running in Tauri (official method for Tauri 2.x)
+    const isTauri = typeof window !== 'undefined' && (
+      (window as any).isTauri === true ||  // Tauri 2.x official detection
+      !!(window as any).__TAURI__           // Fallback for older versions
+    );
+    console.log(`[Environment] Detected: ${isTauri ? 'Tauri' : 'Browser'} mode`);
+
+    // Load Tauri dialog APIs if in Tauri environment
+    if (isTauri) {
+      try {
+        const dialog = await import('@tauri-apps/plugin-dialog');
+        ask = dialog.ask;
+        open = dialog.open;
+        console.log('[Tauri] Dialog API loaded');
+      } catch (err) {
+        console.error('[Tauri] Failed to load dialog API:', err);
+      }
+    }
+
     if (typeof window !== 'undefined') {
       try {
+        // Load window tracking API if in Tauri
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
         const appWindow = getCurrentWindow();
 
         // Listen to focus changes (store unlisten function for cleanup)
@@ -253,7 +620,9 @@
         // Check initial focus state
         windowFocused = await appWindow.isFocused();
       } catch (error) {
-        console.error('[Notifications] Failed to set up window tracking:', error);
+        console.log('[Notifications] Window tracking not available (running in browser)');
+        // In browser, assume window is always focused
+        windowFocused = true;
       }
     }
 
@@ -265,6 +634,50 @@
       }
     } catch (error) {
       console.error('Failed to load instruction sets:', error);
+    }
+
+    // Restore Telegram chats from localStorage (for page refresh recovery)
+    try {
+      const savedTelegramChats = localStorage.getItem('dpc-telegram-chats');
+      if (savedTelegramChats) {
+        const telegramChats = JSON.parse(savedTelegramChats);
+        let restoredCount = 0;
+
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          for (const [id, info] of Object.entries(telegramChats)) {
+            // Only restore if not already in aiChats
+            if (!newMap.has(id)) {
+              newMap.set(id, info as { name: string; provider: string; instruction_set_name?: string });
+              restoredCount++;
+            }
+          }
+          return newMap;
+        });
+
+        // Also populate telegramLinkedChats by extracting chat_id from conversation_id
+        // Format: telegram-{chat_id} -> {chat_id}
+        const restoredLinks: Record<string, string> = {};
+        for (const conversationId of Object.keys(telegramChats)) {
+          if (conversationId.startsWith('telegram-')) {
+            const chatId = conversationId.replace('telegram-', '');
+            restoredLinks[conversationId] = chatId;
+          }
+        }
+
+        if (Object.keys(restoredLinks).length > 0) {
+          import('$lib/coreService.js').then(({ telegramLinkedChats }) => {
+            telegramLinkedChats.set(new Map(Object.entries(restoredLinks)));
+            console.log(`[Telegram] Restored ${Object.keys(restoredLinks).length} conversation links from localStorage`);
+          });
+        }
+
+        if (restoredCount > 0) {
+          console.log(`[Telegram] Restored ${restoredCount} Telegram chats from localStorage`);
+        }
+      }
+    } catch (error) {
+      console.error('[Telegram] Failed to restore chats from localStorage:', error);
     }
   });
 
@@ -356,6 +769,57 @@
     }
   });
 
+  // Reactive: Open model download dialog when model not cached (v0.13.5)
+  $effect(() => {
+    if ($whisperModelDownloadRequired) {
+      console.log('[ModelDownload] Model download required:', $whisperModelDownloadRequired);
+      modelDownloadInfo = $whisperModelDownloadRequired;
+      showModelDownloadDialog = true;
+      isDownloadingModel = false;
+    }
+  });
+
+  // Reactive: Update download status when download starts (v0.13.5)
+  $effect(() => {
+    if ($whisperModelDownloadStarted) {
+      console.log('[ModelDownload] Download started:', $whisperModelDownloadStarted);
+      isDownloadingModel = true;
+    }
+  });
+
+  // Reactive: Close dialog and show success when download completes (v0.13.5)
+  $effect(() => {
+    if ($whisperModelDownloadCompleted) {
+      console.log('[ModelDownload] Download completed:', $whisperModelDownloadCompleted);
+      isDownloadingModel = false;
+      showModelDownloadDialog = false;
+
+      // Show success toast
+      modelDownloadToastMessage = '✅ Model download successful! Voice transcription is now available.';
+      modelDownloadToastType = 'info';
+      showModelDownloadToast = true;
+
+      // Clear the event
+      whisperModelDownloadCompleted.set(null);
+    }
+  });
+
+  // Reactive: Show error and reset when download fails (v0.13.5)
+  $effect(() => {
+    if ($whisperModelDownloadFailed) {
+      console.error('[ModelDownload] Download failed:', $whisperModelDownloadFailed);
+      isDownloadingModel = false;
+
+      // Show error toast
+      modelDownloadToastMessage = `❌ Model download failed: ${$whisperModelDownloadFailed.error}`;
+      modelDownloadToastType = 'error';
+      showModelDownloadToast = true;
+
+      // Clear the event
+      whisperModelDownloadFailed.set(null);
+    }
+  });
+
   // Reactive: Clear chat window on conversation reset (v0.11.3 - for AI chats and P2P resets)
   $effect(() => {
     if ($conversationReset) {
@@ -388,9 +852,17 @@
   $effect(() => {
     if ($tokenWarning) {
       const {conversation_id, tokens_used, token_limit, usage_percent} = $tokenWarning;
+
+      // Guard: Only update if values actually changed (prevent infinite loop)
+      const existing = tokenUsageMap.get(conversation_id);
+      if (existing && existing.used === tokens_used && existing.limit === token_limit) {
+        return; // Values unchanged, skip update
+      }
+
       // Update token usage map
       tokenUsageMap = new Map(tokenUsageMap);
       tokenUsageMap.set(conversation_id, {used: tokens_used, limit: token_limit});
+
       // Show warning toast
       showTokenWarning = true;
       tokenWarningMessage = `Context window ${Math.round(usage_percent * 100)}% full. Consider ending session to save knowledge.`;
@@ -398,12 +870,46 @@
   });
 
   // Reactive: Get current chat's token usage
+  const DEFAULT_TOKEN_LIMIT = 16384; // Default limit for new AI chats (before first message)
   let currentTokenUsage = $derived(tokenUsageMap.get(activeChatId) || {used: 0, limit: 0});
+
+  // Use effective limit (default if not yet set by backend)
+  let effectiveTokenUsage = $derived({
+    used: currentTokenUsage.used,
+    limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT
+  });
+
+  // Reactive: Estimate token usage including current input (real-time feedback)
+  let estimatedUsage = $derived(
+    estimateConversationUsage(effectiveTokenUsage, currentInput)
+  );
+
+  // Reactive: Determine warning level based on estimated usage
+  let tokenWarningLevel = $derived(
+    !$aiChats.has(activeChatId)
+      ? 'none'
+      : estimatedUsage.percentage >= 1.0
+        ? 'critical'
+        : estimatedUsage.percentage >= 0.9
+          ? 'warning'
+          : 'none'
+  );
+
+  let showTokenBanner = $derived(
+    tokenWarningLevel === 'critical' || tokenWarningLevel === 'warning'
+  );
 
   // Reactive: Check if current peer is connected (for enabling/disabling send controls)
   let isPeerConnected = $derived(!activeChatId.startsWith('ai_') && activeChatId !== 'local_ai'
     ? ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
     : true); // AI chats don't require peer connection
+
+  // Reactive: Check if current chat is a Telegram chat (for UI adjustments)
+  let isTelegramChat = $derived(activeChatId.startsWith('telegram-'));
+
+  // Reactive: Check if current chat is an AI chat (excluding Telegram which are stored in aiChats for sidebar)
+  // Telegram chats are in $aiChats for sidebar display but are NOT AI chats
+  let isActuallyAIChat = $derived($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-'));
 
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
   // Handles page refresh scenario: frontend loses chatHistories, backend keeps conversation_monitors
@@ -481,8 +987,45 @@
     }
   });
 
-  // Phase 7: Reactive: Check if context window is full (100% or more)
-  let isContextWindowFull = $derived(currentTokenUsage.limit > 0 && (currentTokenUsage.used / currentTokenUsage.limit) >= 1.0);
+  // Clear input state when switching chats (prevent cross-chat pollution)
+  // Track previous chat to detect actual chat switches
+  let previousChatId: string = '';
+
+  $effect(() => {
+    // Track activeChatId dependency
+    const currentChat = activeChatId;
+
+    // Skip first run (just initialize)
+    if (previousChatId === '') {
+      previousChatId = currentChat;
+      return;
+    }
+
+    // When actually switching to a different chat
+    if (currentChat !== previousChatId) {
+      // 1. Save draft for previous chat
+      chatDraftInputs = new Map(chatDraftInputs).set(previousChatId, currentInput);
+
+      // 2. Restore draft for new chat (if exists)
+      const draft = chatDraftInputs.get(currentChat);
+      currentInput = draft !== undefined ? draft : "";
+
+      // 3. Clear pending image and voice preview
+      if (pendingImage !== null) {
+        pendingImage = null;
+      }
+      if (voicePreview !== null) {
+        voicePreview = null;
+      }
+
+      // 4. Update tracking
+      previousChatId = currentChat;
+    }
+  });
+
+  // Phase 7: Reactive: Check if context window is full (100% or more) - uses estimated total
+  // Only applies to actual AI chats (not Telegram, which are in aiChats for sidebar)
+  let isContextWindowFull = $derived(isActuallyAIChat && estimatedUsage.percentage >= 1.0);
 
   // Reactive: Handle knowledge extraction failures (Phase 4)
   $effect(() => {
@@ -618,6 +1161,119 @@
     }
   });
 
+  // Reactive: Handle voice transcription complete (v0.13.2+)
+  $effect(() => {
+    if ($voiceTranscriptionComplete) {
+      const { transfer_id, node_id, text, transcriber_node_id, provider, confidence, language, timestamp, remote_provider_node_id } = $voiceTranscriptionComplete;
+      console.log(`[VoiceTranscription] Received transcription for ${transfer_id}: "${text}"`);
+
+      // Find the message with this transfer_id and add transcription to attachment
+      // CRITICAL: Must create NEW objects at every level to trigger Svelte reactivity
+      chatHistories.update(histories => {
+        const updatedHistories = new Map();
+
+        for (const [chatId, messages] of histories) {
+          // Create NEW messages array for this chat
+          const updatedMessages = messages.map(message => {
+            // Check if this message has the voice attachment we're looking for
+            if (message.attachments) {
+              const hasTargetVoice = message.attachments.some(
+                att => att.type === 'voice' && att.transfer_id === transfer_id
+              );
+
+              if (hasTargetVoice) {
+                // Create NEW message with NEW attachments array
+                return {
+                  ...message,
+                  attachments: message.attachments.map(attachment => {
+                    if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
+                      // Create NEW attachment with transcription
+                      console.log(`[VoiceTranscription] Adding transcription to message in chat ${chatId}`);
+                      return {
+                        ...attachment,
+                        transcription: {
+                          text,
+                          provider,
+                          transcriber_node_id,
+                          confidence,
+                          language,
+                          timestamp,
+                          remote_provider_node_id
+                        }
+                      };
+                    }
+                    return attachment;
+                  })
+                };
+              }
+            }
+            return message;
+          });
+
+          updatedHistories.set(chatId, updatedMessages);
+        }
+
+        return updatedHistories;
+      });
+    }
+  });
+
+  // Reactive: Handle voice transcription received from peer (v0.13.2+)
+  $effect(() => {
+    if ($voiceTranscriptionReceived) {
+      const { transfer_id, node_id, text, transcriber_node_id, provider, confidence, language, timestamp } = $voiceTranscriptionReceived;
+      console.log(`[VoiceTranscription] Received transcription from peer for ${transfer_id}: "${text}"`);
+
+      // Find the message with this transfer_id and add transcription to attachment
+      // CRITICAL: Must create NEW objects at every level to trigger Svelte reactivity
+      chatHistories.update(histories => {
+        const updatedHistories = new Map();
+
+        for (const [chatId, messages] of histories) {
+          // Create NEW messages array for this chat
+          const updatedMessages = messages.map(message => {
+            // Check if this message has the voice attachment we're looking for
+            if (message.attachments) {
+              const hasTargetVoice = message.attachments.some(
+                att => att.type === 'voice' && att.transfer_id === transfer_id
+              );
+
+              if (hasTargetVoice) {
+                // Create NEW message with NEW attachments array
+                return {
+                  ...message,
+                  attachments: message.attachments.map(attachment => {
+                    if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
+                      // Create NEW attachment with transcription from peer
+                      console.log(`[VoiceTranscription] Adding peer transcription to message in chat ${chatId}`);
+                      return {
+                        ...attachment,
+                        transcription: {
+                          text,
+                          provider,
+                          transcriber_node_id,
+                          confidence,
+                          language,
+                          timestamp
+                        }
+                      };
+                    }
+                    return attachment;
+                  })
+                };
+              }
+            }
+            return message;
+          });
+
+          updatedHistories.set(chatId, updatedMessages);
+        }
+
+        return updatedHistories;
+      });
+    }
+  });
+
   // Reactive: Handle chat history restored (v0.11.2)
   $effect(() => {
     if ($historyRestored) {
@@ -731,7 +1387,7 @@
   // Reactive statement to compute peer counts
   let peersByStrategy = $derived(getPeersByStrategy($nodeStatus?.peer_info));
 
-  function isNearBottom(element: HTMLElement, threshold: number = 150): boolean {
+  function isNearBottom(element: HTMLElement | undefined, threshold: number = 150): boolean {
     if (!element) return true;
     const { scrollTop, scrollHeight, clientHeight } = element;
     return scrollHeight - scrollTop - clientHeight < threshold;
@@ -844,12 +1500,14 @@
       const text = currentInput.trim();
       const imageData = pendingImage;
 
-      // Clear input and pending image
+      // Clear input, draft, and pending image
       currentInput = "";
+      chatDraftInputs = new Map(chatDraftInputs).set(activeChatId, "");
       pendingImage = null;
 
-      // Check if this is an AI chat or P2P chat (Phase 2.3: Fix P2P screenshot sharing)
-      if ($aiChats.has(activeChatId)) {
+      // Check if this is an AI chat, Telegram chat, or P2P chat (Phase 2.3: Fix P2P screenshot sharing)
+      // Note: Telegram chats are in $aiChats but should be handled separately (not as AI chats)
+      if ($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')) {
         // AI chat: Add to conversation history with attachment
         chatHistories.update(h => {
           const newMap = new Map(h);
@@ -900,6 +1558,71 @@
           setTimeout(() => showFileOfferToast = false, 5000);
           isLoading = false;  // Only clear loading on error
         }
+      } else if (activeChatId.startsWith('telegram-')) {
+        // Telegram chat: Save image to temp file and send via Telegram
+        try {
+          // Convert data URL to blob and save to temp file
+          const response = await fetch(imageData.dataUrl);
+          const blob = await response.blob();
+          const arrayBuffer = await blob.arrayBuffer();
+          const uint8Array = new Uint8Array(arrayBuffer);
+
+          // Check if Tauri environment (same detection as line 424)
+          const isTauriEnv = typeof window !== 'undefined' && (
+            (window as any).isTauri === true ||
+            !!(window as any).__TAURI__
+          );
+
+          if (isTauriEnv) {
+            const { writeFile, BaseDirectory, mkdir } = await import('@tauri-apps/plugin-fs');
+            const { invoke } = await import('@tauri-apps/api/core');
+
+            const timestamp = Date.now();
+            const filename = imageData.filename || `screenshot_${timestamp}.png`;
+            const relativePath = `.dpc/temp/${filename}`;
+
+            // Ensure temp directory exists
+            await mkdir('.dpc/temp', { baseDir: BaseDirectory.Home, recursive: true });
+
+            // Write file to home directory
+            await writeFile(relativePath, uint8Array, { baseDir: BaseDirectory.Home });
+
+            // Get home directory path and construct full path for backend
+            const homeDir = await invoke<string>('get_home_directory');
+            const fullPath = `${homeDir}/${relativePath}`;
+
+            // Send to Telegram with the full file path
+            await sendToTelegram(activeChatId, text || '', [], undefined, undefined, undefined, fullPath);
+
+            // Add to local history
+            chatHistories.update(h => {
+              const newMap = new Map(h);
+              const hist = newMap.get(activeChatId) || [];
+              newMap.set(activeChatId, [...hist, {
+                id: crypto.randomUUID(),
+                sender: 'user',
+                text: text || '',
+                timestamp: Date.now(),
+                attachments: [{
+                  type: 'image',
+                  filename: filename,
+                  file_path: fullPath,
+                  size_bytes: uint8Array.length
+                }]
+              }]);
+              return newMap;
+            });
+
+            console.log('[Telegram] Screenshot sent to Telegram');
+          } else {
+            throw new Error('Telegram file transfer requires Tauri desktop app');
+          }
+        } catch (error) {
+          console.error('Error sending screenshot to Telegram:', error);
+          fileOfferToastMessage = `Failed to send screenshot to Telegram: ${error}`;
+          showFileOfferToast = true;
+          setTimeout(() => showFileOfferToast = false, 5000);
+        }
       } else {
         // P2P chat: Send screenshot via file transfer
         try {
@@ -946,6 +1669,9 @@
     const text = currentInput.trim();
     currentInput = "";
 
+    // Clear draft for this chat after sending
+    chatDraftInputs = new Map(chatDraftInputs).set(activeChatId, "");
+
     chatHistories.update(h => {
       const newMap = new Map(h);
       const hist = newMap.get(activeChatId) || [];
@@ -953,8 +1679,9 @@
       return newMap;
     });
 
-    // Check if this is an AI chat (local_ai or ai_chat_*)
-    if ($aiChats.has(activeChatId)) {
+    // Check if this is an AI chat (local_ai or ai_chat_*), but NOT a Telegram chat
+    // Telegram chats are in $aiChats for sidebar display but should NOT trigger AI queries
+    if ($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')) {
       isLoading = true;
       const commandId = crypto.randomUUID();
 
@@ -1019,7 +1746,21 @@
         // Clean up the command mapping
         commandToChatMap.delete(commandId);
       }
+    } else if (activeChatId.startsWith('telegram-')) {
+      // Telegram chat: Send message to Telegram
+      try {
+        const linkedChatId = $telegramLinkedChats.get(activeChatId);
+        if (linkedChatId) {
+          await sendToTelegram(activeChatId, text);
+          console.log(`[Telegram] Sent message to Telegram chat ${linkedChatId}`);
+        } else {
+          console.warn(`[Telegram] No linked chat ID for ${activeChatId}, message not sent to Telegram`);
+        }
+      } catch (error) {
+        console.error('[Telegram] Failed to send message:', error);
+      }
     } else {
+      // P2P chat: Send via P2P
       sendCommand("send_p2p_message", { target_node_id: activeChatId, text });
     }
     
@@ -1179,6 +1920,40 @@
     newSessionProposal.set(null);
   }
 
+  // Model download dialog handlers (v0.13.5)
+  async function handleModelDownload(event: CustomEvent) {
+    const { provider_alias } = event.detail;
+    console.log('[ModelDownload] Starting download for provider:', provider_alias);
+
+    try {
+      const result = await sendCommand('download_whisper_model', {
+        provider_alias
+      });
+
+      if (result.status === 'success') {
+        console.log('[ModelDownload] Download initiated successfully');
+      } else {
+        console.error('[ModelDownload] Download failed:', result.error);
+        modelDownloadToastMessage = `❌ Download failed: ${result.error}`;
+        modelDownloadToastType = 'error';
+        showModelDownloadToast = true;
+        isDownloadingModel = false;
+      }
+    } catch (error) {
+      console.error('[ModelDownload] Error initiating download:', error);
+      modelDownloadToastMessage = `❌ Error: ${error}`;
+      modelDownloadToastType = 'error';
+      showModelDownloadToast = true;
+      isDownloadingModel = false;
+    }
+  }
+
+  function handleModelDownloadCancel() {
+    console.log('[ModelDownload] User cancelled download');
+    showModelDownloadDialog = false;
+    whisperModelDownloadRequired.set(null);
+  }
+
   function handleEndSession(conversationId: string) {
     if (confirm("End this conversation session and extract knowledge?")) {
       sendCommand("end_conversation_session", {
@@ -1284,15 +2059,24 @@
     console.log('Delete AI chat button clicked for:', chatId);
 
     if (chatId === 'local_ai') {
-      await ask("Cannot delete the default Local AI chat.", { title: "D-PC Messenger", kind: "info" });
+      if (ask) {
+        await ask("Cannot delete the default Local AI chat.", { title: "D-PC Messenger", kind: "info" });
+      } else {
+        alert("Cannot delete the default Local AI chat.");
+      }
       return;
     }
 
     // Use Tauri's ask dialog (works on all platforms including macOS)
-    const shouldDelete = await ask(
-      "Delete this AI chat? This will permanently remove the chat history.",
-      { title: "Confirm Deletion", kind: "warning" }
-    );
+    let shouldDelete = false;
+    if (ask) {
+      shouldDelete = await ask(
+        "Delete this AI chat? This will permanently remove the chat history.",
+        { title: "Confirm Deletion", kind: "warning" }
+      );
+    } else {
+      shouldDelete = confirm("Delete this AI chat? This will permanently remove the chat history.");
+    }
     console.log('User confirmed deletion:', shouldDelete);
 
     if (!shouldDelete) {
@@ -1330,9 +2114,19 @@
 
   // File transfer handlers (Week 1)
   async function handleSendFile() {
-    // Only allow file transfer to P2P chats (not local_ai or ai_xxx chats)
+    // Only allow file transfer to P2P chats and Telegram chats (not local_ai or ai_xxx chats)
     if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
-      await ask("File transfer is only available in P2P chats.", { title: "D-PC Messenger", kind: "info" });
+      if (ask) {
+        await ask("File transfer is only available in P2P and Telegram chats.", { title: "D-PC Messenger", kind: "info" });
+      } else {
+        alert("File transfer is only available in P2P and Telegram chats.");
+      }
+      return;
+    }
+
+    // Check if running in Tauri
+    if (!open) {
+      alert("File transfer requires the Tauri desktop app. Please use the desktop version.");
       return;
     }
 
@@ -1353,18 +2147,45 @@
       // Get file name from path
       const fileName = filePath.split(/[\\/]/).pop() || filePath;
 
-      // Get recipient name from peer info
-      const peer = $nodeStatus.peer_info.find((p: any) => p.node_id === activeChatId);
-      const recipientName = peer?.name || activeChatId.slice(0, 20) + '...';
+      // Check if this is a Telegram chat
+      if (activeChatId.startsWith('telegram-')) {
+        // Send directly to Telegram (no confirmation dialog needed)
+        console.log(`[Telegram] Sending file to Telegram: ${fileName}`);
+        await sendToTelegram(activeChatId, '', [], undefined, undefined, undefined, filePath);
 
-      // Store pending file send and show confirmation dialog
-      pendingFileSend = {
-        filePath,
-        fileName,
-        recipientId: activeChatId,
-        recipientName
-      };
-      showSendFileDialog = true;
+        // Add to local chat history (with minimal attachment data for UI display)
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          const hist = newMap.get(activeChatId) || [];
+          newMap.set(activeChatId, [...hist, {
+            id: crypto.randomUUID(),
+            sender: 'user',
+            text: '',
+            timestamp: Date.now(),
+            attachments: [{
+              type: 'file',
+              filename: fileName,
+              file_path: filePath,
+              size_bytes: 0  // Placeholder - actual size handled by backend
+            }]
+          }]);
+          return newMap;
+        });
+      } else {
+        // P2P file transfer with confirmation dialog (existing behavior)
+        // Get recipient name from peer info
+        const peer = $nodeStatus.peer_info.find((p: any) => p.node_id === activeChatId);
+        const recipientName = peer?.name || activeChatId.slice(0, 20) + '...';
+
+        // Store pending file send and show confirmation dialog
+        pendingFileSend = {
+          filePath,
+          fileName,
+          recipientId: activeChatId,
+          recipientName
+        };
+        showSendFileDialog = true;
+      }
     } catch (error) {
       console.error('Error sending file:', error);
       fileOfferToastMessage = `Failed to send file: ${error}`;
@@ -1406,16 +2227,30 @@
 
   // Image paste handlers (Phase 2.4: Screenshot + Vision - improved UX)
   function handlePaste(event: ClipboardEvent) {
+    console.log('[Paste] Paste event triggered');
     const items = event.clipboardData?.items;
-    if (!items) return;
+    if (!items) {
+      console.log('[Paste] No clipboard items available');
+      return;
+    }
 
-    for (const item of items) {
+    console.log(`[Paste] Found ${items.length} clipboard items`);
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      console.log(`[Paste] Item ${i}: type="${item.type}", kind="${item.kind}"`);
+
       if (item.type.startsWith('image/')) {
+        console.log('[Paste] Image item detected, processing...');
         event.preventDefault();
         const blob = item.getAsFile();
 
         // Check if blob is valid
-        if (!blob) continue;
+        if (!blob) {
+          console.log('[Paste] Failed to get file blob from clipboard item');
+          continue;
+        }
+
+        console.log(`[Paste] Got blob: size=${blob.size} bytes, type=${blob.type}`);
 
         // Validate size (5MB limit)
         if (blob.size > 5 * 1024 * 1024) {
@@ -1428,16 +2263,21 @@
         // Convert to data URL and show as preview chip
         const reader = new FileReader();
         reader.onload = (e) => {
+          console.log('[Paste] Image converted to data URL, setting pendingImage');
           pendingImage = {
             dataUrl: e.target?.result as string,
             filename: `screenshot_${Date.now()}.png`,
             sizeBytes: blob.size
           };
         };
+        reader.onerror = (e) => {
+          console.error('[Paste] FileReader error:', e);
+        };
         reader.readAsDataURL(blob);
         break;
       }
     }
+    console.log('[Paste] Paste handling complete');
   }
 
   function clearPendingImage() {
@@ -1500,13 +2340,209 @@
     }
   }
 
+  // Voice message handlers (v0.13.0 - Voice Messages)
+  async function handleRecordingComplete(blob: Blob, duration: number) {
+    voicePreview = { blob, duration };
+  }
+
+  async function handleSendVoiceMessage() {
+    if (!voicePreview) return;
+
+    try {
+      // Store blob and duration locally to avoid null check issues after await
+      const blob = voicePreview.blob;
+      const duration = voicePreview.duration;
+
+      // Check if this is a Telegram chat
+      if (activeChatId.startsWith('telegram-')) {
+        // Convert blob to base64
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+
+        // Convert to base64 in chunks to avoid "Maximum call stack size exceeded"
+        let binaryString = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < uint8Array.length; i += chunkSize) {
+          const chunk = uint8Array.subarray(i, i + chunkSize);
+          binaryString += String.fromCharCode(...chunk);
+        }
+        const base64Audio = btoa(binaryString);
+
+        // Send to Telegram
+        await sendToTelegram(
+          activeChatId,
+          '', // Empty text for voice-only message
+          [],
+          base64Audio,
+          duration,
+          blob.type || 'audio/webm'
+        );
+
+        // Add message to local history
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          const hist = newMap.get(activeChatId) || [];
+          newMap.set(activeChatId, [...hist, {
+            id: crypto.randomUUID(),
+            sender: 'user',
+            text: 'Voice message',
+            timestamp: Date.now(),
+            attachments: [{
+              type: 'voice',
+              filename: `voice_${Date.now()}.${(blob.type || 'audio/webm').split('/')[1]}`,
+              file_path: '', // Will be filled by backend response
+              size_bytes: blob.size,
+              mime_type: blob.type || 'audio/webm',
+              voice_metadata: {
+                duration_seconds: duration,
+                sample_rate: 48000,
+                channels: 1,
+                codec: 'opus',
+                recorded_at: new Date().toISOString()
+              }
+            }]
+          }]);
+          return newMap;
+        });
+
+        console.log(`[Telegram] Sent voice message to Telegram`);
+      } else if (activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+        // For P2P chats, send via file transfer
+        await sendVoiceMessage(activeChatId, blob, duration);
+      }
+      // For AI chats, voice messages must be transcribed first (use handleTranscribeVoiceMessage instead)
+
+      // Clear preview
+      voicePreview = null;
+    } catch (error) {
+      console.error('Error sending voice message:', error);
+      fileOfferToastMessage = `Failed to send voice: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  async function handleTranscribeVoiceMessage() {
+    if (!voicePreview) return;
+
+    try {
+      // Convert blob to base64
+      const arrayBuffer = await voicePreview.blob.arrayBuffer();
+      const uint8Array = new Uint8Array(arrayBuffer);
+
+      // Convert to base64 in chunks to avoid "Maximum call stack size exceeded"
+      let binaryString = '';
+      const chunkSize = 8192;
+      for (let i = 0; i < uint8Array.length; i += chunkSize) {
+        const chunk = uint8Array.subarray(i, i + chunkSize);
+        binaryString += String.fromCharCode(...chunk);
+      }
+      const base64Audio = btoa(binaryString);
+
+      // Show loading state
+      fileOfferToastMessage = 'Transcribing voice message...';
+      showFileOfferToast = true;
+
+      // Parse selected voice provider (v0.13.0+: Use selected provider instead of auto-detect)
+      const parsedProvider = parseProviderSelection(selectedVoiceProvider || selectedTextProvider);
+
+      // Call backend for transcription
+      const response = await sendCommand('transcribe_audio', {
+        audio_base64: base64Audio,
+        mime_type: voicePreview.blob.type || 'audio/webm',
+        provider_alias: parsedProvider.alias  // v0.13.0+: Pass selected provider
+      });
+
+      if (response.error) {
+        throw new Error(response.error);
+      }
+
+      // Insert transcribed text into textarea
+      const transcription = response.text || '';
+      if (transcription) {
+        currentInput = currentInput + (currentInput ? ' ' : '') + transcription;
+      }
+
+      // Clear preview and hide toast
+      voicePreview = null;
+      showFileOfferToast = false;
+
+      // Focus textarea
+      const textarea = document.getElementById('message-input') as HTMLTextAreaElement;
+      if (textarea) {
+        textarea.focus();
+        textarea.setSelectionRange(currentInput.length, currentInput.length);
+      }
+    } catch (error) {
+      console.error('Error transcribing voice message:', error);
+      fileOfferToastMessage = `Transcription failed: ${error}`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+    }
+  }
+
+  function handleCancelVoicePreview() {
+    voicePreview = null;
+  }
+
+  // Auto-transcribe setting management (v0.13.2+ Auto-Transcription)
+  async function saveAutoTranscribeSetting() {
+    // Only save for P2P chats (not AI chats or local_ai)
+    if ($aiChats.has(activeChatId) || activeChatId === 'local_ai') {
+      return;
+    }
+
+    try {
+      const result = await setConversationTranscription(activeChatId, autoTranscribeEnabled);
+      console.log(`[AutoTranscribe] Saved setting for ${activeChatId}: ${autoTranscribeEnabled}`, result);
+
+      // Model will load lazily on first voice message recording
+      // No need to preload here - this speeds up app startup significantly
+    } catch (error) {
+      console.error(`[AutoTranscribe] Failed to save setting for ${activeChatId}:`, error);
+    }
+  }
+
+  async function loadAutoTranscribeSetting(chatId: string) {
+    // Only load for P2P chats (not AI chats or local_ai)
+    if ($aiChats.has(chatId) || chatId === 'local_ai') {
+      autoTranscribeEnabled = true;  // Not applicable for AI chats
+      return;
+    }
+
+    try {
+      const result = await getConversationTranscription(chatId);
+      if (result.status === 'success') {
+        autoTranscribeEnabled = result.enabled;
+        console.log(`[AutoTranscribe] Loaded setting for ${chatId}: ${autoTranscribeEnabled}`);
+      } else {
+        // Default to true on error
+        autoTranscribeEnabled = true;
+        console.warn(`[AutoTranscribe] Failed to load setting for ${chatId}, defaulting to true`);
+      }
+    } catch (error) {
+      console.error(`[AutoTranscribe] Error loading setting for ${chatId}:`, error);
+      autoTranscribeEnabled = true;  // Default to true on error
+    }
+  }
+
+  // Load auto-transcribe setting when chat changes
+  $effect(() => {
+    if (activeChatId && $connectionStatus === 'connected') {
+      loadAutoTranscribeSetting(activeChatId);
+    }
+  });
+
   // --- HANDLE INCOMING MESSAGES ---
   $effect(() => {
     if ($coreMessages?.id) {
       const message = $coreMessages;
 
     if (message.command === "execute_ai_query") {
+      console.log(`[TokenCounter] execute_ai_query response: status=${message.status}, isLoading before clear=${isLoading}`);
       isLoading = false;
+      console.log(`[TokenCounter] isLoading cleared: ${isLoading}`);
+
       const newText = message.status === "OK"
         ? message.payload.content
         : `Error: ${message.payload?.message || 'Unknown error'}`;
@@ -1515,6 +2551,7 @@
 
       // Show toast notification for errors (helps remote users see host failures)
       if (message.status !== "OK") {
+        console.error(`[TokenCounter] AI query failed: ${message.payload?.message}`);
         fileOfferToastMessage = `⚠️ AI Query Failed: ${message.payload?.message || 'Unknown error'}`;
         showFileOfferToast = true;
         setTimeout(() => showFileOfferToast = false, 7000);  // 7s for errors (longer than success)
@@ -1669,358 +2706,46 @@
   });
 
   let activeMessages = $derived($chatHistories.get(activeChatId) || []);
+
+  // Auto-scroll when activeMessages change (for all chat types)
+  $effect(() => {
+    // Track activeMessages length to detect new messages
+    activeMessages.length;
+    // Scroll to bottom when messages are added for the active chat
+    autoScroll();
+  });
 </script>
 
 <main class="container">
   <div class="grid">
     <!-- Sidebar -->
-    <div class="sidebar">
-      <!-- Status Bar (only shown when NOT connected) -->
-      {#if $connectionStatus !== 'connected'}
-        <div class="status-bar">
-          {#if $connectionStatus === 'connecting'}
-            <span class="status-connecting">Backend status: connecting...</span>
-          {:else if $connectionStatus === 'error'}
-            <span class="status-error">Backend status: error</span>
-            <button class="btn-small" onclick={handleReconnect}>Retry</button>
-          {:else}
-            <span class="status-disconnected">Backend status: disconnected</span>
-            <button class="btn-small" onclick={handleReconnect}>Connect</button>
-          {/if}
-        </div>
-      {/if}
-      {#if $connectionStatus === 'connected' && $nodeStatus}
-        <!-- Node Info -->
-        <div class="node-info">
-          <p><strong>Your Node ID:</strong></p>
-          <div class="node-id-container">
-            <code class="node-id">{$nodeStatus.node_id}</code>
-            <button
-              class="copy-btn"
-              onclick={() => {
-                navigator.clipboard.writeText($nodeStatus.node_id);
-                alert('Node ID copied!');
-              }}
-              title="Copy Node ID"
-            >
-              📋
-            </button>
-          </div>
+    <Sidebar
+      connectionStatus={$connectionStatus}
+      nodeStatus={$nodeStatus}
+      aiChats={$aiChats}
+      unreadMessageCounts={$unreadMessageCounts}
+      bind:activeChatId
+      peerDisplayNames={peerDisplayNames}
+      bind:autoKnowledgeDetection
+      bind:peerInput
+      isConnecting={isConnecting}
+      peersByStrategy={peersByStrategy}
+      formatPeerForTooltip={formatPeerForTooltip}
+      onReconnect={handleReconnect}
+      onLoginToHub={(provider) => sendCommand('login_to_hub', {provider})}
+      onViewPersonalContext={loadPersonalContext}
+      onOpenInstructionsEditor={openInstructionsEditor}
+      onOpenFirewallEditor={openFirewallEditor}
+      onOpenProvidersEditor={openProvidersEditor}
+      onToggleAutoKnowledgeDetection={toggleAutoKnowledgeDetection}
+      onConnectPeer={handleConnectPeer}
+      onResetUnreadCount={resetUnreadCount}
+      onGetPeerDisplayName={getPeerDisplayName}
+      onAddAIChat={handleAddAIChat}
+      onDeleteAIChat={handleDeleteAIChat}
+      onDisconnectPeer={handleDisconnectPeer}
+    />
 
-          <!-- Direct TLS Connection URIs (Local Network) -->
-          {#if $nodeStatus.dpc_uris && $nodeStatus.dpc_uris.length > 0}
-            <div class="dpc-uris-section">
-              <details class="uri-details">
-                <summary class="uri-summary">
-                  <span class="uri-title">Local Network ({$nodeStatus.dpc_uris.length})</span>
-                </summary>
-                <div class="uri-help-text">
-                  Share with peers on your local network
-                </div>
-                {#each $nodeStatus.dpc_uris as { ip, uri }}
-                  <div class="uri-card">
-                    <div class="uri-card-header">
-                      <span class="ip-badge">{ip}</span>
-                      <button
-                        class="copy-btn-icon"
-                        onclick={() => {
-                          navigator.clipboard.writeText(uri);
-                          alert('✓ URI copied!');
-                        }}
-                        title="Copy URI"
-                      >
-                        📋
-                      </button>
-                    </div>
-                    <details class="uri-full-details">
-                      <summary class="show-uri-btn">Full URI ▼</summary>
-                      <code class="uri-full-text">{uri}</code>
-                    </details>
-                  </div>
-                {/each}
-              </details>
-            </div>
-          {/if}
-
-          <!-- External URIs (From STUN Servers) -->
-          {#if $nodeStatus.external_uris && $nodeStatus.external_uris.length > 0}
-            <div class="dpc-uris-section">
-              <details class="uri-details">
-                <summary class="uri-summary">
-                  <span class="uri-title">External (Internet) ({$nodeStatus.external_uris.length})</span>
-                </summary>
-                <div class="uri-help-text">
-                  Your public IP address(es) discovered via STUN servers
-                </div>
-                {#each $nodeStatus.external_uris as { ip, uri }}
-                  <div class="uri-card">
-                    <div class="uri-card-header">
-                      <span class="ip-badge external">{ip}</span>
-                      <button
-                        class="copy-btn-icon"
-                        onclick={() => {
-                          navigator.clipboard.writeText(uri);
-                          alert('✓ External URI copied!');
-                        }}
-                        title="Copy External URI"
-                      >
-                        📋
-                      </button>
-                    </div>
-                    <details class="uri-full-details">
-                      <summary class="show-uri-btn">Full URI ▼</summary>
-                      <code class="uri-full-text">{uri}</code>
-                    </details>
-                  </div>
-                {/each}
-              </details>
-            </div>
-          {/if}
-
-          <!-- Hub Mode -->
-          {#if $nodeStatus.operation_mode}
-            <div class="dpc-uris-section">
-              <details class="uri-details" open={!modeSectionCollapsed}>
-                <summary
-                  class="uri-summary"
-                  onclick={() => modeSectionCollapsed = !modeSectionCollapsed}
-                >
-                  <span class="uri-title">Hub Mode</span>
-                </summary>
-
-                <div class="mode-badge" class:fully-online={$nodeStatus.operation_mode === 'fully_online'}
-                     class:hub-offline={$nodeStatus.operation_mode === 'hub_offline'}
-                     class:fully-offline={$nodeStatus.operation_mode === 'fully_offline'}>
-                  {#if $nodeStatus.operation_mode === 'fully_online'}
-                    🟢 Online
-                  {:else if $nodeStatus.operation_mode === 'hub_offline'}
-                    🟡 Hub Offline
-                  {:else}
-                    🔴 Offline
-                  {/if}
-                </div>
-                <p class="mode-description">{$nodeStatus.connection_status || 'All features available'}</p>
-
-                <!-- Hub Login (moved inside) -->
-                {#if $nodeStatus.hub_status !== 'Connected'}
-                  <div class="hub-login-section">
-                    <p class="info-text">Connect to Hub for WebRTC signaling</p>
-                    <div class="hub-login-buttons">
-                      <button
-                        onclick={() => sendCommand('login_to_hub', {provider: 'google'})}
-                        class="btn-oauth btn-google"
-                        title="Login with Google"
-                      >
-                        <span class="oauth-icon">🔵</span>
-                        Google
-                      </button>
-                      <button
-                        onclick={() => sendCommand('login_to_hub', {provider: 'github'})}
-                        class="btn-oauth btn-github"
-                        title="Login with GitHub"
-                      >
-                        <span class="oauth-icon">⚫</span>
-                        GitHub
-                      </button>
-                    </div>
-                  </div>
-                {/if}
-              </details>
-            </div>
-          {/if}
-        </div>
-
-        <!-- Personal Context Button (Knowledge Architecture) -->
-        <div class="context-section">
-          <button class="btn-context" onclick={loadPersonalContext}>
-            View Personal Context
-          </button>
-
-          <button class="btn-context" onclick={openInstructionsEditor}>
-            AI Instructions
-          </button>
-
-          <button class="btn-context" onclick={openFirewallEditor}>
-            Firewall and Privacy Rules
-          </button>
-
-          <button class="btn-context" onclick={openProvidersEditor}>
-            AI Providers
-          </button>
-
-          <!-- Auto Knowledge Detection Toggle -->
-          <div class="knowledge-toggle">
-            <label class="toggle-container">
-              <input
-                id="auto-knowledge-detection"
-                name="auto-knowledge-detection"
-                type="checkbox"
-                bind:checked={autoKnowledgeDetection}
-                onchange={toggleAutoKnowledgeDetection}
-              />
-              <span class="toggle-slider"></span>
-              <span class="toggle-label">
-                Auto-detect knowledge in conversations
-              </span>
-            </label>
-            <p class="toggle-hint">
-              {autoKnowledgeDetection
-                ? "✓ AI is monitoring conversations for knowledge"
-                : "✗ Manual knowledge extraction only"}
-            </p>
-          </div>
-        </div>
-
-        <!-- Connect to Peer -->
-        <div class="connect-section">
-          <h3>Connect to Peer</h3>
-          <input
-            id="peer-input"
-            name="peer-input"
-            type="text"
-            bind:value={peerInput}
-            placeholder="node_id or dpc://IP:port?node_id=..."
-            onkeydown={(e) => e.key === 'Enter' && handleConnectPeer()}
-          />
-          <button
-            onclick={handleConnectPeer}
-            disabled={isConnecting || !peerInput.trim()}
-          >
-            {isConnecting ? '🔄 Connecting...' : 'Connect'}
-          </button>
-
-          <!-- Connection Methods Help (Collapsible) -->
-          <details class="connection-methods-details">
-            <summary class="connection-methods-summary">
-              <span class="uri-icon">ℹ️</span>
-              <span class="uri-title">Connection Methods</span>
-            </summary>
-            <div class="connection-help-content">
-              <p class="small">
-                🔍 <strong>Auto-Discovery (DHT):</strong> <code>dpc-node-abc123...</code><br/>
-                <span class="small-detail">Tries: DHT → Cache → Hub</span>
-              </p>
-              <p class="small">
-                🏠 <strong>Direct TLS (Local):</strong> <code>dpc://192.168.1.100:8888?node_id=...</code>
-              </p>
-              <p class="small">
-                🌍 <strong>Direct TLS (External):</strong> <code>dpc://203.0.113.5:8888?node_id=...</code>
-              </p>
-            </div>
-          </details>
-
-          <!-- Available Features -->
-          {#if $nodeStatus.available_features}
-            <details class="features-details">
-              <summary>Available Features</summary>
-              <ul class="features-list">
-                {#each Object.entries($nodeStatus.available_features) as [feature, available]}
-                  {@const peerCount = peersByStrategy[feature]?.length || 0}
-                  {@const tooltip = peersByStrategy[feature]
-                    ? peersByStrategy[feature].map(formatPeerForTooltip).join(', ')
-                    : ''}
-                  <li
-                    class:feature-available={available}
-                    class:feature-unavailable={!available}
-                    title={peerCount > 0 ? tooltip : ''}
-                  >
-                    {available ? '✓' : '✗'} {feature.replace(/_/g, ' ')}
-                    {#if peerCount > 0}
-                      <span class="peer-count">({peerCount})</span>
-                    {/if}
-                  </li>
-                {/each}
-              </ul>
-              {#if $nodeStatus.cached_peers_count > 0}
-                <p class="cached-info">💾 {$nodeStatus.cached_peers_count} cached peer(s)</p>
-              {/if}
-            </details>
-          {/if}
-        </div>
-
-        <!-- Chat List -->
-        <div class="chat-list">
-          <div class="chat-list-header">
-            <h3>Chats</h3>
-            <button
-              class="btn-add-chat"
-              onclick={handleAddAIChat}
-              title="Add a new AI chat with a different provider"
-            >
-              + AI
-            </button>
-          </div>
-          <ul>
-            <!-- AI Chats -->
-            {#each Array.from($aiChats.entries()) as [chatId, chatInfo] (chatId)}
-              <li class="peer-item">
-                <button
-                  type="button"
-                  class="chat-button"
-                  class:active={activeChatId === chatId}
-                  onclick={() => activeChatId = chatId}
-                  title={chatInfo.provider ? `Provider: ${chatInfo.provider}` : 'Default AI Assistant'}
-                >
-                  {chatInfo.name}
-                </button>
-                {#if chatId !== 'local_ai'}
-                  <button
-                    type="button"
-                    class="disconnect-btn"
-                    onclick={(e) => { e.stopPropagation(); handleDeleteAIChat(chatId); }}
-                    title="Delete AI chat"
-                  >
-                    ×
-                  </button>
-                {/if}
-              </li>
-            {/each}
-
-            <!-- P2P Peer Chats -->
-            {#if $nodeStatus.p2p_peers && $nodeStatus.p2p_peers.length > 0}
-              {#each $nodeStatus.p2p_peers as peerId (`${peerId}-${peerDisplayNames.get(peerId)}`)}
-                <li class="peer-item">
-                  <button
-                    type="button"
-                    class="chat-button"
-                    class:active={activeChatId === peerId}
-                    onclick={() => {
-                      activeChatId = peerId;
-                      resetUnreadCount(peerId);
-                    }}
-                    title={peerId}
-                  >
-                    <span class="peer-name">👤 {getPeerDisplayName(peerId)}</span>
-                    {#if ($unreadMessageCounts.get(peerId) ?? 0) > 0}
-                      <span class="unread-badge">{$unreadMessageCounts.get(peerId)}</span>
-                    {/if}
-                  </button>
-                  <button
-                    type="button"
-                    class="disconnect-btn"
-                    onclick={(e) => { e.stopPropagation(); handleDisconnectPeer(peerId); }}
-                    title="Disconnect from peer"
-                  >
-                    ×
-                  </button>
-                </li>
-              {/each}
-            {:else}
-              <li class="no-peers">No connected peers</li>
-            {/if}
-          </ul>
-        </div>
-      {:else if $connectionStatus === 'connecting'}
-        <div class="connecting">
-          <p>🔄 Connecting...</p>
-        </div>
-      {:else}
-        <div class="error">
-          <p>⚠️ Not connected to Core Service</p>
-          <p class="small">Please ensure the backend is running</p>
-        </div>
-      {/if}
-    </div>
 
     <!-- Chat Panel -->
     <div class="chat-panel" style="height: {chatPanelHeight}px;">
@@ -2034,165 +2759,82 @@
           >
             <h2>
               <span class="collapse-indicator">{chatHeaderCollapsed ? '▶' : '▼'}</span>
-              {#if $aiChats.has(activeChatId)}
+              {#if isActuallyAIChat}
                 {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
               {:else}
                 Chat with {getPeerDisplayName(activeChatId)}
               {/if}
             </h2>
           </button>
+
+          <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI chats) -->
+          {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai'}
+            <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
+              <input
+                type="checkbox"
+                bind:checked={autoTranscribeEnabled}
+                onchange={saveAutoTranscribeSetting}
+                disabled={whisperModelLoading}
+              />
+              <span>Auto Transcribe</span>
+              {#if whisperModelLoading}
+                <span class="whisper-loading-indicator" title="Loading Whisper model...">⏳</span>
+              {/if}
+              {#if whisperModelLoadError}
+                <span class="whisper-error-indicator" title={whisperModelLoadError}>⚠️</span>
+              {/if}
+            </label>
+          {/if}
+
+          <!-- Telegram bot integration status (v0.14.0+) -->
+          <TelegramStatus conversationId={activeChatId} />
         </div>
 
         {#if !chatHeaderCollapsed}
-          {#if $aiChats.has(activeChatId) && $providersList.length > 0}
-            <div class="provider-selector-header">
-              <!-- AI Host Selector (Phase 2: Remote Vision) -->
-              <div class="provider-row-header">
-                <label for="ai-host-header">AI Host:</label>
-                <select id="ai-host-header" bind:value={selectedComputeHost}>
-                  <option value="local">Local</option>
-                  {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
-                    <optgroup label="Remote Peers">
-                      {#each $nodeStatus.peer_info as peer}
-                        {@const displayName = peer.name
-                          ? `${peer.name} | ${peer.node_id.slice(0, 20)}...`
-                          : `${peer.node_id.slice(0, 20)}...`}
-                        <option value={peer.node_id}>
-                          {displayName}
-                        </option>
-                      {/each}
-                    </optgroup>
-                  {/if}
-                </select>
-              </div>
-
-              <!-- Text Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
-              <div class="provider-row-header">
-                <label for="text-provider-header">Text:</label>
-                <select id="text-provider-header" bind:value={selectedTextProvider}>
-                  {#each mergedTextProviders() as provider}
-                    <option value={provider.uniqueId}>
-                      {provider.displayText}
-                    </option>
-                  {/each}
-                </select>
-              </div>
-
-              <!-- Vision Provider Selector (Phase 2.3: uses uniqueId for local/remote tracking) -->
-              <div class="provider-row-header">
-                <label for="vision-provider-header">Vision:</label>
-                <select id="vision-provider-header" bind:value={selectedVisionProvider}>
-                  {#each mergedVisionProviders() as provider}
-                    <option value={provider.uniqueId}>
-                      {provider.displayText}
-                    </option>
-                  {/each}
-                </select>
-              </div>
-            </div>
+          <!-- ProviderSelector: AI chats only (not Telegram) -->
+          {#if isActuallyAIChat}
+          <ProviderSelector
+            bind:selectedComputeHost
+            bind:selectedTextProvider
+            bind:selectedVisionProvider
+            bind:selectedVoiceProvider
+            showForChatId={activeChatId}
+            isAIChat={isActuallyAIChat}
+            providersList={$providersList}
+            peerProviders={$peerProviders}
+            nodeStatus={$nodeStatus}
+            defaultProviders={$defaultProviders}
+          />
           {/if}
 
-        {#if $aiChats.has(activeChatId) && currentTokenUsage.limit > 0}
-          <div class="token-counter">
-            <span class="token-value">
-              {currentTokenUsage.used.toLocaleString()} / {currentTokenUsage.limit.toLocaleString()} tokens
-            </span>
-            <span class="token-percentage" class:warning={currentTokenUsage.used / currentTokenUsage.limit >= 0.8}>
-              ({Math.round((currentTokenUsage.used / currentTokenUsage.limit) * 100)}%)
-            </span>
-          </div>
-        {/if}
-
-        <div class="chat-actions">
-          <button class="btn-new-chat" onclick={() => handleNewChat(activeChatId)}>
-            New Session
-          </button>
-          <button
-            class="btn-end-session"
-            onclick={() => handleEndSession(activeChatId)}
-            disabled={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')}
-            title={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer must be online to save knowledge (requires voting)" : "Extract and save knowledge from this conversation"}
-          >
-            End Session & Save Knowledge
-          </button>
-          {#if $aiChats.has(activeChatId)}
-            <button
-              class="btn-markdown-toggle"
-              class:active={enableMarkdown}
-              onclick={() => enableMarkdown = !enableMarkdown}
-              title={enableMarkdown ? 'Disable markdown rendering' : 'Enable markdown rendering'}
-            >
-              {enableMarkdown ? 'Markdown' : 'Text'}
-            </button>
-          {/if}
-        </div>
+          <!-- SessionControls: AI chats, P2P chats, and Telegram chats -->
+          <SessionControls
+            showForChatId={activeChatId}
+            isAIChat={isActuallyAIChat}
+            isPeerConnected={isPeerConnected}
+            isTelegramChat={isTelegramChat}
+            tokenUsed={effectiveTokenUsage.used}
+            tokenLimit={effectiveTokenUsage.limit}
+            estimatedTokens={estimatedUsage.estimated}
+            showEstimation={estimatedUsage.isEstimated}
+            bind:enableMarkdown
+            onNewSession={handleNewChat}
+            onEndSession={handleEndSession}
+          />
         {/if}
       </div>
 
-      <div class="chat-window" bind:this={chatWindow}>
-        {#if activeMessages.length > 0}
-          {#each activeMessages as msg (msg.id)}
-            <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'}>
-              <div class="message-header">
-                <strong>
-                  {#if msg.sender === 'user'}
-                    You
-                  {:else if msg.sender === 'ai'}
-                    {msg.model ? `AI (${msg.model})` : 'AI Assistant'}
-                  {:else}
-                    {msg.senderName ? `${msg.senderName} | ${msg.sender.slice(0, 20)}...` : msg.sender}
-                  {/if}
-                </strong>
-                <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
-              </div>
-              <!-- Message text (shown always, serves as caption for images) -->
-              {#if msg.text && msg.text !== '[Image]'}
-                {#if msg.sender === 'ai' && enableMarkdown}
-                  <MarkdownMessage content={msg.text} />
-                {:else}
-                  <p>{msg.text}</p>
-                {/if}
-              {/if}
-
-              <!-- Attachments (Phase 2.5: Images + Files) -->
-              {#if msg.attachments && msg.attachments.length > 0}
-                <div class="message-attachments">
-                  {#each msg.attachments as attachment}
-                    {#if attachment.type === 'image'}
-                      <!-- Image attachment (Phase 2.5: Screenshot + Vision) -->
-                      <ImageMessage {attachment} conversationId={activeChatId} />
-                    {:else}
-                      <!-- Regular file attachment -->
-                      <div class="file-attachment">
-                        <div class="file-details">
-                          <div class="file-name">{attachment.filename}</div>
-                          <div class="file-meta">
-                            {attachment.size_mb ? `${attachment.size_mb} MB` : `${(attachment.size_bytes / (1024 * 1024)).toFixed(2)} MB`}
-                            {#if attachment.mime_type}
-                              • {attachment.mime_type}
-                            {/if}
-                            {#if attachment.status}
-                              • {attachment.status}
-                            {/if}
-                          </div>
-                        </div>
-                      </div>
-                    {/if}
-                  {/each}
-                </div>
-              {/if}
-            </div>
-          {/each}
-        {:else}
-          <div class="empty-chat">
-            <p>No messages yet. Start the conversation!</p>
-          </div>
-        {/if}
-      </div>
+      <ChatPanel
+        messages={activeMessages}
+        conversationId={activeChatId}
+        bind:enableMarkdown
+        bind:chatWindowElement={chatWindow}
+        showTranscription={autoTranscribeEnabled}
+      />
 
       <div class="chat-input">
-        {#if $aiChats.has(activeChatId)}
-          <!-- Personal Context Toggle -->
+        {#if $aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')}
+          <!-- Personal Context Toggle (hidden for Telegram chats - not applicable) -->
           <div class="context-toggle">
             <button
               type="button"
@@ -2312,51 +2954,85 @@
           </div>
         {/if}
 
-        <!-- Image Preview Chip (Phase 2.4: improved UX) -->
-        {#if pendingImage}
-          <div class="image-preview-chip">
-            <img src={pendingImage.dataUrl} alt={pendingImage.filename} class="preview-thumbnail" />
-            <div class="preview-info">
-              <span class="preview-filename">{pendingImage.filename}</span>
-              <span class="preview-size">{(pendingImage.sizeBytes / (1024 * 1024)).toFixed(2)} MB</span>
-            </div>
-            <button class="preview-remove" onclick={clearPendingImage} aria-label="Remove image">✕</button>
-          </div>
-        {/if}
+        <!-- FileTransferUI component: Image/voice preview appears here, modals/panels are positioned -->
+        <FileTransferUI
+          pendingImage={pendingImage}
+          onClearPendingImage={clearPendingImage}
+          voicePreview={voicePreview}
+          onClearVoicePreview={handleCancelVoicePreview}
+          onSendVoiceMessage={handleSendVoiceMessage}
+          onTranscribeVoiceMessage={handleTranscribeVoiceMessage}
+          isLocalAIChat={activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
+          showFileOfferDialog={showFileOfferDialog}
+          currentFileOffer={currentFileOffer}
+          onAcceptFile={handleAcceptFile}
+          onRejectFile={handleRejectFile}
+          showSendFileDialog={showSendFileDialog}
+          pendingFileSend={pendingFileSend}
+          isSendingFile={isSendingFile}
+          filePreparationStarted={$filePreparationStarted}
+          filePreparationProgress={$filePreparationProgress}
+          filePreparationCompleted={$filePreparationCompleted}
+          onConfirmSendFile={handleConfirmSendFile}
+          onCancelSendFile={handleCancelSendFile}
+          activeFileTransfers={$activeFileTransfers}
+          onCancelTransfer={handleCancelTransfer}
+          showFileOfferToast={showFileOfferToast}
+          fileOfferToastMessage={fileOfferToastMessage}
+          onDismissToast={() => showFileOfferToast = false}
+        />
 
         <div class="input-row">
+          <!-- Token Warning Banner (90% and 100% warnings) -->
+          {#if showTokenBanner}
+            <TokenWarningBanner
+              severity={tokenWarningLevel === 'critical' ? 'critical' : 'warning'}
+              percentage={estimatedUsage.percentage}
+              onEndSession={() => handleEndSession(activeChatId)}
+              dismissible={tokenWarningLevel !== 'critical'}
+            />
+          {/if}
+
           <textarea
             id="message-input"
             name="message-input"
             bind:value={currentInput}
             placeholder={
-              isContextWindowFull ? 'Context window full - End session to continue' :
+              isContextWindowFull ? 'Context window full - Delete text or end session to continue' :
               ($connectionStatus === 'connected' ? (pendingImage ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
             }
-            disabled={$connectionStatus !== 'connected' || isLoading || isContextWindowFull}
+            disabled={$connectionStatus !== 'connected' || isLoading}
             onkeydown={(e) => {
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                // Only send if peer is connected (or local AI chat) AND (has text OR has pending image)
-                if ((isPeerConnected || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) && (currentInput.trim() || pendingImage)) {
+                // Send if: peer connected, OR local AI chat, OR Telegram chat, OR AI_xxx chat AND (has text OR has pending image)
+                if ((isPeerConnected || isTelegramChat || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) && (currentInput.trim() || pendingImage)) {
                   handleSendMessage();
                 }
               }
             }}
             onpaste={handlePaste}
           ></textarea>
+
+          <!-- Voice Recorder (v0.13.0) -->
+          <VoiceRecorder
+            disabled={$connectionStatus !== 'connected' || isLoading || (autoTranscribeEnabled && whisperModelLoading)}
+            maxDuration={300}
+            onRecordingComplete={handleRecordingComplete}
+          />
+
           <button
             class="file-button"
             onclick={handleSendFile}
-            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || !isPeerConnected}
-            title={isPeerConnected ? "Send file (P2P chat only)" : "Peer disconnected"}
+            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || (!isPeerConnected && !isTelegramChat)}
+            title={isPeerConnected || isTelegramChat ? "Send file" : "Peer disconnected"}
           >
             📎
           </button>
           <button
             onclick={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || !isPeerConnected}
-            title={!isPeerConnected && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer disconnected" : ""}
+            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || (!isPeerConnected && !isTelegramChat)}
+            title={!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer disconnected" : ""}
           >
             {#if isLoading}Sending...{:else}Send{/if}
           </button>
@@ -2392,6 +3068,18 @@
   proposal={$newSessionProposal}
   on:vote={handleSessionVote}
   on:close={closeNewSessionDialog}
+/>
+
+<!-- Model Download Dialog (v0.13.5) -->
+<ModelDownloadDialog
+  bind:open={showModelDownloadDialog}
+  modelName={modelDownloadInfo?.model_name || ''}
+  downloadSizeGb={modelDownloadInfo?.download_size_gb || 3.0}
+  cachePath={modelDownloadInfo?.cache_path || ''}
+  providerAlias={modelDownloadInfo?.provider_alias || ''}
+  downloading={isDownloadingModel}
+  on:download={handleModelDownload}
+  on:cancel={handleModelDownloadCancel}
 />
 
 <!-- Notification Permission Dialog -->
@@ -2535,6 +3223,20 @@
   />
 {/if}
 
+<!-- Model Download Toast (v0.13.5) -->
+{#if showModelDownloadToast}
+  <Toast
+    message={modelDownloadToastMessage}
+    type={modelDownloadToastType}
+    duration={modelDownloadToastType === 'error' ? 10000 : 5000}
+    dismissible={true}
+    onDismiss={() => {
+      showModelDownloadToast = false;
+      modelDownloadToastMessage = "";
+    }}
+  />
+{/if}
+
 <!-- Vote Result Details Dialog -->
 <VoteResultDialog
   result={currentVoteResult}
@@ -2543,111 +3245,6 @@
     showVoteResultDialog = false;
   }}
 />
-
-<!-- File Transfer UI Components (Week 1) -->
-
-<!-- File Offer Dialog -->
-{#if showFileOfferDialog && currentFileOffer}
-  <div class="modal-overlay" role="presentation" onclick={handleRejectFile} onkeydown={(e) => e.key === 'Escape' && handleRejectFile()}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-      <h3>Incoming File</h3>
-      <p><strong>File:</strong> {currentFileOffer.filename}</p>
-      <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
-      <p><strong>From:</strong> {currentFileOffer.node_id.slice(0, 20)}...</p>
-      <div class="modal-buttons">
-        <button class="accept-button" onclick={handleAcceptFile}>Accept</button>
-        <button class="reject-button" onclick={handleRejectFile}>Reject</button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- Send File Confirmation Dialog -->
-{#if showSendFileDialog && pendingFileSend}
-  <div class="modal-overlay" role="presentation" onclick={handleCancelSendFile} onkeydown={(e) => e.key === 'Escape' && handleCancelSendFile()}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-      <h3>Send File</h3>
-      <p><strong>File:</strong> {pendingFileSend.fileName}</p>
-      <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
-
-      {#if $filePreparationStarted && isSendingFile}
-        <p style="margin-top: 10px; font-size: 13px;">
-          <strong>Size:</strong> {$filePreparationStarted.size_mb} MB
-        </p>
-      {/if}
-
-      {#if $filePreparationProgress && isSendingFile}
-        <div style="margin-top: 15px;">
-          <p style="font-size: 13px; margin-bottom: 5px; color: #555;">
-            {#if $filePreparationProgress.phase === 'hashing_file'}
-              Computing file hash: {$filePreparationProgress.percent}%
-            {:else if $filePreparationProgress.phase === 'computing_chunks'}
-              Computing chunk hashes: {$filePreparationProgress.percent}%
-            {:else}
-              Preparing file: {$filePreparationProgress.percent}%
-            {/if}
-          </p>
-          <div style="width: 100%; background-color: #e0e0e0; border-radius: 4px; height: 8px; overflow: hidden;">
-            <div style="width: {$filePreparationProgress.percent}%; background-color: #4CAF50; height: 100%; transition: width 0.3s ease;"></div>
-          </div>
-        </div>
-      {/if}
-
-      <div class="modal-buttons">
-        <button class="accept-button" onclick={handleConfirmSendFile} disabled={isSendingFile}>
-          {#if $filePreparationCompleted && isSendingFile}
-            Sending...
-          {:else if isSendingFile}
-            Preparing...
-          {:else}
-            Send
-          {/if}
-        </button>
-        <button class="reject-button" onclick={handleCancelSendFile} disabled={isSendingFile}>Cancel</button>
-      </div>
-    </div>
-  </div>
-{/if}
-
-<!-- File Transfer Toast -->
-{#if showFileOfferToast}
-  <Toast
-    message={fileOfferToastMessage}
-    type="info"
-    duration={5000}
-    dismissible={true}
-    onDismiss={() => showFileOfferToast = false}
-  />
-{/if}
-
-<!-- Active File Transfers Progress -->
-{#if $activeFileTransfers.size > 0}
-  <div class="active-transfers-panel">
-    <h4>Active Transfers</h4>
-    {#each Array.from($activeFileTransfers.values()) as transfer}
-      <div class="transfer-item">
-        <div class="transfer-info">
-          <span class="transfer-filename">{transfer.filename}</span>
-          <span class="transfer-status">{transfer.direction === 'upload' ? '↑' : '↓'} {transfer.status}</span>
-          <button
-            class="cancel-transfer-button"
-            onclick={() => handleCancelTransfer(transfer.transfer_id, transfer.filename)}
-            title="Cancel transfer"
-            aria-label="Cancel transfer"
-          >
-            ×
-          </button>
-        </div>
-        {#if transfer.progress !== undefined}
-          <div class="progress-bar">
-            <div class="progress-fill" style="width: {transfer.progress}%"></div>
-          </div>
-          <span class="progress-text">{transfer.progress}%</span>
-        {/if}
-      </div>
-    {/each}
-  </div>
-{/if}
 
 <!-- Add AI Chat Dialog -->
 {#if showAddAIChatDialog}
@@ -2718,33 +3315,6 @@
     box-sizing: border-box;
   }
 
-  .status-bar {
-    margin-bottom: 1rem;
-    padding: 0.75rem;
-    border: 1px solid #ccc;
-    border-radius: 6px;
-    background: #f9f9f9;
-    text-align: center;
-    font-size: 0.9rem;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.75rem;
-  }
-  
-  .status-disconnected, .status-error { color: #dc3545; font-weight: bold; }
-  .status-connecting { color: #ffc107; font-weight: bold; }
-  
-  .btn-small {
-    padding: 0.4rem 0.8rem;
-    font-size: 0.9rem;
-    border: none;
-    border-radius: 6px;
-    background: #007bff;
-    color: white;
-    cursor: pointer;
-  }
-  
   .grid {
     display: grid;
     grid-template-columns: 380px 1fr;
@@ -2756,442 +3326,14 @@
   @media (max-width: 968px) {
     .grid { grid-template-columns: 1fr; }
   }
-  
-  .sidebar {
-    display: flex;
-    flex-direction: column;
-    gap: 1rem;
-    overflow-y: auto;
-    max-height: calc(100vh - 8rem);
-    padding-right: 0.5rem;
-  }
 
-  .sidebar::-webkit-scrollbar {
-    width: 6px;
-  }
-
-  .sidebar::-webkit-scrollbar-track {
-    background: #f1f1f1;
-    border-radius: 3px;
-  }
-
-  .sidebar::-webkit-scrollbar-thumb {
-    background: #888;
-    border-radius: 3px;
-  }
-
-  .sidebar::-webkit-scrollbar-thumb:hover {
-    background: #555;
-  }
-  
-  .node-info, .connect-section, .context-section, .chat-list {
-    background: white;
-    border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    padding: 1rem;
-  }
-
-  /* Note: .node-info no longer has max-height restriction to prevent
-     unwanted scrollbars on macOS/Ubuntu. Content naturally fits in sidebar. */
-
-  h2, h3 {
+  h2 {
     margin: 0 0 0.75rem 0;
     font-size: 1.1rem;
     border-bottom: 1px solid #eee;
     padding-bottom: 0.5rem;
   }
 
-  /* Connection Methods Collapsible Section */
-  .connection-methods-details {
-    margin-top: 0.75rem;
-    background: #ffffff;
-    border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    padding: 0;
-    overflow: hidden;
-  }
-
-  .connection-methods-details[open] {
-    border-color: #007bff;
-  }
-
-  .connection-methods-summary {
-    padding: 0.75rem 1rem;
-    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-    cursor: pointer;
-    list-style: none;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 600;
-    color: #333;
-    transition: background 0.2s;
-  }
-
-  .connection-methods-summary:hover {
-    background: linear-gradient(135deg, #e9ecef 0%, #dee2e6 100%);
-  }
-
-  .connection-methods-summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .connection-help-content {
-    padding: 1rem;
-    background: #ffffff;
-  }
-
-  .connection-help-content p {
-    margin: 0.5rem 0;
-  }
-
-  .node-id {
-    font-family: monospace;
-    font-size: 0.85rem;
-    color: #555;
-    word-break: break-all;
-    margin: 0;
-  }
-  
-  .node-id-container {
-    display: flex;
-    align-items: flex-start;
-    gap: 0.5rem;
-  }
-  
-  .copy-btn {
-    width: auto;
-    min-width: auto;
-    padding: 0.3rem 0.5rem;
-    font-size: 1rem;
-    background: transparent;
-    border: 1px solid #ddd;
-    cursor: pointer;
-    border-radius: 4px;
-    transition: all 0.2s;
-  }
-  
-  .copy-btn:hover {
-    background: #f0f0f0;
-    border-color: #007bff;
-  }
-
-  .info-text, .small {
-    font-size: 0.9rem;
-    color: #666;
-    margin: 0.5rem 0;
-    font-style: italic;
-  }
-  
-  input, textarea {
-    width: 100%;
-    padding: 0.75rem;
-    border: 1px solid #ccc;
-    border-radius: 6px;
-    font-size: 1rem;
-    font-family: inherit;
-    box-sizing: border-box;
-  }
-  
-  input {
-    margin-bottom: 0.5rem;
-  }
-  
-  button {
-    width: 100%;
-    padding: 0.75rem;
-    border: none;
-    border-radius: 6px;
-    background: #007bff;
-    color: white;
-    font-size: 1rem;
-    cursor: pointer;
-    transition: background 0.2s;
-  }
-  
-  button:hover:not(:disabled) {
-    background: #0056b3;
-  }
-  
-  button:disabled {
-    background: #a0a0a0;
-    cursor: not-allowed;
-  }
-
-  /* OAuth login buttons */
-  .hub-login-buttons {
-    display: flex;
-    gap: 0.5rem;
-    flex-wrap: wrap;
-  }
-
-  .btn-oauth {
-    flex: 1;
-    min-width: 120px;
-    padding: 0.75rem 1rem;
-    border: none;
-    border-radius: 4px;
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-  }
-
-  .btn-oauth:hover {
-    transform: translateY(-1px);
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
-  }
-
-  .btn-oauth:active {
-    transform: translateY(0);
-  }
-
-  .btn-google {
-    background: #4285f4;
-    color: white;
-  }
-
-  .btn-google:hover {
-    background: #357ae8;
-  }
-
-  .btn-github {
-    background: #24292e;
-    color: white;
-  }
-
-  .btn-github:hover {
-    background: #1b1f23;
-  }
-
-  .oauth-icon {
-    font-size: 1.1rem;
-    line-height: 1;
-  }
-
-  /* Knowledge Architecture - Context Button */
-  .btn-context {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    margin-bottom: 0.5rem;
-    background: #5a67d8;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    font-size: 0.95rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 0.5rem;
-    box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
-  }
-
-  .btn-context:hover {
-    background: #4c51bf;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4);
-  }
-
-  .btn-context:active {
-    transform: translateY(0);
-    box-shadow: 0 1px 4px rgba(90, 103, 216, 0.2);
-  }
-
-  /* Knowledge Architecture - Auto-Detection Toggle */
-  .knowledge-toggle {
-    margin-top: 1rem;
-    padding-top: 1rem;
-    border-top: 1px solid #e0e0e0;
-  }
-
-  .toggle-container {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .toggle-container input[type="checkbox"] {
-    position: absolute;
-    opacity: 0;
-    width: 0;
-    height: 0;
-  }
-
-  .toggle-slider {
-    position: relative;
-    width: 44px;
-    height: 24px;
-    background: #ccc;
-    border-radius: 24px;
-    transition: background 0.3s;
-    flex-shrink: 0;
-  }
-
-  .toggle-slider::before {
-    content: '';
-    position: absolute;
-    width: 18px;
-    height: 18px;
-    left: 3px;
-    top: 3px;
-    background: white;
-    border-radius: 50%;
-    transition: transform 0.3s;
-  }
-
-  .toggle-container input[type="checkbox"]:checked + .toggle-slider {
-    background: #667eea;
-  }
-
-  .toggle-container input[type="checkbox"]:checked + .toggle-slider::before {
-    transform: translateX(20px);
-  }
-
-  .toggle-label {
-    font-size: 0.9rem;
-    color: #333;
-    line-height: 1.4;
-  }
-
-  .toggle-hint {
-    font-size: 0.8rem;
-    color: #666;
-    margin: 0.5rem 0 0 0;
-    padding-left: 3.5rem;
-    line-height: 1.3;
-  }
-
-  .chat-list-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.5rem;
-  }
-
-  .chat-list-header h3 {
-    margin: 0;
-    padding: 0;
-    border: none;
-  }
-
-  .btn-add-chat {
-    padding: 0.3rem 0.6rem;
-    background: #4CAF50;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 0.75rem;
-    font-weight: 600;
-    transition: all 0.2s;
-    box-shadow: 0 2px 4px rgba(76, 175, 80, 0.3);
-    white-space: nowrap;
-    flex-shrink: 0;
-    width: fit-content;
-    min-width: auto;
-  }
-
-  .btn-add-chat:hover {
-    background: #45a049;
-    box-shadow: 0 4px 8px rgba(76, 175, 80, 0.4);
-    transform: translateY(-1px);
-  }
-
-  .btn-add-chat:active {
-    transform: translateY(0);
-    box-shadow: 0 1px 3px rgba(76, 175, 80, 0.2);
-  }
-
-  .chat-list ul {
-    list-style: none;
-    padding: 0;
-    margin: 0;
-  }
-
-  .chat-list li {
-    margin-bottom: 0.5rem;
-  }
-  
-  .peer-item {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-  }
-  
-  .chat-button {
-    display: flex;
-    align-items: center;
-    text-align: left;
-    background: transparent;
-    color: #333;
-    border: 1px solid transparent;
-    padding: 0.6rem;
-    transition: all 0.2s;
-    flex: 1;
-    position: relative;
-  }
-
-  .chat-button:hover {
-    background: #f0f0f0;
-  }
-
-  .chat-button.active {
-    background: #e0e7ff;
-    border-color: #c7d2fe;
-    font-weight: bold;
-  }
-
-  /* Peer name wrapper (v0.9.3) - handles overflow so badge stays visible */
-  .peer-name {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-  }
-
-  /* Unread message badge (v0.9.3) */
-  .unread-badge {
-    display: inline-block;
-    background: #dc3545;
-    color: white;
-    font-size: 0.7rem;
-    font-weight: bold;
-    padding: 0.15rem 0.4rem;
-    border-radius: 10px;
-    margin-left: 0.5rem;
-    min-width: 1.2rem;
-    text-align: center;
-  }
-
-  .disconnect-btn {
-    padding: 0.3rem 0.6rem;
-    background: transparent;
-    color: #999;
-    font-size: 1.5rem;
-    border: 1px solid transparent;
-    flex: 1;
-  }
-
-  .disconnect-btn:hover {
-    background: #ffebee;
-    color: #dc3545;
-  }
-  
-  .no-peers {
-    text-align: center;
-    color: #999;
-    font-style: italic;
-    padding: 1rem;
-  }
   
   .chat-panel {
     background: white;
@@ -3256,184 +3398,52 @@
     min-width: 1em;
   }
 
-  /* Dual Provider Selector in Header (Phase 1) */
-  .provider-selector-header {
-    display: flex;
-    flex-wrap: wrap;  /* Wrap items naturally when they don't fit */
-    gap: 0.75rem;
-    align-items: center;
-  }
-
-  .provider-row-header {
+  /* Auto Transcribe Toggle (v0.13.2+) */
+  .auto-transcribe-toggle {
     display: flex;
     align-items: center;
-    gap: 0.4rem;
-  }
-
-  .provider-row-header label {
-    font-size: 0.85rem;
-    font-weight: 500;
-    color: #666;
-    white-space: nowrap;
-  }
-
-  .provider-row-header select {
-    padding: 0.4rem 0.6rem;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    background: white;
+    gap: 0.5rem;
+    font-size: 14px;
+    color: #555;
     cursor: pointer;
-    font-size: 0.85rem;
-    min-width: 150px;
-    max-width: 220px;
-    /* Handle text overflow */
-    overflow: hidden;
-    text-overflow: ellipsis;
+    padding: 0.5rem 0.75rem;
+    margin-left: auto;
+    background: #f5f5f5;
+    border-radius: 6px;
+    transition: all 0.2s ease;
+    user-select: none;
+  }
+
+  .auto-transcribe-toggle:hover {
+    background: #e8e8e8;
+  }
+
+  .auto-transcribe-toggle input[type="checkbox"] {
+    cursor: pointer;
+    width: 16px;
+    height: 16px;
+    margin: 0;
+  }
+
+  .auto-transcribe-toggle span {
+    font-weight: 500;
     white-space: nowrap;
   }
 
-  .provider-row-header select:hover {
-    border-color: #4CAF50;
+  /* Whisper model loading indicator (v0.13.3+) */
+  .whisper-loading-indicator {
+    font-size: 14px;
+    animation: pulse 1.5s ease-in-out infinite;
   }
 
-  .provider-row-header select:focus {
-    outline: none;
-    border-color: #4CAF50;
-    box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.1);
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
   }
 
-  .token-counter {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    font-size: 0.85rem;
-    padding: 0.4rem 0.8rem;
-    background: #f8f9fa;
-    border-radius: 6px;
-    border: 1px solid #e0e0e0;
-  }
-
-  .token-value {
-    font-family: 'Courier New', monospace;
-    color: #333;
-    font-weight: 600;
-  }
-
-  .token-percentage {
-    color: #4CAF50;
-    font-weight: 500;
-  }
-
-  .token-percentage.warning {
+  .whisper-error-indicator {
+    font-size: 14px;
     color: #ff9800;
-    font-weight: 600;
-  }
-
-  .chat-actions {
-    display: flex;
-    flex-wrap: wrap;  /* Wrap buttons naturally when they don't fit */
-    gap: 0.75rem;
-    align-items: center;
-    justify-content: flex-end;  /* Keep buttons right-aligned */
-    flex: 0 1 auto;  /* Don't grow, but allow shrinking */
-    min-width: 0;  /* Allow shrinking below content size */
-  }
-
-  .btn-new-chat {
-    padding: 0.6rem 1rem;
-    background: #6c757d;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    white-space: nowrap;
-    box-shadow: 0 2px 8px rgba(108, 117, 125, 0.3);
-  }
-
-  .btn-new-chat:hover {
-    background: #5a6268;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(108, 117, 125, 0.4);
-  }
-
-  .btn-new-chat:active {
-    transform: translateY(0);
-    box-shadow: 0 1px 4px rgba(108, 117, 125, 0.2);
-  }
-
-  .btn-end-session {
-    padding: 0.6rem 1rem;
-    background: #28a745;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    white-space: nowrap;
-    box-shadow: 0 2px 8px rgba(40, 167, 69, 0.3);
-  }
-
-  .btn-end-session:hover {
-    background: #20c997;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
-  }
-
-  .btn-end-session:active {
-    transform: translateY(0);
-    box-shadow: 0 1px 4px rgba(40, 167, 69, 0.2);
-  }
-
-  .btn-markdown-toggle {
-    padding: 0.6rem 1rem;
-    background: #6c757d;
-    color: white;
-    border: none;
-    border-radius: 6px;
-    font-size: 0.9rem;
-    font-weight: 500;
-    cursor: pointer;
-    transition: all 0.2s;
-    white-space: nowrap;
-    opacity: 0.7;
-    box-shadow: 0 2px 8px rgba(108, 117, 125, 0.3);
-  }
-
-  .btn-markdown-toggle.active {
-    background: #17a2b8;
-    opacity: 1;
-    box-shadow: 0 2px 8px rgba(23, 162, 184, 0.3);
-  }
-
-  .btn-markdown-toggle:hover {
-    background: #5a6268;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(108, 117, 125, 0.4);
-    opacity: 1;
-  }
-
-  .btn-markdown-toggle.active:hover {
-    background: #138496;
-    box-shadow: 0 4px 12px rgba(23, 162, 184, 0.4);
-  }
-
-  .btn-markdown-toggle:active {
-    transform: translateY(0);
-    box-shadow: 0 1px 4px rgba(108, 117, 125, 0.2);
-  }
-
-  .chat-window {
-    flex: 1;
-    padding: 1rem;
-    overflow-y: auto;
-    overflow-x: hidden; /* Prevent horizontal overflow */
-    background: #f9f9f9;
-    max-width: 100%; /* Constrain to parent width */
   }
 
   /* Resize Handle */
@@ -3474,72 +3484,6 @@
     background: #0056b3;
   }
 
-  .empty-chat {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    height: 100%;
-    color: #999;
-    font-style: italic;
-  }
-  
-  .message {
-    margin-bottom: 1rem;
-    padding: 0.75rem;
-    border-radius: 12px;
-    max-width: 80%;
-    animation: slideIn 0.2s ease-out;
-    overflow-wrap: break-word; /* Break long words */
-    word-break: break-word; /* Break long unbreakable strings */
-  }
-  
-  @keyframes slideIn {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  
-  .message.user {
-    background: #dcf8c6;
-    margin-left: auto;
-  }
-  
-  .message:not(.user):not(.system) {
-    background: white;
-    border: 1px solid #eee;
-  }
-  
-  .message.system {
-    background: #fff0f0;
-    border: 1px solid #ffc0c0;
-    font-style: italic;
-    margin-left: auto;
-    margin-right: auto;
-  }
-  
-  .message-header {
-    display: flex;
-    justify-content: space-between;
-    margin-bottom: 0.5rem;
-    font-size: 0.85rem;
-  }
-  
-  .message-header strong {
-    color: #555;
-  }
-  
-  .timestamp {
-    color: #999;
-    font-size: 0.75rem;
-  }
-  
-  .message p {
-    margin: 0;
-    white-space: pre-wrap;
-    word-wrap: break-word;
-    overflow-wrap: break-word; /* Break long words */
-    word-break: break-word; /* Break long unbreakable strings */
-  }
-  
   .chat-input {
     padding: 1rem;
     border-top: 1px solid #eee;
@@ -3768,266 +3712,43 @@
     overflow-wrap: break-word; /* Break long words */
     word-break: break-word; /* Break long unbreakable strings */
     overflow-x: auto; /* Allow horizontal scroll in textarea if needed */
+    padding: 0.75rem; /* Add padding inside textarea */
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    font-family: inherit;
+    font-size: 1rem;
   }
 
   .input-row button {
-    width: 100px;
+    min-width: 100px;
+    height: 45px; /* Match file button height */
+    padding: 0 16px; /* Horizontal padding only, height is fixed */
     align-self: flex-end;
+    background: #5a67d8;
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 1rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .input-row button:hover:not(:disabled) {
+    background: #4c51bf;
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4);
+  }
+
+  .input-row button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
   
-  .connecting, .error {
-    text-align: center;
-    padding: 2rem;
-  }
-
-  /* Connection Status Styles */
-  .mode-badge {
-    display: inline-block;
-    padding: 0.5rem 1rem;
-    border-radius: 6px;
-    font-weight: bold;
-    font-size: 0.95rem;
-    margin-bottom: 0.5rem;
-  }
-
-  .mode-badge.fully-online {
-    background: #d4edda;
-    color: #155724;
-    border: 1px solid #c3e6cb;
-  }
-
-  .mode-badge.hub-offline {
-    background: #fff3cd;
-    color: #856404;
-    border: 1px solid #ffeaa7;
-  }
-
-  .mode-badge.fully-offline {
-    background: #f8d7da;
-    color: #721c24;
-    border: 1px solid #f5c6cb;
-  }
-
-  .mode-description {
-    font-size: 0.85rem;
-    color: #666;
-    margin: 0.5rem 0;
-    font-style: italic;
-  }
-
-  .features-details {
-    margin-top: 0.75rem;
-    font-size: 0.9rem;
-  }
-
-  .features-details summary {
-    cursor: pointer;
-    font-weight: 600;
-    color: #555;
-    padding: 0.5rem 0;
-    user-select: none;
-  }
-
-  .features-details summary:hover {
-    color: #007bff;
-  }
-
-  .features-list {
-    list-style: none;
-    padding: 0.5rem 0 0 1rem;
-    margin: 0;
-  }
-
-  .features-list li {
-    padding: 0.3rem 0;
-    font-size: 0.85rem;
-  }
-
-  .features-list li.feature-available {
-    color: #28a745;
-  }
-
-  .features-list li.feature-unavailable {
-    color: #dc3545;
-    text-decoration: line-through;
-    opacity: 0.6;
-  }
-
-  .peer-count {
-    color: #888;
-    font-size: 0.9em;
-    margin-left: 0.25rem;
-  }
-
-  .cached-info {
-    font-size: 0.8rem;
-    color: #666;
-    margin-top: 0.5rem;
-    padding: 0.4rem;
-    background: #f0f0f0;
-    border-radius: 4px;
-    text-align: center;
-  }
-
-  /* DPC URI Styles - Redesigned for better UX */
-  .dpc-uris-section {
-    margin-top: 1rem;
-    margin-bottom: 0.5rem;
-  }
-
-  .uri-details {
-    background: #ffffff;
-    border: 1px solid #e0e0e0;
-    border-radius: 8px;
-    padding: 0;
-    overflow: hidden;
-  }
-
-  .uri-details[open] {
-    border-color: #007bff;
-  }
-
-  .uri-summary {
-    padding: 0.75rem 1rem;
-    background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-    cursor: pointer;
-    list-style: none;
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-weight: 600;
-    color: #495057;
-    transition: background 0.2s;
-    user-select: none;
-  }
-
-  .uri-summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .uri-summary:hover {
-    background: linear-gradient(135deg, #e9ecef 0%, #dee2e6 100%);
-  }
-
-  .uri-icon {
-    font-size: 1.2rem;
-  }
-
-  .uri-title {
-    flex: 1;
-    font-size: 0.9rem;
-  }
-
-  .uri-help-text {
-    padding: 0.5rem 1rem 0.75rem;
-    font-size: 0.75rem;
-    color: #6c757d;
-    background: #f8f9fa;
-    border-bottom: 1px solid #e9ecef;
-  }
-
-  .uri-card {
-    padding: 0.75rem 1rem;
-    border-bottom: 1px solid #f0f0f0;
-    transition: background 0.2s;
-  }
-
-  .uri-card:last-of-type {
-    border-bottom: none;
-  }
-
-  .uri-card:hover {
-    background: #f8f9fa;
-  }
-
-  .uri-card-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.5rem;
-  }
-
-  .ip-badge {
-    flex: 1;
-    font-family: 'Courier New', monospace;
-    font-size: 0.9rem;
-    font-weight: 600;
-    color: #0056b3;
-    padding: 0.4rem 0.6rem;
-    background: #e7f1ff;
-    border-radius: 6px;
-    border: 1px solid #b3d7ff;
-  }
-
-  .ip-badge.external {
-    color: #0d6e2b;
-    background: #d1f4e0;
-    border: 1px solid #7fd99f;
-  }
-
-  .copy-btn-icon {
-    width: auto;
-    min-width: auto;
-    padding: 0.3rem 0.5rem;
-    font-size: 1rem;
-    background: transparent;
-    border: 1px solid #ddd;
-    cursor: pointer;
-    border-radius: 4px;
-    transition: all 0.2s;
-    flex-shrink: 0;
-  }
-
-  .copy-btn-icon:hover {
-    background: #f0f0f0;
-    border-color: #007bff;
-  }
-
-  .copy-btn-icon:active {
-    background: #e0e0e0;
-  }
-
-  .uri-full-details {
-    margin-top: 0.5rem;
-  }
-
-  .uri-full-details summary {
-    display: none;
-  }
-
-  .show-uri-btn {
-    display: inline-block !important;
-    font-size: 0.75rem;
-    color: #007bff;
-    cursor: pointer;
-    padding: 0.3rem 0.6rem;
-    background: #f0f7ff;
-    border: 1px solid #cce5ff;
-    border-radius: 4px;
-    margin-top: 0.4rem;
-    transition: all 0.2s;
-    user-select: none;
-  }
-
-  .show-uri-btn:hover {
-    background: #e0f0ff;
-    border-color: #99ccff;
-  }
-
-  .uri-full-text {
-    display: block;
-    margin-top: 0.5rem;
-    padding: 0.6rem;
-    font-family: 'Courier New', monospace;
-    font-size: 0.7rem;
-    color: #495057;
-    background: #f8f9fa;
-    border: 1px solid #dee2e6;
-    border-radius: 4px;
-    word-break: break-all;
-    line-height: 1.5;
-  }
-
   /* Modal Dialog Styles */
   .modal-overlay {
     position: fixed;
@@ -4146,15 +3867,21 @@
   /* File Transfer UI Styles (Week 1) */
   .file-button {
     min-width: 45px;
-    padding: 8px 12px;
-    font-size: 18px;
-    margin-right: 8px;
+    width: 45px; /* Fixed width for icon button */
+    height: 45px; /* Square button */
+    padding: 8px;
+    font-size: 20px;
     cursor: pointer;
     background: #5a67d8;
+    color: white;
     border: none;
     border-radius: 4px;
     transition: all 0.2s;
     box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
+    align-self: flex-end;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .file-button:hover:not(:disabled) {
@@ -4166,222 +3893,6 @@
   .file-button:disabled {
     opacity: 0.4;
     cursor: not-allowed;
-  }
-
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 1000;
-  }
-
-  .modal-dialog {
-    background: #2a2a2a;
-    padding: 24px;
-    border-radius: 8px;
-    max-width: 500px;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
-  }
-
-  .modal-dialog h3 {
-    margin-top: 0;
-    color: #e0e0e0;
-  }
-
-  .modal-dialog p {
-    margin: 8px 0;
-    color: #b0b0b0;
-  }
-
-  .modal-buttons {
-    display: flex;
-    gap: 12px;
-    margin-top: 20px;
-  }
-
-  .accept-button {
-    flex: 1;
-    padding: 10px;
-    background: #4CAF50;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-weight: 500;
-    box-shadow: 0 2px 8px rgba(76, 175, 80, 0.3);
-    transition: all 0.2s;
-  }
-
-  .accept-button:hover {
-    background: #45a049;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(76, 175, 80, 0.4);
-  }
-
-  .reject-button {
-    flex: 1;
-    padding: 10px;
-    background: #f44336;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-weight: 500;
-    box-shadow: 0 2px 8px rgba(244, 67, 54, 0.3);
-    transition: all 0.2s;
-  }
-
-  .reject-button:hover {
-    background: #d32f2f;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(244, 67, 54, 0.4);
-  }
-
-  .active-transfers-panel {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: #2a2a2a;
-    padding: 16px;
-    border-radius: 8px;
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
-    min-width: 300px;
-    z-index: 999;
-  }
-
-  .active-transfers-panel h4 {
-    margin: 0 0 12px 0;
-    color: #e0e0e0;
-    font-size: 14px;
-  }
-
-  .transfer-item {
-    margin-bottom: 12px;
-    padding-bottom: 12px;
-    border-bottom: 1px solid #444;
-  }
-
-  .transfer-item:last-child {
-    margin-bottom: 0;
-    padding-bottom: 0;
-    border-bottom: none;
-  }
-
-  .transfer-info {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 8px;
-  }
-
-  .transfer-filename {
-    color: #b0b0b0;
-    font-size: 13px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .transfer-status {
-    color: #888;
-    font-size: 12px;
-    white-space: nowrap;
-  }
-
-  .cancel-transfer-button {
-    background: transparent;
-    border: none;
-    color: #888;
-    font-size: 20px;
-    line-height: 1;
-    padding: 0;
-    width: 24px;
-    height: 24px;
-    cursor: pointer;
-    border-radius: 4px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    transition: all 0.2s ease;
-    flex-shrink: 0;
-  }
-
-  .cancel-transfer-button:hover {
-    background: rgba(255, 68, 68, 0.2);
-    color: #ff4444;
-  }
-
-  .cancel-transfer-button:active {
-    transform: scale(0.95);
-  }
-
-  .progress-bar {
-    width: 100%;
-    height: 6px;
-    background: #444;
-    border-radius: 3px;
-    overflow: hidden;
-    margin-bottom: 4px;
-  }
-
-  .progress-fill {
-    height: 100%;
-    background: #17a2b8;
-    transition: width 0.3s ease;
-  }
-
-  .progress-text {
-    font-size: 11px;
-    color: #888;
-  }
-
-  /* File attachment display (Week 1) */
-  .message-attachments {
-    margin-top: 8px;
-  }
-
-  .file-attachment {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 12px;
-    background: rgba(255, 255, 255, 0.05);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 8px;
-    margin-top: 8px;
-    transition: background 0.2s ease;
-  }
-
-  .file-attachment:hover {
-    background: rgba(255, 255, 255, 0.08);
-  }
-
-  .file-details {
-    flex: 1;
-    min-width: 0;
-  }
-
-  .file-name {
-    color: #1a1a1a;
-    font-weight: 600;
-    font-size: 14px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .file-meta {
-    color: #4a4a4a;
-    font-size: 12px;
-    margin-top: 4px;
   }
 
   /* Notification Permission Dialog */
@@ -4463,147 +3974,5 @@
 
   .btn-secondary:hover {
     background: #e0e0e0;
-  }
-
-  /* Image Preview Modal Styles (Phase 2.4) */
-  .modal-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(0, 0, 0, 0.7);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10000;
-  }
-
-  .modal-dialog {
-    background: white;
-    padding: 2rem;
-    border-radius: 12px;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
-    max-width: 90%;
-    max-height: 90vh;
-    overflow-y: auto;
-  }
-
-  .modal-buttons {
-    display: flex;
-    gap: 1rem;
-    margin-top: 1.5rem;
-    justify-content: flex-end;
-  }
-
-  .accept-button, .reject-button {
-    padding: 0.75rem 1.5rem;
-    border: none;
-    border-radius: 6px;
-    font-size: 1rem;
-    cursor: pointer;
-    transition: background 0.2s ease;
-  }
-
-  .accept-button {
-    background: #4CAF50;
-    color: white;
-  }
-
-  .accept-button:hover {
-    background: #45a049;
-  }
-
-  .accept-button:disabled {
-    background: #cccccc;
-    cursor: not-allowed;
-  }
-
-  .reject-button {
-    background: #f44336;
-    color: white;
-  }
-
-  .reject-button:hover {
-    background: #d32f2f;
-  }
-
-  .reject-button:disabled {
-    background: #cccccc;
-    cursor: not-allowed;
-  }
-
-  /* Image Preview Chip (Phase 2.4: improved UX) */
-  .image-preview-chip {
-    display: flex;
-    align-items: center;
-    gap: 0.75rem;
-    padding: 0.5rem;
-    margin-bottom: 0.5rem;
-    background: #f5f5f5;
-    border: 1px solid #ddd;
-    border-radius: 8px;
-    transition: all 0.2s ease;
-  }
-
-  .image-preview-chip:hover {
-    background: #ebebeb;
-    border-color: #ccc;
-  }
-
-  .preview-thumbnail {
-    width: 60px;
-    height: 60px;
-    object-fit: cover;
-    border-radius: 4px;
-    border: 1px solid #ccc;
-  }
-
-  .preview-info {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    gap: 0.25rem;
-    min-width: 0; /* Enable text truncation */
-  }
-
-  .preview-filename {
-    font-size: 0.875rem;
-    font-weight: 600;
-    color: #333;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .preview-size {
-    font-size: 0.75rem;
-    color: #666;
-  }
-
-  .preview-remove {
-    flex-shrink: 0;
-    width: 28px;
-    height: 28px;
-    padding: 0;
-    background: #f44336;
-    color: white;
-    border: none;
-    border-radius: 50%;
-    font-size: 1.2rem;
-    line-height: 1;
-    cursor: pointer;
-    transition: background 0.2s ease;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .preview-remove:hover {
-    background: #d32f2f;
-  }
-
-  .preview-remove:active {
-    transform: scale(0.95);
   }
 </style>

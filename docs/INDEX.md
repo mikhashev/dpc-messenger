@@ -120,8 +120,9 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 - **Root**: [README.md](../README.md) - Project overview
 - **Client Package**: [dpc-client/README.md](../dpc-client/README.md) - Client architecture
 - **Client Core**: [dpc-client/core/README.md](../dpc-client/core/README.md) - Core service quick reference
-- **Client Core Config**: [dpc-client/core/SERVER_CONFIGURATION.md](../dpc-client/core/SERVER_CONFIGURATION.md) - Server-specific config
-- **Client Core TURN**: [dpc-client/core/TURN_SETUP.md](../dpc-client/core/TURN_SETUP.md) - TURN connectivity
+- **Server Configuration**: [SERVER_CONFIGURATION.md](SERVER_CONFIGURATION.md) - STUN/TURN server config
+- **TURN Setup**: [TURN_SETUP.md](TURN_SETUP.md) - TURN credentials setup
+- **DTLS Research**: [DTLS_RESEARCH.md](DTLS_RESEARCH.md) - DTLS library research notes
 - **Client UI**: [dpc-client/ui/README.md](../dpc-client/ui/README.md) - UI reference
 
 ### Hub Documentation

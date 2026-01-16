@@ -32,6 +32,12 @@ def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
         if len(original) > max_length:
             sanitized['image_base64'] = f"{original[:max_length]}... ({len(original)} chars)"
 
+    # Truncate voice_audio_base64 field if present
+    if 'voice_audio_base64' in sanitized and isinstance(sanitized['voice_audio_base64'], str):
+        original = sanitized['voice_audio_base64']
+        if len(original) > max_length:
+            sanitized['voice_audio_base64'] = f"{original[:max_length]}... ({len(original)} chars)"
+
     return sanitized
 
 
@@ -69,9 +75,9 @@ class LocalApiServer:
                     if handler_method and asyncio.iscoroutinefunction(handler_method):
                         # Sanitize payload for logging (truncate large base64 strings)
                         sanitized_payload = _sanitize_payload_for_logging(payload)
-                        # Special logging for image commands
-                        if command in ["send_image", "send_p2p_image"]:
-                            logger.debug("Executing command '%s' (payload contains image data)", command)
+                        # Special logging for image/voice commands
+                        if command in ["send_image", "send_p2p_image", "send_voice_message", "transcribe_audio"]:
+                            logger.debug("Executing command '%s' (payload contains media data)", command)
                         else:
                             logger.debug("Executing command '%s' with payload: %s", command, sanitized_payload)
 

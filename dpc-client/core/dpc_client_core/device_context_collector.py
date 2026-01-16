@@ -227,14 +227,13 @@ class DeviceContextCollector:
             "architecture": platform.architecture()[0]
         }
 
-        # Runtime
+        # Runtime (version only - no executable paths for privacy and cross-platform compatibility)
         software["runtime"] = {
             "python": {
                 "version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
                 "major": sys.version_info.major,
                 "minor": sys.version_info.minor,
-                "patch": sys.version_info.micro,
-                "executable": sys.executable
+                "patch": sys.version_info.micro
             }
         }
 
