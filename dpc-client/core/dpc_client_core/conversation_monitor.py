@@ -165,9 +165,8 @@ class ConversationMonitor:
                     # Generate commit proposal
                     proposal = await self._generate_commit_proposal()
 
-                    # Reset buffer
-                    self.message_buffer = []
-                    self.knowledge_score = 0.0
+                    # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
+                    # Buffer will be cleared by consensus_manager when proposal is approved
                     self.proposals_created += 1
 
                     return proposal
@@ -197,10 +196,9 @@ class ConversationMonitor:
                 # Generate proposal
                 proposal = await self._generate_commit_proposal()
 
-                # Reset buffer only if proposal generation succeeded (v0.14.0 fix)
+                # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
+                # Buffer will be cleared by consensus_manager when proposal is approved
                 if proposal is not None:
-                    self.message_buffer = []
-                    self.knowledge_score = 0.0
                     self.proposals_created += 1
 
                 return proposal
