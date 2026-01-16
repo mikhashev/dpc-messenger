@@ -40,6 +40,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Telegram Bot API limits
+TELEGRAM_MESSAGE_MAX_LENGTH = 4096  # Text messages
+TELEGRAM_CAPTION_MAX_LENGTH = 1024  # Caption for media (voice, photo, document)
+
 
 class TelegramBotManager:
     """
@@ -449,6 +453,88 @@ class TelegramBotManager:
             logger.error(f"Failed to queue document: {e}", exc_info=True)
             return False
 
+    def _split_long_message(self, text: str, max_length: int = TELEGRAM_MESSAGE_MAX_LENGTH) -> List[str]:
+        """
+        Split a long message into chunks respecting word boundaries and HTML tags.
+
+        Tries to split at sentence boundaries (periods, newlines) first,
+        then falls back to word boundaries (spaces). Handles HTML tag
+        preservation to avoid breaking HTML formatting across chunks.
+
+        Args:
+            text: The message text to split
+            max_length: Maximum length per chunk (default: 4096)
+
+        Returns:
+            List of message chunks, each under max_length characters
+        """
+        if len(text) <= max_length:
+            return [text]
+
+        chunks = []
+        remaining_text = text
+
+        # Known HTML tags that need to be preserved
+        # Format: (open_tag, close_tag)
+        html_tags = [
+            ('<b>', '</b>'),
+            ('<i>', '</i>'),
+            ('<u>', '</u>'),
+            ('<s>', '</s>'),
+            ('<code>', '</code>'),
+            ('<pre>', '</pre>'),
+            ('<a href=', '</a>'),  # Special handling needed
+        ]
+
+        while remaining_text:
+            # Reserve space for part indicator (e.g., "\n\n(1/3)")
+            # We'll add this later, so reserve ~20 chars
+            chunk_size = max_length - 20
+
+            if len(remaining_text) <= chunk_size:
+                chunks.append(remaining_text)
+                break
+
+            # Try to split at sentence boundary (period + space, or newline)
+            chunk_end = chunk_size
+            split_points = ['.\n', '. ', '\n\n', '\n']
+
+            for split_point in split_points:
+                # Look for split point before the chunk end
+                pos = remaining_text.rfind(split_point, 0, chunk_size)
+                if pos > chunk_size // 2:  # Ensure we don't split too early
+                    chunk_end = pos + len(split_point)
+                    break
+
+            # If no sentence boundary found, try word boundary (space)
+            if chunk_end == chunk_size:
+                pos = remaining_text.rfind(' ', 0, chunk_size)
+                if pos > chunk_size // 2:
+                    chunk_end = pos + 1
+
+            # Still no good split point, force split at max length
+            if chunk_end == chunk_size:
+                chunk_end = chunk_size
+
+            chunk = remaining_text[:chunk_end]
+            remaining_text = remaining_text[chunk_end:]
+
+            # Check for unclosed HTML tags in this chunk
+            for open_tag, close_tag in html_tags:
+                open_count = chunk.count(open_tag)
+                close_count = chunk.count(close_tag)
+
+                if open_count > close_count:
+                    # Unclosed tag(s) - close them in this chunk
+                    chunk += close_tag * (open_count - close_count)
+                    # Reopen them in next chunk
+                    if remaining_text:
+                        remaining_text = open_tag * (open_count - close_count) + remaining_text
+
+            chunks.append(chunk)
+
+        return chunks
+
     async def _message_sender_loop(self):
         """
         Background task that sends queued messages to Telegram.
@@ -492,32 +578,74 @@ class TelegramBotManager:
         logger.info("Telegram message sender loop stopped")
 
     async def _send_text_message(self, msg: Dict[str, Any]):
-        """Send a text message via Telegram Bot API."""
+        """Send a text message via Telegram Bot API.
+
+        Handles long messages by splitting them into multiple parts.
+        Telegram has a 4096 character limit per message.
+        """
         try:
             from telegram import Bot
 
             bot: Bot = self.application.bot
-            await bot.send_message(
-                chat_id=msg["chat_id"],
-                text=msg["text"],
-                parse_mode=msg.get("parse_mode"),
-                disable_web_page_preview=msg.get("disable_web_page_preview", False)
-            )
-            logger.debug(f"Sent text message to chat {msg['chat_id']}")
+            text = msg["text"]
+
+            # Check if message needs splitting
+            if len(text) > TELEGRAM_MESSAGE_MAX_LENGTH:
+                chunks = self._split_long_message(text, TELEGRAM_MESSAGE_MAX_LENGTH)
+                logger.info(
+                    f"Splitting message into {len(chunks)} parts "
+                    f"(original: {len(text)} chars)"
+                )
+
+                # Send each chunk with part indicator
+                for i, chunk in enumerate(chunks, 1):
+                    part_indicator = f"\n\n({i}/{len(chunks)})"
+                    await bot.send_message(
+                        chat_id=msg["chat_id"],
+                        text=chunk + part_indicator,
+                        parse_mode=msg.get("parse_mode"),
+                        disable_web_page_preview=msg.get("disable_web_page_preview", False)
+                    )
+                    logger.debug(
+                        f"Sent text message part {i}/{len(chunks)} "
+                        f"to chat {msg['chat_id']} ({len(chunk)} chars)"
+                    )
+                    # Small delay between parts to respect rate limits
+                    await asyncio.sleep(0.05)
+            else:
+                # Send single message
+                await bot.send_message(
+                    chat_id=msg["chat_id"],
+                    text=text,
+                    parse_mode=msg.get("parse_mode"),
+                    disable_web_page_preview=msg.get("disable_web_page_preview", False)
+                )
+                logger.debug(f"Sent text message to chat {msg['chat_id']}")
+
         except Exception as e:
             logger.error(f"Failed to send text message: {e}", exc_info=True)
 
     async def _send_voice_message(self, msg: Dict[str, Any]):
-        """Send a voice message via Telegram Bot API."""
+        """Send a voice message via Telegram Bot API.
+
+        Truncates caption if it exceeds 1024 characters (Telegram limit).
+        """
         try:
             from telegram import Bot
 
             bot: Bot = self.application.bot
+            caption = msg.get("caption")
+
+            # Truncate caption if too long (Telegram limit: 1024)
+            if caption and len(caption) > TELEGRAM_CAPTION_MAX_LENGTH:
+                caption = caption[:TELEGRAM_CAPTION_MAX_LENGTH - 3] + "..."
+                logger.debug(f"Truncated voice caption to {TELEGRAM_CAPTION_MAX_LENGTH} chars")
+
             with open(msg["file_path"], "rb") as f:
                 await bot.send_voice(
                     chat_id=msg["chat_id"],
                     voice=f,
-                    caption=msg.get("caption"),
+                    caption=caption,
                     duration=msg.get("duration")
                 )
             logger.debug(f"Sent voice message to chat {msg['chat_id']}")
@@ -525,32 +653,52 @@ class TelegramBotManager:
             logger.error(f"Failed to send voice message: {e}", exc_info=True)
 
     async def _send_photo_message(self, msg: Dict[str, Any]):
-        """Send a photo message via Telegram Bot API."""
+        """Send a photo message via Telegram Bot API.
+
+        Truncates caption if it exceeds 1024 characters (Telegram limit).
+        """
         try:
             from telegram import Bot
 
             bot: Bot = self.application.bot
+            caption = msg.get("caption")
+
+            # Truncate caption if too long (Telegram limit: 1024)
+            if caption and len(caption) > TELEGRAM_CAPTION_MAX_LENGTH:
+                caption = caption[:TELEGRAM_CAPTION_MAX_LENGTH - 3] + "..."
+                logger.debug(f"Truncated photo caption to {TELEGRAM_CAPTION_MAX_LENGTH} chars")
+
             with open(msg["file_path"], "rb") as f:
                 await bot.send_photo(
                     chat_id=msg["chat_id"],
                     photo=f,
-                    caption=msg.get("caption")
+                    caption=caption
                 )
             logger.debug(f"Sent photo to chat {msg['chat_id']}")
         except Exception as e:
             logger.error(f"Failed to send photo: {e}", exc_info=True)
 
     async def _send_document_message(self, msg: Dict[str, Any]):
-        """Send a document message via Telegram Bot API."""
+        """Send a document message via Telegram Bot API.
+
+        Truncates caption if it exceeds 1024 characters (Telegram limit).
+        """
         try:
             from telegram import Bot
 
             bot: Bot = self.application.bot
+            caption = msg.get("caption")
+
+            # Truncate caption if too long (Telegram limit: 1024)
+            if caption and len(caption) > TELEGRAM_CAPTION_MAX_LENGTH:
+                caption = caption[:TELEGRAM_CAPTION_MAX_LENGTH - 3] + "..."
+                logger.debug(f"Truncated document caption to {TELEGRAM_CAPTION_MAX_LENGTH} chars")
+
             with open(msg["file_path"], "rb") as f:
                 await bot.send_document(
                     chat_id=msg["chat_id"],
                     document=f,
-                    caption=msg.get("caption")
+                    caption=caption
                 )
             logger.debug(f"Sent document to chat {msg['chat_id']}")
         except Exception as e:

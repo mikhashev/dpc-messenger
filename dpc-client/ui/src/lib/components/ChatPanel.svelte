@@ -83,8 +83,8 @@
           </strong>
           <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
-        <!-- Message text (shown always, serves as caption for images) -->
-        {#if msg.text && msg.text !== '[Image]'}
+        <!-- Message text (hidden for voice attachments with transcription to avoid duplication, v0.15.1+) -->
+        {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)}
           {#if msg.sender === 'ai' && enableMarkdown}
             <MarkdownMessage content={msg.text} />
           {:else}

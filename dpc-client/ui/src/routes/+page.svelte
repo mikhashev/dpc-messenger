@@ -361,7 +361,7 @@
             id: `telegram-voice-${Date.now()}`,
             sender: `telegram-${telegram_chat_id}`,
             senderName: sender_name,
-            text: transcription ? `Voice message: ${transcription}` : 'Voice message',
+            text: transcription ? `Voice message: ${transcription}` : 'Voice message',  // Transcription in text for knowledge extraction
             timestamp: Date.now(),
             attachments: [{
               type: 'voice',
