@@ -203,6 +203,13 @@ class TelegramBotManager:
                 )
                 self.application.add_handler(document_handler)
 
+                # Video messages handler
+                video_handler = MessageHandler(
+                    filters.VIDEO,
+                    bridge.handle_video_message
+                )
+                self.application.add_handler(video_handler)
+
                 # Start the bot
                 if self.use_webhook:
                     # Webhook mode (production)
