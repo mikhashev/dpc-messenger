@@ -139,9 +139,9 @@ chore: maintenance tasks (dependencies, config)
 
 ### Example: Current State
 
-**Current Status (2025-01-16):**
-- `main`: Stable v0.12.0
-- `dev`: v0.15.0 development (92 commits ahead of main)
+**Current Status (2025-01-17):**
+- `main`: Stable v0.15.1
+- `dev`: Active development (2 commits ahead of main)
 
 **Upcoming Release v0.15.0 includes:**
 - Voice messages with local Whisper transcription (v0.13.0-v0.13.3)
