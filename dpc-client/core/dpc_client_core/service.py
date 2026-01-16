@@ -3318,17 +3318,24 @@ class CoreService:
                 # No local capability - wait for peer's transcription (passive mode)
                 if not is_sender:
                     timeout_seconds = self.settings.get_voice_transcription_timeout_seconds() or 240
-                    logger.info(f"No transcription capability (model not loaded), waiting {timeout_seconds}s for peer's transcription for {transfer_id}")
-                    # Wait for peer to send transcription
-                    for _ in range(timeout_seconds):
+                    # Log start of passive wait mode (v0.13.3+ - better UX logging)
+                    logger.info(f"Starting passive wait mode for {transfer_id}: waiting {timeout_seconds}s for sender's transcription")
+                    # Wait for peer to send transcription with progress logging
+                    for i in range(timeout_seconds):
                         await asyncio.sleep(1)
-                        if transfer_id in self._voice_transcriptions:
-                            logger.info(f"Received transcription from peer for {transfer_id}")
-                            return
-                    logger.warning(f"No transcription received from peer after {timeout_seconds}s for {transfer_id}")
 
-                    # Timeout expired - try to transcribe locally (allow lazy model loading)
-                    logger.info(f"Attempting local transcription after timeout for {transfer_id} (will load model if needed)")
+                        # Log progress every 30 seconds (v0.13.3+)
+                        if i > 0 and i % 30 == 0:
+                            logger.info(f"Still waiting for sender's transcription for {transfer_id}: {i}/{timeout_seconds}s elapsed")
+
+                        if transfer_id in self._voice_transcriptions:
+                            logger.info(f"Received transcription from sender for {transfer_id} after {i}s")
+                            return
+
+                    # Timeout expired - transcribe locally (v0.13.3+ - clearer logging)
+                    logger.warning(f"Timeout after {timeout_seconds}s: No transcription received from sender for {transfer_id}")
+                    logger.info(f"Starting local transcription for {transfer_id} (will load Whisper model if needed)")
+
                     has_capability_lazy = await self._check_transcription_capability(check_model_loaded=False)
                     if not has_capability_lazy:
                         logger.error(f"No transcription provider configured at all for {transfer_id}, giving up")

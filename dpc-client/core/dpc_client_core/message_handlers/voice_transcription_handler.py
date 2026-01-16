@@ -35,6 +35,14 @@ class VoiceTranscriptionHandler(MessageHandler):
         timestamp = payload.get("timestamp")
         remote_provider_node_id = payload.get("remote_provider_node_id")  # Optional
 
+        # 1.5. Validate transcription is not empty (v0.13.3+ - prevent empty/malicious transcriptions)
+        transcription_text = transcription_text.strip()
+        if not transcription_text:
+            self.logger.warning(
+                f"Received empty transcription from {sender_node_id} for {transfer_id}, ignoring"
+            )
+            return None  # Don't store empty transcriptions
+
         self.logger.info(
             f"VOICE_TRANSCRIPTION from {sender_node_id} for transfer {transfer_id} "
             f"(provider: {provider}, language: {language}, confidence: {confidence})"
