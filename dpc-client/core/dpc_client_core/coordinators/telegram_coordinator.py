@@ -440,8 +440,9 @@ class TelegramBridge:
                 self.service.conversation_monitors[conversation_id] = monitor
 
             # Create message with voice attachment
-            # NOTE: Transcription shown only in VoicePlayer attachment, not in message text (avoids duplication)
-            message_text = "Voice message"
+            # NOTE: Include transcription in message text for knowledge extraction (v0.15.1+)
+            # Transcription is also shown in VoicePlayer attachment for UI
+            message_text = transcription_text if transcription_text else "Voice message"
             conv_message = ConvMessage(
                 message_id=f"telegram-voice-{message.message_id}",
                 conversation_id=conversation_id,
