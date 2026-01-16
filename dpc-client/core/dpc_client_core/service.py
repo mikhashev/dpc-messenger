@@ -4110,10 +4110,10 @@ class CoreService:
                     proposal.to_dict()
                 )
 
-                # For local_ai conversations, don't broadcast knowledge to peers (privacy)
+                # For local_ai and telegram conversations, don't broadcast knowledge to peers (privacy)
                 # For peer conversations, broadcast for collaborative consensus
-                if conversation_id == "local_ai":
-                    logger.info("Local AI - private conversation, knowledge will not be shared with peers")
+                if conversation_id == "local_ai" or conversation_id.startswith("telegram-"):
+                    logger.info("%s - private conversation, knowledge will not be shared with peers", conversation_id)
                     # Use no-op broadcast function (local-only approval)
                     async def _no_op_broadcast(message: Dict[str, Any]) -> None:
                         pass  # Don't send to peers for private conversations
