@@ -5191,6 +5191,10 @@ class CoreService:
             logger.info("Inference completed successfully for %s", peer_id)
 
             # Send success response with token and model metadata
+            # Use the actual model name from result if available (e.g., "claude-haiku-4.5"),
+            # otherwise fall back to the original model parameter (e.g., "default")
+            actual_model = result.get("model", model)
+
             success_response = create_remote_inference_response(
                 request_id=request_id,
                 response=result["response"],
@@ -5198,7 +5202,7 @@ class CoreService:
                 prompt_tokens=result.get("prompt_tokens"),
                 response_tokens=result.get("response_tokens"),
                 model_max_tokens=result.get("model_max_tokens"),
-                model=result.get("model"),
+                model=actual_model,
                 provider=result.get("provider")
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
