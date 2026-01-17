@@ -81,10 +81,12 @@ class LocalApiServer:
                         else:
                             logger.debug("Executing command '%s' with payload: %s", command, sanitized_payload)
 
-                        # For long-running tasks like AI queries, run them in the background
-                        if command == "execute_ai_query":
+                        # For long-running tasks, run them in the background
+                        # get_status can take 30s on Linux (IP detection), execute_ai_query for AI
+                        if command in ["execute_ai_query", "get_status"]:
                             # Pass the command_id to the handler
                             payload['command_id'] = command_id
+                            payload['_websocket'] = websocket
                             asyncio.create_task(handler_method(**payload))
                         else:
                             # For short tasks, await the result and send it back

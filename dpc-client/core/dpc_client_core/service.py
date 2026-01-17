@@ -1240,8 +1240,17 @@ class CoreService:
 
         return local_ips
 
-    async def get_status(self) -> Dict[str, Any]:
-        """Aggregates status from all components."""
+    async def get_status(self, command_id: str = None, _websocket = None) -> Dict[str, Any]:
+        """
+        Aggregates status from all components.
+
+        Args:
+            command_id: Optional command_id for background execution (sends response via WebSocket)
+            _websocket: Optional WebSocket for sending response in background mode
+
+        Returns:
+            Status dict if called synchronously, None if called in background mode
+        """
 
         hub_connected = (
             self.hub_client.websocket is not None and
@@ -1320,7 +1329,7 @@ class CoreService:
         if self.connection_orchestrator:
             orchestrator_stats = self.connection_orchestrator.get_stats()
 
-        return {
+        status_result = {
             "node_id": self.p2p_manager.node_id,
             "hub_status": "Connected" if hub_connected else "Disconnected",
             "p2p_peers": list(self.p2p_manager.peers.keys()),
@@ -1340,6 +1349,18 @@ class CoreService:
             # Connection orchestrator stats (6-tier fallback metrics)
             "orchestrator_stats": orchestrator_stats,
         }
+
+        # If running in background mode, send response via WebSocket
+        if command_id is not None and _websocket is not None:
+            try:
+                response = {"id": command_id, "command": "get_status", "status": "OK", "payload": status_result}
+                await _websocket.send(json.dumps(response))
+                logger.debug("Sent get_status response in background mode")
+            except Exception as e:
+                logger.error("Failed to send get_status response: %s", e)
+            return None
+
+        return status_result
     
     async def list_providers(self) -> Dict[str, Any]:
         """
