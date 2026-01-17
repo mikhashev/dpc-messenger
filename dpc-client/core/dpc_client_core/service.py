@@ -2806,6 +2806,10 @@ class CoreService:
                 logger.error(f"Remote transcription failed: {e}", exc_info=True)
                 raise ValueError(f"Remote transcription failed: {e}")
 
+        # Handle local provider format from dropdown ("local:alias") - v0.15.1+
+        if provider_alias and provider_alias.startswith("local:"):
+            provider_alias = provider_alias[6:]  # Remove "local:" prefix
+
         # 1. Decode audio data
         try:
             audio_data = base64.b64decode(audio_base64)

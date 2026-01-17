@@ -2443,14 +2443,14 @@
       fileOfferToastMessage = 'Transcribing voice message...';
       showFileOfferToast = true;
 
-      // Parse selected voice provider (v0.13.0+: Use selected provider instead of auto-detect)
-      const parsedProvider = parseProviderSelection(selectedVoiceProvider || selectedTextProvider);
+      // Get selected voice provider (v0.15.1+: Pass full provider ID for remote support)
+      const selectedProviderId = selectedVoiceProvider || selectedTextProvider;
 
       // Call backend for transcription
       const response = await sendCommand('transcribe_audio', {
         audio_base64: base64Audio,
         mime_type: voicePreview.blob.type || 'audio/webm',
-        provider_alias: parsedProvider.alias  // v0.13.0+: Pass selected provider
+        provider_alias: selectedProviderId  // v0.15.1+: Pass full ID (supports "remote:" and "local:" prefixes)
       });
 
       if (response.error) {
