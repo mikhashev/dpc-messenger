@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Last Updated:** December 2025 | **Current Version:** 0.10.1 | **Current Phase:** Phase 2.1 - Decentralized Infrastructure
+> **Last Updated:** January 2026 | **Current Version:** 0.15.1 | **Current Phase:** Phase 2.1 - Decentralized Infrastructure
 
 ---
 
@@ -156,6 +156,7 @@ D-PC Messenger follows a three-phase development roadmap:
 | 9 | Knowledge Commit Templates | Low | Pre-defined formats (Meeting Notes, Decisions, Postmortems) |
 | 10 | Team AI Assistants | Medium | AI queries with `team_id`, access to collective team knowledge |
 | 11 | Collaborative Context Editing | High | Propose edits with diff generation, PR-like approval workflow |
+| 12 | **Multilingual Knowledge Extraction** | Low | **Language detection for knowledge proposals** - Uses Whisper's built-in language detection for voice + non-ASCII heuristic for text, adds language metadata to KnowledgeEntry |
 
 #### Phase 2.3: Polish & Offline Mesh (Months 7-9)
 

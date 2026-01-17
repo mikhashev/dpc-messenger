@@ -440,8 +440,9 @@ class TelegramBridge:
                 self.service.conversation_monitors[conversation_id] = monitor
 
             # Create message with voice attachment
-            # NOTE: Transcription shown only in VoicePlayer attachment, not in message text (avoids duplication)
-            message_text = "Voice message"
+            # NOTE: Include transcription in message text for knowledge extraction (v0.15.1+)
+            # Transcription is also shown in VoicePlayer attachment for UI
+            message_text = transcription_text if transcription_text else "Voice message"
             conv_message = ConvMessage(
                 message_id=f"telegram-voice-{message.message_id}",
                 conversation_id=conversation_id,
@@ -674,6 +675,120 @@ class TelegramBridge:
 
         except Exception as e:
             logger.error(f"Error handling Telegram document: {e}", exc_info=True)
+
+    async def handle_video_message(self, update, context):
+        """
+        Handle incoming video message from Telegram.
+
+        Downloads the video and creates a file attachment in the DPC conversation.
+        """
+        try:
+            message = update.message
+            video = message.video
+            chat_id = str(message.chat_id)
+            from_user = message.from_user
+
+            # Whitelist check with rate limiting (v0.15.0)
+            if not self.telegram.is_allowed(chat_id):
+                if chat_id not in self._notified_unknown_users:
+                    logger.warning(f"Video from unauthorized chat_id {chat_id}, sending info reply")
+                    await self._send_unknown_user_info(chat_id, from_user)
+                    self._notified_unknown_users.add(chat_id)
+                else:
+                    logger.warning(f"Video from unauthorized chat_id {chat_id}, already notified")
+                return
+
+            # Get or create conversation
+            conversation_id = self._get_or_create_conversation_id(chat_id)
+
+            # Get file info
+            filename = video.file_name or f"telegram_video_{message.message_id}.{self._get_video_extension(video.mime_type)}"
+            mime_type = video.mime_type or "video/mp4"
+
+            # Download video
+            file_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "files"
+            file_dir.mkdir(parents=True, exist_ok=True)
+            file_path = file_dir / filename
+
+            from telegram import Bot
+            bot: Bot = self.telegram.application.bot
+            file = await bot.get_file(video.file_id)
+            await file.download_to_drive(file_path)
+
+            logger.info(f"Downloaded video to {file_path}")
+
+            # Create file attachment
+            sender_name = message.from_user.full_name or message.from_user.username or f"User_{chat_id}"
+            file_size = video.file_size or file_path.stat().st_size
+
+            video_attachment = {
+                "type": "file",
+                "filename": filename,
+                "file_path": str(file_path),
+                "size_bytes": file_size,
+                "mime_type": mime_type,
+                "source": "telegram",
+                "telegram_message_id": message.message_id
+            }
+
+            # Get or create monitor
+            from ..conversation_monitor import ConversationMonitor, Message as ConvMessage
+            monitor = self.service.conversation_monitors.get(conversation_id)
+            if not monitor:
+                monitor = ConversationMonitor(
+                    conversation_id=conversation_id,
+                    participants=[{"node_id": f"telegram-bot-{chat_id}", "name": sender_name}],
+                    llm_manager=self.service.llm_manager,
+                    knowledge_threshold=0.7,
+                    settings=self.service.settings,
+                    ai_query_func=self.service.send_ai_query,
+                    auto_detect=self.service.auto_knowledge_detection_enabled,
+                    instruction_set_name=self.service.instruction_set.default
+                )
+                self.service.conversation_monitors[conversation_id] = monitor
+
+            # Create message
+            caption = message.caption or f"Video ({video.duration}s)"
+            conv_message = ConvMessage(
+                message_id=f"telegram-video-{message.message_id}",
+                conversation_id=conversation_id,
+                sender_node_id=f"telegram-bot-{chat_id}",
+                sender_name=sender_name,
+                text=caption,
+                timestamp=datetime.now(timezone.utc)
+            )
+            conv_message.attachments = [video_attachment]
+
+            # Add to monitor
+            await monitor.on_message(conv_message)
+
+            # Broadcast to UI
+            await self.service.local_api.broadcast_event("telegram_file_received", {
+                "conversation_id": conversation_id,
+                "telegram_chat_id": chat_id,
+                "sender_name": sender_name,
+                "filename": filename,
+                "file_path": str(file_path),
+                "caption": caption,
+                "mime_type": mime_type,
+                "size_bytes": file_size
+            })
+
+            logger.info(f"Processed Telegram video from {chat_id}")
+
+        except Exception as e:
+            logger.error(f"Error handling Telegram video: {e}", exc_info=True)
+
+    def _get_video_extension(self, mime_type: Optional[str]) -> str:
+        """Get file extension from video mime type."""
+        extensions = {
+            "video/mp4": "mp4",
+            "video/quicktime": "mov",
+            "video/x-msvideo": "avi",
+            "video/x-matroska": "mkv",
+            "video/webm": "webm"
+        }
+        return extensions.get(mime_type, "mp4")
 
     async def forward_dpc_to_telegram(
         self,

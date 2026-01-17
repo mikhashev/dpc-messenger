@@ -139,11 +139,19 @@ chore: maintenance tasks (dependencies, config)
 
 ### Example: Current State
 
-**Current Status (2025-01-17):**
-- `main`: Stable v0.15.1
-- `dev`: Active development (2 commits ahead of main)
+**Current Status (2026-01-17):**
+- `main`: Stable v0.15.0
+- `dev`: Active development (4 commits ahead of main)
 
-**Upcoming Release v0.15.0 includes:**
+**Release v0.15.1 (Upcoming - Bugfixes):**
+- Telegram long message splitting (4096 char limit with part indicators)
+- Telegram video message support (was missing handler)
+- Fix transcription duplication in UI (hidden in ChatPanel when present)
+- Fix knowledge extraction for Telegram voice messages (includes transcription)
+- Multilingual knowledge extraction feature added to roadmap (deferred)
+- Whisper deprecation warnings fixed (dtype parameter, ignore_warning)
+
+**Release v0.15.0:**
 - Voice messages with local Whisper transcription (v0.13.0-v0.13.3)
 - Telegram bot integration (v0.14.0+)
 - Linux audio recording support via Rust (v0.15.0)

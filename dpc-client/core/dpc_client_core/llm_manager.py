@@ -668,12 +668,13 @@ class LocalWhisperProvider(AIProvider):
                 feature_extractor=processor.feature_extractor,
                 chunk_length_s=self.chunk_length_s,
                 batch_size=self.batch_size,
-                torch_dtype=torch_dtype,
+                dtype=torch_dtype,  # Use dtype (not torch_dtype) for pipeline (v0.15.1+)
                 device=device,
                 generate_kwargs={
                     "language": self.language if self.language != "auto" else None,
                     "task": self.task
-                }
+                },
+                ignore_warning=True  # Suppress "chunk_length_s is experimental" warning
             )
 
             # Apply torch.compile for 4.5x speedup (PyTorch 2.4+, CUDA only)
