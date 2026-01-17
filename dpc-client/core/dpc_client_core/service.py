@@ -5268,7 +5268,7 @@ class CoreService:
                     raise ValueError(f"No provider found for model '{model}'")
 
             # Get the provider instance
-            provider_instance = self.llm_manager.get_provider(provider_alias_to_use)
+            provider_instance = self.llm_manager.providers.get(provider_alias_to_use)
 
             # Check if provider supports transcription
             if not hasattr(provider_instance, 'transcribe'):
