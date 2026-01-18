@@ -231,7 +231,14 @@ class Settings:
             'access_denied_message': '',  # Custom access denied message (optional)
             'transcription_enabled': 'true',  # Auto-transcribe Telegram voice messages (uses default voice provider)
             'bridge_to_p2p': 'false',  # Forward Telegram messages to P2P peers (see NOTE below)
-            'conversation_links': '{}'  # JSON map of telegram_chat_id -> conversation_id
+            'conversation_links': '{}',  # JSON map of telegram_chat_id -> conversation_id
+            # Historical message fetching (v0.15.0+)
+            'fetch_history_on_startup': 'true',  # Fetch historical messages on bot startup
+            'history_fetch_limit': '100',  # Max messages to fetch per chat (Telegram limit: 100)
+            'history_max_age_hours': '24',  # Maximum age of messages to fetch (Telegram limit: 24 hours)
+            'history_message_types': 'text,voice,photo,document,video',  # Comma-separated message types
+            'drop_pending_updates': 'false',  # Drop pending updates on startup
+            'last_update_id': '{}'  # Track last processed update_id per chat (JSON object)
         }
         # NOTE: bridge_to_p2p currently forwards as N separate 1:1 messages (v0.15.0).
         # Future: Will support group chat bridging (single message to DPC group).
@@ -827,6 +834,57 @@ class Settings:
             'transcription_enabled': self.get_telegram_transcription_enabled(),
             'bridge_to_p2p': self.get_telegram_bridge_to_p2p()
         }
+
+    # Historical message fetching settings (v0.15.0+)
+
+    def get_telegram_fetch_history_on_startup(self) -> bool:
+        """Check if historical message fetching is enabled on startup."""
+        value = self.get('telegram', 'fetch_history_on_startup', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_history_fetch_limit(self) -> int:
+        """Get maximum number of historical messages to fetch per chat."""
+        return int(self.get('telegram', 'history_fetch_limit', '100'))
+
+    def get_telegram_history_max_age_hours(self) -> int:
+        """Get maximum age of messages to fetch (hours)."""
+        return int(self.get('telegram', 'history_max_age_hours', '24'))
+
+    def get_telegram_history_message_types(self) -> list:
+        """Get list of message types to fetch during history sync."""
+        types_str = self.get('telegram', 'history_message_types', 'text,voice,photo,document,video')
+        return [t.strip() for t in types_str.split(',') if t.strip()]
+
+    def get_telegram_drop_pending_updates(self) -> bool:
+        """Check if pending updates should be dropped on startup."""
+        value = self.get('telegram', 'drop_pending_updates', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_telegram_last_update_id(self, chat_id: str) -> int:
+        """Get last processed update_id for a specific chat."""
+        import json
+        try:
+            all_updates = json.loads(self.get('telegram', 'last_update_id', '{}'))
+            return int(all_updates.get(chat_id, 0))
+        except (json.JSONDecodeError, ValueError):
+            return 0
+
+    def set_telegram_last_update_id(self, chat_id: str, update_id: int):
+        """Set last processed update_id for a specific chat."""
+        import json
+        try:
+            all_updates = json.loads(self.get('telegram', 'last_update_id', '{}'))
+            all_updates[chat_id] = update_id
+            self.set('telegram', 'last_update_id', json.dumps(all_updates))
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to save last_update_id: {e}")
+
+    def save_config(self):
+        """Save configuration to file."""
+        with open(self.config_file, 'w') as f:
+            self._config.write(f)
 
     def reload(self):
         """Reload configuration from file."""

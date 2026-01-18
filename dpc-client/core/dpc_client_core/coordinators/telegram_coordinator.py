@@ -304,6 +304,10 @@ class TelegramBridge:
 
             logger.info(f"Processed Telegram text message from {chat_id}: {text[:50]}...")
 
+            # Track update_id for history recovery
+            update_id_to_track = update.update_id if hasattr(update, 'update_id') else message_id
+            self.service.settings.set_telegram_last_update_id(chat_id, update_id_to_track)
+
         except Exception as e:
             logger.error(f"Error handling Telegram text message: {e}", exc_info=True)
 
@@ -471,6 +475,10 @@ class TelegramBridge:
 
             logger.info(f"Processed Telegram voice message from {chat_id}")
 
+            # Track update_id for history recovery
+            update_id_to_track = update.update_id if hasattr(update, 'update_id') else message.message_id
+            self.service.settings.set_telegram_last_update_id(chat_id, update_id_to_track)
+
         except Exception as e:
             logger.error(f"Error handling Telegram voice message: {e}", exc_info=True)
 
@@ -568,6 +576,10 @@ class TelegramBridge:
             })
 
             logger.info(f"Processed Telegram photo from {chat_id}")
+
+            # Track update_id for history recovery
+            update_id_to_track = update.update_id if hasattr(update, 'update_id') else message.message_id
+            self.service.settings.set_telegram_last_update_id(chat_id, update_id_to_track)
 
         except Exception as e:
             logger.error(f"Error handling Telegram photo: {e}", exc_info=True)
@@ -673,6 +685,10 @@ class TelegramBridge:
 
             logger.info(f"Processed Telegram document from {chat_id}")
 
+            # Track update_id for history recovery
+            update_id_to_track = update.update_id if hasattr(update, 'update_id') else message.message_id
+            self.service.settings.set_telegram_last_update_id(chat_id, update_id_to_track)
+
         except Exception as e:
             logger.error(f"Error handling Telegram document: {e}", exc_info=True)
 
@@ -775,6 +791,10 @@ class TelegramBridge:
             })
 
             logger.info(f"Processed Telegram video from {chat_id}")
+
+            # Track update_id for history recovery
+            update_id_to_track = update.update_id if hasattr(update, 'update_id') else message.message_id
+            self.service.settings.set_telegram_last_update_id(chat_id, update_id_to_track)
 
         except Exception as e:
             logger.error(f"Error handling Telegram video: {e}", exc_info=True)
