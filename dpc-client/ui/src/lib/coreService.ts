@@ -416,8 +416,11 @@ export function connectToCoreService() {
                 // If you add more UI-reactive fields (compute settings, node groups, etc.),
                 // update the corresponding store here (see pattern in store declarations above).
                 else if (message.event === "firewall_rules_updated") {
-                    console.log("Firewall rules updated, triggering AI scope reload");
+                    console.log("Firewall rules updated, triggering AI scope and provider list reload");
                     firewallRulesUpdated.set(message.payload);
+                    // Also reload provider list since allowed models may have changed
+                    sendCommand("get_providers_list");
+                    sendCommand("get_default_providers");
                 }
                 // Handle AI vision response (Phase 2)
                 else if (message.event === "ai_response_with_image") {

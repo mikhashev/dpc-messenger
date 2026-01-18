@@ -140,7 +140,7 @@ class InferenceOrchestrator:
             # result_data is a dict with response and token metadata
             return {
                 "response": result_data.get("response") if isinstance(result_data, dict) else result_data,
-                "model": model or "unknown",
+                "model": model or provider or "unknown",  # Use provider alias as model name if model not specified
                 "provider": provider or "unknown",
                 "compute_host": compute_host,
                 # Include token metadata if available

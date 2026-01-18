@@ -101,6 +101,14 @@ class TelegramBotManager:
         self.transcription_enabled = config.get("transcription_enabled", True)
         self.bridge_to_p2p = config.get("bridge_to_p2p", False)
 
+        # Historical message fetching settings (v0.15.0+)
+        self.fetch_history_on_startup = config.get("fetch_history_on_startup", True)
+        self.history_fetch_limit = config.get("history_fetch_limit", 100)
+        self.history_max_age_hours = config.get("history_max_age_hours", 24)
+        self.history_message_types = config.get("history_message_types",
+            ["text", "voice", "photo", "document", "video"])
+        self.drop_pending_updates_config = config.get("drop_pending_updates", False)
+
         # Bot instance (lazy loaded)
         self.application = None
         self.bot_instance = None
@@ -229,8 +237,24 @@ class TelegramBotManager:
                     # Polling mode (development)
                     await self.application.initialize()
                     await self.application.start()
-                    await self.application.updater.start_polling(drop_pending_updates=True)
-                    logger.info("Telegram bot started (polling mode)")
+
+                    # Determine if we should drop pending updates
+                    # Only drop if history fetching is disabled (to avoid duplicates)
+                    # If history fetching is enabled, we'll fetch them manually first
+                    drop_updates = not self.fetch_history_on_startup and self.drop_pending_updates_config
+
+                    if self.fetch_history_on_startup:
+                        try:
+                            logger.info("Fetching historical Telegram messages...")
+                            await self._fetch_historical_messages()
+                            logger.info("Historical message fetch complete")
+                        except Exception as e:
+                            logger.error(f"Failed to fetch historical messages: {e}", exc_info=True)
+                            drop_updates = True  # Fallback to prevent duplicates
+                            logger.warning("Falling back to drop_pending_updates=True to prevent duplicates")
+
+                    await self.application.updater.start_polling(drop_pending_updates=drop_updates)
+                    logger.info(f"Telegram bot started (polling mode, drop_updates={drop_updates})")
 
                 # Start outgoing message sender task
                 self._sender_task = asyncio.create_task(self._message_sender_loop())
@@ -710,3 +734,133 @@ class TelegramBotManager:
             logger.debug(f"Sent document to chat {msg['chat_id']}")
         except Exception as e:
             logger.error(f"Failed to send document: {e}", exc_info=True)
+
+    # Historical message fetching methods (v0.15.0+)
+
+    async def _fetch_historical_messages(self):
+        """
+        Fetch historical messages from Telegram (within 24-hour window).
+
+        This is called on bot startup to retrieve messages sent while DPC was offline.
+
+        Note: Telegram Bot API limitations:
+        - Only works for messages sent within the last 24 hours
+        - Maximum 100 messages per request
+        - Only incoming messages (sent TO the bot), not outgoing
+        """
+        from datetime import datetime, timedelta, timezone
+
+        if not self.application or not self.application.bot:
+            logger.error("Cannot fetch history: bot not initialized")
+            return
+
+        bot = self.application.bot
+        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=self.history_max_age_hours)
+
+        logger.info(f"Fetching messages newer than {cutoff_time.isoformat()} (max_age: {self.history_max_age_hours}h)")
+
+        # Process each whitelisted chat
+        for chat_id in self.allowed_chat_ids:
+            try:
+                await self._fetch_chat_history(bot, chat_id, cutoff_time)
+                await asyncio.sleep(0.5)  # Rate limiting delay between chats
+            except Exception as e:
+                logger.error(f"Failed to fetch history for chat {chat_id}: {e}", exc_info=True)
+
+    async def _fetch_chat_history(self, bot, chat_id: str, cutoff_time: datetime):
+        """Fetch historical messages for a specific chat."""
+        last_update_id = self.service.settings.get_telegram_last_update_id(chat_id)
+        logger.info(f"Fetching history for chat {chat_id} (last_update_id: {last_update_id})")
+
+        updates = []
+        offset = last_update_id + 1 if last_update_id > 0 else None
+
+        while len(updates) < self.history_fetch_limit:
+            try:
+                batch = await bot.get_updates(
+                    timeout=10,
+                    offset=offset,
+                    limit=min(100, self.history_fetch_limit - len(updates))
+                )
+
+                if not batch:
+                    break
+
+                for update in batch:
+                    # Check cutoff time
+                    if update.message and update.message.date:
+                        if update.message.date < cutoff_time:
+                            logger.debug(f"Reached cutoff time for chat {chat_id}")
+                            break
+
+                    # Check message type filter
+                    if self._should_process_message_type(update):
+                        updates.append(update)
+                        if update.update_id > last_update_id:
+                            last_update_id = update.update_id
+
+                if len(updates) >= self.history_fetch_limit:
+                    break
+
+                if batch:
+                    offset = batch[-1].update_id + 1
+
+                await asyncio.sleep(0.3)  # Rate limiting between batches
+
+            except Exception as e:
+                logger.error(f"Error fetching batch for chat {chat_id}: {e}")
+                break
+
+        # Process updates
+        logger.info(f"Processing {len(updates)} historical messages for chat {chat_id}")
+        for update in updates:
+            try:
+                await self._process_historical_update(update)
+            except Exception as e:
+                logger.error(f"Error processing historical update {update.update_id}: {e}")
+
+        # Save last update_id
+        if last_update_id > 0:
+            self.service.settings.set_telegram_last_update_id(chat_id, last_update_id)
+            logger.info(f"Saved last_update_id {last_update_id} for chat {chat_id}")
+
+    def _should_process_message_type(self, update) -> bool:
+        """Check if message type should be processed during history fetch."""
+        if not update.message:
+            return False
+
+        msg = update.message
+        if "text" in self.history_message_types and msg.text:
+            return True
+        if "voice" in self.history_message_types and msg.voice:
+            return True
+        if "photo" in self.history_message_types and msg.photo:
+            return True
+        if "document" in self.history_message_types and msg.document:
+            return True
+        if "video" in self.history_message_types and msg.video:
+            return True
+        return False
+
+    async def _process_historical_update(self, update):
+        """Process historical update through existing handlers."""
+        # Create a mock context for the handler
+        class MockContext:
+            def __init__(self, bot):
+                self.bot = bot
+                self._data = {}
+
+        context = MockContext(self.application.bot)
+        bridge = self.service.telegram_bridge
+
+        # Route to appropriate handler based on message type
+        if update.message and update.message.text:
+            await bridge.handle_text_message(update, context)
+        elif update.message and update.message.voice:
+            await bridge.handle_voice_message(update, context)
+        elif update.message and update.message.photo:
+            await bridge.handle_photo_message(update, context)
+        elif update.message and update.message.document:
+            await bridge.handle_document_message(update, context)
+        elif update.message and update.message.video:
+            await bridge.handle_video_message(update, context)

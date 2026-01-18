@@ -140,10 +140,10 @@ chore: maintenance tasks (dependencies, config)
 ### Example: Current State
 
 **Current Status (2026-01-17):**
-- `main`: Stable v0.15.0
-- `dev`: Active development (4 commits ahead of main)
+- `main`: Stable v0.15.1
+- `dev`: Active development (ready for new features)
 
-**Release v0.15.1 (Upcoming - Bugfixes):**
+**Release v0.15.1 (Latest):**
 - Telegram long message splitting (4096 char limit with part indicators)
 - Telegram video message support (was missing handler)
 - Fix transcription duplication in UI (hidden in ChatPanel when present)

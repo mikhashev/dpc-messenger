@@ -1617,10 +1617,14 @@ class LLMManager:
             # Get model's context window
             context_window = self.get_context_window(provider.model)
 
+            # Get the actual model name from result if available, otherwise use provider.model
+            # (Some providers return the actual model name like "claude-haiku-4.5" in the result)
+            actual_model = result.get("model", provider.model)
+
             return {
                 "response": response,
                 "provider": alias_to_use,
-                "model": provider.model,
+                "model": actual_model,
                 "tokens_used": total_tokens,
                 "prompt_tokens": prompt_tokens,
                 "response_tokens": response_tokens,

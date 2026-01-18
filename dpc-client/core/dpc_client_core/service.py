@@ -1240,8 +1240,17 @@ class CoreService:
 
         return local_ips
 
-    async def get_status(self) -> Dict[str, Any]:
-        """Aggregates status from all components."""
+    async def get_status(self, command_id: str = None, _websocket = None) -> Dict[str, Any]:
+        """
+        Aggregates status from all components.
+
+        Args:
+            command_id: Optional command_id for background execution (sends response via WebSocket)
+            _websocket: Optional WebSocket for sending response in background mode
+
+        Returns:
+            Status dict if called synchronously, None if called in background mode
+        """
 
         hub_connected = (
             self.hub_client.websocket is not None and
@@ -1320,7 +1329,7 @@ class CoreService:
         if self.connection_orchestrator:
             orchestrator_stats = self.connection_orchestrator.get_stats()
 
-        return {
+        status_result = {
             "node_id": self.p2p_manager.node_id,
             "hub_status": "Connected" if hub_connected else "Disconnected",
             "p2p_peers": list(self.p2p_manager.peers.keys()),
@@ -1340,6 +1349,18 @@ class CoreService:
             # Connection orchestrator stats (6-tier fallback metrics)
             "orchestrator_stats": orchestrator_stats,
         }
+
+        # If running in background mode, send response via WebSocket
+        if command_id is not None and _websocket is not None:
+            try:
+                response = {"id": command_id, "command": "get_status", "status": "OK", "payload": status_result}
+                await _websocket.send(json.dumps(response))
+                logger.debug("Sent get_status response in background mode")
+            except Exception as e:
+                logger.error("Failed to send get_status response: %s", e)
+            return None
+
+        return status_result
     
     async def list_providers(self) -> Dict[str, Any]:
         """
@@ -2805,6 +2826,10 @@ class CoreService:
             except Exception as e:
                 logger.error(f"Remote transcription failed: {e}", exc_info=True)
                 raise ValueError(f"Remote transcription failed: {e}")
+
+        # Handle local provider format from dropdown ("local:alias") - v0.15.1+
+        if provider_alias and provider_alias.startswith("local:"):
+            provider_alias = provider_alias[6:]  # Remove "local:" prefix
 
         # 1. Decode audio data
         try:
@@ -5166,6 +5191,10 @@ class CoreService:
             logger.info("Inference completed successfully for %s", peer_id)
 
             # Send success response with token and model metadata
+            # Use the actual model name from result if available (e.g., "claude-haiku-4.5"),
+            # otherwise fall back to the original model parameter (e.g., "default")
+            actual_model = result.get("model", model)
+
             success_response = create_remote_inference_response(
                 request_id=request_id,
                 response=result["response"],
@@ -5173,7 +5202,7 @@ class CoreService:
                 prompt_tokens=result.get("prompt_tokens"),
                 response_tokens=result.get("response_tokens"),
                 model_max_tokens=result.get("model_max_tokens"),
-                model=result.get("model"),
+                model=actual_model,
                 provider=result.get("provider")
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
@@ -5264,7 +5293,7 @@ class CoreService:
                     raise ValueError(f"No provider found for model '{model}'")
 
             # Get the provider instance
-            provider_instance = self.llm_manager.get_provider(provider_alias_to_use)
+            provider_instance = self.llm_manager.providers.get(provider_alias_to_use)
 
             # Check if provider supports transcription
             if not hasattr(provider_instance, 'transcribe'):

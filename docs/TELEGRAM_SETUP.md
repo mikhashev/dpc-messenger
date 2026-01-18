@@ -5,6 +5,7 @@ DPC Messenger v0.14.0+ includes a Telegram bot integration that enables:
 - **Two-way messaging bridge** between Telegram and DPC P2P chats
 - **Private/whitelist-only access** control
 - **Integrated UI** - Telegram messages appear within existing DPC conversations
+- **Historical message sync** - Retrieve messages sent while DPC was offline (v0.15.0+)
 
 ---
 
@@ -70,6 +71,11 @@ bridge_to_p2p = false
 | `use_webhook` | Use webhook mode (production) | `false` |
 | `webhook_url` | Public URL for webhooks | (empty) |
 | `webhook_port` | Local port for webhook server | `8443` |
+| `fetch_history_on_startup` | Fetch historical messages on startup | `true` |
+| `history_fetch_limit` | Max messages to fetch per chat (1-100) | `100` |
+| `history_max_age_hours` | Maximum age of messages to fetch (1-24) | `24` |
+| `history_message_types` | Message types to fetch (comma-separated) | `text,voice,photo,document,video` |
+| `drop_pending_updates` | Drop pending updates on startup | `false` |
 
 ### Step 4: Install Python Dependency
 
@@ -131,6 +137,45 @@ You should see logs indicating successful Telegram bot initialization:
    👤 Your Name (DPC):
    Your message here
    ```
+
+### Historical Message Sync (v0.15.0+)
+
+DPC Messenger automatically fetches messages sent while the app was offline (within the last 24 hours).
+
+**How it works:**
+- On startup, bot fetches recent messages from Telegram servers
+- Only messages sent within the last 24 hours (Telegram API limitation)
+- Maximum 100 messages per chat (Telegram API limitation)
+- Tracks last processed message to avoid duplicates
+
+**Configuration:**
+```ini
+[telegram]
+fetch_history_on_startup = true  # Enable/disable history sync
+history_fetch_limit = 100         # Max messages to fetch per chat
+history_max_age_hours = 24        # Maximum age of messages to fetch
+history_message_types = "text,voice,photo,document,video"  # Types to fetch
+drop_pending_updates = false      # Drop pending updates on startup
+```
+
+**Limitations:**
+- Only works for messages sent within the last 24 hours (Telegram API hard limit)
+- Only incoming messages (sent TO the bot), not outgoing messages
+- Maximum 100 messages per chat
+- Does not retrieve edited messages or message deletions
+
+**Troubleshooting:**
+
+**No historical messages appear:**
+- Verify messages were sent within the last 24 hours
+- Check `history_fetch_limit` is not too low
+- Ensure `fetch_history_on_startup = true` in config
+- Check logs: `tail -f ~/.dpc/logs/dpc-client.log`
+
+**Messages appear duplicated:**
+- This should not happen if `last_update_id` tracking is working
+- Check `last_update_id` in config.ini for each chat_id
+- If duplicates persist, set `drop_pending_updates = true` temporarily
 
 ---
 

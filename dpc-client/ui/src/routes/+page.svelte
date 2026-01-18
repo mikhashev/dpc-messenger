@@ -2226,57 +2226,106 @@
   }
 
   // Image paste handlers (Phase 2.4: Screenshot + Vision - improved UX)
-  function handlePaste(event: ClipboardEvent) {
+  async function handlePaste(event: ClipboardEvent) {
     console.log('[Paste] Paste event triggered');
+
+    // First try the standard ClipboardEvent API
     const items = event.clipboardData?.items;
-    if (!items) {
-      console.log('[Paste] No clipboard items available');
-      return;
-    }
+    if (items && items.length > 0) {
+      console.log(`[Paste] Found ${items.length} clipboard items via standard API`);
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        console.log(`[Paste] Item ${i}: type="${item.type}", kind="${item.kind}"`);
 
-    console.log(`[Paste] Found ${items.length} clipboard items`);
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      console.log(`[Paste] Item ${i}: type="${item.type}", kind="${item.kind}"`);
+        if (item.type.startsWith('image/')) {
+          console.log('[Paste] Image item detected, processing...');
+          event.preventDefault();
+          const blob = item.getAsFile();
 
-      if (item.type.startsWith('image/')) {
-        console.log('[Paste] Image item detected, processing...');
-        event.preventDefault();
-        const blob = item.getAsFile();
+          // Check if blob is valid
+          if (!blob) {
+            console.log('[Paste] Failed to get file blob from clipboard item');
+            continue;
+          }
 
-        // Check if blob is valid
-        if (!blob) {
-          console.log('[Paste] Failed to get file blob from clipboard item');
-          continue;
-        }
+          console.log(`[Paste] Got blob: size=${blob.size} bytes, type=${blob.type}`);
 
-        console.log(`[Paste] Got blob: size=${blob.size} bytes, type=${blob.type}`);
+          // Validate size (5MB limit)
+          if (blob.size > 5 * 1024 * 1024) {
+            fileOfferToastMessage = `Image too large (${(blob.size / (1024 * 1024)).toFixed(2)}MB). Max: 5MB`;
+            showFileOfferToast = true;
+            setTimeout(() => showFileOfferToast = false, 5000);
+            return;
+          }
 
-        // Validate size (5MB limit)
-        if (blob.size > 5 * 1024 * 1024) {
-          fileOfferToastMessage = `Image too large (${(blob.size / (1024 * 1024)).toFixed(2)}MB). Max: 5MB`;
-          showFileOfferToast = true;
-          setTimeout(() => showFileOfferToast = false, 5000);
+          // Convert to data URL and show as preview chip
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            console.log('[Paste] Image converted to data URL, setting pendingImage');
+            pendingImage = {
+              dataUrl: e.target?.result as string,
+              filename: `screenshot_${Date.now()}.png`,
+              sizeBytes: blob.size
+            };
+          };
+          reader.onerror = (e) => {
+            console.error('[Paste] FileReader error:', e);
+          };
+          reader.readAsDataURL(blob);
           return;
         }
-
-        // Convert to data URL and show as preview chip
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          console.log('[Paste] Image converted to data URL, setting pendingImage');
-          pendingImage = {
-            dataUrl: e.target?.result as string,
-            filename: `screenshot_${Date.now()}.png`,
-            sizeBytes: blob.size
-          };
-        };
-        reader.onerror = (e) => {
-          console.error('[Paste] FileReader error:', e);
-        };
-        reader.readAsDataURL(blob);
-        break;
       }
     }
+
+    // Fallback: Try navigator.clipboard.read() for Linux compatibility
+    try {
+      console.log('[Paste] Standard API failed, trying navigator.clipboard.read()...');
+      const clipboardItems = await navigator.clipboard.read();
+
+      for (const clipboardItem of clipboardItems) {
+        console.log('[Paste] ClipboardItem types:', clipboardItem.types);
+
+        for (const type of clipboardItem.types) {
+          if (type.startsWith('image/')) {
+            console.log(`[Paste] Found image type: ${type}`);
+            event.preventDefault();
+            const blob = await clipboardItem.getType(type);
+
+            console.log(`[Paste] Got blob from navigator.clipboard: size=${blob.size} bytes, type=${blob.type}`);
+
+            // Validate size (5MB limit)
+            if (blob.size > 5 * 1024 * 1024) {
+              fileOfferToastMessage = `Image too large (${(blob.size / (1024 * 1024)).toFixed(2)}MB). Max: 5MB`;
+              showFileOfferToast = true;
+              setTimeout(() => showFileOfferToast = false, 5000);
+              return;
+            }
+
+            // Convert to data URL and show as preview chip
+            const reader = new FileReader();
+            reader.onload = (e) => {
+              console.log('[Paste] Image converted to data URL (fallback), setting pendingImage');
+              pendingImage = {
+                dataUrl: e.target?.result as string,
+                filename: `screenshot_${Date.now()}.png`,
+                sizeBytes: blob.size
+              };
+            };
+            reader.onerror = (e) => {
+              console.error('[Paste] FileReader error (fallback):', e);
+            };
+            reader.readAsDataURL(blob);
+            return;
+          }
+        }
+      }
+
+      console.log('[Paste] No image found in clipboard via fallback API');
+    } catch (err) {
+      console.error('[Paste] navigator.clipboard.read() failed:', err);
+      // Might fail due to permissions or not being supported
+    }
+
     console.log('[Paste] Paste handling complete');
   }
 
@@ -2443,14 +2492,14 @@
       fileOfferToastMessage = 'Transcribing voice message...';
       showFileOfferToast = true;
 
-      // Parse selected voice provider (v0.13.0+: Use selected provider instead of auto-detect)
-      const parsedProvider = parseProviderSelection(selectedVoiceProvider || selectedTextProvider);
+      // Get selected voice provider (v0.15.1+: Pass full provider ID for remote support)
+      const selectedProviderId = selectedVoiceProvider || selectedTextProvider;
 
       // Call backend for transcription
       const response = await sendCommand('transcribe_audio', {
         audio_base64: base64Audio,
         mime_type: voicePreview.blob.type || 'audio/webm',
-        provider_alias: parsedProvider.alias  // v0.13.0+: Pass selected provider
+        provider_alias: selectedProviderId  // v0.15.1+: Pass full ID (supports "remote:" and "local:" prefixes)
       });
 
       if (response.error) {
