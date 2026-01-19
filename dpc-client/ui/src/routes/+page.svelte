@@ -936,17 +936,41 @@
             if (result.status === 'success' && result.messages && result.messages.length > 0) {
               console.log(`[ChatHistory] Loaded ${result.message_count} messages from backend`);
 
-              // Convert backend format to frontend format
+              // Convert backend format to frontend format (v0.15.3: use backend metadata)
               chatHistories.update(map => {
                 const newMap = new Map(map);
-                const loadedMessages = result.messages.map((msg: any, index: number) => ({
-                  id: `backend-${index}-${Date.now()}`,
-                  sender: msg.role === 'user' ? 'user' : activeChatId,
-                  senderName: msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId),
-                  text: msg.content,
-                  timestamp: Date.now() - (result.messages.length - index) * 1000,
-                  attachments: msg.attachments || []
-                }));
+                const loadedMessages = result.messages.map((msg: any, index: number) => {
+                  // Use backend's timestamp if available (ISO format), otherwise generate fake timestamp
+                  let timestamp;
+                  if (msg.timestamp) {
+                    // Parse ISO timestamp to Date (milliseconds)
+                    timestamp = new Date(msg.timestamp).getTime();
+                  } else {
+                    // Fallback to fake timestamp (sequential from now)
+                    timestamp = Date.now() - (result.messages.length - index) * 1000;
+                  }
+
+                  // Use backend's sender info if available, otherwise fallback to role-based logic
+                  let sender;
+                  let senderName;
+                  if (msg.sender_node_id) {
+                    sender = msg.sender_node_id;
+                    senderName = msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId));
+                  } else {
+                    // Fallback for messages without sender info (old format)
+                    sender = msg.role === 'user' ? 'user' : activeChatId;
+                    senderName = msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId);
+                  }
+
+                  return {
+                    id: `backend-${index}-${Date.now()}`,
+                    sender: sender,
+                    senderName: senderName,
+                    text: msg.content,
+                    timestamp: timestamp,
+                    attachments: msg.attachments || []
+                  };
+                });
                 newMap.set(activeChatId, loadedMessages);
                 console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages`);
                 return newMap;

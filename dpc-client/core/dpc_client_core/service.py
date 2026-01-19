@@ -4252,12 +4252,21 @@ class CoreService:
 
             # Convert to frontend format (role, content, attachments)
             # v0.13.2+: Merge transcription data into voice attachments from _voice_transcriptions
+            # v0.15.3+: Include timestamp and sender info for proper chat history display
             messages = []
             for msg in history:
                 message_dict = {
                     "role": msg["role"],
                     "content": msg["content"]
                 }
+                # Add timestamp if present (v0.15.3)
+                if "timestamp" in msg:
+                    message_dict["timestamp"] = msg["timestamp"]
+                # Add sender info if present (v0.15.3)
+                if "sender_node_id" in msg:
+                    message_dict["sender_node_id"] = msg["sender_node_id"]
+                if "sender_name" in msg:
+                    message_dict["sender_name"] = msg["sender_name"]
                 if "attachments" in msg:
                     # Deep copy attachments to avoid mutating original
                     attachments = []
