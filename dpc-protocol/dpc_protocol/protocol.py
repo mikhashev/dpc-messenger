@@ -64,9 +64,11 @@ def create_remote_inference_response(
     response_tokens: int = None,
     model_max_tokens: int = None,
     model: str = None,
-    provider: str = None
+    provider: str = None,
+    thinking: str = None,
+    thinking_tokens: int = None
 ) -> Dict[str, Any]:
-    """Creates a remote inference response message with optional token and model metadata."""
+    """Creates a remote inference response message with optional token, model, and thinking metadata."""
     payload = {"request_id": request_id}
     if response is not None:
         payload["response"] = response
@@ -85,6 +87,11 @@ def create_remote_inference_response(
             payload["model"] = model
         if provider is not None:
             payload["provider"] = provider
+        # Add thinking metadata if provided (v1.4+)
+        if thinking is not None:
+            payload["thinking"] = thinking
+        if thinking_tokens is not None:
+            payload["thinking_tokens"] = thinking_tokens
     else:
         payload["error"] = error or "Unknown error"
         payload["status"] = "error"

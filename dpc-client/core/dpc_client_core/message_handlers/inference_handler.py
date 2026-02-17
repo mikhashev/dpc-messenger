@@ -66,11 +66,15 @@ class RemoteInferenceResponseHandler(MessageHandler):
         model = payload.get("model")
         provider = payload.get("provider")
 
+        # Extract thinking fields (v1.4+)
+        thinking = payload.get("thinking")
+        thinking_tokens = payload.get("thinking_tokens")
+
         if request_id in self.service._pending_inference_requests:
             future = self.service._pending_inference_requests[request_id]
             if not future.done():
                 if status == "success":
-                    # Return dict with response, token, and model metadata
+                    # Return dict with response, token, model, and thinking metadata
                     result_data = {
                         "response": response,
                         "tokens_used": tokens_used,
@@ -78,7 +82,9 @@ class RemoteInferenceResponseHandler(MessageHandler):
                         "prompt_tokens": prompt_tokens,
                         "response_tokens": response_tokens,
                         "model": model,
-                        "provider": provider
+                        "provider": provider,
+                        "thinking": thinking,
+                        "thinking_tokens": thinking_tokens,
                     }
                     future.set_result(result_data)
                 else:

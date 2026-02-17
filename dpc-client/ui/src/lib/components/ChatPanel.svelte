@@ -5,6 +5,7 @@
   import MarkdownMessage from './MarkdownMessage.svelte';
   import ImageMessage from './ImageMessage.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
+  import ThinkingBlock from './ThinkingBlock.svelte';
 
   // Message type definition
   type Message = {
@@ -15,6 +16,8 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
+    thinking?: string;  // Thinking/reasoning content (v1.4+)
+    thinkingTokens?: number;  // Tokens used for thinking (v1.4+)
     attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
       type: 'file' | 'image' | 'voice';
       filename: string;
@@ -83,6 +86,11 @@
           </strong>
           <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
+        <!-- Thinking block (v1.4+): Display AI reasoning before main response -->
+        {#if msg.sender === 'ai' && msg.thinking}
+          <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
+        {/if}
+
         <!-- Message text (hidden for voice attachments with transcription to avoid duplication, v0.15.1+) -->
         {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)}
           {#if msg.sender === 'ai' && enableMarkdown}

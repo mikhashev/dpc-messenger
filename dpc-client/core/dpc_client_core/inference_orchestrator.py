@@ -147,7 +147,10 @@ class InferenceOrchestrator:
                 "tokens_used": result_data.get("tokens_used") if isinstance(result_data, dict) else None,
                 "model_max_tokens": result_data.get("model_max_tokens") if isinstance(result_data, dict) else None,
                 "prompt_tokens": result_data.get("prompt_tokens") if isinstance(result_data, dict) else None,
-                "response_tokens": result_data.get("response_tokens") if isinstance(result_data, dict) else None
+                "response_tokens": result_data.get("response_tokens") if isinstance(result_data, dict) else None,
+                # Include thinking fields if available (v1.4+)
+                "thinking": result_data.get("thinking") if isinstance(result_data, dict) else None,
+                "thinking_tokens": result_data.get("thinking_tokens") if isinstance(result_data, dict) else None,
             }
         except ConnectionError as e:
             raise ValueError(f"Compute host {compute_host} is not connected") from e

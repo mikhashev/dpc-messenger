@@ -5212,7 +5212,9 @@ class CoreService:
                 response_tokens=result.get("response_tokens"),
                 model_max_tokens=result.get("model_max_tokens"),
                 model=actual_model,
-                provider=result.get("provider")
+                provider=result.get("provider"),
+                thinking=result.get("thinking"),
+                thinking_tokens=result.get("thinking_tokens")
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)
@@ -6106,11 +6108,15 @@ class CoreService:
             )
             # result is a dict with 'response', 'model', 'provider', 'compute_host'
             # and potentially 'tokens_used', 'model_max_tokens' for local inference
+            # and 'thinking', 'thinking_tokens' for reasoning models (v1.4+)
             response_payload = {
                 "content": result["response"],
                 "model": result["model"],
                 "provider": result["provider"],
-                "compute_host": result["compute_host"]
+                "compute_host": result["compute_host"],
+                # Include thinking fields if available (v1.4+)
+                "thinking": result.get("thinking"),
+                "thinking_tokens": result.get("thinking_tokens"),
             }
 
             # Phase 7: Add AI response to conversation history

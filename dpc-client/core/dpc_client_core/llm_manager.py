@@ -6,7 +6,7 @@ import asyncio
 import logging
 import base64
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 
 # Import client libraries
 from openai import AsyncOpenAI
@@ -70,6 +70,34 @@ class AIProvider:
         """
         raise NotImplementedError(f"Vision API not implemented for {self.__class__.__name__}")
 
+    def supports_thinking(self) -> bool:
+        r"""
+        Returns True if this provider supports thinking/reasoning mode.
+
+        Thinking mode models perform extended reasoning before producing
+        their final response. Examples include:
+        - DeepSeek R1 (with <think\> tags)
+        - Claude Extended Thinking (Claude 3.7+, Claude 4+)
+        - OpenAI o1/o3 (reasoning models)
+
+        Returns:
+            bool: True if thinking mode is supported, False by default
+        """
+        return False
+
+    def get_thinking_params(self) -> Dict[str, Any]:
+        """
+        Return provider-specific thinking parameters.
+
+        Override this method to return parameters like:
+        - budget_tokens (Claude)
+        - reasoning_effort (OpenAI o1/o3)
+
+        Returns:
+            Dict with thinking parameters, empty by default
+        """
+        return {}
+
 # --- Concrete Provider Implementations ---
 
 # Vision-capable Ollama models (for auto-detection)
@@ -82,6 +110,59 @@ OLLAMA_VISION_MODELS = [
     "moondream",        # Moondream
 ]
 
+# Thinking/reasoning models (for auto-detection)
+# These models perform extended reasoning before producing their final response
+OLLAMA_THINKING_MODELS = [
+    "deepseek-r1",      # DeepSeek R1 (all variants)
+    "deepseek-reasoner",
+]
+
+OPENAI_THINKING_MODELS = [
+    "o1", "o1-mini", "o1-preview", "o1-pro",
+    "o3", "o3-mini", "o3-pro",
+    "o4-mini",
+]
+
+ANTHROPIC_THINKING_MODELS = [
+    "claude-3-7",       # Claude 3.7 Sonnet (extended thinking)
+    "claude-opus-4",    # Claude Opus 4 (extended thinking)
+    "claude-sonnet-4",  # Claude Sonnet 4 (extended thinking)
+    "claude-haiku-4",   # Claude Haiku 4 (extended thinking)
+]
+
+
+def parse_thinking_tags(content: str) -> Tuple[str, Optional[str]]:
+    r"""
+    Parse <think\>...</think\> tags from model response content.
+
+    Used by DeepSeek R1 and similar models that embed thinking/reasoning
+    in their response using XML-style tags.
+
+    Args:
+        content: Raw response content that may contain <think\> tags
+
+    Returns:
+        Tuple of (final_content, thinking_content):
+        - final_content: Content with <think\> tags removed
+        - thinking_content: Extracted thinking text, or None if no tags found
+    """
+    import re
+
+    # Pattern matches <think\>...</think\> with any content inside (including newlines)
+    think_pattern = r'<think\s*>(.*?)</think\s*>'
+    matches = re.findall(think_pattern, content, re.DOTALL | re.IGNORECASE)
+
+    if matches:
+        # Join multiple thinking blocks with newlines
+        thinking = '\n'.join(match.strip() for match in matches if match.strip())
+
+        # Remove thinking tags from final content
+        final_content = re.sub(think_pattern, '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+
+        return final_content, thinking if thinking else None
+
+    return content, None
+
 class OllamaProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
@@ -90,6 +171,10 @@ class OllamaProvider(AIProvider):
     def supports_vision(self) -> bool:
         """Check if this Ollama model supports vision/multimodal inputs."""
         return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
+
+    def supports_thinking(self) -> bool:
+        """Check if this Ollama model is a thinking/reasoning model."""
+        return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
 
     async def generate_response(self, prompt: str) -> str:
         try:
@@ -260,6 +345,10 @@ class OpenAICompatibleProvider(AIProvider):
         vision_models = ["gpt-4o", "gpt-4-turbo", "gpt-4o-mini"]
         return any(vm in self.model for vm in vision_models)
 
+    def supports_thinking(self) -> bool:
+        """Check if this is an OpenAI reasoning model (o1/o3 series)."""
+        return any(tm in self.model.lower() for tm in OPENAI_THINKING_MODELS)
+
     async def generate_response(self, prompt: str) -> str:
         try:
             response = await self.client.chat.completions.create(
@@ -325,22 +414,100 @@ class AnthropicProvider(AIProvider):
         # Set to None or omit from config to use model's maximum
         self.max_tokens = config.get("max_tokens", 4096)
 
+        # Thinking/reasoning configuration (Claude Extended Thinking)
+        # Claude 3.7+ and Claude 4+ support extended thinking with budget_tokens
+        self.thinking_enabled = config.get("thinking", {}).get("enabled", False)
+        self.thinking_budget_tokens = config.get("thinking", {}).get("budget_tokens", 10000)
+
+        # Store last thinking content for retrieval by LLMManager
+        self._last_thinking: Optional[str] = None
+
     def supports_vision(self) -> bool:
         """Claude 3+ models support vision"""
         vision_models = ["claude-3", "claude-opus", "claude-sonnet", "claude-haiku"]
         return any(vm in self.model for vm in vision_models)
 
+    def supports_thinking(self) -> bool:
+        """Check if this Claude model supports extended thinking (Claude 3.7+/4+)."""
+        return any(tm in self.model.lower() for tm in ANTHROPIC_THINKING_MODELS)
+
+    def get_thinking_params(self) -> Dict[str, Any]:
+        """Return Claude-specific thinking parameters."""
+        if self.supports_thinking() and self.thinking_enabled:
+            return {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+            }
+        return {}
+
     async def generate_response(self, prompt: str) -> str:
         try:
-            # Use configured max_tokens or default (Anthropic requires max_tokens parameter)
-            message = await self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens if self.max_tokens else 4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return message.content[0].text
+            # Determine max_tokens value
+            # When thinking is enabled, max_tokens must be > budget_tokens
+            effective_max_tokens = self.max_tokens if self.max_tokens else 4096
+
+            # Build API parameters
+            api_params = {
+                "model": self.model,
+                "max_tokens": effective_max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+
+            # Add extended thinking if enabled and supported
+            if self.supports_thinking() and self.thinking_enabled:
+                # Ensure max_tokens > budget_tokens (API requirement)
+                if effective_max_tokens <= self.thinking_budget_tokens:
+                    # Set max_tokens to budget + buffer for actual response
+                    effective_max_tokens = self.thinking_budget_tokens + 4096
+                    api_params["max_tokens"] = effective_max_tokens
+                    logger.info(f"Adjusted max_tokens to {effective_max_tokens} to exceed budget_tokens ({self.thinking_budget_tokens})")
+
+                api_params["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+                logger.info(f"Claude extended thinking enabled (budget={self.thinking_budget_tokens} tokens)")
+            elif self.supports_thinking() and not self.thinking_enabled:
+                logger.info(f"Claude model {self.model} supports thinking but it's disabled in config")
+            else:
+                logger.debug(f"Claude model {self.model} does not support extended thinking")
+
+            message = await self.client.messages.create(**api_params)
+
+            # Parse content blocks - handle both thinking and text blocks
+            thinking_text = None
+            final_text = None
+
+            for block in message.content:
+                if hasattr(block, 'type'):
+                    if block.type == "thinking":
+                        thinking_text = getattr(block, 'thinking', None)
+                    elif block.type == "text":
+                        final_text = getattr(block, 'text', None)
+
+            # Store thinking for retrieval by LLMManager
+            self._last_thinking = thinking_text
+
+            if thinking_text:
+                logger.info(f"Claude extended thinking: {len(thinking_text)} chars")
+
+            # Return text content (or first block's text for backward compatibility)
+            if final_text:
+                return final_text
+            elif message.content:
+                # Fallback: try to get text from first block
+                return message.content[0].text if hasattr(message.content[0], 'text') else str(message.content[0])
+            else:
+                return ""
+
         except Exception as e:
             raise RuntimeError(f"Anthropic provider '{self.alias}' failed: {e}") from e
+
+    def get_last_thinking(self) -> Optional[str]:
+        """Get the thinking content from the last response (for Claude extended thinking)."""
+        return self._last_thinking
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """
@@ -1608,6 +1775,29 @@ class LLMManager:
             logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
             response = await provider.generate_response(prompt)
 
+        # Check if this is a thinking model and extract thinking content
+        thinking_content = None
+        thinking_tokens = None
+        if provider.supports_thinking():
+            logger.info("Provider '%s' supports thinking mode", provider.model)
+
+            # First, check if provider stores thinking separately (e.g., Claude extended thinking)
+            if hasattr(provider, 'get_last_thinking'):
+                thinking_content = provider.get_last_thinking()
+                if thinking_content:
+                    logger.info("Retrieved stored thinking content (%d chars)", len(thinking_content))
+
+            # If no stored thinking, try parsing <think\> tags from response (e.g., DeepSeek R1)
+            if not thinking_content:
+                response, thinking_content = parse_thinking_tags(response)
+                if thinking_content:
+                    logger.info("Parsed thinking tags from response (%d chars)", len(thinking_content))
+
+            if thinking_content:
+                thinking_tokens = self.count_tokens(thinking_content, provider.model)
+        else:
+            logger.debug("Provider '%s' does not support thinking mode", provider.model)
+
         if return_metadata:
             # Count tokens in prompt and response
             prompt_tokens = self.count_tokens(prompt, provider.model)
@@ -1617,19 +1807,17 @@ class LLMManager:
             # Get model's context window
             context_window = self.get_context_window(provider.model)
 
-            # Get the actual model name from result if available, otherwise use provider.model
-            # (Some providers return the actual model name like "claude-haiku-4.5" in the result)
-            actual_model = result.get("model", provider.model)
-
             return {
                 "response": response,
                 "provider": alias_to_use,
-                "model": actual_model,
+                "model": provider.model,
                 "tokens_used": total_tokens,
                 "prompt_tokens": prompt_tokens,
                 "response_tokens": response_tokens,
                 "model_max_tokens": context_window,
-                "vision_used": bool(images)  # NEW: Indicate if vision API was used
+                "vision_used": bool(images),  # Indicate if vision API was used
+                "thinking": thinking_content,  # Thinking/reasoning content (if any)
+                "thinking_tokens": thinking_tokens,  # Tokens used for thinking
             }
         return response
 

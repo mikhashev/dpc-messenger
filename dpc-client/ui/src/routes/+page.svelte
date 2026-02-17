@@ -2621,6 +2621,9 @@
         : `Error: ${message.payload?.message || 'Unknown error'}`;
       const newSender = message.status === "OK" ? 'ai' : 'system';
       const modelName = message.status === "OK" ? message.payload.model : undefined;
+      // v1.4+: Extract thinking fields for reasoning models
+      const thinkingContent = message.status === "OK" ? message.payload.thinking : undefined;
+      const thinkingTokenCount = message.status === "OK" ? message.payload.thinking_tokens : undefined;
 
       // Show toast notification for errors (helps remote users see host failures)
       if (message.status !== "OK") {
@@ -2639,7 +2642,15 @@
           const newMap = new Map(h);
           const hist = newMap.get(chatId) || [];
           newMap.set(chatId, hist.map(m =>
-            m.commandId === responseCommandId ? { ...m, sender: newSender, text: newText, model: modelName, commandId: undefined } : m
+            m.commandId === responseCommandId ? {
+              ...m,
+              sender: newSender,
+              text: newText,
+              model: modelName,
+              thinking: thinkingContent,  // v1.4+: Thinking/reasoning content
+              thinkingTokens: thinkingTokenCount,  // v1.4+: Thinking token count
+              commandId: undefined
+            } : m
           ));
           return newMap;
         });
