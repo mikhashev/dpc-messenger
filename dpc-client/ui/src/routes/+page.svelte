@@ -907,6 +907,14 @@
   // Reactive: Check if current chat is a Telegram chat (for UI adjustments)
   let isTelegramChat = $derived(activeChatId.startsWith('telegram-'));
 
+  // Reactive: Check if current chat is a P2P chat (not local AI, not AI chat, not Telegram)
+  // P2P chats are identified by node IDs like 'dpc-node-xxx'
+  let isP2PChat = $derived(
+    activeChatId !== 'local_ai' &&
+    !activeChatId.startsWith('ai_') &&
+    !activeChatId.startsWith('telegram-')
+  );
+
   // Reactive: Check if current chat is an AI chat (excluding Telegram which are stored in aiChats for sidebar)
   // Telegram chats are in $aiChats for sidebar display but are NOT AI chats
   let isActuallyAIChat = $derived($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-'));
@@ -2870,8 +2878,10 @@
             </label>
           {/if}
 
-          <!-- Telegram bot integration status (v0.14.0+) -->
-          <TelegramStatus conversationId={activeChatId} />
+          <!-- Telegram bot integration status (v0.14.0+) - P2P chats only -->
+          {#if isP2PChat}
+            <TelegramStatus conversationId={activeChatId} />
+          {/if}
         </div>
 
         {#if !chatHeaderCollapsed}
