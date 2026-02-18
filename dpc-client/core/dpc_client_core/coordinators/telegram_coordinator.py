@@ -279,7 +279,8 @@ class TelegramBridge:
             # Create Message object
             # Use original Telegram message date for timestamp (v0.15.3)
             # message.date is already a datetime.datetime object from Telegram Bot API
-            msg_timestamp = message.date.replace(tzinfo=timezone.utc)
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-{message_id}",
                 conversation_id=conversation_id,
@@ -452,7 +453,8 @@ class TelegramBridge:
             message_text = transcription_text if transcription_text else "Voice message"
             # Use original Telegram message date for timestamp (v0.15.3)
             # message.date is already a datetime.datetime object from Telegram Bot API
-            msg_timestamp = message.date.replace(tzinfo=timezone.utc)
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-voice-{message.message_id}",
                 conversation_id=conversation_id,
@@ -560,7 +562,8 @@ class TelegramBridge:
             caption = message.caption or "Image"
             # Use original Telegram message date for timestamp (v0.15.3)
             # message.date is already a datetime.datetime object from Telegram Bot API
-            msg_timestamp = message.date.replace(tzinfo=timezone.utc)
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-photo-{message.message_id}",
                 conversation_id=conversation_id,
@@ -669,7 +672,8 @@ class TelegramBridge:
             caption = message.caption or filename
             # Use original Telegram message date for timestamp (v0.15.3)
             # message.date is already a datetime.datetime object from Telegram Bot API
-            msg_timestamp = message.date.replace(tzinfo=timezone.utc)
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-document-{message.message_id}",
                 conversation_id=conversation_id,
@@ -779,7 +783,8 @@ class TelegramBridge:
             caption = message.caption or f"Video ({video.duration}s)"
             # Use original Telegram message date for timestamp (v0.15.3)
             # message.date is already a datetime.datetime object from Telegram Bot API
-            msg_timestamp = message.date.replace(tzinfo=timezone.utc)
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-video-{message.message_id}",
                 conversation_id=conversation_id,
