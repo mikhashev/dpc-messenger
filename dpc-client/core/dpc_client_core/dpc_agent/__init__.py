@@ -5,8 +5,8 @@ This package contains an embedded version of the Ouroboros self-modifying AI age
 adapted to work with DPC Messenger's infrastructure.
 
 Key Components:
-- DpcLlmAdapter: Bridges to DPC's LLMManager
 - DpcAgent: Simplified agent orchestrator
+- DpcLlmAdapter: Bridges to DPC's LLMManager
 - ToolRegistry: Plugin architecture with sandbox constraints
 - Memory: Scratchpad, identity, knowledge base
 
@@ -18,5 +18,16 @@ Features:
 """
 
 from .llm_adapter import DpcLlmAdapter
+from .agent import DpcAgent, AgentConfig
+from .memory import Memory
+from .tools import ToolRegistry, ToolContext, ToolEntry
 
-__all__ = ["DpcLlmAdapter"]
+__all__ = [
+    "DpcAgent",
+    "AgentConfig",
+    "DpcLlmAdapter",
+    "Memory",
+    "ToolRegistry",
+    "ToolContext",
+    "ToolEntry",
+]

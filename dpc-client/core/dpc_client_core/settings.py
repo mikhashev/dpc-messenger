@@ -244,6 +244,19 @@ class Settings:
         # Future: Will support group chat bridging (single message to DPC group).
         # See telegram_coordinator.py:_forward_to_p2p_peers() for implementation details.
 
+        self._config['dpc_agent'] = {
+            'enabled': 'false',  # Enable embedded autonomous AI agent (opt-in)
+            'background_consciousness': 'false',  # Enable background thinking between tasks (optional)
+            'tools': 'repo_read,repo_list,update_scratchpad,update_identity',  # Comma-separated tool whitelist
+            'budget_usd': '50',  # Maximum budget per task in USD
+            'max_rounds': '200',  # Maximum LLM rounds before stopping
+            'context_window': '200000'  # Agent context window size (tokens)
+        }
+        # NOTE: The agent is sandboxed to ~/.dpc/agent/ directory.
+        # It can modify files within its sandbox but cannot access DPC codebase.
+        # Use 'tools' config to further restrict which tools are available.
+        # To use the agent, add a provider with type="dpc_agent" in providers.json
+
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
             'console': 'true',  # Enable console output
@@ -880,6 +893,46 @@ class Settings:
             import logging
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to save last_update_id: {e}")
+
+    # DPC Agent Settings (Embedded Autonomous AI Agent)
+
+    def get_dpc_agent_enabled(self) -> bool:
+        """Check if the embedded autonomous AI agent is enabled."""
+        value = self.get('dpc_agent', 'enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dpc_agent_background_consciousness(self) -> bool:
+        """Check if background consciousness (thinking between tasks) is enabled."""
+        value = self.get('dpc_agent', 'background_consciousness', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dpc_agent_tools(self) -> list[str]:
+        """Get list of enabled tools for the agent (whitelist)."""
+        tools_str = self.get('dpc_agent', 'tools', 'repo_read,repo_list,update_scratchpad,update_identity')
+        return [t.strip() for t in tools_str.split(',') if t.strip()]
+
+    def get_dpc_agent_budget_usd(self) -> float:
+        """Get maximum budget per task in USD."""
+        return float(self.get('dpc_agent', 'budget_usd', '50'))
+
+    def get_dpc_agent_max_rounds(self) -> int:
+        """Get maximum LLM rounds before stopping."""
+        return int(self.get('dpc_agent', 'max_rounds', '200'))
+
+    def get_dpc_agent_context_window(self) -> int:
+        """Get agent context window size in tokens."""
+        return int(self.get('dpc_agent', 'context_window', '200000'))
+
+    def get_dpc_agent_config(self) -> dict:
+        """Get all DPC agent configuration as a dict."""
+        return {
+            'enabled': self.get_dpc_agent_enabled(),
+            'background_consciousness': self.get_dpc_agent_background_consciousness(),
+            'tools': self.get_dpc_agent_tools(),
+            'budget_usd': self.get_dpc_agent_budget_usd(),
+            'max_rounds': self.get_dpc_agent_max_rounds(),
+            'context_window': self.get_dpc_agent_context_window(),
+        }
 
     def save_config(self):
         """Save configuration to file."""
