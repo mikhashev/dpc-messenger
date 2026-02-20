@@ -1187,6 +1187,7 @@ poetry run pytest tests/test_turn_connectivity.py
 - `docs/LOGGING.md` - Logging system configuration and troubleshooting
 - `docs/DEVICE_CONTEXT_SPEC.md` - Device context schema and special instructions specification
 - `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
+- `docs/DPC_AGENT_GUIDE.md` - Embedded autonomous AI agent testing and usage guide
 - `specs/dptp_v1.md` - DPTP (D-PC Transfer Protocol) formal specification
 - `specs/hub_api_v1.md` - Hub API specification
 - `dpc-protocol/README.md` - Protocol library documentation and usage examples
