@@ -92,11 +92,19 @@ class DpcAgentManager:
             agent_root=self.agent_root,
         )
 
+        # Start background consciousness if enabled
+        if agent_config.background_consciousness:
+            self._agent.start_consciousness(emit_progress=self._emit_progress)
+            log.info("Background consciousness started")
+
         log.info("DpcAgent started successfully")
 
     async def stop(self) -> None:
         """Shutdown the agent."""
-        self._agent = None
+        if self._agent is not None:
+            # Stop consciousness first
+            self._agent.stop_consciousness()
+            self._agent = None
         log.info("DpcAgent stopped")
 
     async def process_message(
@@ -201,3 +209,17 @@ class DpcAgentManager:
     def is_running(self) -> bool:
         """Check if agent is running."""
         return self._agent is not None
+
+    def is_consciousness_running(self) -> bool:
+        """Check if background consciousness is running."""
+        return self._agent is not None and self._agent.is_consciousness_running()
+
+    def start_consciousness(self) -> None:
+        """Start background consciousness manually."""
+        if self._agent is not None:
+            self._agent.start_consciousness(emit_progress=self._emit_progress)
+
+    def stop_consciousness(self) -> None:
+        """Stop background consciousness."""
+        if self._agent is not None:
+            self._agent.stop_consciousness()

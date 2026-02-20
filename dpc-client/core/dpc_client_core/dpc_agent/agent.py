@@ -35,6 +35,7 @@ from .utils import (
 
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
+    from .consciousness import BackgroundConsciousness
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +80,10 @@ class DpcAgent:
         self.llm = DpcLlmAdapter(llm_manager)
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
+
+        # Background consciousness (optional)
+        self._consciousness: Optional["BackgroundConsciousness"] = None
+        self._consciousness_enabled = self.config.background_consciousness
 
         log.info(f"DpcAgent initialized with storage at {self.agent_root}")
 
@@ -195,6 +200,41 @@ class DpcAgent:
         self.memory.save_identity(self.memory._default_identity())
         log.info("Agent memory reset to defaults")
 
+    def start_consciousness(self, emit_progress: Optional[Callable[[str], None]] = None) -> None:
+        """
+        Start background consciousness if enabled.
+
+        Args:
+            emit_progress: Optional callback for consciousness events
+        """
+        if not self._consciousness_enabled:
+            log.debug("Background consciousness not enabled")
+            return
+
+        if self._consciousness is not None:
+            log.warning("Consciousness already running")
+            return
+
+        from .consciousness import BackgroundConsciousness
+
+        self._consciousness = BackgroundConsciousness(
+            agent=self,
+            emit_progress=emit_progress,
+        )
+        self._consciousness.start()
+        log.info("Background consciousness started")
+
+    def stop_consciousness(self) -> None:
+        """Stop background consciousness."""
+        if self._consciousness is not None:
+            self._consciousness.stop()
+            self._consciousness = None
+            log.info("Background consciousness stopped")
+
+    def is_consciousness_running(self) -> bool:
+        """Check if consciousness is running."""
+        return self._consciousness is not None and self._consciousness.is_running()
+
     def get_status(self) -> Dict[str, Any]:
         """Get agent status info."""
         state_path = self.agent_root / "state" / "state.json"
@@ -216,5 +256,10 @@ class DpcAgent:
                 "scratchpad": self.memory.scratchpad_path().exists(),
                 "identity": self.memory.identity_path().exists(),
                 "dialogue_summary": self.memory.dialogue_summary_path().exists(),
+            },
+            "consciousness": {
+                "enabled": self._consciousness_enabled,
+                "running": self.is_consciousness_running(),
+                "status": self._consciousness.get_status() if self._consciousness else None,
             },
         }

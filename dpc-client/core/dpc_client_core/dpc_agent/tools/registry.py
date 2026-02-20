@@ -138,17 +138,21 @@ CORE_TOOL_NAMES = {
     "get_dpc_context",
     # Utility
     "web_search",
+    # Browser tools (safe, read-only)
+    "browse_page", "fetch_json", "extract_links", "check_url", "search_web",
+    # Review tools (safe, analysis only)
+    "self_review", "request_critique", "compare_approaches", "quality_checklist", "consensus_check",
 }
 
 # Restricted tools (require explicit enable in config)
 RESTRICTED_TOOL_NAMES = {
     "run_shell",           # Shell access
     "claude_code_edit",    # Code editing via Claude
-    "git_status",          # Git operations
-    "git_diff",
     "repo_commit_push",    # Git push
     "request_restart",     # Control operations
     "promote_to_stable",
+    # Git tools (can modify files)
+    "git_add", "git_commit", "git_init",
 }
 
 

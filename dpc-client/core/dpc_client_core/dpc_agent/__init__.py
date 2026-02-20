@@ -9,6 +9,7 @@ Key Components:
 - DpcLlmAdapter: Bridges to DPC's LLMManager
 - ToolRegistry: Plugin architecture with sandbox constraints
 - Memory: Scratchpad, identity, knowledge base
+- BackgroundConsciousness: Proactive thinking between tasks
 
 Features:
 - 40+ tools (file ops, git, web search, etc.)
@@ -21,6 +22,7 @@ from .llm_adapter import DpcLlmAdapter
 from .agent import DpcAgent, AgentConfig
 from .memory import Memory
 from .tools import ToolRegistry, ToolContext, ToolEntry
+from .consciousness import BackgroundConsciousness
 
 __all__ = [
     "DpcAgent",
@@ -30,4 +32,5 @@ __all__ = [
     "ToolRegistry",
     "ToolContext",
     "ToolEntry",
+    "BackgroundConsciousness",
 ]
