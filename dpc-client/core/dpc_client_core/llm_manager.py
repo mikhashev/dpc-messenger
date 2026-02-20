@@ -554,7 +554,14 @@ class AnthropicProvider(AIProvider):
             raise RuntimeError(f"Anthropic vision API failed for '{self.alias}': {e}") from e
 
 class ZaiProvider(AIProvider):
-    """Z.AI provider for GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)"""
+    """
+    Z.AI provider for GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)
+
+    Uses Anthropic-compatible endpoint (https://api.z.ai/api/anthropic)
+    instead of PaaS endpoint to avoid prepaid balance requirements.
+
+    All GLM models support extended thinking via API parameter.
+    """
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
 
@@ -568,36 +575,115 @@ class ZaiProvider(AIProvider):
         if not api_key:
             raise ValueError(f"API key not found for Z.AI provider '{self.alias}'")
 
-        # Initialize Z.AI client (synchronous SDK confirmed from docs)
-        from zai import ZaiClient
-        self.client = ZaiClient(api_key=api_key)
+        # Use Anthropic-compatible endpoint (same as law7-services)
+        base_url = config.get("base_url", "https://api.z.ai/api/anthropic")
+        self.client = AsyncAnthropic(api_key=api_key, base_url=base_url)
+
+        # Read max_tokens from config (optional, defaults to 8192 if not specified)
+        # Matches law7-services default for GLM models
+        self.max_tokens = config.get("max_tokens", 8192)
+
+        # Thinking/reasoning configuration (GLM Extended Thinking)
+        # All GLM models support extended thinking with budget_tokens
+        self.thinking_enabled = config.get("thinking", {}).get("enabled", True)
+        self.thinking_budget_tokens = config.get("thinking", {}).get("budget_tokens", 10000)
+
+        # Store last thinking content for retrieval by LLMManager
+        self._last_thinking: Optional[str] = None
 
     def supports_vision(self) -> bool:
         """GLM vision models: models with 'v' suffix (glm-4.6v-flash, glm-4.5v, glm-4.0v)"""
-        # Vision models confirmed from rate limits page
         vision_models = ["glm-4.6v", "glm-4.5v", "glm-4.0v", "glm-4v"]
         return any(vm in self.model.lower() for vm in vision_models)
 
+    def supports_thinking(self) -> bool:
+        """All GLM models support extended thinking."""
+        return True
+
+    def get_thinking_params(self) -> Dict[str, Any]:
+        """Return GLM-specific thinking parameters."""
+        if self.thinking_enabled:
+            return {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+            }
+        return {}
+
+    def get_last_thinking(self) -> Optional[str]:
+        """Get the thinking content from the last response."""
+        return self._last_thinking
+
     async def generate_response(self, prompt: str) -> str:
-        """Generate text response using Z.AI GLM model"""
+        """Generate text response using Z.AI GLM model with extended thinking"""
         try:
-            # Z.AI SDK is synchronous, wrap in asyncio.to_thread()
-            response = await asyncio.to_thread(
-                self.client.chat.completions.create,
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.choices[0].message.content
+            # Determine max_tokens value
+            # When thinking is enabled, max_tokens must be > budget_tokens
+            effective_max_tokens = self.max_tokens if self.max_tokens else 8192
+
+            # Build API parameters
+            api_params = {
+                "model": self.model,
+                "max_tokens": effective_max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+
+            # Add extended thinking if enabled (all GLM models support it)
+            if self.thinking_enabled:
+                # Ensure max_tokens > budget_tokens (API requirement)
+                if effective_max_tokens <= self.thinking_budget_tokens:
+                    # Set max_tokens to budget + buffer for actual response
+                    effective_max_tokens = self.thinking_budget_tokens + 4096
+                    api_params["max_tokens"] = effective_max_tokens
+                    logger.info(f"Adjusted max_tokens to {effective_max_tokens} to exceed budget_tokens ({self.thinking_budget_tokens})")
+
+                api_params["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+                logger.info(f"GLM extended thinking enabled (budget={self.thinking_budget_tokens} tokens)")
+            else:
+                logger.debug(f"GLM extended thinking disabled for {self.model}")
+
+            message = await self.client.messages.create(**api_params)
+
+            # Parse content blocks - handle both thinking and text blocks
+            thinking_text = None
+            final_text = None
+
+            for block in message.content:
+                if hasattr(block, 'type'):
+                    if block.type == "thinking":
+                        thinking_text = getattr(block, 'thinking', None)
+                    elif block.type == "text":
+                        final_text = getattr(block, 'text', None)
+
+            # Store thinking for retrieval by LLMManager
+            self._last_thinking = thinking_text
+
+            if thinking_text:
+                logger.info(f"GLM extended thinking: {len(thinking_text)} chars")
+
+            # Return text content (or first block's text for backward compatibility)
+            if final_text:
+                return final_text
+            elif message.content:
+                # Fallback: try to get text from first block
+                return message.content[0].text if hasattr(message.content[0], 'text') else str(message.content[0])
+            else:
+                return ""
+
         except Exception as e:
             raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {e}") from e
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """
         Z.AI vision API for GLM-V models (glm-4.6v-flash, glm-4.5v, glm-4.0v)
-        Assuming OpenAI-compatible multimodal format (needs verification)
+        Uses Anthropic-compatible image format.
         """
         try:
-            # Build multimodal message content (OpenAI-compatible format)
+            # Build multimodal message content (Anthropic format)
             content = [{"type": "text", "text": prompt}]
 
             for img in images:
@@ -612,22 +698,20 @@ class ZaiProvider(AIProvider):
 
                 mime_type = img.get("mime_type", "image/png")
                 content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{mime_type};base64,{base64_data}",
-                        "detail": "high"
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": base64_data
                     }
                 })
 
-            # Z.AI SDK is synchronous, wrap in asyncio.to_thread()
-            response = await asyncio.to_thread(
-                self.client.chat.completions.create,
+            response = await self.client.messages.create(
                 model=self.model,
-                messages=[{"role": "user", "content": content}],
-                temperature=kwargs.get("temperature", 0.7),
-                max_tokens=kwargs.get("max_tokens", 4000)
+                max_tokens=kwargs.get("max_tokens", 8192),
+                messages=[{"role": "user", "content": content}]
             )
-            return response.choices[0].message.content
+            return response.content[0].text
         except Exception as e:
             raise RuntimeError(f"Z.AI vision API failed for '{self.alias}': {e}") from e
 
