@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from .utils import utc_now_iso, append_jsonl, get_agent_root
 from .memory import Memory
+from .events import EventType, get_event_emitter
 
 if TYPE_CHECKING:
     from .agent import DpcAgent
@@ -159,10 +160,19 @@ class BackgroundConsciousness:
 
         log.info(f"Background thought #{self.thought_count} starting...")
 
+        # Get event emitter
+        emitter = get_event_emitter()
+
         try:
             # Choose a thought type
             thought_type = self._choose_thought_type()
             log.debug(f"Thought type: {thought_type}")
+
+            # Emit thought started event
+            await emitter.emit(EventType.THOUGHT_STARTED, {
+                "thought_number": self.thought_count,
+                "thought_type": thought_type,
+            })
 
             # Generate thought prompt
             prompt = self._generate_thought_prompt(thought_type)
@@ -179,10 +189,22 @@ class BackgroundConsciousness:
             # Update memory based on thought type
             await self._apply_thought_result(thought_type, response)
 
+            # Emit thought completed event
+            await emitter.emit(EventType.THOUGHT_COMPLETED, {
+                "thought_number": self.thought_count,
+                "thought_type": thought_type,
+                "response_preview": response[:200] if response else None,
+            })
+
             log.info(f"Background thought #{self.thought_count} complete")
 
         except Exception as e:
             log.error(f"Thought error: {e}", exc_info=True)
+            # Emit thought failed event
+            await emitter.emit(EventType.THOUGHT_COMPLETED, {
+                "thought_number": self.thought_count,
+                "error": str(e)[:200],
+            })
 
     def _choose_thought_type(self) -> str:
         """

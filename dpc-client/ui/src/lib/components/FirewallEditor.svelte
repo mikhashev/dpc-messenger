@@ -79,6 +79,15 @@
         // Restricted tools
         run_shell?: boolean;
         claude_code_edit?: boolean;
+        // Task queue tools (v0.16.0+)
+        schedule_task?: boolean;
+        get_task_status?: boolean;
+        // Evolution tools (v0.16.0+)
+        pause_evolution?: boolean;
+        resume_evolution?: boolean;
+        get_evolution_stats?: boolean;
+        approve_evolution_change?: boolean;
+        reject_evolution_change?: boolean;
         [key: string]: boolean | string | undefined;
       };
     };
@@ -1705,6 +1714,7 @@
                         { key: 'knowledge_read', label: 'Read Knowledge', desc: 'Read knowledge base' },
                         { key: 'knowledge_write', label: 'Write Knowledge', desc: 'Write to knowledge base' },
                         { key: 'knowledge_list', label: 'List Knowledge', desc: 'List knowledge topics' },
+                        { key: 'get_dpc_context', label: 'Get DPC Context', desc: 'Access DPC personal/device context' },
                       ] as tool}
                         <div class="notification-event-item">
                           {#if editMode && editedRules?.dpc_agent?.tools}
@@ -1891,6 +1901,85 @@
                               />
                               <div>
                                 <span class="event-name" style="color: var(--danger);">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Task Queue Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Task Queue Tools (background scheduling)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'schedule_task', label: 'Schedule Task', desc: 'Schedule tasks for future execution' },
+                        { key: 'get_task_status', label: 'Task Status', desc: 'Check status of scheduled tasks' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Evolution Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Evolution Tools (agent self-modification)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'pause_evolution', label: 'Pause Evolution', desc: 'Pause automatic evolution cycles' },
+                        { key: 'resume_evolution', label: 'Resume Evolution', desc: 'Resume paused evolution' },
+                        { key: 'get_evolution_stats', label: 'Evolution Stats', desc: 'Get evolution statistics' },
+                        { key: 'approve_evolution_change', label: 'Approve Change', desc: 'Approve pending self-modification (dangerous)' },
+                        { key: 'reject_evolution_change', label: 'Reject Change', desc: 'Reject pending changes' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name" style={tool.key === 'approve_evolution_change' ? 'color: var(--danger);' : ''}>{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name" style={tool.key === 'approve_evolution_change' ? 'color: var(--danger);' : ''}>{tool.label}</span>
                                 <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
                               </div>
                             </label>

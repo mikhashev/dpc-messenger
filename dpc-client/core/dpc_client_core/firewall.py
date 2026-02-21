@@ -119,7 +119,6 @@ class ContextFirewall:
             # DPC integration
             'get_dpc_context': True,
             # Web tools
-            'web_search': True,
             'browse_page': True,
             'fetch_json': True,
             'extract_links': True,
@@ -144,6 +143,15 @@ class ContextFirewall:
             # Restricted tools (security sensitive)
             'run_shell': False,
             'claude_code_edit': False,
+            # Task queue tools (v0.16.0+)
+            'schedule_task': True,  # Safe, just scheduling
+            'get_task_status': True,  # Read-only
+            # Evolution tools (v0.16.0+)
+            'pause_evolution': True,  # Control, doesn't modify files
+            'resume_evolution': True,  # Control, doesn't modify files
+            'get_evolution_stats': True,  # Read-only
+            'approve_evolution_change': False,  # Modifies files, requires explicit permission
+            'reject_evolution_change': True,  # Safe, just removes pending change
         }
 
         # Parse tool permissions from config, using defaults for missing tools
@@ -364,7 +372,6 @@ class ContextFirewall:
                         "knowledge_write": False,
                         "knowledge_list": True,
                         "get_dpc_context": True,
-                        "web_search": True,
                         "browse_page": True,
                         "fetch_json": True,
                         "extract_links": True,
@@ -384,7 +391,16 @@ class ContextFirewall:
                         "git_init": False,
                         "repo_commit_push": False,
                         "run_shell": False,
-                        "claude_code_edit": False
+                        "claude_code_edit": False,
+                        "_comment_task": "Task queue tools - safe scheduling and status checks",
+                        "schedule_task": True,
+                        "get_task_status": True,
+                        "_comment_evolution": "Evolution tools - control agent self-modification",
+                        "pause_evolution": True,
+                        "resume_evolution": True,
+                        "get_evolution_stats": True,
+                        "approve_evolution_change": False,
+                        "reject_evolution_change": True
                     }
                 },
                 "file_transfer": {
@@ -1198,7 +1214,7 @@ class ContextFirewall:
                                 # DPC integration
                                 'get_dpc_context',
                                 # Web tools
-                                'web_search', 'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
+                                'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
                                 # Review tools
                                 'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                 # Git tools
@@ -1206,6 +1222,11 @@ class ContextFirewall:
                                 'repo_commit_push',
                                 # Restricted tools
                                 'run_shell', 'claude_code_edit',
+                                # Task queue tools (v0.16.0+)
+                                'schedule_task', 'get_task_status',
+                                # Evolution tools (v0.16.0+)
+                                'pause_evolution', 'resume_evolution', 'get_evolution_stats',
+                                'approve_evolution_change', 'reject_evolution_change',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):

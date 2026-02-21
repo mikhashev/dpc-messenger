@@ -250,12 +250,29 @@ class Settings:
             'tools': 'repo_read,repo_list,update_scratchpad,update_identity',  # Comma-separated tool whitelist
             'budget_usd': '50',  # Maximum budget per task in USD
             'max_rounds': '200',  # Maximum LLM rounds before stopping
-            'context_window': '200000'  # Agent context window size (tokens)
+            'context_window': '200000',  # Agent context window size (tokens)
+            # Task queue settings
+            'enable_task_queue': 'true',  # Enable background task scheduling
+            # Evolution settings
+            'evolution_enabled': 'false',  # Enable autonomous self-modification
+            'evolution_interval_minutes': '60',  # Minutes between evolution cycles
+            'evolution_auto_apply': 'false',  # Auto-apply changes (false = require approval)
+            # Budget settings
+            'billing_model': 'subscription',  # 'subscription' or 'pay_per_use'
         }
         # NOTE: The agent is sandboxed to ~/.dpc/agent/ directory.
         # It can modify files within its sandbox but cannot access DPC codebase.
         # Use 'tools' config to further restrict which tools are available.
         # To use the agent, add a provider with type="dpc_agent" in providers.json
+
+        self._config['dpc_agent_telegram'] = {
+            'enabled': 'false',  # Enable Telegram notifications for agent events
+            'bot_token': '',  # Telegram bot token (separate from main DPC bot)
+            'allowed_chat_ids': '',  # JSON array of chat IDs: ["123456789"]
+            'event_filter': 'task_completed,task_failed,evolution_cycle_completed,code_modified',  # Events to forward
+        }
+        # NOTE: Create a separate Telegram bot for agent monitoring via @BotFather
+        # Get your chat ID via @userinfobot
 
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -919,10 +936,8 @@ class Settings:
         value = self.get('dpc_agent', 'background_consciousness', 'false')
         return value.lower() in ('true', '1', 'yes')
 
-    def get_dpc_agent_tools(self) -> list[str]:
-        """Get list of enabled tools for the agent (whitelist)."""
-        tools_str = self.get('dpc_agent', 'tools', 'repo_read,repo_list,update_scratchpad,update_identity')
-        return [t.strip() for t in tools_str.split(',') if t.strip()]
+    # NOTE: Tool control is now handled via privacy_rules.json firewall only
+    # See: dpc_agent.tools in ~/.dpc/privacy_rules.json
 
     def get_dpc_agent_budget_usd(self) -> float:
         """Get maximum budget per task in USD."""
@@ -936,15 +951,78 @@ class Settings:
         """Get agent context window size in tokens."""
         return int(self.get('dpc_agent', 'context_window', '200000'))
 
+    def get_dpc_agent_enable_task_queue(self) -> bool:
+        """Check if task queue (background scheduling) is enabled."""
+        value = self.get('dpc_agent', 'enable_task_queue', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dpc_agent_evolution_enabled(self) -> bool:
+        """Check if evolution (self-modification) is enabled."""
+        value = self.get('dpc_agent', 'evolution_enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dpc_agent_evolution_interval_minutes(self) -> int:
+        """Get minutes between evolution cycles."""
+        return int(self.get('dpc_agent', 'evolution_interval_minutes', '60'))
+
+    def get_dpc_agent_evolution_auto_apply(self) -> bool:
+        """Check if evolution changes should be auto-applied (no human approval)."""
+        value = self.get('dpc_agent', 'evolution_auto_apply', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dpc_agent_billing_model(self) -> str:
+        """Get billing model ('subscription' or 'pay_per_use')."""
+        return self.get('dpc_agent', 'billing_model', 'subscription')
+
+    # DPC Agent Telegram Settings
+
+    def get_dpc_agent_telegram_enabled(self) -> bool:
+        """Check if Telegram notifications for agent events are enabled."""
+        value = self.get('dpc_agent_telegram', 'enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dpc_agent_telegram_bot_token(self) -> str:
+        """Get Telegram bot token for agent notifications."""
+        return self.get('dpc_agent_telegram', 'bot_token', '')
+
+    def get_dpc_agent_telegram_allowed_chat_ids(self) -> list[str]:
+        """Get list of allowed chat IDs for agent Telegram notifications."""
+        import json
+        chat_ids_str = self.get('dpc_agent_telegram', 'allowed_chat_ids', '[]')
+        try:
+            return json.loads(chat_ids_str)
+        except json.JSONDecodeError:
+            return []
+
+    def get_dpc_agent_telegram_event_filter(self) -> list[str]:
+        """Get list of event types to forward to Telegram."""
+        filter_str = self.get('dpc_agent_telegram', 'event_filter',
+                              'task_completed,task_failed,evolution_cycle_completed,code_modified')
+        return [e.strip() for e in filter_str.split(',') if e.strip()]
+
     def get_dpc_agent_config(self) -> dict:
         """Get all DPC agent configuration as a dict."""
         return {
             'enabled': self.get_dpc_agent_enabled(),
             'background_consciousness': self.get_dpc_agent_background_consciousness(),
-            'tools': self.get_dpc_agent_tools(),
+            # Tool control is via firewall (privacy_rules.json), not config.ini
             'budget_usd': self.get_dpc_agent_budget_usd(),
             'max_rounds': self.get_dpc_agent_max_rounds(),
             'context_window': self.get_dpc_agent_context_window(),
+            'enable_task_queue': self.get_dpc_agent_enable_task_queue(),
+            'evolution_enabled': self.get_dpc_agent_evolution_enabled(),
+            'evolution_interval_minutes': self.get_dpc_agent_evolution_interval_minutes(),
+            'evolution_auto_apply': self.get_dpc_agent_evolution_auto_apply(),
+            'billing_model': self.get_dpc_agent_billing_model(),
+        }
+
+    def get_dpc_agent_telegram_config(self) -> dict:
+        """Get all DPC agent Telegram configuration as a dict."""
+        return {
+            'enabled': self.get_dpc_agent_telegram_enabled(),
+            'bot_token': self.get_dpc_agent_telegram_bot_token(),
+            'allowed_chat_ids': self.get_dpc_agent_telegram_allowed_chat_ids(),
+            'event_filter': self.get_dpc_agent_telegram_event_filter(),
         }
 
     def save_config(self):

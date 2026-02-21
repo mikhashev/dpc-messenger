@@ -6,6 +6,7 @@ Manages:
 - Configuration loading
 - Context integration with DPC
 - Event forwarding to DPC UI
+- Telegram notifications for agent events
 
 This manager bridges the embedded DpcAgent with DPC Messenger's CoreService.
 """
@@ -19,6 +20,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from ..dpc_agent.agent import DpcAgent, AgentConfig
 from ..dpc_agent.utils import get_agent_root, ensure_agent_dirs, utc_now_iso
+from ..dpc_agent.events import get_event_emitter, EventType
 
 if TYPE_CHECKING:
     from ..service import CoreService
@@ -37,6 +39,7 @@ class DpcAgentManager:
     - Configuration from DPC settings
     - Context integration (personal, device context from DPC)
     - Event forwarding to DPC's UI
+    - Telegram notifications for agent monitoring
     """
 
     def __init__(self, service: "CoreService", config: Dict[str, Any]):
@@ -60,6 +63,9 @@ class DpcAgentManager:
         # Agent instance (lazy initialization)
         self._agent: Optional[DpcAgent] = None
 
+        # Telegram bridge for notifications
+        self._telegram_bridge = None
+
         log.info(f"DpcAgentManager initialized with storage at {self.agent_root}")
 
     @property
@@ -70,41 +76,26 @@ class DpcAgentManager:
         return self._agent
 
     async def start(self) -> None:
-        """Initialize the agent."""
+        """Initialize the agent and Telegram bridge."""
         if self._agent is not None:
             log.warning("Agent already initialized")
             return
 
-        # Get allowed tools from firewall
-        firewall_tools = set()
-        if self.firewall:
-            firewall_tools = self.firewall.get_allowed_agent_tools()
-            if not self.firewall.dpc_agent_enabled:
-                log.warning("DPC Agent is disabled via firewall - not starting")
-                return
+        # Check if agent is enabled via firewall
+        if self.firewall and not self.firewall.dpc_agent_enabled:
+            log.warning("DPC Agent is disabled via firewall - not starting")
+            return
 
-        # Merge with config tools (intersection - most restrictive)
-        config_tools = set(self.config.get("tools", [])) if self.config.get("tools") else None
-
-        if firewall_tools and config_tools:
-            # Both specified - use intersection (most restrictive)
-            tool_whitelist = firewall_tools & config_tools
-        elif firewall_tools:
-            # Only firewall - use firewall whitelist
-            tool_whitelist = firewall_tools
-        elif config_tools:
-            # Only config - use config whitelist
-            tool_whitelist = config_tools
-        else:
-            # Neither specified - use core tools only
-            tool_whitelist = None  # Agent will use its defaults
-
-        # Build agent config
+        # Build agent config (tool control is via firewall, not config)
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
-            tool_whitelist=tool_whitelist,
             background_consciousness=self.config.get("background_consciousness", False),
+            enable_task_queue=self.config.get("enable_task_queue", True),
+            evolution_enabled=self.config.get("evolution_enabled", False),
+            evolution_interval_minutes=self.config.get("evolution_interval_minutes", 60),
+            evolution_auto_apply=self.config.get("evolution_auto_apply", False),
+            billing_model=self.config.get("billing_model", "subscription"),
         )
 
         # Get LLMManager from CoreService
@@ -112,11 +103,12 @@ class DpcAgentManager:
         if llm_manager is None:
             raise RuntimeError("CoreService does not have llm_manager")
 
-        # Create agent
+        # Create agent with firewall for tool control
         self._agent = DpcAgent(
             llm_manager=llm_manager,
             config=agent_config,
             agent_root=self.agent_root,
+            firewall=self.firewall,  # Firewall controls tool access
         )
 
         # Start background consciousness if enabled
@@ -124,10 +116,76 @@ class DpcAgentManager:
             self._agent.start_consciousness(emit_progress=self._emit_progress)
             log.info("Background consciousness started")
 
+        # Initialize Telegram bridge for agent notifications
+        await self._start_telegram_bridge()
+
         log.info("DpcAgent started successfully")
 
+    async def _start_telegram_bridge(self) -> None:
+        """Initialize and start the Telegram notification bridge."""
+        # Get Telegram config from settings
+        settings = getattr(self.service, "settings", None)
+        if settings is None:
+            log.debug("No settings available, skipping Telegram bridge")
+            return
+
+        telegram_config = settings.get_dpc_agent_telegram_config()
+
+        if not telegram_config.get("enabled", False):
+            log.debug("Telegram notifications for agent disabled")
+            return
+
+        bot_token = telegram_config.get("bot_token", "")
+        chat_ids = telegram_config.get("allowed_chat_ids", [])
+
+        if not bot_token or not chat_ids:
+            log.warning("Telegram bridge enabled but missing bot_token or allowed_chat_ids")
+            return
+
+        try:
+            from .agent_telegram_bridge import AgentTelegramBridge, create_telegram_bridge_callback
+
+            # Get event filter
+            event_filter = telegram_config.get("event_filter")
+
+            # Create bridge
+            self._telegram_bridge = AgentTelegramBridge(
+                bot_token=bot_token,
+                allowed_chat_ids=chat_ids,
+                event_filter=event_filter,
+            )
+
+            # Set message handler for two-way communication
+            self._telegram_bridge.set_message_handler(
+                handler=self.process_message,
+                agent_manager=self,
+            )
+
+            # Start bridge
+            success = await self._telegram_bridge.start()
+            if not success:
+                log.warning("Failed to start Telegram bridge")
+                self._telegram_bridge = None
+                return
+
+            # Connect to event emitter
+            emitter = get_event_emitter()
+            emitter.add_listener(create_telegram_bridge_callback(self._telegram_bridge))
+
+            log.info(f"Telegram bridge started, connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events)")
+
+        except ImportError as e:
+            log.warning(f"Telegram bridge not available: {e}")
+        except Exception as e:
+            log.error(f"Failed to initialize Telegram bridge: {e}", exc_info=True)
+
     async def stop(self) -> None:
-        """Shutdown the agent."""
+        """Shutdown the agent and Telegram bridge."""
+        # Stop Telegram bridge first
+        if self._telegram_bridge is not None:
+            await self._telegram_bridge.stop()
+            self._telegram_bridge = None
+
         if self._agent is not None:
             # Stop consciousness first
             self._agent.stop_consciousness()
@@ -151,20 +209,54 @@ class DpcAgentManager:
         Returns:
             Agent's response text
         """
+        import uuid
+
+        # Generate task ID for this request
+        task_id = f"chat-{uuid.uuid4().hex[:8]}"
+        emitter = get_event_emitter()
+
+        # Emit TASK_STARTED event
+        await emitter.emit(EventType.TASK_STARTED, {
+            "task_id": task_id,
+            "task_type": "chat",
+            "conversation_id": conversation_id,
+            "message_preview": message[:100] if len(message) > 100 else message,
+        })
+
         # Get DPC context if requested
         dpc_context = None
         if include_context:
             dpc_context = self._get_dpc_context()
 
-        # Process through agent
-        response = await self.agent.process(
-            message=message,
-            conversation_id=conversation_id,
-            dpc_context=dpc_context,
-            emit_progress=self._emit_progress,
-        )
+        try:
+            # Process through agent
+            response = await self.agent.process(
+                message=message,
+                conversation_id=conversation_id,
+                dpc_context=dpc_context,
+                emit_progress=self._emit_progress,
+            )
 
-        return response
+            # Emit TASK_COMPLETED event
+            await emitter.emit(EventType.TASK_COMPLETED, {
+                "task_id": task_id,
+                "task_type": "chat",
+                "conversation_id": conversation_id,
+                "response_length": len(response),
+                "result": response[:200] if len(response) > 200 else response,
+            })
+
+            return response
+
+        except Exception as e:
+            # Emit TASK_FAILED event
+            await emitter.emit(EventType.TASK_FAILED, {
+                "task_id": task_id,
+                "task_type": "chat",
+                "conversation_id": conversation_id,
+                "error": str(e),
+            })
+            raise
 
     def _get_dpc_context(self) -> Dict[str, Any]:
         """Get DPC personal and device context with firewall checks."""

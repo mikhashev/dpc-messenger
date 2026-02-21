@@ -525,6 +525,245 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
 
 
 # ---------------------------------------------------------------------------
+# Task Queue Tools
+# ---------------------------------------------------------------------------
+
+def schedule_task(
+    ctx: ToolContext,
+    task_type: str,
+    task_data: str,
+    delay_seconds: int = 0,
+    priority: str = "normal",
+) -> str:
+    """
+    Schedule a task for future execution.
+
+    Args:
+        ctx: Tool context
+        task_type: Type of task ('chat', 'improvement', 'review')
+        task_data: JSON string with task payload
+        delay_seconds: Delay before execution (0 = immediate)
+        priority: 'critical', 'high', 'normal', or 'low'
+
+    Returns:
+        Task ID and confirmation
+    """
+    try:
+        # Check if agent has task queue
+        if not hasattr(ctx, '_agent') or not hasattr(ctx._agent, 'queue'):
+            return "⚠️ Task queue not available"
+
+        # Parse task data
+        try:
+            data = json.loads(task_data)
+        except json.JSONDecodeError:
+            return "⚠️ task_data must be valid JSON"
+
+        # Map priority string
+        from ..task_queue import TaskPriority
+        priority_map = {
+            "critical": TaskPriority.CRITICAL,
+            "high": TaskPriority.HIGH,
+            "normal": TaskPriority.NORMAL,
+            "low": TaskPriority.LOW,
+        }
+        task_priority = priority_map.get(priority.lower(), TaskPriority.NORMAL)
+
+        # Schedule task
+        task = ctx._agent.schedule_task(
+            task_type=task_type,
+            data=data,
+            priority=task_priority,
+            delay_seconds=delay_seconds,
+        )
+
+        return f"✓ Scheduled task {task.id} (type={task_type}, priority={priority}, delay={delay_seconds}s)"
+
+    except Exception as e:
+        return f"⚠️ Error scheduling task: {e}"
+
+
+def get_task_status(ctx: ToolContext, task_id: str) -> str:
+    """
+    Get status of a scheduled task.
+
+    Args:
+        ctx: Tool context
+        task_id: Task ID to check
+
+    Returns:
+        Task status information
+    """
+    try:
+        if not hasattr(ctx, '_agent') or not hasattr(ctx._agent, 'queue'):
+            return "⚠️ Task queue not available"
+
+        task = ctx._agent.queue.get_task(task_id)
+        if not task:
+            return f"⚠️ Task not found: {task_id}"
+
+        return json.dumps({
+            "id": task.id,
+            "type": task.task_type,
+            "status": task.status,
+            "created_at": task.created_at,
+            "scheduled_at": task.scheduled_at,
+            "started_at": task.started_at,
+            "completed_at": task.completed_at,
+            "result": task.result[:200] if task.result else None,
+            "error": task.error[:200] if task.error else None,
+            "retry_count": task.retry_count,
+        }, indent=2)
+
+    except Exception as e:
+        return f"⚠️ Error getting task status: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Evolution Tools
+# ---------------------------------------------------------------------------
+
+def pause_evolution(ctx: ToolContext) -> str:
+    """
+    Pause automatic evolution cycles.
+
+    Args:
+        ctx: Tool context
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        if not hasattr(ctx, '_agent') or not hasattr(ctx._agent, '_evolution'):
+            return "⚠️ Evolution not enabled"
+
+        if ctx._agent._evolution:
+            ctx._agent._evolution.pause()
+            return "✓ Evolution paused"
+        return "⚠️ Evolution not running"
+
+    except Exception as e:
+        return f"⚠️ Error pausing evolution: {e}"
+
+
+def resume_evolution(ctx: ToolContext) -> str:
+    """
+    Resume automatic evolution cycles.
+
+    Args:
+        ctx: Tool context
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        if not hasattr(ctx, '_agent') or not hasattr(ctx._agent, '_evolution'):
+            return "⚠️ Evolution not enabled"
+
+        if ctx._agent._evolution:
+            ctx._agent._evolution.resume()
+            return "✓ Evolution resumed"
+        return "⚠️ Evolution not initialized"
+
+    except Exception as e:
+        return f"⚠️ Error resuming evolution: {e}"
+
+
+def get_evolution_stats(ctx: ToolContext) -> str:
+    """
+    Get evolution statistics and pending changes.
+
+    Args:
+        ctx: Tool context
+
+    Returns:
+        Evolution status information
+    """
+    try:
+        if not hasattr(ctx, '_agent'):
+            return "⚠️ Agent not available"
+
+        if ctx._agent._evolution:
+            status = ctx._agent._evolution.get_status()
+            pending = ctx._agent.get_pending_evolution_changes()
+            status["pending_changes_detail"] = pending
+            return json.dumps(status, indent=2)
+
+        return json.dumps({
+            "enabled": False,
+            "message": "Evolution not enabled. Enable in config with evolution_enabled=true"
+        }, indent=2)
+
+    except Exception as e:
+        return f"⚠️ Error getting evolution stats: {e}"
+
+
+def approve_evolution_change(ctx: ToolContext, change_id: str) -> str:
+    """
+    Approve a pending evolution change.
+
+    Args:
+        ctx: Tool context
+        change_id: ID of the change to approve
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        if not hasattr(ctx, '_agent'):
+            return "⚠️ Agent not available"
+
+        # Note: This is a sync wrapper around async method
+        # In practice, the agent should handle this via its async methods
+        if ctx._agent._evolution:
+            # Queue approval for async execution
+            import asyncio
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # Schedule for later
+                    asyncio.create_task(ctx._agent.approve_evolution_change(change_id))
+                    return f"✓ Change {change_id} approval queued"
+                else:
+                    success = loop.run_until_complete(ctx._agent.approve_evolution_change(change_id))
+                    if success:
+                        return f"✓ Change {change_id} approved and applied"
+                    return f"⚠️ Failed to approve change {change_id}"
+            except RuntimeError:
+                return "⚠️ Cannot approve from sync context - use async API"
+        return "⚠️ Evolution not enabled"
+
+    except Exception as e:
+        return f"⚠️ Error approving change: {e}"
+
+
+def reject_evolution_change(ctx: ToolContext, change_id: str) -> str:
+    """
+    Reject a pending evolution change.
+
+    Args:
+        ctx: Tool context
+        change_id: ID of the change to reject
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        if not hasattr(ctx, '_agent'):
+            return "⚠️ Agent not available"
+
+        if ctx._agent._evolution:
+            success = ctx._agent.reject_evolution_change(change_id)
+            if success:
+                return f"✓ Change {change_id} rejected"
+            return f"⚠️ Change {change_id} not found"
+        return "⚠️ Evolution not enabled"
+
+    except Exception as e:
+        return f"⚠️ Error rejecting change: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Tool Registry Export
 # ---------------------------------------------------------------------------
 
@@ -625,9 +864,9 @@ def get_tools() -> List[ToolEntry]:
         ),
 
         ToolEntry(
-            name="repo_write",
+            name="repo_write_commit",
             schema={
-                "name": "repo_write",
+                "name": "repo_write_commit",
                 "description": "Write a file to the agent sandbox directory",
                 "parameters": {
                     "type": "object",
@@ -828,6 +1067,151 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=get_dpc_context,
+            timeout_sec=10,
+        ),
+
+        # Task queue tools
+        ToolEntry(
+            name="schedule_task",
+            schema={
+                "name": "schedule_task",
+                "description": "Schedule a task for future or background execution",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_type": {
+                            "type": "string",
+                            "description": "Type of task",
+                            "enum": ["chat", "improvement", "review"]
+                        },
+                        "task_data": {
+                            "type": "string",
+                            "description": "JSON string with task payload"
+                        },
+                        "delay_seconds": {
+                            "type": "integer",
+                            "description": "Delay before execution in seconds",
+                            "default": 0,
+                            "minimum": 0
+                        },
+                        "priority": {
+                            "type": "string",
+                            "description": "Task priority",
+                            "enum": ["critical", "high", "normal", "low"],
+                            "default": "normal"
+                        }
+                    },
+                    "required": ["task_type", "task_data"]
+                }
+            },
+            handler=schedule_task,
+            timeout_sec=10,
+        ),
+
+        ToolEntry(
+            name="get_task_status",
+            schema={
+                "name": "get_task_status",
+                "description": "Get status of a scheduled task",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_id": {
+                            "type": "string",
+                            "description": "Task ID to check"
+                        }
+                    },
+                    "required": ["task_id"]
+                }
+            },
+            handler=get_task_status,
+            timeout_sec=10,
+        ),
+
+        # Evolution tools
+        ToolEntry(
+            name="pause_evolution",
+            schema={
+                "name": "pause_evolution",
+                "description": "Pause automatic evolution cycles",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            handler=pause_evolution,
+            timeout_sec=5,
+        ),
+
+        ToolEntry(
+            name="resume_evolution",
+            schema={
+                "name": "resume_evolution",
+                "description": "Resume automatic evolution cycles",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            handler=resume_evolution,
+            timeout_sec=5,
+        ),
+
+        ToolEntry(
+            name="get_evolution_stats",
+            schema={
+                "name": "get_evolution_stats",
+                "description": "Get evolution statistics and pending changes",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            handler=get_evolution_stats,
+            timeout_sec=10,
+        ),
+
+        ToolEntry(
+            name="approve_evolution_change",
+            schema={
+                "name": "approve_evolution_change",
+                "description": "Approve a pending evolution change",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "change_id": {
+                            "type": "string",
+                            "description": "ID of the change to approve"
+                        }
+                    },
+                    "required": ["change_id"]
+                }
+            },
+            handler=approve_evolution_change,
+            timeout_sec=10,
+            is_code_tool=True,
+        ),
+
+        ToolEntry(
+            name="reject_evolution_change",
+            schema={
+                "name": "reject_evolution_change",
+                "description": "Reject a pending evolution change",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "change_id": {
+                            "type": "string",
+                            "description": "ID of the change to reject"
+                        }
+                    },
+                    "required": ["change_id"]
+                }
+            },
+            handler=reject_evolution_change,
             timeout_sec=10,
         ),
     ]

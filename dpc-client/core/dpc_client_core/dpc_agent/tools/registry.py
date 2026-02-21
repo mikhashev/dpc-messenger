@@ -136,8 +136,6 @@ CORE_TOOL_NAMES = {
     "knowledge_read", "knowledge_write", "knowledge_list",
     # DPC integration
     "get_dpc_context",
-    # Utility
-    "web_search",
     # Browser tools (safe, read-only)
     "browse_page", "fetch_json", "extract_links", "check_url", "search_web",
     # Review tools (safe, analysis only)
