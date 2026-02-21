@@ -4084,7 +4084,7 @@ class CoreService:
             # Build participants list
             participants = []
 
-            if conversation_id == "local_ai":
+            if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
                 # Local AI chat: just the user
                 participants = [
                     {
@@ -4156,9 +4156,9 @@ class CoreService:
                     proposal.to_dict()
                 )
 
-                # For local_ai and telegram conversations, don't broadcast knowledge to peers (privacy)
+                # For local_ai, ai_chat_xxx, and telegram conversations, don't broadcast knowledge to peers (privacy)
                 # For peer conversations, broadcast for collaborative consensus
-                if conversation_id == "local_ai" or conversation_id.startswith("telegram-"):
+                if conversation_id == "local_ai" or conversation_id.startswith("ai_") or conversation_id.startswith("telegram-"):
                     logger.info("%s - private conversation, knowledge will not be shared with peers", conversation_id)
                     # Use no-op broadcast function (local-only approval)
                     async def _no_op_broadcast(message: Dict[str, Any]) -> None:
@@ -4907,11 +4907,11 @@ class CoreService:
         Send an image from clipboard paste (Phase 2.3: Vision + Remote Vision).
 
         Handles two cases:
-        - AI Chat (local_ai): Save image, run vision analysis (local or remote), broadcast result
+        - AI Chat (local_ai or ai_chat_xxx): Save image, run vision analysis (local or remote), broadcast result
         - P2P Chat: Generate thumbnail, send FILE_OFFER with image_metadata
 
         Args:
-            conversation_id: 'local_ai' for AI chat, or node_id for P2P chat
+            conversation_id: 'local_ai' or 'ai_chat_xxx' for AI chat, or node_id for P2P chat
             image_base64: Data URL (e.g., "data:image/png;base64,...")
             filename: Suggested filename (e.g., "screenshot_1234567890.png")
             caption: Optional text caption (will be included in vision query for AI chat)
@@ -4959,8 +4959,8 @@ class CoreService:
             # Extract dimensions
             dimensions = get_image_dimensions(tmp_path)
 
-            if conversation_id == "local_ai":
-                # AI Chat: Run vision analysis
+            if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
+                # AI Chat: Run vision analysis (supports local_ai and ai_chat_xxx conversations)
                 logger.info(f"AI chat vision analysis: {filename} ({dimensions['width']}x{dimensions['height']})")
 
                 # Build query with caption (if provided)
@@ -4983,7 +4983,7 @@ class CoreService:
 
                 # Broadcast AI response to UI
                 await self.local_api.broadcast_event("ai_response_with_image", {
-                    "conversation_id": "local_ai",
+                    "conversation_id": conversation_id,
                     "query": query,
                     "response": response_metadata["response"],
                     "provider": response_metadata["provider"],
@@ -4995,7 +4995,7 @@ class CoreService:
 
                 return {
                     "status": "analyzed",
-                    "conversation_id": "local_ai",
+                    "conversation_id": conversation_id,
                     "filename": filename,
                     "dimensions": dimensions
                 }
