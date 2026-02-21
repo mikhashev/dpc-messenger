@@ -2114,7 +2114,9 @@
 
     // Create new Agent chat ID
     const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
-    const chatName = `DPC Agent`;
+    // Include underlying provider in chat name for clarity
+    const underlyingProvider = $availableProviders?.default_provider || 'unknown';
+    const chatName = `Agent (${underlyingProvider})`;
 
     // Add to aiChats
     aiChats.update(chats => {
@@ -3427,7 +3429,11 @@
         <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
           {#each $availableProviders.providers as provider}
             <option value={provider.alias}>
-              {provider.alias} - {provider.model}
+              {#if provider.alias === 'dpc_agent'}
+                Agent (uses {$availableProviders?.default_provider || 'default'})
+              {:else}
+                {provider.alias} - {provider.model}
+              {/if}
             </option>
           {/each}
         </select>
