@@ -298,8 +298,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["url"]
                 }
             },
-            fn=browse_page,
-            timeout=60,
+            handler=browse_page,
+            timeout_sec=60,
         ),
 
         ToolEntry(
@@ -318,8 +318,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["url"]
                 }
             },
-            fn=fetch_json,
-            timeout=30,
+            handler=fetch_json,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -338,8 +338,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["url"]
                 }
             },
-            fn=extract_links,
-            timeout=30,
+            handler=extract_links,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -358,8 +358,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["url"]
                 }
             },
-            fn=check_url,
-            timeout=15,
+            handler=check_url,
+            timeout_sec=15,
         ),
 
         ToolEntry(
@@ -385,7 +385,7 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["query"]
                 }
             },
-            fn=search_duckduckgo,
-            timeout=30,
+            handler=search_duckduckgo,
+            timeout_sec=30,
         ),
     ]

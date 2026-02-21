@@ -46,8 +46,10 @@ class DpcLlmAdapter:
     def default_model(self) -> str:
         """Return the current DPC provider's model name."""
         try:
-            provider = self._llm_manager.get_default_provider()
-            if provider:
+            # LLMManager.default_provider is the alias name, providers is the dict
+            alias = self._llm_manager.default_provider
+            if alias and alias in self._llm_manager.providers:
+                provider = self._llm_manager.providers[alias]
                 return getattr(provider, "model", "dpc_default") or "dpc_default"
         except Exception as e:
             log.debug(f"Failed to get default model: {e}")
@@ -79,13 +81,16 @@ class DpcLlmAdapter:
 
         # Inject tool descriptions if provided
         if tools:
+            log.debug(f"Injecting {len(tools)} tool descriptions into prompt")
             tool_descriptions = self._format_tools_for_prompt(tools)
             prompt = f"{tool_descriptions}\n\n{prompt}"
 
         # Get response from DPC's LLMManager
-        provider = self._llm_manager.get_default_provider()
-        if not provider:
+        # LLMManager.default_provider is the alias name, providers is the dict
+        alias = self._llm_manager.default_provider
+        if not alias or alias not in self._llm_manager.providers:
             raise RuntimeError("No AI provider configured in DPC Messenger")
+        provider = self._llm_manager.providers[alias]
 
         # Call DPC provider
         try:
@@ -99,9 +104,12 @@ class DpcLlmAdapter:
 
             # Parse for tool calls if tools were provided
             if tools:
+                log.debug(f"Parsing tool calls from response (len={len(response)})")
                 tool_calls = self._parse_tool_calls(response)
+                log.debug(f"Parsed {len(tool_calls)} tool calls from response")
                 if tool_calls:
                     response_msg["tool_calls"] = tool_calls
+                    log.info(f"Found {len(tool_calls)} tool call(s): {[tc['function']['name'] for tc in tool_calls]}")
 
             # Estimate usage (DPC providers may not return token counts)
             usage: Dict[str, Any] = {
@@ -199,9 +207,43 @@ class DpcLlmAdapter:
         """
         tool_calls = []
 
+        if not content:
+            log.debug("Empty content passed to _parse_tool_calls")
+            return tool_calls
+
+        # Debug: log first 500 chars of content
+        log.debug(f"Parsing content (len={len(content)}): {content[:500]!r}")
+
         # Find tool_call blocks
-        pattern = r"```tool_call\s*\n(.*?)```"
+        # More robust pattern: handles \r\n, \n, extra whitespace
+        pattern = r"```tool_call\s*[\r]?\n(.*?)```"
         matches = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
+
+        log.debug(f"Regex found {len(matches)} tool_call blocks in content")
+
+        # If no matches found, try alternative patterns
+        if not matches and "tool_call" in content.lower():
+            log.warning("Found 'tool_call' in content but regex didn't match - trying alternative patterns")
+            # Try without newline requirement
+            alt_pattern = r"```tool_call\s*(.*?)```"
+            matches = re.findall(alt_pattern, content, re.DOTALL | re.IGNORECASE)
+            log.debug(f"Alternative regex found {len(matches)} matches")
+
+            # Try with Unicode backticks (some LLMs use different quote characters)
+            if not matches:
+                # Unicode backticks: U+2018/U+2019 (curly quotes), U+0060 (grave)
+                alt_pattern2 = r"[`\u2018\u2019`]{3}tool_call\s*[\r\n]*(.*?)[`\u2018\u2019`]{3}"
+                matches = re.findall(alt_pattern2, content, re.DOTALL | re.IGNORECASE)
+                log.debug(f"Unicode backtick regex found {len(matches)} matches")
+
+        # Last resort: try to find JSON objects that look like tool calls
+        if not matches:
+            # Look for JSON objects with "name" and "arguments" fields
+            json_pattern = r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^}]*\}\s*\}'
+            json_matches = re.findall(json_pattern, content, re.DOTALL)
+            if json_matches:
+                log.debug(f"Found {len(json_matches)} JSON tool call objects directly")
+                matches = json_matches
 
         for i, match in enumerate(matches):
             try:
@@ -217,6 +259,7 @@ class DpcLlmAdapter:
                         "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False)
                     }
                 })
+                log.debug(f"Parsed tool call: {data.get('name', 'unknown')}")
 
             except json.JSONDecodeError as e:
                 log.warning(f"Failed to parse tool call JSON: {match[:100]} - {e}")

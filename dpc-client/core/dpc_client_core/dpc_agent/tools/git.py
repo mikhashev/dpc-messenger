@@ -54,7 +54,7 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
             cwd=str(work_dir),
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout_sec=30,
         )
 
         return {
@@ -269,8 +269,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": []
                 }
             },
-            fn=git_status,
-            timeout=30,
+            handler=git_status,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -295,8 +295,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": []
                 }
             },
-            fn=git_diff,
-            timeout=30,
+            handler=git_diff,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -323,8 +323,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": []
                 }
             },
-            fn=git_log,
-            timeout=30,
+            handler=git_log,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -349,8 +349,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["files"]
                 }
             },
-            fn=git_add,
-            timeout=30,
+            handler=git_add,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -374,8 +374,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["message"]
                 }
             },
-            fn=git_commit,
-            timeout=30,
+            handler=git_commit,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -395,8 +395,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": []
                 }
             },
-            fn=git_branch,
-            timeout=30,
+            handler=git_branch,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -416,7 +416,7 @@ def get_tools() -> List[ToolEntry]:
                     "required": []
                 }
             },
-            fn=git_init,
-            timeout=30,
+            handler=git_init,
+            timeout_sec=30,
         ),
     ]

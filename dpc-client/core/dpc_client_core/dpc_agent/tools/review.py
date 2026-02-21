@@ -342,8 +342,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["content"]
                 }
             },
-            fn=self_review,
-            timeout=30,
+            handler=self_review,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -368,8 +368,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["content"]
                 }
             },
-            fn=request_critique,
-            timeout=30,
+            handler=request_critique,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -394,8 +394,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["approaches"]
                 }
             },
-            fn=compare_approaches,
-            timeout=30,
+            handler=compare_approaches,
+            timeout_sec=30,
         ),
 
         ToolEntry(
@@ -416,8 +416,8 @@ def get_tools() -> List[ToolEntry]:
                     "required": []
                 }
             },
-            fn=quality_checklist,
-            timeout=10,
+            handler=quality_checklist,
+            timeout_sec=10,
         ),
 
         ToolEntry(
@@ -444,7 +444,7 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["responses"]
                 }
             },
-            fn=consensus_check,
-            timeout=30,
+            handler=consensus_check,
+            timeout_sec=30,
         ),
     ]

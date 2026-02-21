@@ -493,12 +493,17 @@ class AnthropicProvider(AIProvider):
             if thinking_text:
                 logger.info(f"Claude extended thinking: {len(thinking_text)} chars")
 
-            # Return text content (or first block's text for backward compatibility)
+            # Return text content (only from text blocks, never from thinking blocks)
             if final_text:
                 return final_text
             elif message.content:
-                # Fallback: try to get text from first block
-                return message.content[0].text if hasattr(message.content[0], 'text') else str(message.content[0])
+                # Fallback: look for any text block in content
+                for block in message.content:
+                    if hasattr(block, 'type') and block.type == "text" and hasattr(block, 'text'):
+                        return block.text
+                # No text block found - return empty rather than repr of thinking block
+                logger.warning(f"No text block found in response, only thinking blocks")
+                return ""
             else:
                 return ""
 
@@ -665,12 +670,17 @@ class ZaiProvider(AIProvider):
             if thinking_text:
                 logger.info(f"GLM extended thinking: {len(thinking_text)} chars")
 
-            # Return text content (or first block's text for backward compatibility)
+            # Return text content (only from text blocks, never from thinking blocks)
             if final_text:
                 return final_text
             elif message.content:
-                # Fallback: try to get text from first block
-                return message.content[0].text if hasattr(message.content[0], 'text') else str(message.content[0])
+                # Fallback: look for any text block in content
+                for block in message.content:
+                    if hasattr(block, 'type') and block.type == "text" and hasattr(block, 'text'):
+                        return block.text
+                # No text block found - return empty rather than repr of thinking block
+                logger.warning(f"No text block found in response, only thinking blocks")
+                return ""
             else:
                 return ""
 
@@ -1368,6 +1378,9 @@ class DpcAgentProvider(AIProvider):
         self.background_consciousness = config.get("background_consciousness", False)
         self.budget_usd = config.get("budget_usd", 50.0)
         self.max_rounds = config.get("max_rounds", 200)
+
+        # Set model name for token counting (uses underlying provider's model)
+        self.model = "dpc_agent"  # Identifier for token counting
 
         # Agent manager (lazy initialization)
         self._manager = None

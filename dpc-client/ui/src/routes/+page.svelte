@@ -694,6 +694,15 @@
     setActiveChat(activeChatId);
   });
 
+  // Reactive: Sync provider dropdown with chat-specific provider when switching chats
+  $effect(() => {
+    const chatProvider = $chatProviders.get(activeChatId);
+    if (chatProvider && chatProvider !== 'local_ai') {
+      // Update dropdown to show chat-specific provider (e.g., dpc_agent)
+      selectedTextProvider = `local:${chatProvider}`;
+    }
+  });
+
   // Reactive: Open commit dialog when proposal received
   $effect(() => {
     if ($knowledgeCommitProposal) {
@@ -1750,17 +1759,25 @@
         payload.context_ids = Array.from(selectedPeerContexts);
       }
 
-      // Phase 2.3: Parse text provider to support remote text inference
-      const textProvider = parseProviderSelection(selectedTextProvider);
+      // Determine provider: use chat-specific provider if set, otherwise use dropdown selection
+      const chatSpecificProvider = $chatProviders.get(activeChatId);
 
-      if (textProvider.source === 'remote' && textProvider.nodeId) {
-        // Remote inference - send compute_host and provider alias
-        payload.compute_host = textProvider.nodeId;
-        payload.provider = textProvider.alias;
+      if (chatSpecificProvider) {
+        // Use chat-specific provider (e.g., dpc_agent for agent chats)
+        payload.provider = chatSpecificProvider;
       } else {
-        // Local inference - pass provider alias
-        if (textProvider.alias) {
+        // Fall back to dropdown selection (supports remote inference)
+        const textProvider = parseProviderSelection(selectedTextProvider);
+
+        if (textProvider.source === 'remote' && textProvider.nodeId) {
+          // Remote inference - send compute_host and provider alias
+          payload.compute_host = textProvider.nodeId;
           payload.provider = textProvider.alias;
+        } else {
+          // Local inference - pass provider alias
+          if (textProvider.alias) {
+            payload.provider = textProvider.alias;
+          }
         }
       }
 
@@ -2085,6 +2102,47 @@
   function cancelAddAIChat() {
     showAddAIChatDialog = false;
     selectedProviderForNewChat = "";
+  }
+
+  function handleAddAgentChat() {
+    // Check if dpc_agent provider exists
+    const agentProvider = $availableProviders?.providers?.find((p: any) => p.alias === 'dpc_agent');
+    if (!agentProvider) {
+      alert("DPC Agent provider not configured. Add 'dpc_agent' to ~/.dpc/providers.json");
+      return;
+    }
+
+    // Create new Agent chat ID
+    const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
+    const chatName = `DPC Agent`;
+
+    // Add to aiChats
+    aiChats.update(chats => {
+      const newMap = new Map(chats);
+      newMap.set(chatId, {
+        name: chatName,
+        provider: 'dpc_agent',
+        instruction_set_name: 'none'
+      });
+      return newMap;
+    });
+
+    // Set provider for this chat
+    chatProviders.update(map => {
+      const newMap = new Map(map);
+      newMap.set(chatId, 'dpc_agent');
+      return newMap;
+    });
+
+    // Initialize chat history
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      newMap.set(chatId, []);
+      return newMap;
+    });
+
+    // Switch to the new chat
+    activeChatId = chatId;
   }
 
   async function handleDeleteAIChat(chatId: string) {
@@ -2834,6 +2892,7 @@
       onResetUnreadCount={resetUnreadCount}
       onGetPeerDisplayName={getPeerDisplayName}
       onAddAIChat={handleAddAIChat}
+      onAddAgentChat={handleAddAgentChat}
       onDeleteAIChat={handleDeleteAIChat}
       onDisconnectPeer={handleDisconnectPeer}
     />

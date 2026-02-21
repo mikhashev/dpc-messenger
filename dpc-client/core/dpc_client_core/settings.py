@@ -266,6 +266,19 @@ class Settings:
             'backup_count': '5'  # Number of backup log files to keep
         }
 
+        # Per-module log level overrides (reduce verbosity of verbose third-party libs)
+        self._config['logging.modules'] = {
+            # HTTP libraries - very verbose at DEBUG
+            'httpcore': 'WARNING',
+            'httpx': 'WARNING',
+            # Anthropic SDK - verbose request logging
+            'anthropic': 'WARNING',
+            # Telegram bot - verbose polling
+            'telegram.ext.Application': 'INFO',
+            # OpenAI SDK
+            'openai': 'WARNING',
+        }
+
         # Ensure directory exists
         self.dpc_home_dir.mkdir(parents=True, exist_ok=True)
 

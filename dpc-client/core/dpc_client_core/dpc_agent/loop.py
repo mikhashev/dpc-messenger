@@ -230,6 +230,12 @@ async def run_llm_loop(
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
 
+            log.debug(f"LLM response: tool_calls={len(tool_calls)}, content_len={len(content) if content else 0}")
+            if tool_calls:
+                log.info(f"Processing {len(tool_calls)} tool call(s)")
+            elif content and "tool_call" in content.lower():
+                log.warning(f"No tool_calls parsed but 'tool_call' found in content: {content[:200]!r}")
+
             # No tool calls — final response
             if not tool_calls:
                 if content and content.strip():

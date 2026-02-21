@@ -191,16 +191,13 @@ class ToolRegistry:
         """
         import importlib
         import pkgutil
+        import pathlib
 
-        try:
-            from . import tools as tools_pkg
-            tools_path = tools_pkg.__path__
-        except ImportError:
-            # If tools package doesn't exist yet, skip module loading
-            log.debug("Tools package not found, skipping module loading")
-            return
+        # Get the path to this package (the tools directory)
+        tools_path = pathlib.Path(__file__).parent
 
-        for _importer, modname, _ispkg in pkgutil.iter_modules(tools_path):
+        tools_loaded = 0
+        for _importer, modname, _ispkg in pkgutil.iter_modules([str(tools_path)]):
             if modname.startswith("_") or modname == "registry":
                 continue
             try:
@@ -208,9 +205,12 @@ class ToolRegistry:
                 if hasattr(mod, "get_tools"):
                     for entry in mod.get_tools():
                         self._entries[entry.name] = entry
-                        log.debug(f"Loaded tool: {entry.name}")
+                        tools_loaded += 1
             except Exception as e:
                 log.warning(f"Failed to load tool module {modname}: {e}", exc_info=True)
+
+        if tools_loaded > 0:
+            log.info(f"Loaded {tools_loaded} agent tools from {len(self._entries)} modules")
 
     def set_context(self, ctx: ToolContext) -> None:
         """Set the execution context for subsequent tool calls."""

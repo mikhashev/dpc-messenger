@@ -117,6 +117,14 @@ class CoreService:
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
         self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
+
+        # Inject CoreService reference into DpcAgentProvider if configured
+        if "dpc_agent" in self.llm_manager.providers:
+            dpc_agent_provider = self.llm_manager.providers["dpc_agent"]
+            if hasattr(dpc_agent_provider, 'set_service'):
+                dpc_agent_provider.set_service(self)
+                logger.info("Injected CoreService into DpcAgentProvider")
+
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
             oauth_callback_host=self.settings.get_oauth_callback_host(),
