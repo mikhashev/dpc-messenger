@@ -4,7 +4,7 @@ This guide explains how to configure, test, and use the embedded autonomous AI a
 
 ## Overview
 
-The embedded agent is a self-modifying AI agent adapted from the [Ouroboros project](https://github.com/mike/ouroboros), integrated directly into DPC Messenger's codebase. It provides:
+The embedded agent is a self-modifying AI agent adapted from the [Ouroboros project](https://github.com/razzant/ouroboros), integrated directly into DPC Messenger's codebase. It provides:
 
 - **40+ Tools**: File operations, web search, memory management, git, browser automation
 - **Background Consciousness**: Proactive thinking between tasks (optional)
