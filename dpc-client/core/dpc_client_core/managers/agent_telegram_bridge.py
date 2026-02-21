@@ -131,6 +131,7 @@ class AgentTelegramBridge:
         """Get default event filter - important events only."""
         return {
             # Tasks
+            EventType.TASK_STARTED.value,
             EventType.TASK_COMPLETED.value,
             EventType.TASK_FAILED.value,
             # Evolution
@@ -518,6 +519,11 @@ Just type a message and the agent will process it.
             lines.append(f"📋 Task: `{data['task_id']}`")
         if "task_type" in data:
             lines.append(f"📁 Type: {data['task_type']}")
+        if "message_preview" in data:
+            preview = str(data["message_preview"])[:150]
+            lines.append(f"💬 Preview: {preview}")
+        if "conversation_id" in data:
+            lines.append(f"🔗 Conv: `{data['conversation_id'][:30]}`")
 
         # Tool events
         if "tool" in data:
