@@ -46,6 +46,9 @@ class ContextFirewall:
         # Parse notification settings
         self._parse_notification_settings()
 
+        # Parse DPC agent settings
+        self._parse_dpc_agent_settings()
+
     def _parse_compute_settings(self):
         """Parse compute sharing settings from the config."""
         compute = self.rules.get('compute', {})
@@ -85,6 +88,132 @@ class ContextFirewall:
         })
         logger.debug("Notification settings updated: enabled=%s, events=%s",
                      self.notifications_enabled, self.notification_events)
+
+    def _parse_dpc_agent_settings(self):
+        """Parse DPC agent settings from the config."""
+        dpc_agent = self.rules.get('dpc_agent', {})
+        self.dpc_agent_enabled = dpc_agent.get('enabled', True)
+        self.dpc_agent_personal_context_access = dpc_agent.get('personal_context_access', True)
+        self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', True)
+        self.dpc_agent_knowledge_access = dpc_agent.get('knowledge_access', 'read_only')
+
+        # All available tools with their default values
+        # True = enabled by default, False = disabled by default (security)
+        all_tools_defaults = {
+            # File operations (sandboxed to ~/.dpc/agent/)
+            'repo_read': True,
+            'repo_list': True,
+            'repo_write_commit': False,  # Can write files
+            # Drive operations (direct file system access)
+            'drive_read': False,
+            'drive_list': False,
+            'drive_write': False,
+            # Memory/identity
+            'update_scratchpad': True,
+            'update_identity': True,
+            'chat_history': True,
+            # Knowledge
+            'knowledge_read': True,
+            'knowledge_write': False,  # Controlled by knowledge_access
+            'knowledge_list': True,
+            # DPC integration
+            'get_dpc_context': True,
+            # Web tools
+            'web_search': True,
+            'browse_page': True,
+            'fetch_json': True,
+            'extract_links': True,
+            'check_url': True,
+            'search_web': True,
+            # Review tools (safe, analysis only)
+            'self_review': True,
+            'request_critique': True,
+            'compare_approaches': True,
+            'quality_checklist': True,
+            'consensus_check': True,
+            # Git tools (read-only)
+            'git_status': False,
+            'git_diff': False,
+            'git_log': False,
+            # Git tools (modify files)
+            'git_add': False,
+            'git_commit': False,
+            'git_branch': False,
+            'git_init': False,
+            'repo_commit_push': False,  # Can push to remote
+            # Restricted tools (security sensitive)
+            'run_shell': False,
+            'claude_code_edit': False,
+        }
+
+        # Parse tool permissions from config, using defaults for missing tools
+        tools = dpc_agent.get('tools', {})
+        self.dpc_agent_tools: Dict[str, bool] = {}
+        for tool_name, default_enabled in all_tools_defaults.items():
+            self.dpc_agent_tools[tool_name] = tools.get(tool_name, default_enabled)
+
+        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d",
+                     self.dpc_agent_enabled,
+                     self.dpc_agent_personal_context_access,
+                     self.dpc_agent_device_context_access,
+                     self.dpc_agent_knowledge_access,
+                     len([t for t in self.dpc_agent_tools.values() if t]))
+
+    def can_agent_access_context(self, context_type: str) -> bool:
+        """
+        Check if the DPC agent can access a specific context type.
+
+        Args:
+            context_type: Type of context ('personal', 'device', 'knowledge')
+
+        Returns:
+            True if agent can access this context type
+        """
+        if not self.dpc_agent_enabled:
+            return False
+
+        if context_type == 'personal':
+            return self.dpc_agent_personal_context_access
+        elif context_type == 'device':
+            return self.dpc_agent_device_context_access
+        elif context_type == 'knowledge':
+            # knowledge_access can be 'read_only', 'read_write', or 'none'
+            return self.dpc_agent_knowledge_access != 'none'
+
+        return False
+
+    def can_agent_write_knowledge(self) -> bool:
+        """Check if the agent can write to knowledge base."""
+        if not self.dpc_agent_enabled:
+            return False
+        return self.dpc_agent_knowledge_access == 'read_write'
+
+    def get_allowed_agent_tools(self) -> set:
+        """
+        Get the set of tools the agent is allowed to use.
+
+        Returns:
+            Set of allowed tool names based on firewall configuration
+        """
+        if not self.dpc_agent_enabled:
+            return set()
+
+        allowed = set()
+
+        # Add tools that are enabled in configuration
+        for tool_name, is_enabled in self.dpc_agent_tools.items():
+            if is_enabled:
+                allowed.add(tool_name)
+
+        # Override: get_dpc_context requires personal_context_access
+        if not self.dpc_agent_personal_context_access:
+            allowed.discard('get_dpc_context')
+
+        # Override: knowledge_write requires read_write access
+        if self.dpc_agent_knowledge_access != 'read_write':
+            allowed.discard('knowledge_write')
+
+        return allowed
 
     def _ensure_file_exists(self):
         """Creates a default, secure privacy_rules.json file if one doesn't exist."""
@@ -212,6 +341,50 @@ class ContextFirewall:
                         "session_proposal": True,
                         "session_result": True,
                         "connection_status": False
+                    }
+                },
+                "dpc_agent": {
+                    "_comment": "DPC Agent permissions - Control what the embedded AI agent can access",
+                    "enabled": True,
+                    "personal_context_access": True,
+                    "device_context_access": True,
+                    "knowledge_access": "read_only",
+                    "tools": {
+                        "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
+                        "repo_read": True,
+                        "repo_list": True,
+                        "repo_write_commit": False,
+                        "drive_read": False,
+                        "drive_list": False,
+                        "drive_write": False,
+                        "update_scratchpad": True,
+                        "update_identity": True,
+                        "chat_history": True,
+                        "knowledge_read": True,
+                        "knowledge_write": False,
+                        "knowledge_list": True,
+                        "get_dpc_context": True,
+                        "web_search": True,
+                        "browse_page": True,
+                        "fetch_json": True,
+                        "extract_links": True,
+                        "check_url": True,
+                        "search_web": True,
+                        "self_review": True,
+                        "request_critique": True,
+                        "compare_approaches": True,
+                        "quality_checklist": True,
+                        "consensus_check": True,
+                        "git_status": False,
+                        "git_diff": False,
+                        "git_log": False,
+                        "git_add": False,
+                        "git_commit": False,
+                        "git_branch": False,
+                        "git_init": False,
+                        "repo_commit_push": False,
+                        "run_shell": False,
+                        "claude_code_edit": False
                     }
                 },
                 "file_transfer": {
@@ -793,7 +966,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', '_comment']
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', 'dpc_agent', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -986,6 +1159,61 @@ class ContextFirewall:
                             for event_name, enabled in notifications['events'].items():
                                 if not isinstance(enabled, bool):
                                     errors.append(f"'notifications.events.{event_name}' must be a boolean (true or false)")
+
+            # Validate dpc_agent section
+            if 'dpc_agent' in config_dict:
+                dpc_agent = config_dict['dpc_agent']
+                if not isinstance(dpc_agent, dict):
+                    errors.append("'dpc_agent' section must be a dictionary")
+                else:
+                    if 'enabled' in dpc_agent and not isinstance(dpc_agent['enabled'], bool):
+                        errors.append("'dpc_agent.enabled' must be a boolean (true or false)")
+
+                    if 'personal_context_access' in dpc_agent and not isinstance(dpc_agent['personal_context_access'], bool):
+                        errors.append("'dpc_agent.personal_context_access' must be a boolean")
+
+                    if 'device_context_access' in dpc_agent and not isinstance(dpc_agent['device_context_access'], bool):
+                        errors.append("'dpc_agent.device_context_access' must be a boolean")
+
+                    if 'knowledge_access' in dpc_agent:
+                        valid_access = ['none', 'read_only', 'read_write']
+                        if dpc_agent['knowledge_access'] not in valid_access:
+                            errors.append(f"'dpc_agent.knowledge_access' must be one of: {valid_access}")
+
+                    if 'tools' in dpc_agent:
+                        tools = dpc_agent['tools']
+                        if not isinstance(tools, dict):
+                            errors.append("'dpc_agent.tools' must be a dictionary")
+                        else:
+                            # All valid tool names
+                            valid_tools = {
+                                # File operations
+                                'repo_read', 'repo_list', 'repo_write_commit',
+                                # Drive operations
+                                'drive_read', 'drive_list', 'drive_write',
+                                # Memory/identity
+                                'update_scratchpad', 'update_identity', 'chat_history',
+                                # Knowledge
+                                'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                # DPC integration
+                                'get_dpc_context',
+                                # Web tools
+                                'web_search', 'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
+                                # Review tools
+                                'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
+                                # Git tools
+                                'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
+                                'repo_commit_push',
+                                # Restricted tools
+                                'run_shell', 'claude_code_edit',
+                            }
+                            for tool_name, tool_enabled in tools.items():
+                                if tool_name.startswith('_'):
+                                    continue  # Skip comments
+                                if tool_name not in valid_tools:
+                                    errors.append(f"Unknown tool in dpc_agent.tools: '{tool_name}'")
+                                if not isinstance(tool_enabled, bool):
+                                    errors.append(f"'dpc_agent.tools.{tool_name}' must be a boolean")
 
             # Validate image_transfer section
             if 'image_transfer' in config_dict:

@@ -50,6 +50,9 @@ class DpcAgentManager:
         self.service = service
         self.config = config
 
+        # Get firewall reference from CoreService
+        self.firewall = getattr(service, "firewall", None)
+
         # Storage paths
         self.agent_root = get_agent_root()
         ensure_agent_dirs()
@@ -72,11 +75,35 @@ class DpcAgentManager:
             log.warning("Agent already initialized")
             return
 
+        # Get allowed tools from firewall
+        firewall_tools = set()
+        if self.firewall:
+            firewall_tools = self.firewall.get_allowed_agent_tools()
+            if not self.firewall.dpc_agent_enabled:
+                log.warning("DPC Agent is disabled via firewall - not starting")
+                return
+
+        # Merge with config tools (intersection - most restrictive)
+        config_tools = set(self.config.get("tools", [])) if self.config.get("tools") else None
+
+        if firewall_tools and config_tools:
+            # Both specified - use intersection (most restrictive)
+            tool_whitelist = firewall_tools & config_tools
+        elif firewall_tools:
+            # Only firewall - use firewall whitelist
+            tool_whitelist = firewall_tools
+        elif config_tools:
+            # Only config - use config whitelist
+            tool_whitelist = config_tools
+        else:
+            # Neither specified - use core tools only
+            tool_whitelist = None  # Agent will use its defaults
+
         # Build agent config
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
-            tool_whitelist=set(self.config.get("tools", [])) if self.config.get("tools") else None,
+            tool_whitelist=tool_whitelist,
             background_consciousness=self.config.get("background_consciousness", False),
         )
 
@@ -140,27 +167,38 @@ class DpcAgentManager:
         return response
 
     def _get_dpc_context(self) -> Dict[str, Any]:
-        """Get DPC personal and device context."""
+        """Get DPC personal and device context with firewall checks."""
         context = {}
         dpc_dir = pathlib.Path.home() / ".dpc"
 
-        # Load personal context
-        personal_path = dpc_dir / "personal.json"
-        if personal_path.exists():
-            try:
-                personal = json.loads(personal_path.read_text(encoding="utf-8"))
-                context["personal"] = json.dumps(personal, indent=2, ensure_ascii=False)
-            except Exception as e:
-                log.debug(f"Failed to load personal context: {e}")
+        # Check if agent is enabled via firewall
+        if self.firewall and not self.firewall.dpc_agent_enabled:
+            log.debug("DPC Agent is disabled via firewall rules")
+            return context
 
-        # Load device context
-        device_path = dpc_dir / "device_context.json"
-        if device_path.exists():
-            try:
-                device = json.loads(device_path.read_text(encoding="utf-8"))
-                context["device"] = json.dumps(device, indent=2, ensure_ascii=False)
-            except Exception as e:
-                log.debug(f"Failed to load device context: {e}")
+        # Load personal context (with firewall check)
+        if self.firewall is None or self.firewall.can_agent_access_context('personal'):
+            personal_path = dpc_dir / "personal.json"
+            if personal_path.exists():
+                try:
+                    personal = json.loads(personal_path.read_text(encoding="utf-8"))
+                    context["personal"] = json.dumps(personal, indent=2, ensure_ascii=False)
+                except Exception as e:
+                    log.debug(f"Failed to load personal context: {e}")
+        else:
+            log.debug("Personal context access denied by firewall")
+
+        # Load device context (with firewall check)
+        if self.firewall is None or self.firewall.can_agent_access_context('device'):
+            device_path = dpc_dir / "device_context.json"
+            if device_path.exists():
+                try:
+                    device = json.loads(device_path.read_text(encoding="utf-8"))
+                    context["device"] = json.dumps(device, indent=2, ensure_ascii=False)
+                except Exception as e:
+                    log.debug(f"Failed to load device context: {e}")
+        else:
+            log.debug("Device context access denied by firewall")
 
         return context
 

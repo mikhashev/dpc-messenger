@@ -357,7 +357,7 @@ def knowledge_read(ctx: ToolContext, topic: str) -> str:
 
 def knowledge_write(ctx: ToolContext, topic: str, content: str) -> str:
     """
-    Write or update a knowledge base topic.
+    Write or update a knowledge base topic with firewall check.
 
     Args:
         ctx: Tool context
@@ -368,6 +368,12 @@ def knowledge_write(ctx: ToolContext, topic: str, content: str) -> str:
         Result message
     """
     try:
+        # Check firewall for write access
+        if ctx.dpc_service and hasattr(ctx.dpc_service, 'firewall'):
+            firewall = ctx.dpc_service.firewall
+            if not getattr(firewall, 'can_agent_write_knowledge', lambda: True)():
+                return "⚠️ Knowledge write access is disabled via firewall rules (knowledge_access must be 'read_write')"
+
         topic_path = ctx.knowledge_path(topic)
         topic_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -461,7 +467,7 @@ Last updated: {datetime.now(timezone.utc).isoformat()}
 
 def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
     """
-    Read DPC personal or device context.
+    Read DPC personal or device context with firewall checks.
 
     This tool provides access to the user's personal.json or device_context.json
     files, enabling context-aware assistance.
@@ -474,6 +480,19 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
         Context content
     """
     try:
+        # Check firewall if available via DPC service
+        if ctx.dpc_service and hasattr(ctx.dpc_service, 'firewall'):
+            firewall = ctx.dpc_service.firewall
+
+            if not getattr(firewall, 'dpc_agent_enabled', True):
+                return "⚠️ DPC Agent is disabled via firewall rules"
+
+            if context_type == "personal" and not getattr(firewall, 'dpc_agent_personal_context_access', True):
+                return "⚠️ Personal context access is disabled via firewall rules"
+
+            if context_type == "device" and not getattr(firewall, 'dpc_agent_device_context_access', True):
+                return "⚠️ Device context access is disabled via firewall rules"
+
         dpc_dir = Path.home() / ".dpc"
 
         if context_type == "personal":
