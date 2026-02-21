@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import asdict
 import json
 import logging
+import re
 import uuid
 import websockets
 import socket
@@ -4037,13 +4038,37 @@ class CoreService:
             Dict with status and result
         """
         try:
-            # Cast vote through ConsensusManager
+            # Check if this is an AI chat proposal (AI agent needs to vote too)
+            is_ai_chat = False
+            ai_agent_node_id = None
+            if proposal_id in self.consensus_manager.sessions:
+                session = self.consensus_manager.sessions[proposal_id]
+                conversation_id = session.proposal.conversation_id
+                if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
+                    is_ai_chat = True
+                    ai_agent_node_id = conversation_id
+
+            # Cast user's vote through ConsensusManager
+            # For AI chats, don't broadcast to peers (use no-op)
+            broadcast_func = self._broadcast_to_peers
+            if is_ai_chat:
+                async def _no_op_broadcast(message: Dict[str, Any]) -> None:
+                    pass  # AI chats are private, no peer broadcast
+                broadcast_func = _no_op_broadcast
+
             success = await self.consensus_manager.cast_vote(
                 proposal_id=proposal_id,
                 vote=vote,
                 comment=comment,
-                broadcast_func=self._broadcast_to_peers
+                broadcast_func=broadcast_func
             )
+
+            if success and is_ai_chat:
+                # User voted first, now trigger AI agent to evaluate and vote
+                logger.info("User voted on AI chat proposal %s, triggering AI evaluation", proposal_id)
+                asyncio.create_task(
+                    self._ai_agent_vote_on_proposal(proposal_id, ai_agent_node_id)
+                )
 
             if success:
                 return {
@@ -4061,6 +4086,180 @@ class CoreService:
             return {
                 "status": "error",
                 "message": str(e)
+            }
+
+    async def _ai_agent_vote_on_proposal(self, proposal_id: str, ai_agent_node_id: str) -> None:
+        """Have the AI agent evaluate and cast a vote on a knowledge proposal.
+
+        The AI agent reviews the proposed knowledge entries and makes a reasoned
+        decision to approve, reject, or request changes.
+
+        Args:
+            proposal_id: ID of the proposal to vote on
+            ai_agent_node_id: The AI agent's node_id (same as conversation_id)
+        """
+        try:
+            # Get the proposal
+            if proposal_id not in self.consensus_manager.sessions:
+                logger.warning("AI vote: Proposal %s not found", proposal_id)
+                return
+
+            session = self.consensus_manager.sessions[proposal_id]
+            proposal = session.proposal
+
+            # Check if AI already voted (prevent double voting)
+            if ai_agent_node_id in session.votes:
+                logger.info("AI agent %s already voted on proposal %s", ai_agent_node_id, proposal_id)
+                return
+
+            # Evaluate the proposal using AI
+            ai_decision = await self._evaluate_knowledge_proposal_for_ai_vote(proposal)
+
+            logger.info(
+                "AI agent %s voting on proposal %s: %s - %s",
+                ai_agent_node_id, proposal_id, ai_decision["vote"], ai_decision.get("comment", "")
+            )
+
+            # Cast AI's vote (directly through consensus_manager, no broadcast for AI chats)
+            from dpc_protocol.knowledge_commit import CommitVote
+
+            vote_obj = CommitVote(
+                proposal_id=proposal_id,
+                voter_node_id=ai_agent_node_id,
+                vote=ai_decision["vote"],
+                comment=ai_decision.get("comment"),
+                is_required_dissent=False
+            )
+
+            # Record the vote
+            session.votes[ai_agent_node_id] = vote_obj
+
+            # Broadcast AI vote to UI
+            await self.local_api.broadcast_event(
+                "knowledge_vote_received",
+                {
+                    "proposal_id": proposal_id,
+                    "voter_node_id": ai_agent_node_id,
+                    "voter_name": "DPC Agent",
+                    "vote": ai_decision["vote"],
+                    "comment": ai_decision.get("comment", "")
+                }
+            )
+
+            # Check if voting is complete (all participants have voted)
+            if len(session.votes) == len(session.proposal.participants):
+                await self.consensus_manager._finalize_vote(session)
+
+        except Exception as e:
+            logger.error("Error in AI agent voting: %s", e, exc_info=True)
+
+    async def _evaluate_knowledge_proposal_for_ai_vote(self, proposal) -> Dict[str, Any]:
+        """Evaluate a knowledge proposal and return an AI vote decision.
+
+        The AI reviews each knowledge entry for accuracy, relevance, and quality,
+        then decides whether to approve, reject, or request changes.
+
+        Args:
+            proposal: KnowledgeCommitProposal to evaluate
+
+        Returns:
+            Dict with 'vote' (approve/reject/request_changes) and 'comment'
+        """
+        try:
+            # Build evaluation prompt
+            entries_text = ""
+            for i, entry in enumerate(proposal.entries, 1):
+                entries_text += f"\n{i}. {entry.content} (confidence: {entry.confidence:.2f})"
+                if hasattr(entry, 'tags') and entry.tags:
+                    entries_text += f" [tags: {', '.join(entry.tags)}]"
+
+            prompt = f"""You are reviewing a knowledge commit proposal from a conversation you just participated in as the DPC Agent. You need to vote on whether this knowledge should be saved to the user's personal knowledge base.
+
+**Proposal Topic:** {proposal.topic}
+**Summary:** {proposal.summary}
+**Average Confidence:** {proposal.avg_confidence:.2f}
+
+**Knowledge Entries:**{entries_text}
+
+**Your Task:**
+Evaluate each entry for:
+1. **Accuracy**: Is this factually correct based on standard knowledge? (Not opinions)
+2. **Relevance**: Is this genuinely useful knowledge worth preserving?
+3. **Redundancy**: Does this duplicate or contradict existing common knowledge?
+4. **Quality**: Is the entry clear, specific, and well-formulated?
+
+**Voting Options:**
+- `approve`: Knowledge is accurate, relevant, and worth saving
+- `reject`: Knowledge is factually incorrect, irrelevant, or harmful
+- `request_changes`: Knowledge has potential but needs revision (explain what)
+
+**IMPORTANT:**
+- Be thoughtful but not overly critical - personal knowledge is subjective
+- Technical facts, user preferences, and learned insights are all valid
+- If most entries are good but a few need work, vote request_changes
+- Only reject if the knowledge is genuinely problematic
+
+Respond in JSON format:
+{{
+    "vote": "approve" | "reject" | "request_changes",
+    "comment": "Brief explanation of your decision (1-2 sentences)",
+    "entry_feedback": [
+        {{"index": 1, "assessment": "good" | "needs_work" | "problematic", "note": "optional note"}}
+    ]
+}}
+"""
+
+            # Use the LLM to evaluate
+            response = await self.llm_manager.query(
+                prompt=prompt,
+                provider_alias=None,  # Use default provider
+                max_tokens=500
+            )
+
+            # Parse the response
+            import json
+            response_text = response.get("response", "")
+
+            # Try to extract JSON from the response
+            import re
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if json_match:
+                decision = json.loads(json_match.group())
+            else:
+                # Fallback: try parsing the whole response
+                decision = json.loads(response_text)
+
+            vote = decision.get("vote", "approve")
+            comment = decision.get("comment", "")
+
+            # Add entry feedback to comment if available
+            entry_feedback = decision.get("entry_feedback", [])
+            if entry_feedback and vote == "request_changes":
+                feedback_notes = []
+                for ef in entry_feedback:
+                    if ef.get("assessment") != "good" and ef.get("note"):
+                        feedback_notes.append(f"Entry {ef.get('index')}: {ef.get('note')}")
+                if feedback_notes:
+                    comment += " | " + "; ".join(feedback_notes[:3])  # Limit to 3 notes
+
+            return {
+                "vote": vote,
+                "comment": comment[:500]  # Limit comment length
+            }
+
+        except json.JSONDecodeError as e:
+            logger.warning("AI vote evaluation returned invalid JSON: %s", e)
+            # Default to approve on parsing error (generous interpretation)
+            return {
+                "vote": "approve",
+                "comment": "AI evaluation completed (defaulting to approve due to parsing issue)"
+            }
+        except Exception as e:
+            logger.error("Error in AI vote evaluation: %s", e, exc_info=True)
+            # Default to approve on error
+            return {
+                "vote": "approve",
+                "comment": "AI evaluation encountered an error, defaulting to user's judgment"
             }
 
     async def _broadcast_to_peers(self, message: Dict[str, Any]) -> None:
@@ -4085,12 +4284,17 @@ class CoreService:
             participants = []
 
             if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
-                # Local AI chat: just the user
+                # AI chat: user + AI agent as participant (for collaborative knowledge voting)
                 participants = [
                     {
                         "node_id": self.p2p_manager.node_id,
                         "name": "User",
                         "context": "local"
+                    },
+                    {
+                        "node_id": conversation_id,  # AI agent uses conversation_id as its node_id
+                        "name": "DPC Agent",
+                        "context": "ai_agent"
                     }
                 ]
             else:
