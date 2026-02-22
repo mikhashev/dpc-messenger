@@ -1296,6 +1296,11 @@ class ContextFirewall:
                                 # Evolution tools (v0.16.0+)
                                 'pause_evolution', 'resume_evolution', 'get_evolution_stats',
                                 'approve_evolution_change', 'reject_evolution_change',
+                                # Search tools (v0.16.0+)
+                                'search_files', 'search_in_file',
+                                # Extended sandbox tools (v0.16.0+)
+                                'extended_path_read', 'extended_path_list', 'extended_path_write',
+                                'list_extended_sandbox_paths',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):

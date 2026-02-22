@@ -63,7 +63,6 @@
         // DPC integration
         get_dpc_context?: boolean;
         // Web tools
-        web_search?: boolean;
         browse_page?: boolean;
         fetch_json?: boolean;
         extract_links?: boolean;
@@ -1877,10 +1876,9 @@
                     <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Web Tools</h5>
                     <div class="notification-events">
                       {#each [
-                        { key: 'web_search', label: 'Web Search', desc: 'Search the web via DuckDuckGo' },
+                        { key: 'search_web', label: 'Web Search', desc: 'Search the web via DuckDuckGo' },
                         { key: 'browse_page', label: 'Browse Page', desc: 'Fetch and parse web pages' },
                         { key: 'fetch_json', label: 'Fetch JSON', desc: 'Fetch JSON from APIs' },
-                        { key: 'search_web', label: 'Search Web (alt)', desc: 'Alternative web search' },
                         { key: 'extract_links', label: 'Extract Links', desc: 'Extract links from pages' },
                         { key: 'check_url', label: 'Check URL', desc: 'Check if URL is accessible' },
                       ] as tool}
