@@ -218,6 +218,9 @@ class DpcLlmAdapter:
         ```
 
         Returns list of tool call dicts in OpenAI format.
+
+        Note: Uses brace-balanced JSON parsing to handle content with embedded
+        triple backticks (e.g., markdown code blocks inside the JSON content field).
         """
         tool_calls = []
 
@@ -228,27 +231,19 @@ class DpcLlmAdapter:
         # Debug: log first 500 chars of content
         log.debug(f"Parsing content (len={len(content)}): {content[:500]!r}")
 
-        # Find tool_call blocks
-        # More robust pattern: handles \r\n, \n, extra whitespace
-        pattern = r"```tool_call\s*[\r]?\n(.*?)```"
-        matches = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
+        # Find tool_call blocks using brace-balanced parsing
+        # This handles cases where content contains triple backticks
+        matches = self._extract_tool_call_json(content)
+        log.debug(f"Found {len(matches)} tool_call JSON blocks")
 
-        log.debug(f"Regex found {len(matches)} tool_call blocks in content")
-
-        # If no matches found, try alternative patterns
+        # Fallback: try simple regex if brace-balanced parsing found nothing
         if not matches and "tool_call" in content.lower():
-            log.warning("Found 'tool_call' in content but regex didn't match - trying alternative patterns")
-            # Try without newline requirement
-            alt_pattern = r"```tool_call\s*(.*?)```"
-            matches = re.findall(alt_pattern, content, re.DOTALL | re.IGNORECASE)
-            log.debug(f"Alternative regex found {len(matches)} matches")
-
-            # Try with Unicode backticks (some LLMs use different quote characters)
-            if not matches:
-                # Unicode backticks: U+2018/U+2019 (curly quotes), U+0060 (grave)
-                alt_pattern2 = r"[`\u2018\u2019`]{3}tool_call\s*[\r\n]*(.*?)[`\u2018\u2019`]{3}"
-                matches = re.findall(alt_pattern2, content, re.DOTALL | re.IGNORECASE)
-                log.debug(f"Unicode backtick regex found {len(matches)} matches")
+            log.debug("Trying simple regex fallback")
+            pattern = r"```tool_call\s*[\r]?\n(.*?)```"
+            regex_matches = re.findall(pattern, content, re.DOTALL | re.IGNORECASE)
+            if regex_matches:
+                log.debug(f"Regex fallback found {len(regex_matches)} matches")
+                matches.extend(regex_matches)
 
         # Last resort: try to find JSON objects that look like tool calls
         if not matches:
@@ -283,6 +278,111 @@ class DpcLlmAdapter:
                 continue
 
         return tool_calls
+
+    def _extract_tool_call_json(self, content: str) -> List[str]:
+        """
+        Extract JSON from tool_call blocks using brace-balanced parsing.
+
+        This method handles the case where the JSON content field contains
+        triple backticks (e.g., markdown code examples) which would break
+        simple regex parsing.
+
+        Args:
+            content: Full response content
+
+        Returns:
+            List of JSON strings extracted from tool_call blocks
+        """
+        matches = []
+
+        # Find all tool_call block starts
+        # Pattern matches: ```tool_call followed by optional whitespace and newline
+        block_start_pattern = re.compile(r'```tool_call\s*[\r]?\n', re.IGNORECASE)
+
+        pos = 0
+        while True:
+            # Find next tool_call block start
+            start_match = block_start_pattern.search(content, pos)
+            if not start_match:
+                break
+
+            # Start of JSON content
+            json_start = start_match.end()
+
+            # Extract JSON using brace balancing
+            json_str = self._extract_balanced_json(content, json_start)
+            if json_str:
+                matches.append(json_str)
+                log.debug(f"Extracted JSON from tool_call block: {json_str[:100]}...")
+                # Move position past the extracted content
+                pos = json_start + len(json_str)
+            else:
+                # Failed to extract, move past this block start
+                pos = json_start
+
+        return matches
+
+    def _extract_balanced_json(self, content: str, start_pos: int) -> Optional[str]:
+        """
+        Extract a complete JSON object starting at start_pos using brace balancing.
+
+        This handles nested objects and strings properly, so it won't be confused
+        by braces or backticks inside string values.
+
+        Args:
+            content: Full content string
+            start_pos: Position to start extracting from
+
+        Returns:
+            Complete JSON string, or None if extraction failed
+        """
+        if start_pos >= len(content):
+            return None
+
+        # Skip leading whitespace
+        while start_pos < len(content) and content[start_pos] in ' \t\n\r':
+            start_pos += 1
+
+        if start_pos >= len(content) or content[start_pos] != '{':
+            return None
+
+        depth = 0
+        in_string = False
+        escape_next = False
+        pos = start_pos
+
+        while pos < len(content):
+            char = content[pos]
+
+            if escape_next:
+                escape_next = False
+                pos += 1
+                continue
+
+            if char == '\\' and in_string:
+                escape_next = True
+                pos += 1
+                continue
+
+            if char == '"' and not escape_next:
+                in_string = not in_string
+                pos += 1
+                continue
+
+            if not in_string:
+                if char == '{':
+                    depth += 1
+                elif char == '}':
+                    depth -= 1
+                    if depth == 0:
+                        # Found complete JSON object
+                        return content[start_pos:pos + 1]
+
+            pos += 1
+
+        # Reached end without finding balanced JSON
+        log.debug(f"Could not find balanced JSON starting at pos {start_pos}")
+        return None
 
     async def chat_with_tools(
         self,
