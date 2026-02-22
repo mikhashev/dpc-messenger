@@ -246,13 +246,13 @@ async def run_llm_loop(
             messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
 
             if content and content.strip():
-                emit_progress(content.strip(), None, round_num + 1)
+                emit_progress(content.strip(), None, round_idx)
                 llm_trace["assistant_notes"].append(content.strip()[:320])
 
             # Execute tool calls
             for tc in tool_calls:
                 tool_name = tc["function"]["name"]
-                emit_progress(f"Executing {tool_name}...", tool_name, round_num + 1)
+                emit_progress(f"Executing {tool_name}...", tool_name, round_idx)
                 timeout = tools.get_timeout(tc["function"]["name"])
                 exec_result = _execute_with_timeout(tools, tc, logs_dir, timeout, task_id)
 
