@@ -60,13 +60,19 @@
     conversationId,
     enableMarkdown = $bindable(true),
     chatWindowElement = $bindable(),
-    showTranscription = true  // v0.13.2+: Control transcription display
+    showTranscription = true,  // v0.13.2+: Control transcription display
+    agentProgressMessage = null,  // v0.15.0+: Agent progress message
+    agentProgressTool = null,  // v0.15.0+: Current tool being executed
+    agentProgressRound = 0  // v0.15.0+: Current round number
   }: {
     messages: Message[];
     conversationId: string;
     enableMarkdown?: boolean;
     chatWindowElement?: HTMLElement;
     showTranscription?: boolean;
+    agentProgressMessage?: string | null;
+    agentProgressTool?: string | null;
+    agentProgressRound?: number;
   } = $props();
 </script>
 
@@ -155,6 +161,24 @@
   {:else}
     <div class="empty-chat">
       <p>No messages yet. Start the conversation!</p>
+    </div>
+  {/if}
+
+  <!-- Agent progress indicator (v0.15.0+) -->
+  {#if agentProgressTool || agentProgressMessage}
+    <div class="agent-progress">
+      <div class="agent-progress-spinner"></div>
+      <div class="agent-progress-content">
+        {#if agentProgressTool}
+          <span class="agent-progress-tool">🔧 {agentProgressTool}</span>
+        {/if}
+        {#if agentProgressRound > 0}
+          <span class="agent-progress-round">Round {agentProgressRound}</span>
+        {/if}
+        {#if agentProgressMessage}
+          <span class="agent-progress-message">{agentProgressMessage}</span>
+        {/if}
+      </div>
     </div>
   {/if}
 </div>
@@ -291,5 +315,66 @@
     border-radius: 8px;
     color: #555;
     font-size: 13px;
+  }
+
+  /* Agent progress indicator (v0.15.0+) */
+  .agent-progress {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    margin: 8px 0;
+    background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%);
+    border: 1px solid #90caf9;
+    border-radius: 12px;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.8; }
+  }
+
+  .agent-progress-spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid #90caf9;
+    border-top-color: #1976d2;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .agent-progress-content {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+  }
+
+  .agent-progress-tool {
+    font-weight: 600;
+    color: #1565c0;
+  }
+
+  .agent-progress-round {
+    font-size: 0.85em;
+    color: #666;
+    background: rgba(0,0,0,0.05);
+    padding: 2px 8px;
+    border-radius: 10px;
+  }
+
+  .agent-progress-message {
+    color: #555;
+    font-size: 0.9em;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -103,6 +103,11 @@
   // Whisper model loading state (v0.13.3+ Model Pre-loading)
   let whisperModelLoading = $state(false);
   let whisperModelLoadError = $state<string | null>(null);
+
+  // DPC Agent progress state (v0.15.0+ - real-time agent progress)
+  let agentProgressMessage = $state<string | null>(null);
+  let agentProgressTool = $state<string | null>(null);
+  let agentProgressRound = $state<number>(0);
 
   // Dual provider selection (Phase 1: separate text and vision providers)
   // Managed by ProviderSelector component (extracted)
@@ -250,6 +255,33 @@
       console.error(`[Whisper] Model loading failed: ${$whisperModelLoadingFailed.error}`);
       whisperModelLoading = false;
       whisperModelLoadError = $whisperModelLoadingFailed.error;
+    }
+  });
+
+  // DPC Agent progress (v0.15.0+): Show real-time agent progress in chat
+  $effect(() => {
+    if ($agentProgress) {
+      const { conversation_id, message, round, tool_name, ts } = $agentProgress;
+      console.log(`[AgentProgress] Conv: ${conversation_id}, Tool: ${tool_name}, Round: ${round}`);
+
+      // Only show progress for the active AI chat
+      if (activeChatId === conversation_id) {
+        agentProgressMessage = message || null;
+        agentProgressTool = tool_name || null;
+        agentProgressRound = round || 0;
+      }
+    }
+  });
+
+  $effect(() => {
+    if ($agentProgressClear) {
+      const { conversation_id } = $agentProgressClear;
+      // Clear progress when task completes/fails
+      if (activeChatId === conversation_id) {
+        agentProgressMessage = null;
+        agentProgressTool = null;
+        agentProgressRound = 0;
+      }
     }
   });
 
@@ -2985,6 +3017,9 @@
         bind:enableMarkdown
         bind:chatWindowElement={chatWindow}
         showTranscription={autoTranscribeEnabled}
+        agentProgressMessage={agentProgressMessage}
+        agentProgressTool={agentProgressTool}
+        agentProgressRound={agentProgressRound}
       />
 
       <div class="chat-input">

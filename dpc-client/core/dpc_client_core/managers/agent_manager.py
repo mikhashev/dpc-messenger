@@ -234,12 +234,15 @@ class DpcAgentManager:
             dpc_context = self._get_dpc_context()
 
         try:
-            # Process through agent
+            # Process through agent with progress callback that includes conversation_id
+            def emit_progress_with_context(msg: str, tool: str = None, round: int = None):
+                self._emit_progress(msg, conversation_id, tool, round)
+
             response = await self.agent.process(
                 message=message,
                 conversation_id=conversation_id,
                 dpc_context=dpc_context,
-                emit_progress=self._emit_progress,
+                emit_progress=emit_progress_with_context,
             )
 
             # Emit TASK_COMPLETED event
@@ -251,6 +254,9 @@ class DpcAgentManager:
                 "result": response[:200] if len(response) > 200 else response,
             })
 
+            # Clear progress indicator
+            self._emit_progress_clear(conversation_id)
+
             return response
 
         except Exception as e:
@@ -261,6 +267,8 @@ class DpcAgentManager:
                 "conversation_id": conversation_id,
                 "error": str(e),
             })
+            # Clear progress indicator on failure too
+            self._emit_progress_clear(conversation_id)
             raise
 
     def _get_dpc_context(self) -> Dict[str, Any]:
@@ -299,7 +307,13 @@ class DpcAgentManager:
 
         return context
 
-    def _emit_progress(self, message: str) -> None:
+    def _emit_progress(
+        self,
+        message: str,
+        conversation_id: str = None,
+        tool_name: str = None,
+        round: int = None
+    ) -> None:
         """Emit progress message to DPC UI (if available)."""
         try:
             # Try to broadcast via local_api if available
@@ -308,10 +322,25 @@ class DpcAgentManager:
                 import asyncio
                 asyncio.create_task(local_api.broadcast_event("agent_progress", {
                     "message": message[:500],
+                    "conversation_id": conversation_id,
+                    "tool_name": tool_name,
+                    "round": round,
                     "ts": utc_now_iso(),
                 }))
         except Exception as e:
             log.debug(f"Failed to emit progress: {e}")
+
+    def _emit_progress_clear(self, conversation_id: str) -> None:
+        """Emit progress clear event to DPC UI (when task completes/fails)."""
+        try:
+            local_api = getattr(self.service, "local_api", None)
+            if local_api and hasattr(local_api, "broadcast_event"):
+                import asyncio
+                asyncio.create_task(local_api.broadcast_event("agent_progress_clear", {
+                    "conversation_id": conversation_id,
+                }))
+        except Exception as e:
+            log.debug(f"Failed to emit progress clear: {e}")
 
     def get_status(self) -> Dict[str, Any]:
         """Get agent status."""

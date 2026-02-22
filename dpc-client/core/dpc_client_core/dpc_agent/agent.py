@@ -166,7 +166,7 @@ class DpcAgent:
             current_task_id=conversation_id,
             current_task_type="chat",
             tool_whitelist=allowed_tools,
-            emit_progress_fn=emit_progress or (lambda _: None),
+            emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None: None),
         )
         self.tools.set_context(ctx)
 
@@ -184,7 +184,7 @@ class DpcAgent:
             tools=self.tools,
             llm=self.llm,
             agent_root=self.agent_root,
-            emit_progress=emit_progress or (lambda _: None),
+            emit_progress=emit_progress or (lambda msg, tool=None, rnd=None: None),
             task_id=conversation_id,
             budget_remaining_usd=self.config.budget_usd,
             max_rounds=self.config.max_rounds,

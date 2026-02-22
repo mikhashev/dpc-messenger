@@ -149,7 +149,7 @@ async def run_llm_loop(
     tools: "ToolRegistry",
     llm: DpcLlmAdapter,
     agent_root: pathlib.Path,
-    emit_progress: Callable[[str], None],
+    emit_progress: Callable[[str, Optional[str], Optional[int]], None],
     task_id: str = "",
     budget_remaining_usd: Optional[float] = None,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
@@ -246,11 +246,13 @@ async def run_llm_loop(
             messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
 
             if content and content.strip():
-                emit_progress(content.strip())
+                emit_progress(content.strip(), None, round_num + 1)
                 llm_trace["assistant_notes"].append(content.strip()[:320])
 
             # Execute tool calls
             for tc in tool_calls:
+                tool_name = tc["function"]["name"]
+                emit_progress(f"Executing {tool_name}...", tool_name, round_num + 1)
                 timeout = tools.get_timeout(tc["function"]["name"])
                 exec_result = _execute_with_timeout(tools, tc, logs_dir, timeout, task_id)
 

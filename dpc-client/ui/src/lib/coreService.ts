@@ -124,6 +124,10 @@ export const whisperModelDownloadStarted = writable<any>(null);  // {provider, m
 export const whisperModelDownloadCompleted = writable<any>(null);  // {provider, model_name, cache_path}
 export const whisperModelDownloadFailed = writable<any>(null);  // {provider, error}
 
+// DPC Agent progress stores (v0.15.0+ - real-time agent progress in chat)
+export const agentProgress = writable<any>(null);  // {conversation_id, message, round, tool_name, ts}
+export const agentProgressClear = writable<any>(null);  // {conversation_id} - signal to clear progress
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -726,6 +730,18 @@ export function connectToCoreService() {
                 else if (message.event === "whisper_model_download_failed") {
                     console.error("Whisper model download failed:", message.payload);
                     whisperModelDownloadFailed.set(message.payload);
+                }
+                // DPC Agent progress events (v0.15.0+ - real-time agent progress in chat)
+                else if (message.event === "agent_progress") {
+                    // Progress update from agent during tool execution
+                    // payload: {conversation_id, message, round, tool_name, ts}
+                    console.log("[AgentProgress]", message.payload?.tool_name || "thinking", `round ${message.payload?.round || "?"}`);
+                    agentProgress.set(message.payload);
+                }
+                else if (message.event === "agent_progress_clear") {
+                    // Signal to clear progress display (task completed/failed)
+                    console.log("[AgentProgress] Clear for conversation:", message.payload?.conversation_id);
+                    agentProgressClear.set(message.payload);
                 }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)
