@@ -32,7 +32,8 @@ class ToolContext:
     Tool execution context — passed from the agent before each task.
 
     All file operations are sandboxed to agent_root (~/.dpc/agent/).
-    The agent cannot access files outside this directory.
+    The agent cannot access files outside this directory unless
+    sandbox_extensions are configured in firewall rules.
     """
 
     agent_root: pathlib.Path  # ~/.dpc/agent/ - sandboxed storage
@@ -50,6 +51,9 @@ class ToolContext:
 
     # Tool whitelist (if set, only these tools are allowed)
     tool_whitelist: Optional[set] = None
+
+    # Firewall reference for extended sandbox paths (v0.16.0+)
+    firewall: Optional[Any] = None
 
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)
@@ -111,6 +115,60 @@ class ToolContext:
         except Exception:
             log.debug(f"Failed to emit progress: {message}")
 
+    # -----------------------------------------------------------------------
+    # Extended sandbox paths (v0.16.0+)
+    # -----------------------------------------------------------------------
+
+    def is_extended_path_allowed(self, path: str, require_write: bool = False) -> bool:
+        """
+        Check if a path is allowed via sandbox_extensions.
+
+        Args:
+            path: Path to check
+            require_write: If True, check for write access
+
+        Returns:
+            True if the path is allowed for the requested access level
+        """
+        if not self.firewall:
+            return False
+        return self.firewall.is_extended_path_allowed(path, require_write)
+
+    def validate_extended_path(self, path: str, require_write: bool = False) -> pathlib.Path:
+        """
+        Validate and resolve an extended path.
+
+        Args:
+            path: Path to validate
+            require_write: If True, require write access
+
+        Returns:
+            Resolved path if allowed
+
+        Raises:
+            PermissionError: If path is not allowed
+        """
+        resolved = pathlib.Path(path).expanduser().resolve()
+
+        # First check if it's in the default sandbox
+        if is_path_in_sandbox(resolved, self.agent_root):
+            return resolved
+
+        # Check extended sandbox
+        if self.is_extended_path_allowed(str(resolved), require_write):
+            return resolved
+
+        access_type = "read/write" if require_write else "read"
+        raise PermissionError(
+            f"Sandbox violation: path '{path}' is not in agent directory or extended sandbox ({access_type})"
+        )
+
+    def list_extended_paths(self) -> Dict[str, List[str]]:
+        """Get all configured extended sandbox paths."""
+        if not self.firewall:
+            return {'read_only': [], 'read_write': []}
+        return self.firewall.get_extended_paths()
+
 
 @dataclass
 class ToolEntry:
@@ -129,6 +187,8 @@ CORE_TOOL_NAMES = {
     # File operations (sandboxed)
     "repo_read", "repo_list", "repo_write_commit",
     "drive_read", "drive_list", "drive_write",
+    # Extended sandbox (v0.16.0+)
+    "extended_path_read", "extended_path_list", "extended_path_write", "list_extended_sandbox_paths",
     # Memory/identity
     "update_scratchpad", "update_identity",
     "chat_history",

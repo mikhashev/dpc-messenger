@@ -108,6 +108,11 @@ class ContextFirewall:
             'drive_read': False,
             'drive_list': False,
             'drive_write': False,
+            # Extended sandbox (v0.16.0+ - paths outside default sandbox)
+            'extended_path_read': False,  # Requires sandbox_extensions config
+            'extended_path_list': False,
+            'extended_path_write': False,  # Requires read_write in sandbox_extensions
+            'list_extended_sandbox_paths': True,  # Safe - just lists config
             # Memory/identity
             'update_scratchpad': True,
             'update_identity': True,
@@ -160,12 +165,73 @@ class ContextFirewall:
         for tool_name, default_enabled in all_tools_defaults.items():
             self.dpc_agent_tools[tool_name] = tools.get(tool_name, default_enabled)
 
-        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d",
+        # Parse sandbox extensions (v0.16.0+ - custom paths outside default sandbox)
+        sandbox_extensions = dpc_agent.get('sandbox_extensions', {})
+        self.sandbox_read_only_paths: List[str] = sandbox_extensions.get('read_only', [])
+        self.sandbox_read_write_paths: List[str] = sandbox_extensions.get('read_write', [])
+
+        # Validate and normalize paths
+        self.sandbox_read_only_paths = [self._normalize_path(p) for p in self.sandbox_read_only_paths if p]
+        self.sandbox_read_write_paths = [self._normalize_path(p) for p in self.sandbox_read_write_paths if p]
+
+        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d",
                      self.dpc_agent_enabled,
                      self.dpc_agent_personal_context_access,
                      self.dpc_agent_device_context_access,
                      self.dpc_agent_knowledge_access,
-                     len([t for t in self.dpc_agent_tools.values() if t]))
+                     len([t for t in self.dpc_agent_tools.values() if t]),
+                     len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths))
+
+    def _normalize_path(self, path_str: str) -> str:
+        """Normalize a path string for comparison."""
+        try:
+            p = Path(path_str).expanduser().resolve()
+            return str(p)
+        except Exception:
+            logger.warning(f"Invalid path in sandbox_extensions: {path_str}")
+            return ""
+
+    def is_extended_path_allowed(self, path: str, require_write: bool = False) -> bool:
+        """
+        Check if a path is in the extended sandbox (outside ~/.dpc/agent/).
+
+        Args:
+            path: Path to check
+            require_write: If True, check for write access; if False, read access is sufficient
+
+        Returns:
+            True if the path is allowed for the requested access level
+        """
+        if not self.dpc_agent_enabled:
+            return False
+
+        try:
+            normalized = str(Path(path).expanduser().resolve())
+        except Exception:
+            return False
+
+        # Check read_write paths first (they also allow read)
+        for allowed_path in self.sandbox_read_write_paths:
+            if allowed_path and normalized.startswith(allowed_path):
+                return True
+
+        # If write is required, read_only paths are not sufficient
+        if require_write:
+            return False
+
+        # Check read_only paths
+        for allowed_path in self.sandbox_read_only_paths:
+            if allowed_path and normalized.startswith(allowed_path):
+                return True
+
+        return False
+
+    def get_extended_paths(self) -> Dict[str, List[str]]:
+        """Get all extended sandbox paths."""
+        return {
+            'read_only': self.sandbox_read_only_paths,
+            'read_write': self.sandbox_read_write_paths,
+        }
 
     def can_agent_access_context(self, context_type: str) -> bool:
         """

@@ -764,6 +764,174 @@ def reject_evolution_change(ctx: ToolContext, change_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Extended Sandbox Tools (v0.16.0+)
+# ---------------------------------------------------------------------------
+
+def extended_path_read(ctx: ToolContext, path: str) -> str:
+    """
+    Read a file from an extended sandbox path (outside ~/.dpc/agent/).
+
+    Requires the path to be configured in privacy_rules.json under
+    dpc_agent.sandbox_extensions.read_only or read_write.
+
+    Args:
+        ctx: Tool context
+        path: Absolute file path (must be in extended sandbox)
+
+    Returns:
+        File contents
+    """
+    try:
+        file_path = ctx.validate_extended_path(path, require_write=False)
+
+        if not file_path.exists():
+            return f"⚠️ File not found: {path}"
+
+        if not file_path.is_file():
+            return f"⚠️ Not a file: {path}"
+
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+
+        # Truncate large files
+        if len(content) > 100000:
+            content = content[:100000] + f"\n\n... (truncated, {len(content)} total chars)"
+
+        return content
+
+    except PermissionError as e:
+        return f"⚠️ Access denied: {e}"
+    except Exception as e:
+        return f"⚠️ Error reading file: {e}"
+
+
+def extended_path_list(ctx: ToolContext, path: str, recursive: bool = False) -> str:
+    """
+    List files in an extended sandbox directory.
+
+    Args:
+        ctx: Tool context
+        path: Absolute directory path (must be in extended sandbox)
+        recursive: If True, list recursively
+
+    Returns:
+        Directory listing
+    """
+    try:
+        dir_path = ctx.validate_extended_path(path, require_write=False)
+
+        if not dir_path.exists():
+            return f"⚠️ Directory not found: {path}"
+
+        if not dir_path.is_dir():
+            return f"⚠️ Not a directory: {path}"
+
+        items = []
+        if recursive:
+            for item in dir_path.rglob("*"):
+                rel = item.relative_to(dir_path)
+                if item.is_dir():
+                    items.append(f"📁 {rel}/")
+                else:
+                    size = item.stat().st_size
+                    items.append(f"📄 {rel} ({size:,} bytes)")
+        else:
+            for item in sorted(dir_path.iterdir()):
+                if item.is_dir():
+                    items.append(f"📁 {item.name}/")
+                else:
+                    size = item.stat().st_size
+                    items.append(f"📄 {item.name} ({size:,} bytes)")
+
+        if not items:
+            return f"Directory '{path}' is empty"
+
+        return "\n".join(items[:200]) + (f"\n\n... ({len(items)} total items)" if len(items) > 200 else "")
+
+    except PermissionError as e:
+        return f"⚠️ Access denied: {e}"
+    except Exception as e:
+        return f"⚠️ Error listing directory: {e}"
+
+
+def extended_path_write(ctx: ToolContext, path: str, content: str) -> str:
+    """
+    Write a file to an extended sandbox path (outside ~/.dpc/agent/).
+
+    Requires the path to be configured in privacy_rules.json under
+    dpc_agent.sandbox_extensions.read_write.
+
+    Args:
+        ctx: Tool context
+        path: Absolute file path (must be in extended sandbox with write access)
+        content: Content to write
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        file_path = ctx.validate_extended_path(path, require_write=True)
+
+        # Create parent directories if needed
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Check content size
+        if len(content) > 500000:
+            return f"⚠️ Content too large ({len(content):,} chars). Maximum is 500,000 chars."
+
+        file_path.write_text(content, encoding="utf-8")
+
+        return f"✓ Wrote {len(content):,} chars to {path}"
+
+    except PermissionError as e:
+        return f"⚠️ Access denied: {e}"
+    except Exception as e:
+        return f"⚠️ Error writing file: {e}"
+
+
+def list_extended_sandbox_paths(ctx: ToolContext) -> str:
+    """
+    List all configured extended sandbox paths.
+
+    Returns:
+        Formatted list of allowed paths
+    """
+    try:
+        paths = ctx.list_extended_paths()
+
+        lines = ["## Extended Sandbox Paths\n"]
+
+        if paths['read_only']:
+            lines.append("### Read-Only Access:")
+            for p in paths['read_only']:
+                lines.append(f"  📖 {p}")
+        else:
+            lines.append("### Read-Only Access: (none configured)")
+
+        if paths['read_write']:
+            lines.append("\n### Read-Write Access:")
+            for p in paths['read_write']:
+                lines.append(f"  ✏️ {p}")
+        else:
+            lines.append("\n### Read-Write Access: (none configured)")
+
+        if not paths['read_only'] and not paths['read_write']:
+            lines.append("\n_To add extended paths, edit ~/.dpc/privacy_rules.json:_")
+            lines.append("```json")
+            lines.append('"dpc_agent": {')
+            lines.append('  "sandbox_extensions": {')
+            lines.append('    "read_only": ["C:\\\\Users\\\\you\\\\Documents\\\\notes"],')
+            lines.append('    "read_write": ["C:\\\\Users\\\\you\\\\projects\\\\myapp"]')
+            lines.append('  }')
+            lines.append('}')
+            lines.append("```")
+
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"⚠️ Error listing paths: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Tool Registry Export
 # ---------------------------------------------------------------------------
 
@@ -1213,5 +1381,91 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=reject_evolution_change,
             timeout_sec=10,
+        ),
+
+        # Extended sandbox tools (v0.16.0+)
+        ToolEntry(
+            name="extended_path_read",
+            schema={
+                "name": "extended_path_read",
+                "description": "Read a file from an extended sandbox path (outside ~/.dpc/agent/). Requires sandbox_extensions configuration.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute file path (must be in configured extended sandbox)"
+                        }
+                    },
+                    "required": ["path"]
+                }
+            },
+            handler=extended_path_read,
+            timeout_sec=30,
+        ),
+
+        ToolEntry(
+            name="extended_path_list",
+            schema={
+                "name": "extended_path_list",
+                "description": "List files in an extended sandbox directory",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute directory path"
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "description": "List recursively",
+                            "default": False
+                        }
+                    },
+                    "required": ["path"]
+                }
+            },
+            handler=extended_path_list,
+            timeout_sec=30,
+        ),
+
+        ToolEntry(
+            name="extended_path_write",
+            schema={
+                "name": "extended_path_write",
+                "description": "Write a file to an extended sandbox path. Requires read_write access in sandbox_extensions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Absolute file path"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write"
+                        }
+                    },
+                    "required": ["path", "content"]
+                }
+            },
+            handler=extended_path_write,
+            timeout_sec=30,
+            is_code_tool=True,
+        ),
+
+        ToolEntry(
+            name="list_extended_sandbox_paths",
+            schema={
+                "name": "list_extended_sandbox_paths",
+                "description": "List all configured extended sandbox paths (paths outside ~/.dpc/agent/ that the agent can access)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            handler=list_extended_sandbox_paths,
+            timeout_sec=5,
         ),
     ]

@@ -167,6 +167,7 @@ class DpcAgent:
             current_task_type="chat",
             tool_whitelist=allowed_tools,
             emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None: None),
+            firewall=self._firewall,  # For extended sandbox paths
         )
         self.tools.set_context(ctx)
 
