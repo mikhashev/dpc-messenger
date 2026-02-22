@@ -18,6 +18,7 @@
     model?: string;  // AI model name (for AI responses)
     thinking?: string;  // Thinking/reasoning content (v1.4+)
     thinkingTokens?: number;  // Tokens used for thinking (v1.4+)
+    streamingRaw?: string;  // v0.16.0+: Raw streaming text (shown in collapsible)
     attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
       type: 'file' | 'image' | 'voice';
       filename: string;
@@ -120,6 +121,17 @@
           {:else}
             <p>{msg.text}</p>
           {/if}
+        {/if}
+
+        <!-- Raw streaming output (v0.16.0+): Collapsible section showing incremental text -->
+        {#if msg.sender === 'ai' && msg.streamingRaw && msg.streamingRaw.length > 50}
+          <details class="streaming-raw-details">
+            <summary class="streaming-raw-summary">
+              <span class="streaming-raw-icon">📝</span>
+              <span>Raw output ({msg.streamingRaw.length} chars)</span>
+            </summary>
+            <pre class="streaming-raw-content">{msg.streamingRaw}</pre>
+          </details>
         {/if}
 
         <!-- Attachments (Phase 2.5: Images + Files + v0.13.0: Voice) -->
@@ -446,5 +458,47 @@
     background: transparent;
     color: inherit;
     line-height: 1.5;
+  }
+
+  /* Collapsible raw streaming output (v0.16.0+) */
+  .streaming-raw-details {
+    margin-top: 0.75rem;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    background: #fafafa;
+  }
+
+  .streaming-raw-summary {
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: #666;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    user-select: none;
+  }
+
+  .streaming-raw-summary:hover {
+    background: #f0f0f0;
+  }
+
+  .streaming-raw-icon {
+    font-size: 0.9rem;
+  }
+
+  .streaming-raw-content {
+    margin: 0;
+    padding: 0.75rem;
+    border-top: 1px solid #e0e0e0;
+    background: #f5f5f5;
+    font-family: 'Courier New', Consolas, Monaco, monospace;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+    color: #555;
   }
 </style>

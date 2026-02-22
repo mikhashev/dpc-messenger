@@ -43,6 +43,7 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
+    streamingRaw?: string;  // v0.16.0+: Raw streaming text (shown in collapsible)
     attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
       type: 'file' | 'image' | 'voice';
       filename: string;
@@ -2774,6 +2775,9 @@
     if (message.command === "execute_ai_query") {
       console.log(`[TokenCounter] execute_ai_query response: status=${message.status}, isLoading before clear=${isLoading}`);
       isLoading = false;
+
+      // Capture streaming text before clearing (for collapsible raw output)
+      const capturedStreamingText = agentStreamingText;
       clearAgentStreaming();  // Clear streaming text when final response arrives
       console.log(`[TokenCounter] isLoading cleared: ${isLoading}`);
 
@@ -2810,6 +2814,7 @@
               model: modelName,
               thinking: thinkingContent,  // v1.4+: Thinking/reasoning content
               thinkingTokens: thinkingTokenCount,  // v1.4+: Thinking token count
+              streamingRaw: capturedStreamingText || undefined,  // v0.16.0+: Raw streaming text
               commandId: undefined
             } : m
           ));
