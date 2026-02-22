@@ -177,13 +177,20 @@ class ContextFirewall:
         self.sandbox_read_only_paths = [self._normalize_path(p) for p in self.sandbox_read_only_paths if p]
         self.sandbox_read_write_paths = [self._normalize_path(p) for p in self.sandbox_read_write_paths if p]
 
-        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d",
+        # Parse evolution settings (v0.17.0+)
+        evolution = dpc_agent.get('evolution', {})
+        self.evolution_enabled = evolution.get('enabled', False)
+        self.evolution_interval_minutes = evolution.get('interval_minutes', 60)
+        self.evolution_auto_apply = evolution.get('auto_apply', False)
+
+        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s",
                      self.dpc_agent_enabled,
                      self.dpc_agent_personal_context_access,
                      self.dpc_agent_device_context_access,
                      self.dpc_agent_knowledge_access,
                      len([t for t in self.dpc_agent_tools.values() if t]),
-                     len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths))
+                     len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths),
+                     self.evolution_enabled)
 
     def _normalize_path(self, path_str: str) -> str:
         """Normalize a path string for comparison."""
@@ -426,6 +433,12 @@ class ContextFirewall:
                     "personal_context_access": True,
                     "device_context_access": True,
                     "knowledge_access": "read_only",
+                    "evolution": {
+                        "_comment": "Evolution settings - autonomous self-modification within sandbox",
+                        "enabled": False,
+                        "interval_minutes": 60,
+                        "auto_apply": False
+                    },
                     "tools": {
                         "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
                         "repo_read": True,
@@ -1309,6 +1322,22 @@ class ContextFirewall:
                                     errors.append(f"Unknown tool in dpc_agent.tools: '{tool_name}'")
                                 if not isinstance(tool_enabled, bool):
                                     errors.append(f"'dpc_agent.tools.{tool_name}' must be a boolean")
+
+                    # Validate evolution settings (v0.17.0+)
+                    if 'evolution' in dpc_agent:
+                        evolution = dpc_agent['evolution']
+                        if not isinstance(evolution, dict):
+                            errors.append("'dpc_agent.evolution' must be a dictionary")
+                        else:
+                            if 'enabled' in evolution and not isinstance(evolution['enabled'], bool):
+                                errors.append("'dpc_agent.evolution.enabled' must be a boolean")
+                            if 'interval_minutes' in evolution:
+                                if not isinstance(evolution['interval_minutes'], int):
+                                    errors.append("'dpc_agent.evolution.interval_minutes' must be an integer")
+                                elif evolution['interval_minutes'] < 1:
+                                    errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
+                            if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
+                                errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
 
             # Validate image_transfer section
             if 'image_transfer' in config_dict:

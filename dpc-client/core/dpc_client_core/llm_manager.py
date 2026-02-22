@@ -1423,7 +1423,8 @@ class DpcAgentProvider(AIProvider):
     - 40+ tools for file operations, web search, memory management
     - Persistent identity and scratchpad memory
     - Background consciousness (optional)
-    - Self-modification within sandbox (~/.dpc/agent/)
+    - Evolution: autonomous self-modification within sandbox (~/.dpc/agent/)
+      (configured in privacy_rules.json under dpc_agent.evolution)
 
     Configuration example (~/.dpc/providers.json):
     {
@@ -1435,6 +1436,17 @@ class DpcAgentProvider(AIProvider):
         "max_rounds": 200,
         "context_window": 200000
     }
+
+    Note: Evolution settings are configured in ~/.dpc/privacy_rules.json:
+    {
+        "dpc_agent": {
+            "evolution": {
+                "enabled": true,
+                "interval_minutes": 60,
+                "auto_apply": false
+            }
+        }
+    }
     """
 
     def __init__(self, alias: str, config: Dict[str, Any]):
@@ -1445,6 +1457,9 @@ class DpcAgentProvider(AIProvider):
         self.background_consciousness = config.get("background_consciousness", False)
         self.budget_usd = config.get("budget_usd", 50.0)
         self.max_rounds = config.get("max_rounds", 200)
+
+        # Note: Evolution settings are read from firewall (privacy_rules.json)
+        # not from provider config - see agent_manager.py
 
         # Set model name for token counting (uses underlying provider's model)
         self.model = "dpc_agent"  # Identifier for token counting
@@ -1489,6 +1504,7 @@ class DpcAgentProvider(AIProvider):
         from dpc_client_core.managers.agent_manager import DpcAgentManager
 
         # Create manager with configuration
+        # Note: Evolution settings are read from firewall (privacy_rules.json)
         self._manager = DpcAgentManager(self._service, {
             "tools": self.enabled_tools,
             "background_consciousness": self.background_consciousness,

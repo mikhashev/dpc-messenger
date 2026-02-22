@@ -102,6 +102,12 @@
         read_only?: string[];
         read_write?: string[];
       };
+      evolution?: {
+        _comment?: string;
+        enabled: boolean;
+        interval_minutes: number;
+        auto_apply: boolean;
+      };
     };
     file_transfer?: {
       _comment?: string;
@@ -182,6 +188,15 @@
     editMode = true;
     // Deep copy the rules for editing
     editedRules = JSON.parse(JSON.stringify(rules));
+
+    // Initialize evolution settings if missing
+    if (editedRules.dpc_agent && !editedRules.dpc_agent.evolution) {
+      editedRules.dpc_agent.evolution = {
+        enabled: false,
+        interval_minutes: 60,
+        auto_apply: false
+      };
+    }
   }
 
   // Cancel editing
@@ -1628,6 +1643,86 @@
                         <span class="value">{displayRules.dpc_agent.knowledge_access}</span>
                       {/if}
                     </div>
+                  </div>
+
+                  <!-- Evolution Settings Section -->
+                  <div class="subsection">
+                    <h4>Evolution Settings</h4>
+                    <p class="help-text-small">Configure autonomous self-modification behavior</p>
+
+                    <div class="setting-item">
+                      <label>
+                        {#if editMode && editedRules?.dpc_agent?.evolution}
+                          <input
+                            type="checkbox"
+                            id="dpc-agent-evolution-enabled"
+                            bind:checked={editedRules.dpc_agent.evolution.enabled}
+                          />
+                        {:else}
+                          <input
+                            type="checkbox"
+                            id="dpc-agent-evolution-enabled-display"
+                            checked={displayRules.dpc_agent.evolution?.enabled || false}
+                            disabled
+                          />
+                        {/if}
+                        <span>Enable Evolution</span>
+                      </label>
+                      <p class="help-text-small">Allow agent to autonomously improve itself within sandbox</p>
+                    </div>
+
+                    {#if (editMode ? editedRules?.dpc_agent?.evolution?.enabled : displayRules.dpc_agent.evolution?.enabled)}
+                      <div class="setting-item" style="margin-top: 0.75rem;">
+                        <span><strong>Interval (minutes):</strong></span>
+                        {#if editMode && editedRules?.dpc_agent?.evolution}
+                          <input
+                            type="number"
+                            id="dpc-agent-evolution-interval"
+                            min="1"
+                            max="1440"
+                            bind:value={editedRules.dpc_agent.evolution.interval_minutes}
+                            style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
+                          />
+                        {:else}
+                          <span class="value">{displayRules.dpc_agent.evolution?.interval_minutes || 60}</span>
+                        {/if}
+                        <span class="help-text-small" style="margin-left: 0.5rem;">Time between evolution cycles</span>
+                      </div>
+
+                      <div class="setting-item" style="margin-top: 0.5rem;">
+                        <label>
+                          {#if editMode && editedRules?.dpc_agent?.evolution}
+                            <input
+                              type="checkbox"
+                              id="dpc-agent-evolution-auto-apply"
+                              bind:checked={editedRules.dpc_agent.evolution.auto_apply}
+                            />
+                          {:else}
+                            <input
+                              type="checkbox"
+                              id="dpc-agent-evolution-auto-apply-display"
+                              checked={displayRules.dpc_agent.evolution?.auto_apply || false}
+                              disabled
+                            />
+                          {/if}
+                          <span>Auto-Apply Changes</span>
+                        </label>
+                        <p class="help-text-small">If disabled, changes require manual approval</p>
+                      </div>
+                    {:else if editMode && editedRules?.dpc_agent}
+                      <!-- Initialize evolution object if missing when user enables it -->
+                      {#if !editedRules.dpc_agent.evolution}
+                        {@html ''}
+                      {/if}
+                    {/if}
+
+                    {#if !editMode}
+                      <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
+                        <strong>Evolution</strong> allows the agent to modify its own memory files
+                        (identity.md, scratchpad.md, knowledge/*.md) within the ~/.dpc/agent/ sandbox.
+                        When auto-apply is disabled, you must manually approve each change.
+                      </div>
+                    {/if}
                   </div>
 
                   <!-- Tool Permissions Section -->

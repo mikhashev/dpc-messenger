@@ -87,14 +87,19 @@ class DpcAgentManager:
             return
 
         # Build agent config (tool control is via firewall, not config)
+        # Evolution settings come from firewall (privacy_rules.json), not provider config
+        evolution_enabled = self.firewall.evolution_enabled if self.firewall else False
+        evolution_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
+        evolution_auto = self.firewall.evolution_auto_apply if self.firewall else False
+
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
             background_consciousness=self.config.get("background_consciousness", False),
             enable_task_queue=self.config.get("enable_task_queue", True),
-            evolution_enabled=self.config.get("evolution_enabled", False),
-            evolution_interval_minutes=self.config.get("evolution_interval_minutes", 60),
-            evolution_auto_apply=self.config.get("evolution_auto_apply", False),
+            evolution_enabled=evolution_enabled,
+            evolution_interval_minutes=evolution_interval,
+            evolution_auto_apply=evolution_auto,
             billing_model=self.config.get("billing_model", "subscription"),
         )
 
