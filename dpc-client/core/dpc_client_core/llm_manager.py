@@ -42,8 +42,17 @@ class AIProvider:
         self.config = config
         self.model = config.get("model")
 
-    async def generate_response(self, prompt: str) -> str:
-        """Generates a response from the AI model."""
+    async def generate_response(self, prompt: str, **kwargs) -> str:
+        """
+        Generates a response from the AI model.
+
+        Args:
+            prompt: The input prompt text
+            **kwargs: Additional arguments (e.g., conversation_id) for compatibility
+
+        Returns:
+            The AI model's response text
+        """
         raise NotImplementedError
 
     def supports_vision(self) -> bool:
@@ -176,7 +185,7 @@ class OllamaProvider(AIProvider):
         """Check if this Ollama model is a thinking/reasoning model."""
         return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
 
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(self, prompt: str, **kwargs) -> str:
         try:
             message = {'role': 'user', 'content': prompt}
 
@@ -349,7 +358,7 @@ class OpenAICompatibleProvider(AIProvider):
         """Check if this is an OpenAI reasoning model (o1/o3 series)."""
         return any(tm in self.model.lower() for tm in OPENAI_THINKING_MODELS)
 
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(self, prompt: str, **kwargs) -> str:
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -442,7 +451,7 @@ class AnthropicProvider(AIProvider):
             }
         return {}
 
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(self, prompt: str, **kwargs) -> str:
         try:
             # Determine max_tokens value
             # When thinking is enabled, max_tokens must be > budget_tokens
@@ -620,7 +629,7 @@ class ZaiProvider(AIProvider):
         """Get the thinking content from the last response."""
         return self._last_thinking
 
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(self, prompt: str, **kwargs) -> str:
         """Generate text response using Z.AI GLM model with extended thinking"""
         try:
             # Determine max_tokens value
@@ -1405,7 +1414,7 @@ class LocalWhisperProvider(AIProvider):
                 logger.error(f"Local transcription failed: {e}", exc_info=True)
                 raise RuntimeError(f"Local Whisper transcription failed: {e}") from e
 
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(self, prompt: str, **kwargs) -> str:
         """Not implemented - LocalWhisperProvider only supports transcription."""
         raise NotImplementedError("LocalWhisperProvider does not support text generation")
 
