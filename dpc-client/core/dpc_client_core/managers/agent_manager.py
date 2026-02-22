@@ -116,6 +116,11 @@ class DpcAgentManager:
             self._agent.start_consciousness(emit_progress=self._emit_progress)
             log.info("Background consciousness started")
 
+        # Start evolution if enabled
+        if agent_config.evolution_enabled:
+            self._agent.start_evolution()
+            log.info(f"Evolution started (interval={agent_config.evolution_interval_minutes}min, auto_apply={agent_config.evolution_auto_apply})")
+
         # Initialize Telegram bridge for agent notifications
         await self._start_telegram_bridge()
 

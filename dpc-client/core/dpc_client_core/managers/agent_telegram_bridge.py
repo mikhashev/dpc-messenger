@@ -411,12 +411,15 @@ Just type a message and the agent will process it.
 
         # Filter events
         if event.type.value not in self.event_filter:
+            log.debug(f"Event filtered out: {event.type.value} not in {self.event_filter}")
             return False
 
         # Rate limit check
         if not self._check_rate_limit(event.type.value):
-            log.debug(f"Rate limited event: {event.type.value}")
+            log.warning(f"Rate limited event: {event.type.value}")
             return False
+
+        log.info(f"Sending Telegram notification for event: {event.type.value}")
 
         # Format message
         message = self._format_event(event)
