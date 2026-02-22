@@ -113,6 +113,9 @@ class ContextFirewall:
             'extended_path_list': False,
             'extended_path_write': False,  # Requires read_write in sandbox_extensions
             'list_extended_sandbox_paths': True,  # Safe - just lists config
+            # Search tools (v0.16.0+ - grep-like functionality)
+            'search_files': True,  # Safe - read-only search
+            'search_in_file': True,  # Safe - read-only search
             # Memory/identity
             'update_scratchpad': True,
             'update_identity': True,

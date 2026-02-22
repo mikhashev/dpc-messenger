@@ -932,6 +932,179 @@ def list_extended_sandbox_paths(ctx: ToolContext) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Search Tools (v0.16.0+)
+# ---------------------------------------------------------------------------
+
+import re
+import subprocess
+
+
+def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: int = 50, include_pattern: str = "*") -> str:
+    """
+    Search for a text pattern in files (grep-like functionality).
+
+    Searches within the agent sandbox by default, or in extended sandbox paths
+    if configured and allowed.
+
+    Args:
+        ctx: Tool context
+        pattern: Regex pattern to search for
+        path: Directory path to search (relative to sandbox, or absolute for extended)
+        max_results: Maximum number of matches to return (default 50)
+        include_pattern: Glob pattern for files to include (default "*" for all files)
+
+    Returns:
+        Search results with file:line:content format
+    """
+    try:
+        # Determine search directory
+        if path and (path.startswith("/") or path.startswith("C:") or path.startswith("~")):
+            # Absolute path - check extended sandbox
+            search_dir = ctx.validate_extended_path(path, require_write=False)
+        else:
+            # Relative path - use sandbox
+            search_dir = ctx.repo_path(path) if path else ctx.agent_root
+
+        if not search_dir.exists():
+            return f"⚠️ Directory not found: {path or 'sandbox root'}"
+
+        if not search_dir.is_dir():
+            return f"⚠️ Not a directory: {path}"
+
+        # Compile regex pattern
+        try:
+            regex = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+        except re.error as e:
+            return f"⚠️ Invalid regex pattern: {e}"
+
+        matches = []
+        files_searched = 0
+        files_with_matches = 0
+
+        # Search files
+        for file_path in search_dir.rglob(include_pattern):
+            if not file_path.is_file():
+                continue
+
+            # Skip binary files and common non-text files
+            if file_path.suffix.lower() in {'.pyc', '.pyo', '.exe', '.dll', '.so', '.dylib',
+                                              '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.ico',
+                                              '.mp3', '.mp4', '.wav', '.avi', '.mkv', '.webm',
+                                              '.zip', '.tar', '.gz', '.rar', '.7z', '.pdf',
+                                              '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+                                              '.db', '.sqlite', '.sqlite3'}:
+                continue
+
+            files_searched += 1
+
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="ignore")
+                rel_path = file_path.relative_to(search_dir)
+
+                for line_num, line in enumerate(content.splitlines(), 1):
+                    if regex.search(line):
+                        # Truncate long lines
+                        display_line = line.strip()[:150]
+                        if len(line.strip()) > 150:
+                            display_line += "..."
+
+                        matches.append(f"{rel_path}:{line_num}: {display_line}")
+                        files_with_matches = files_with_matches if matches else 1
+                        if len(matches) >= max_results:
+                            break
+
+                if len(matches) >= max_results:
+                    break
+
+            except Exception:
+                continue
+
+        if not matches:
+            return f"No matches found for pattern '{pattern}' in {files_searched} files"
+
+        result = [f"## Search Results for '{pattern}'"]
+        result.append(f"Found {len(matches)} matches in {files_with_matches} files (searched {files_searched} files)\n")
+
+        # Group by file for better readability
+        current_file = None
+        for match in matches:
+            file_name = match.split(":")[0]
+            if file_name != current_file:
+                result.append(f"\n### {file_name}")
+                current_file = file_name
+            result.append(f"  {match.split(':', 1)[1]}")
+
+        if len(matches) >= max_results:
+            result.append(f"\n_... truncated at {max_results} results_")
+
+        return "\n".join(result)
+
+    except PermissionError as e:
+        return f"⚠️ Access denied: {e}"
+    except Exception as e:
+        return f"⚠️ Search error: {e}"
+
+
+def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines: int = 2) -> str:
+    """
+    Search for a pattern in a specific file with context.
+
+    Args:
+        ctx: Tool context
+        pattern: Regex pattern to search for
+        file_path: Path to the file (relative to sandbox, or absolute for extended)
+        context_lines: Number of lines to show before/after each match
+
+    Returns:
+        Matches with surrounding context
+    """
+    try:
+        # Determine file path
+        if file_path.startswith("/") or file_path.startswith("C:") or file_path.startswith("~"):
+            # Absolute path - check extended sandbox
+            full_path = ctx.validate_extended_path(file_path, require_write=False)
+        else:
+            # Relative path - use sandbox
+            full_path = ctx.repo_path(file_path)
+
+        if not full_path.exists():
+            return f"⚠️ File not found: {file_path}"
+
+        if not full_path.is_file():
+            return f"⚠️ Not a file: {file_path}"
+
+        # Compile regex
+        try:
+            regex = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+        except re.error as e:
+            return f"⚠️ Invalid regex pattern: {e}"
+
+        content = full_path.read_text(encoding="utf-8", errors="ignore")
+        lines = content.splitlines()
+
+        matches = []
+        for i, line in enumerate(lines):
+            if regex.search(line):
+                start = max(0, i - context_lines)
+                end = min(len(lines), i + context_lines + 1)
+
+                match_block = [f"\n### Line {i + 1}"]
+                for j in range(start, end):
+                    prefix = ">>>" if j == i else "   "
+                    matches.append(f"{prefix} {j + 1:4d}: {lines[j][:120]}")
+
+        if not matches:
+            return f"No matches found for pattern '{pattern}' in {file_path}"
+
+        return f"## Search in {file_path}\n" + "\n".join(matches)
+
+    except PermissionError as e:
+        return f"⚠️ Access denied: {e}"
+    except Exception as e:
+        return f"⚠️ Search error: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Tool Registry Export
 # ---------------------------------------------------------------------------
 
@@ -1467,5 +1640,74 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=list_extended_sandbox_paths,
             timeout_sec=5,
+        ),
+
+        # Search tools (v0.16.0+)
+        ToolEntry(
+            name="search_files",
+            schema={
+                "name": "search_files",
+                "description": "Search for a text/regex pattern in files (grep-like). Searches sandbox by default, or extended paths if absolute path given.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex pattern to search for"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Directory to search (relative to sandbox, or absolute for extended)",
+                            "default": ""
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Maximum matches to return",
+                            "default": 50,
+                            "minimum": 1,
+                            "maximum": 200
+                        },
+                        "include_pattern": {
+                            "type": "string",
+                            "description": "Glob pattern for files (e.g., '*.py', '*.md')",
+                            "default": "*"
+                        }
+                    },
+                    "required": ["pattern"]
+                }
+            },
+            handler=search_files,
+            timeout_sec=60,
+        ),
+
+        ToolEntry(
+            name="search_in_file",
+            schema={
+                "name": "search_in_file",
+                "description": "Search for a pattern in a specific file with surrounding context",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Regex pattern to search for"
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "File path (relative to sandbox, or absolute for extended)"
+                        },
+                        "context_lines": {
+                            "type": "integer",
+                            "description": "Lines to show before/after match",
+                            "default": 2,
+                            "minimum": 0,
+                            "maximum": 10
+                        }
+                    },
+                    "required": ["pattern", "file_path"]
+                }
+            },
+            handler=search_in_file,
+            timeout_sec=30,
         ),
     ]

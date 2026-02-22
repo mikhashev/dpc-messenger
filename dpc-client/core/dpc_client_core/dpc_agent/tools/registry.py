@@ -189,6 +189,8 @@ CORE_TOOL_NAMES = {
     "drive_read", "drive_list", "drive_write",
     # Extended sandbox (v0.16.0+)
     "extended_path_read", "extended_path_list", "extended_path_write", "list_extended_sandbox_paths",
+    # Search tools (v0.16.0+)
+    "search_files", "search_in_file",
     # Memory/identity
     "update_scratchpad", "update_identity",
     "chat_history",
