@@ -187,8 +187,8 @@ async def run_llm_loop(
         "rounds": 0,
     }
 
-    # Get tool schemas
-    tool_schemas = tools.schemas(core_only=True, include_restricted=False)
+    # Get tool schemas (use firewall whitelist, not just core tools)
+    tool_schemas = tools.schemas(core_only=False, include_restricted=False)
 
     round_idx = 0
     try:
