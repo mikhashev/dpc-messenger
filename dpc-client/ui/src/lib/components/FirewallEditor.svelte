@@ -44,6 +44,14 @@
         drive_read?: boolean;
         drive_list?: boolean;
         drive_write?: boolean;
+        // Search tools (grep-like)
+        search_files?: boolean;
+        search_in_file?: boolean;
+        // Extended sandbox (custom paths)
+        extended_path_read?: boolean;
+        extended_path_list?: boolean;
+        extended_path_write?: boolean;
+        list_extended_sandbox_paths?: boolean;
         // Memory/identity
         update_scratchpad?: boolean;
         update_identity?: boolean;
@@ -1630,6 +1638,84 @@
                         { key: 'repo_read', label: 'Read Files', desc: 'Read files in sandbox' },
                         { key: 'repo_list', label: 'List Files', desc: 'List directory contents' },
                         { key: 'repo_write_commit', label: 'Write Files', desc: 'Create/modify files in sandbox' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Search Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Search Tools (grep-like)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'search_files', label: 'Search Files', desc: 'Search for patterns across multiple files' },
+                        { key: 'search_in_file', label: 'Search in File', desc: 'Search in specific file with context' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Extended Sandbox -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Extended Sandbox (custom paths)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'extended_path_read', label: 'Extended Read', desc: 'Read from custom paths outside sandbox' },
+                        { key: 'extended_path_list', label: 'Extended List', desc: 'List directories in custom paths' },
+                        { key: 'extended_path_write', label: 'Extended Write', desc: 'Write to custom paths (requires read_write)' },
+                        { key: 'list_extended_sandbox_paths', label: 'List Extended Paths', desc: 'View configured extended paths' },
                       ] as tool}
                         <div class="notification-event-item">
                           {#if editMode && editedRules?.dpc_agent?.tools}
