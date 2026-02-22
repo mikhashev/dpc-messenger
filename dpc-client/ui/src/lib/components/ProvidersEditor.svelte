@@ -9,12 +9,12 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper' | 'dpc_agent';
 
   type Provider = {
     alias: string;
     type: ProviderType;
-    model: string;
+    model?: string;          // Optional for dpc_agent type
     host?: string;           // Ollama only
     base_url?: string;       // OpenAI only
     api_key?: string;        // Plaintext (local providers only)
@@ -29,6 +29,11 @@
     language?: string;       // 'auto' or specific language code
     task?: string;           // 'transcribe' or 'translate'
     lazy_loading?: boolean;  // Load model on first use
+    // Thinking/reasoning (v0.15.0+)
+    thinking?: {
+      enabled?: boolean;
+      budget_tokens?: number;
+    };
   };
 
   type ProvidersConfig = {

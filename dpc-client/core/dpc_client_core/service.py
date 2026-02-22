@@ -1677,14 +1677,15 @@ class CoreService:
 
             if "type" not in provider:
                 errors.append(f"{prefix}: Missing 'type'")
-            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper"]:
+            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper", "dpc_agent"]:
                 errors.append(f"{prefix}: Invalid type '{provider['type']}'")
 
-            if "model" not in provider:
+            # Model is required for all types except dpc_agent
+            provider_type = provider.get("type")
+            if provider_type != "dpc_agent" and "model" not in provider:
                 errors.append(f"{prefix}: Missing 'model'")
 
             # Type-specific required fields
-            provider_type = provider.get("type")
             if provider_type == "ollama" and "host" not in provider:
                 errors.append(f"{prefix}: Ollama provider missing 'host'")
             if provider_type == "openai_compatible" and "base_url" not in provider:
