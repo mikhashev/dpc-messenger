@@ -5315,7 +5315,7 @@ Respond in JSON format:
             "reason": reason
         }
 
-    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None):
+    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None):
         """
         Send an AI query, either to local LLM or to a remote peer for inference.
 
@@ -5326,6 +5326,7 @@ Respond in JSON format:
             compute_host: Optional node_id of peer to use for inference (None = local)
             model: Optional model name to use
             provider: Optional provider alias to use
+            conversation_id: Optional conversation ID for progress tracking (DPC Agent)
 
         Returns:
             Dict with 'response', 'model', 'provider', and 'compute_host' keys
@@ -5338,7 +5339,8 @@ Respond in JSON format:
             prompt=prompt,
             compute_host=compute_host,
             model=model,
-            provider=provider
+            provider=provider,
+            conversation_id=conversation_id
         )
 
     # --- Context Request Methods ---
@@ -6316,7 +6318,8 @@ Respond in JSON format:
                 prompt=final_prompt,
                 compute_host=compute_host,
                 model=model,
-                provider=provider
+                provider=provider,
+                conversation_id=conversation_id
             )
             # result is a dict with 'response', 'model', 'provider', 'compute_host'
             # and potentially 'tokens_used', 'model_max_tokens' for local inference

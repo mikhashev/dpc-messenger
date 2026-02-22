@@ -1435,12 +1435,14 @@ class DpcAgentProvider(AIProvider):
 
         return self._manager
 
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(self, prompt: str, conversation_id: str = None, **kwargs) -> str:
         """
         Process a message through the autonomous agent.
 
         Args:
             prompt: User message text
+            conversation_id: Optional conversation ID for progress tracking
+            **kwargs: Additional arguments (ignored)
 
         Returns:
             Agent's response text
@@ -1451,9 +1453,10 @@ class DpcAgentProvider(AIProvider):
         try:
             manager = await self._ensure_manager()
 
-            # Generate a conversation ID (simple hash of prompt for now)
-            import hashlib
-            conversation_id = hashlib.md5(prompt.encode()).hexdigest()[:16]
+            # Use provided conversation_id or generate one
+            if not conversation_id:
+                import hashlib
+                conversation_id = hashlib.md5(prompt.encode()).hexdigest()[:16]
 
             # Process through agent with DPC context
             response = await manager.process_message(
@@ -2084,7 +2087,7 @@ class LLMManager:
             response = await provider.generate_with_vision(prompt, images, **kwargs)
         else:
             logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
-            response = await provider.generate_response(prompt)
+            response = await provider.generate_response(prompt, **kwargs)
 
         # Check if this is a thinking model and extract thinking content
         thinking_content = None
