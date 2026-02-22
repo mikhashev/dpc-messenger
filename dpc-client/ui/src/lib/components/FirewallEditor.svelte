@@ -98,6 +98,11 @@
         reject_evolution_change?: boolean;
         [key: string]: boolean | string | undefined;
       };
+      sandbox_extensions?: {
+        _comment?: string;
+        read_only?: string[];
+        read_write?: string[];
+      };
     };
     file_transfer?: {
       _comment?: string;
@@ -1748,6 +1753,126 @@
                       {/each}
                     </div>
 
+                    <!-- Sandbox Path Configuration -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Configure Extended Paths</h5>
+                    <p class="help-text-small" style="margin-bottom: 0.5rem;">Add directories outside the default sandbox that the agent can access</p>
+
+                    {#if editMode && editedRules?.dpc_agent}
+                      <div class="sandbox-paths-config">
+                        <!-- Read-Only Paths -->
+                        <div class="path-section">
+                          <span class="path-label">📖 Read-Only Paths</span>
+                          <p class="help-text-small">Agent can read but not modify files in these directories</p>
+
+                          {#each (editedRules.dpc_agent.sandbox_extensions?.read_only || []) as path, i}
+                            <div class="path-entry">
+                              <input
+                                type="text"
+                                class="path-input"
+                                bind:value={editedRules.dpc_agent.sandbox_extensions.read_only[i]}
+                                placeholder="C:\Users\you\Documents\notes"
+                              />
+                              <button
+                                type="button"
+                                class="remove-path-btn"
+                                on:click={() => {
+                                  if (!editedRules.dpc_agent.sandbox_extensions) {
+                                    editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
+                                  }
+                                  editedRules.dpc_agent.sandbox_extensions.read_only = editedRules.dpc_agent.sandbox_extensions.read_only.filter((_: string, idx: number) => idx !== i);
+                                  editedRules = editedRules;
+                                }}
+                              >✕</button>
+                            </div>
+                          {/each}
+                          <button
+                            type="button"
+                            class="add-path-btn"
+                            on:click={() => {
+                              if (!editedRules.dpc_agent.sandbox_extensions) {
+                                editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
+                              }
+                              if (!editedRules.dpc_agent.sandbox_extensions.read_only) {
+                                editedRules.dpc_agent.sandbox_extensions.read_only = [];
+                              }
+                              editedRules.dpc_agent.sandbox_extensions.read_only = [...editedRules.dpc_agent.sandbox_extensions.read_only, ''];
+                              editedRules = editedRules;
+                            }}
+                          >+ Add Read-Only Path</button>
+                        </div>
+
+                        <!-- Read-Write Paths -->
+                        <div class="path-section" style="margin-top: 1rem;">
+                          <span class="path-label">✏️ Read-Write Paths</span>
+                          <p class="help-text-small">Agent can read and modify files in these directories</p>
+
+                          {#each (editedRules.dpc_agent.sandbox_extensions?.read_write || []) as path, i}
+                            <div class="path-entry">
+                              <input
+                                type="text"
+                                class="path-input"
+                                bind:value={editedRules.dpc_agent.sandbox_extensions.read_write[i]}
+                                placeholder="C:\Users\you\projects\myapp"
+                              />
+                              <button
+                                type="button"
+                                class="remove-path-btn"
+                                on:click={() => {
+                                  if (!editedRules.dpc_agent.sandbox_extensions) {
+                                    editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
+                                  }
+                                  editedRules.dpc_agent.sandbox_extensions.read_write = editedRules.dpc_agent.sandbox_extensions.read_write.filter((_: string, idx: number) => idx !== i);
+                                  editedRules = editedRules;
+                                }}
+                              >✕</button>
+                            </div>
+                          {/each}
+                          <button
+                            type="button"
+                            class="add-path-btn"
+                            on:click={() => {
+                              if (!editedRules.dpc_agent.sandbox_extensions) {
+                                editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
+                              }
+                              if (!editedRules.dpc_agent.sandbox_extensions.read_write) {
+                                editedRules.dpc_agent.sandbox_extensions.read_write = [];
+                              }
+                              editedRules.dpc_agent.sandbox_extensions.read_write = [...editedRules.dpc_agent.sandbox_extensions.read_write, ''];
+                              editedRules = editedRules;
+                            }}
+                          >+ Add Read-Write Path</button>
+                        </div>
+                      </div>
+                    {:else if displayRules?.dpc_agent?.sandbox_extensions}
+                      <div class="sandbox-paths-display">
+                        {#if displayRules.dpc_agent.sandbox_extensions.read_only?.length > 0}
+                          <div class="path-section">
+                            <span class="path-label">📖 Read-Only Paths</span>
+                            <ul class="path-list">
+                              {#each displayRules.dpc_agent.sandbox_extensions.read_only as path}
+                                <li>{path}</li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                        {#if displayRules.dpc_agent.sandbox_extensions.read_write?.length > 0}
+                          <div class="path-section">
+                            <span class="path-label">✏️ Read-Write Paths</span>
+                            <ul class="path-list">
+                              {#each displayRules.dpc_agent.sandbox_extensions.read_write as path}
+                                <li>{path}</li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                        {#if !displayRules.dpc_agent.sandbox_extensions.read_only?.length && !displayRules.dpc_agent.sandbox_extensions.read_write?.length}
+                          <p class="help-text-small" style="font-style: italic;">No extended paths configured</p>
+                        {/if}
+                      </div>
+                    {:else}
+                      <p class="help-text-small" style="font-style: italic;">No extended paths configured</p>
+                    {/if}
+
                     <!-- Web Tools -->
                     <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Web Tools</h5>
                     <div class="notification-events">
@@ -2697,6 +2822,98 @@
   .event-name {
     text-transform: capitalize;
     font-size: 0.9rem;
+  }
+
+  /* Sandbox path configuration styles */
+  .sandbox-paths-config {
+    margin-top: 0.5rem;
+    padding: 0.75rem;
+    background: #f9f9f9;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+  }
+
+  .path-section {
+    margin-bottom: 0.5rem;
+  }
+
+  .path-label {
+    font-weight: 500;
+    color: #333;
+    margin-bottom: 0.25rem;
+    display: block;
+  }
+
+  .path-entry {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .path-input {
+    flex: 1;
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    font-family: monospace;
+  }
+
+  .path-input:focus {
+    outline: none;
+    border-color: #1976d2;
+    box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.2);
+  }
+
+  .remove-path-btn {
+    padding: 0.5rem 0.75rem;
+    background: #ffebee;
+    color: #c62828;
+    border: 1px solid #ffcdd2;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+  }
+
+  .remove-path-btn:hover {
+    background: #ffcdd2;
+  }
+
+  .add-path-btn {
+    width: 100%;
+    padding: 0.5rem;
+    background: #e3f2fd;
+    color: #1565c0;
+    border: 1px dashed #90caf9;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    margin-top: 0.25rem;
+  }
+
+  .add-path-btn:hover {
+    background: #bbdefb;
+  }
+
+  .sandbox-paths-display {
+    padding: 0.75rem;
+    background: #f9f9f9;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+  }
+
+  .path-list {
+    margin: 0.25rem 0 0 0;
+    padding-left: 1.5rem;
+    list-style-type: disc;
+  }
+
+  .path-list li {
+    font-family: monospace;
+    font-size: 0.85rem;
+    padding: 0.25rem 0;
+    color: #555;
+    word-break: break-all;
   }
 
   /* v0.13.3: Fix for macOS WebKit event handler detachment issue */
