@@ -687,6 +687,73 @@ class ZaiProvider(AIProvider):
         except Exception as e:
             raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {e}") from e
 
+    async def generate_response_stream(
+        self,
+        prompt: str,
+        on_chunk: callable,
+        conversation_id: str = None
+    ) -> str:
+        """
+        Generate text response with streaming.
+
+        Args:
+            prompt: User message text
+            on_chunk: Async callback for each text chunk: await on_chunk(chunk, conversation_id)
+            conversation_id: Optional conversation ID for chunk callbacks
+
+        Returns:
+            Full response text (accumulated from all chunks)
+        """
+        try:
+            # Determine max_tokens value
+            effective_max_tokens = self.max_tokens if self.max_tokens else 8192
+
+            # Build API parameters
+            api_params = {
+                "model": self.model,
+                "max_tokens": effective_max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+
+            # Add extended thinking if enabled (all GLM models support it)
+            if self.thinking_enabled:
+                if effective_max_tokens <= self.thinking_budget_tokens:
+                    effective_max_tokens = self.thinking_budget_tokens + 4096
+                    api_params["max_tokens"] = effective_max_tokens
+
+                api_params["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+                logger.info(f"GLM streaming with thinking enabled (budget={self.thinking_budget_tokens} tokens)")
+            else:
+                logger.debug(f"GLM streaming without thinking for {self.model}")
+
+            # Note: Do NOT add stream=True - messages.stream() is already a streaming method
+
+            # Stream response
+            full_text = ""
+            thinking_text = ""
+
+            async with self.client.messages.stream(**api_params) as stream:
+                async for text in stream.text_stream:
+                    full_text += text
+                    # Call the chunk callback
+                    if on_chunk:
+                        await on_chunk(text, conversation_id)
+
+            # Store thinking for retrieval if available
+            if thinking_text:
+                self._last_thinking = thinking_text
+                logger.info(f"GLM streaming thinking: {len(thinking_text)} chars")
+
+            logger.info(f"GLM streaming completed: {len(full_text)} chars")
+            return full_text
+
+        except Exception as e:
+            logger.error(f"Z.AI streaming failed: {e}", exc_info=True)
+            raise RuntimeError(f"Z.AI streaming provider '{self.alias}' failed: {e}") from e
+
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """
         Z.AI vision API for GLM-V models (glm-4.6v-flash, glm-4.5v, glm-4.0v)
@@ -1471,6 +1538,49 @@ class DpcAgentProvider(AIProvider):
         except Exception as e:
             logger.error(f"DpcAgentProvider '{self.alias}' failed: {e}", exc_info=True)
             raise RuntimeError(f"Embedded agent failed: {e}") from e
+
+    async def generate_response_stream(
+        self,
+        prompt: str,
+        on_chunk: callable,
+        conversation_id: str = None,
+        **kwargs
+    ) -> str:
+        """
+        Process a message through the autonomous agent with streaming.
+
+        Args:
+            prompt: User message text
+            on_chunk: Async callback for each text chunk: await on_chunk(chunk, conversation_id)
+            conversation_id: Optional conversation ID for progress tracking
+            **kwargs: Additional arguments (ignored)
+
+        Returns:
+            Agent's response text (accumulated from all chunks)
+        """
+        try:
+            manager = await self._ensure_manager()
+
+            # Use provided conversation_id or generate one
+            if not conversation_id:
+                import hashlib
+                conversation_id = hashlib.md5(prompt.encode()).hexdigest()[:16]
+
+            # Note: We don't pass on_chunk to manager - the manager handles
+            # broadcasting directly via local_api. This avoids callback chain issues.
+            response = await manager.process_message(
+                message=prompt,
+                conversation_id=conversation_id,
+                include_context=True,
+                on_stream_chunk=None,  # Manager handles broadcast directly
+            )
+
+            logger.info(f"DpcAgentProvider '{self.alias}': Generated streaming response ({len(response)} chars)")
+            return response
+
+        except Exception as e:
+            logger.error(f"DpcAgentProvider '{self.alias}' streaming failed: {e}", exc_info=True)
+            raise RuntimeError(f"Embedded agent streaming failed: {e}") from e
 
     def supports_vision(self) -> bool:
         """

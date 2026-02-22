@@ -62,6 +62,8 @@ class DpcLlmAdapter:
         tools: Optional[List[Dict[str, Any]]] = None,
         reasoning_effort: str = "medium",
         max_tokens: int = 4096,
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        conversation_id: Optional[str] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Send chat request through DPC's LLMManager.
@@ -72,6 +74,8 @@ class DpcLlmAdapter:
             tools: Optional list of tool schemas (handled via prompt injection)
             reasoning_effort: Effort level (low/medium/high) - passed to provider if supported
             max_tokens: Max completion tokens
+            on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
+            conversation_id: Optional conversation ID for streaming callbacks
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -92,9 +96,19 @@ class DpcLlmAdapter:
             raise RuntimeError("No AI provider configured in DPC Messenger")
         provider = self._llm_manager.providers[alias]
 
-        # Call DPC provider
+        # Call DPC provider - use streaming if available and callback provided
         try:
-            response = await provider.generate_response(prompt)
+            if on_stream_chunk and hasattr(provider, 'generate_response_stream'):
+                # Use streaming
+                log.debug("Using streaming mode for LLM response")
+                response = await provider.generate_response_stream(
+                    prompt,
+                    on_chunk=on_stream_chunk,
+                    conversation_id=conversation_id,
+                )
+            else:
+                # Non-streaming fallback
+                response = await provider.generate_response(prompt)
 
             # Build response message in Ouroboros format
             response_msg: Dict[str, Any] = {

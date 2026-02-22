@@ -127,6 +127,7 @@ export const whisperModelDownloadFailed = writable<any>(null);  // {provider, er
 // DPC Agent progress stores (v0.15.0+ - real-time agent progress in chat)
 export const agentProgress = writable<any>(null);  // {conversation_id, message, round, tool_name, ts}
 export const agentProgressClear = writable<any>(null);  // {conversation_id} - signal to clear progress
+export const agentTextChunk = writable<any>(null);  // {conversation_id, chunk, ts} - streaming text chunks
 
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
@@ -742,6 +743,11 @@ export function connectToCoreService() {
                     // Signal to clear progress display (task completed/failed)
                     console.log("[AgentProgress] Clear for conversation:", message.payload?.conversation_id);
                     agentProgressClear.set(message.payload);
+                }
+                else if (message.event === "agent_text_chunk") {
+                    // Streaming text chunk from agent LLM response
+                    // payload: {conversation_id, chunk, ts}
+                    agentTextChunk.set(message.payload);
                 }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)

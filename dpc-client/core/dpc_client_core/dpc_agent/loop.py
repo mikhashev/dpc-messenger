@@ -153,6 +153,8 @@ async def run_llm_loop(
     task_id: str = "",
     budget_remaining_usd: Optional[float] = None,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
+    on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+    conversation_id: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """
     Core LLM-with-tools loop.
@@ -168,6 +170,8 @@ async def run_llm_loop(
         task_id: Task identifier for logging
         budget_remaining_usd: Optional budget limit
         max_rounds: Maximum LLM rounds before stopping
+        on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
+        conversation_id: Optional conversation ID for streaming callbacks
 
     Returns:
         (final_text, accumulated_usage, llm_trace) tuple
@@ -200,7 +204,12 @@ async def run_llm_loop(
                 finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({max_rounds}). Consider breaking into smaller tasks."
                 messages.append({"role": "system", "content": f"[ROUND_LIMIT] {finish_reason}"})
                 try:
-                    final_msg, _ = await llm.chat(messages, tools=tool_schemas)
+                    final_msg, _ = await llm.chat(
+                        messages,
+                        tools=tool_schemas,
+                        on_stream_chunk=on_stream_chunk,
+                        conversation_id=conversation_id,
+                    )
                     if final_msg.get("content"):
                         return final_msg["content"], accumulated_usage, llm_trace
                 except Exception:
@@ -213,7 +222,12 @@ async def run_llm_loop(
 
             # --- LLM call ---
             try:
-                msg, usage = await llm.chat(messages, tools=tool_schemas)
+                msg, usage = await llm.chat(
+                    messages,
+                    tools=tool_schemas,
+                    on_stream_chunk=on_stream_chunk,
+                    conversation_id=conversation_id,
+                )
                 accumulated_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
                 accumulated_usage["completion_tokens"] += usage.get("completion_tokens", 0)
                 accumulated_usage["total_tokens"] += usage.get("total_tokens", 0)
@@ -277,7 +291,12 @@ async def run_llm_loop(
                     finish_reason = f"Task spent ${task_cost:.3f} (>50% of budget ${budget_remaining_usd:.2f})."
                     messages.append({"role": "system", "content": f"[BUDGET_LIMIT] {finish_reason} Give your final response now."})
                     try:
-                        final_msg, _ = await llm.chat(messages, tools=None)
+                        final_msg, _ = await llm.chat(
+                            messages,
+                            tools=None,
+                            on_stream_chunk=on_stream_chunk,
+                            conversation_id=conversation_id,
+                        )
                         if final_msg.get("content"):
                             return final_msg["content"], accumulated_usage, llm_trace
                     except Exception:

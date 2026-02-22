@@ -63,7 +63,8 @@
     showTranscription = true,  // v0.13.2+: Control transcription display
     agentProgressMessage = null,  // v0.15.0+: Agent progress message
     agentProgressTool = null,  // v0.15.0+: Current tool being executed
-    agentProgressRound = 0  // v0.15.0+: Current round number
+    agentProgressRound = 0,  // v0.15.0+: Current round number
+    agentStreamingText = ""  // v0.16.0+: Streaming text from agent
   }: {
     messages: Message[];
     conversationId: string;
@@ -73,7 +74,22 @@
     agentProgressMessage?: string | null;
     agentProgressTool?: string | null;
     agentProgressRound?: number;
+    agentStreamingText?: string;
   } = $props();
+
+  // Debug: Log when progress props change
+  $effect(() => {
+    if (agentProgressTool || agentProgressMessage) {
+      console.log(`[ChatPanel] Progress props: tool=${agentProgressTool}, msg=${agentProgressMessage?.substring(0,50)}, round=${agentProgressRound}`);
+    }
+  });
+
+  // Auto-scroll when streaming text updates
+  $effect(() => {
+    if (agentStreamingText && chatWindowElement) {
+      chatWindowElement.scrollTop = chatWindowElement.scrollHeight;
+    }
+  });
 </script>
 
 <div class="chat-window" bind:this={chatWindowElement}>
@@ -178,6 +194,20 @@
         {#if agentProgressMessage}
           <span class="agent-progress-message">{agentProgressMessage}</span>
         {/if}
+      </div>
+    </div>
+  {/if}
+
+  <!-- Agent streaming text (v0.16.0+) - Shows AI response as it's generated -->
+  {#if agentStreamingText}
+    <div class="message ai-streaming">
+      <div class="message-header">
+        <strong>AI Assistant</strong>
+        <span class="streaming-indicator">✨ Generating...</span>
+      </div>
+      <!-- Always use plain text during streaming for performance - markdown renders on final message -->
+      <div class="message-text streaming-content">
+        <pre class="streaming-plain">{agentStreamingText}</pre>
       </div>
     </div>
   {/if}
@@ -376,5 +406,45 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  /* Agent streaming text (v0.16.0+) */
+  .ai-streaming {
+    background: linear-gradient(135deg, #e8f5e9 0%, #f1f8e9 100%);
+    border: 1px solid #a5d6a7;
+    animation: fade-in 0.3s ease;
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .streaming-indicator {
+    color: #4caf50;
+    font-size: 0.75rem;
+    margin-left: 8px;
+    animation: blink 1.5s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .streaming-content {
+    min-height: 20px;
+  }
+
+  .streaming-plain {
+    margin: 0;
+    padding: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: inherit;
+    font-size: inherit;
+    background: transparent;
+    color: inherit;
+    line-height: 1.5;
   }
 </style>

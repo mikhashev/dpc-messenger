@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -108,6 +108,22 @@
   let agentProgressMessage = $state<string | null>(null);
   let agentProgressTool = $state<string | null>(null);
   let agentProgressRound = $state<number>(0);
+  let agentStreamingText = $state<string>("");  // Accumulated streaming text from agent
+  let lastActiveChatId: string | null = null;  // Non-reactive tracker for chat switches
+
+  // Throttled streaming: accumulate chunks in non-reactive buffer, flush to state periodically
+  let streamingBuffer = "";  // Non-reactive buffer for chunks
+  let streamingFlushTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // Helper to clear streaming state (buffer + state)
+  function clearAgentStreaming() {
+    if (streamingFlushTimeout) {
+      clearTimeout(streamingFlushTimeout);
+      streamingFlushTimeout = null;
+    }
+    streamingBuffer = "";
+    agentStreamingText = "";
+  }
 
   // Dual provider selection (Phase 1: separate text and vision providers)
   // Managed by ProviderSelector component (extracted)
@@ -263,13 +279,31 @@
     if ($agentProgress) {
       const { conversation_id, message, round, tool_name, ts } = $agentProgress;
       console.log(`[AgentProgress] Conv: ${conversation_id}, Tool: ${tool_name}, Round: ${round}`);
+      console.log(`[AgentProgress] activeChatId: ${activeChatId}, match: ${activeChatId === conversation_id}`);
 
       // Only show progress for the active AI chat
       if (activeChatId === conversation_id) {
+        console.log(`[AgentProgress] Setting progress: tool=${tool_name}, round=${round}`);
         agentProgressMessage = message || null;
         agentProgressTool = tool_name || null;
         agentProgressRound = round || 0;
+      } else {
+        console.log(`[AgentProgress] SKIPPED - conversation_id mismatch`);
       }
+    }
+  });
+
+  // Clear agent progress when switching chats (only when activeChatId actually changes)
+  $effect(() => {
+    // This effect tracks activeChatId - only runs when it changes
+    if (activeChatId !== lastActiveChatId) {
+      // Clear progress and streaming state when switching chats
+      agentProgressMessage = null;
+      agentProgressTool = null;
+      agentProgressRound = 0;
+      clearAgentStreaming();
+      lastActiveChatId = activeChatId;
+      console.log(`[ChatSwitch] Cleared progress for chat switch to: ${activeChatId}`);
     }
   });
 
@@ -281,6 +315,29 @@
         agentProgressMessage = null;
         agentProgressTool = null;
         agentProgressRound = 0;
+        clearAgentStreaming();
+      }
+    }
+  });
+
+  // DPC Agent streaming text (v0.16.0+ - real-time text streaming)
+  // Throttled approach: accumulate chunks in buffer, flush to state every 100ms
+  $effect(() => {
+    if ($agentTextChunk) {
+      const { conversation_id, chunk } = $agentTextChunk;
+      // Only accumulate chunks for the active AI chat
+      if (activeChatId === conversation_id) {
+        // Add to non-reactive buffer
+        streamingBuffer += chunk;
+
+        // Throttle state updates - flush buffer to state every 100ms
+        if (!streamingFlushTimeout) {
+          streamingFlushTimeout = setTimeout(() => {
+            agentStreamingText += streamingBuffer;
+            streamingBuffer = "";
+            streamingFlushTimeout = null;
+          }, 100);
+        }
       }
     }
   });
@@ -1745,6 +1802,9 @@
     // Clear draft for this chat after sending
     chatDraftInputs = new Map(chatDraftInputs).set(activeChatId, "");
 
+    // Clear streaming text when sending a new message
+    clearAgentStreaming();
+
     chatHistories.update(h => {
       const newMap = new Map(h);
       const hist = newMap.get(activeChatId) || [];
@@ -2714,6 +2774,7 @@
     if (message.command === "execute_ai_query") {
       console.log(`[TokenCounter] execute_ai_query response: status=${message.status}, isLoading before clear=${isLoading}`);
       isLoading = false;
+      clearAgentStreaming();  // Clear streaming text when final response arrives
       console.log(`[TokenCounter] isLoading cleared: ${isLoading}`);
 
       const newText = message.status === "OK"
@@ -3020,6 +3081,7 @@
         agentProgressMessage={agentProgressMessage}
         agentProgressTool={agentProgressTool}
         agentProgressRound={agentProgressRound}
+        agentStreamingText={agentStreamingText}
       />
 
       <div class="chat-input">

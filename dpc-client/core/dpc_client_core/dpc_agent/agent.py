@@ -130,6 +130,7 @@ class DpcAgent:
         dpc_context: Optional[Dict[str, Any]] = None,
         system_prompt: Optional[str] = None,
         emit_progress: Optional[Callable[[str], None]] = None,
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -140,6 +141,7 @@ class DpcAgent:
             dpc_context: Optional DPC context (personal, device)
             system_prompt: Optional custom system prompt
             emit_progress: Optional callback for progress updates
+            on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
 
         Returns:
             Agent's response text
@@ -189,6 +191,8 @@ class DpcAgent:
             task_id=conversation_id,
             budget_remaining_usd=self.config.budget_usd,
             max_rounds=self.config.max_rounds,
+            on_stream_chunk=on_stream_chunk,
+            conversation_id=conversation_id,
         )
 
         # Log task completion

@@ -35,6 +35,9 @@ class EventType(Enum):
     TASK_COMPLETED = "task_completed"
     TASK_FAILED = "task_failed"
 
+    # Streaming
+    TEXT_CHUNK = "text_chunk"
+
     # Consciousness
     THOUGHT_STARTED = "thought_started"
     THOUGHT_COMPLETED = "thought_completed"
@@ -83,6 +86,7 @@ EVENT_CATEGORIES = {
     "lifecycle": [EventType.AGENT_STARTED, EventType.AGENT_STOPPED],
     "tasks": [EventType.TASK_SCHEDULED, EventType.TASK_STARTED,
               EventType.TASK_COMPLETED, EventType.TASK_FAILED],
+    "streaming": [EventType.TEXT_CHUNK],
     "consciousness": [EventType.THOUGHT_STARTED, EventType.THOUGHT_COMPLETED],
     "tools": [EventType.TOOL_EXECUTED],
     "evolution": [EventType.EVOLUTION_CYCLE_STARTED, EventType.EVOLUTION_CYCLE_COMPLETED,

@@ -202,6 +202,7 @@ class DpcAgentManager:
         message: str,
         conversation_id: str,
         include_context: bool = True,
+        on_stream_chunk=None,
     ) -> str:
         """
         Process a user message through the agent.
@@ -210,6 +211,7 @@ class DpcAgentManager:
             message: User's message text
             conversation_id: Unique ID for this conversation
             include_context: Whether to include DPC personal/device context
+            on_stream_chunk: Optional async callback for streaming text chunks: await on_stream_chunk(chunk, conversation_id)
 
         Returns:
             Agent's response text
@@ -238,11 +240,29 @@ class DpcAgentManager:
             def emit_progress_with_context(msg: str, tool: str = None, round: int = None):
                 self._emit_progress(msg, conversation_id, tool, round)
 
+            # Create streaming callback that broadcasts text chunks via local_api
+            async def emit_stream_chunk(chunk: str, conv_id: str):
+                # Broadcast text_chunk event for WebSocket (UI streaming display)
+                try:
+                    local_api = getattr(self.service, "local_api", None)
+                    if local_api and hasattr(local_api, "broadcast_event"):
+                        await local_api.broadcast_event("agent_text_chunk", {
+                            "conversation_id": conv_id,
+                            "chunk": chunk,
+                            "ts": utc_now_iso(),
+                        })
+                except Exception as e:
+                    log.debug(f"Failed to emit text chunk: {e}")
+
+                # Note: We do NOT call on_stream_chunk here to avoid callback chain issues
+                # The broadcast above is sufficient for UI updates
+
             response = await self.agent.process(
                 message=message,
                 conversation_id=conversation_id,
                 dpc_context=dpc_context,
                 emit_progress=emit_progress_with_context,
+                on_stream_chunk=emit_stream_chunk,
             )
 
             # Emit TASK_COMPLETED event
