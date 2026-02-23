@@ -171,6 +171,7 @@ class DpcAgent:
             emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None: None),
             firewall=self._firewall,  # For extended sandbox paths
         )
+        ctx._agent = self  # Enable schedule_task and other agent-dependent tools
         self.tools.set_context(ctx)
 
         # Log task start
