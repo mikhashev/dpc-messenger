@@ -244,26 +244,19 @@ class Settings:
         # Future: Will support group chat bridging (single message to DPC group).
         # See telegram_coordinator.py:_forward_to_p2p_peers() for implementation details.
 
+        # DPC Agent runtime settings (security/permission settings are in privacy_rules.json)
+        # Note: enabled, tools, and evolution_* settings are configured via Firewall Rules UI
         self._config['dpc_agent'] = {
-            'enabled': 'false',  # Enable embedded autonomous AI agent (opt-in)
             'background_consciousness': 'false',  # Enable background thinking between tasks (optional)
-            'tools': 'repo_read,repo_list,update_scratchpad,update_identity',  # Comma-separated tool whitelist
             'budget_usd': '50',  # Maximum budget per task in USD
             'max_rounds': '200',  # Maximum LLM rounds before stopping
             'context_window': '200000',  # Agent context window size (tokens)
-            # Task queue settings
             'enable_task_queue': 'true',  # Enable background task scheduling
-            # Evolution settings
-            'evolution_enabled': 'false',  # Enable autonomous self-modification
-            'evolution_interval_minutes': '60',  # Minutes between evolution cycles
-            'evolution_auto_apply': 'false',  # Auto-apply changes (false = require approval)
-            # Budget settings
             'billing_model': 'subscription',  # 'subscription' or 'pay_per_use'
         }
         # NOTE: The agent is sandboxed to ~/.dpc/agent/ directory.
-        # It can modify files within its sandbox but cannot access DPC codebase.
-        # Use 'tools' config to further restrict which tools are available.
-        # To use the agent, add a provider with type="dpc_agent" in providers.json
+        # Security settings (enabled, tools, evolution) are configured via Firewall Rules UI
+        # which writes to ~/.dpc/privacy_rules.json.
 
         self._config['dpc_agent_telegram'] = {
             'enabled': 'false',  # Enable Telegram notifications for agent events
@@ -924,12 +917,9 @@ class Settings:
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to save last_update_id: {e}")
 
-    # DPC Agent Settings (Embedded Autonomous AI Agent)
-
-    def get_dpc_agent_enabled(self) -> bool:
-        """Check if the embedded autonomous AI agent is enabled."""
-        value = self.get('dpc_agent', 'enabled', 'false')
-        return value.lower() in ('true', '1', 'yes')
+    # DPC Agent Runtime Settings
+    # Note: Security/permission settings (enabled, tools, evolution) are in privacy_rules.json
+    # Configure via Firewall Rules UI in the desktop app.
 
     def get_dpc_agent_background_consciousness(self) -> bool:
         """Check if background consciousness (thinking between tasks) is enabled."""
@@ -956,19 +946,8 @@ class Settings:
         value = self.get('dpc_agent', 'enable_task_queue', 'true')
         return value.lower() in ('true', '1', 'yes')
 
-    def get_dpc_agent_evolution_enabled(self) -> bool:
-        """Check if evolution (self-modification) is enabled."""
-        value = self.get('dpc_agent', 'evolution_enabled', 'false')
-        return value.lower() in ('true', '1', 'yes')
-
-    def get_dpc_agent_evolution_interval_minutes(self) -> int:
-        """Get minutes between evolution cycles."""
-        return int(self.get('dpc_agent', 'evolution_interval_minutes', '60'))
-
-    def get_dpc_agent_evolution_auto_apply(self) -> bool:
-        """Check if evolution changes should be auto-applied (no human approval)."""
-        value = self.get('dpc_agent', 'evolution_auto_apply', 'false')
-        return value.lower() in ('true', '1', 'yes')
+    # Note: Evolution settings are configured via Firewall Rules UI (privacy_rules.json)
+    # See: dpc_agent.evolution in ~/.dpc/privacy_rules.json
 
     def get_dpc_agent_billing_model(self) -> str:
         """Get billing model ('subscription' or 'pay_per_use')."""
@@ -1006,19 +985,21 @@ class Settings:
         return value.lower() in ('true', '1', 'yes')
 
     def get_dpc_agent_config(self) -> dict:
-        """Get all DPC agent configuration as a dict."""
+        """Get DPC agent runtime configuration as a dict.
+
+        Note: Security/permission settings (enabled, tools, evolution) are
+        configured via the Firewall Rules UI (privacy_rules.json), not here.
+        """
         return {
-            'enabled': self.get_dpc_agent_enabled(),
+            # Runtime settings from config.ini
             'background_consciousness': self.get_dpc_agent_background_consciousness(),
-            # Tool control is via firewall (privacy_rules.json), not config.ini
             'budget_usd': self.get_dpc_agent_budget_usd(),
             'max_rounds': self.get_dpc_agent_max_rounds(),
             'context_window': self.get_dpc_agent_context_window(),
             'enable_task_queue': self.get_dpc_agent_enable_task_queue(),
-            'evolution_enabled': self.get_dpc_agent_evolution_enabled(),
-            'evolution_interval_minutes': self.get_dpc_agent_evolution_interval_minutes(),
-            'evolution_auto_apply': self.get_dpc_agent_evolution_auto_apply(),
             'billing_model': self.get_dpc_agent_billing_model(),
+            # Security settings configured via Firewall Rules UI (privacy_rules.json):
+            # - enabled, tools, evolution_enabled, evolution_interval_minutes, evolution_auto_apply
         }
 
     def get_dpc_agent_telegram_config(self) -> dict:
