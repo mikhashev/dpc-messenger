@@ -204,13 +204,8 @@ class AgentTelegramBridge:
                 write_timeout=30,
                 connect_timeout=30,
             )
-            self._bot = Bot(token=self.bot_token, request=request)
 
-            # Verify bot is valid
-            me = await self._bot.get_me()
-            log.info(f"Agent Telegram bridge started: @{me.username}")
-
-            # Create application for polling
+            # Create application for polling (this manages the bot instance)
             self._application = Application.builder().token(self.bot_token).request(request).build()
 
             # Add handlers for commands
@@ -224,8 +219,18 @@ class AgentTelegramBridge:
             # Add handler for voice messages
             self._application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
 
-            # Initialize and start polling
+            # Initialize application (creates bot instance internally)
             await self._application.initialize()
+
+            # Use the Application's bot instance (not a separate one)
+            # This ensures proper event loop integration
+            self._bot = self._application.bot
+
+            # Verify bot is valid
+            me = await self._bot.get_me()
+            log.info(f"Agent Telegram bridge started: @{me.username}")
+
+            # Start polling
             await self._application.start()
             await self._application.updater.start_polling(drop_pending_updates=True)
 
@@ -567,7 +572,10 @@ Send a voice message and it will be transcribed and processed\\.
         Returns:
             True if sent successfully, False otherwise
         """
+        log.debug(f"[handle_event] Received: {event.type.value}, enabled={self._enabled}, bot={self._bot is not None}")
+
         if not self._enabled or not self._bot:
+            log.warning(f"[handle_event] Bridge not ready (enabled={self._enabled}, bot={self._bot is not None})")
             return False
 
         # Filter events
@@ -580,23 +588,31 @@ Send a voice message and it will be transcribed and processed\\.
             log.warning(f"Rate limited event: {event.type.value}")
             return False
 
-        log.info(f"Sending Telegram notification for event: {event.type.value}")
+        log.debug(f"Sending Telegram notification for event: {event.type.value}")
 
         # Format message
-        message = self._format_event(event)
+        try:
+            message = self._format_event(event)
+        except Exception as e:
+            log.error(f"[handle_event] Failed to format event: {e}", exc_info=True)
+            return False
 
         if not message:
+            log.warning(f"[handle_event] Empty message for event {event.type.value}")
             return False
 
         # Send to all allowed chats
         success = True
         for chat_id in self.allowed_chat_ids:
             try:
+                log.debug(f"[handle_event] Calling _send_message for chat_id={chat_id}")
                 await self._send_message(chat_id, message)
+                log.debug(f"[handle_event] _send_message completed for chat_id={chat_id}")
             except Exception as e:
-                log.error(f"Failed to send Telegram message to {chat_id}: {e}")
+                log.error(f"[handle_event] Failed to send Telegram message to {chat_id}: {e}", exc_info=True)
                 success = False
 
+        log.debug(f"[handle_event] Completed with success={success}")
         return success
 
     def _check_rate_limit(self, event_type: str) -> bool:
@@ -647,12 +663,33 @@ Send a voice message and it will be transcribed and processed\\.
         if len(text) > TELEGRAM_MESSAGE_MAX_LENGTH:
             text = text[:TELEGRAM_MESSAGE_MAX_LENGTH - 50] + "\n\n... (truncated)"
 
-        await self._bot.send_message(
-            chat_id=chat_id,
-            text=text,
-            parse_mode="Markdown",
-            disable_notification=False,
-        )
+        log.debug(f"[_send_message] Sending to chat_id={chat_id}, text_len={len(text)}")
+
+        try:
+            result = await self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="Markdown",
+                disable_notification=False,
+            )
+            log.debug(f"[_send_message] Success! message_id={result.message_id}")
+            return result
+        except Exception as e:
+            log.error(f"[_send_message] FAILED to send to {chat_id}: {e}", exc_info=True)
+            # Try without Markdown as fallback
+            try:
+                log.debug(f"[_send_message] Retrying without Markdown parsing...")
+                result = await self._bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=None,  # No markdown
+                    disable_notification=False,
+                )
+                log.debug(f"[_send_message] Success without Markdown! message_id={result.message_id}")
+                return result
+            except Exception as e2:
+                log.error(f"[_send_message] Failed even without Markdown: {e2}", exc_info=True)
+                raise
 
     def _format_event(self, event: AgentEvent) -> str:
         """
@@ -737,6 +774,7 @@ Send a voice message and it will be transcribed and processed\\.
 
             if "message" in data:
                 # Escape markdown and truncate long messages
+                # Use full escape_markdown for proper Telegram Markdown v2 escaping
                 msg = escape_markdown(str(data["message"])[:3500])
                 lines.append(f"\n{msg}")
 
@@ -805,7 +843,12 @@ def create_telegram_bridge_callback(bridge: AgentTelegramBridge):
         Callback function suitable for add_listener()
     """
     async def callback(event: AgentEvent) -> None:
-        await bridge.handle_event(event)
+        log.debug(f"[TelegramBridge Callback] Received event: {event.type.value}, bridge_enabled={bridge._enabled}")
+        try:
+            result = await bridge.handle_event(event)
+            log.debug(f"[TelegramBridge Callback] Event handled, result={result}")
+        except Exception as e:
+            log.error(f"[TelegramBridge Callback] Error handling event: {e}", exc_info=True)
 
     callback.__name__ = "telegram_bridge_callback"
     return callback

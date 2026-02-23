@@ -6,7 +6,11 @@ import asyncio
 import logging
 import base64
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dpc_client_core.service import CoreService
+    from dpc_client_core.managers.agent_manager import DpcAgentManager
 
 # Import client libraries
 from openai import AsyncOpenAI
@@ -751,10 +755,33 @@ class ZaiProvider(AIProvider):
                     if on_chunk:
                         await on_chunk(text, conversation_id)
 
+                # After streaming, check for thinking blocks in final message
+                # This handles the case where LLM produces only thinking, no text
+                if self.thinking_enabled and not full_text:
+                    try:
+                        final_message = await stream.get_final_message()
+                        for block in final_message.content:
+                            if hasattr(block, 'type') and block.type == "thinking":
+                                thinking_text = getattr(block, 'thinking', "")
+                                if thinking_text:
+                                    logger.info(f"GLM streaming thinking (no text): {len(thinking_text)} chars")
+                                    self._last_thinking = thinking_text
+                    except Exception as e:
+                        logger.debug(f"Could not get final message for thinking: {e}")
+
             # Store thinking for retrieval if available
             if thinking_text:
                 self._last_thinking = thinking_text
                 logger.info(f"GLM streaming thinking: {len(thinking_text)} chars")
+
+            # If no text produced but thinking was done, return a summary
+            if not full_text and thinking_text:
+                logger.warning("GLM extended thinking produced no text output, using thinking summary")
+                # Return a brief indication that thinking occurred
+                # The actual thinking is stored in _last_thinking for retrieval
+                full_text = "(thinking completed - see reasoning for details)"
+            elif not full_text:
+                logger.warning("GLM streaming produced no output")
 
             logger.info(f"GLM streaming completed: {len(full_text)} chars")
             return full_text

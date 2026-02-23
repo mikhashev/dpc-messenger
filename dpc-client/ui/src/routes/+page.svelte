@@ -2784,8 +2784,16 @@
   $effect(() => {
     if ($coreMessages?.id) {
       const message = $coreMessages;
+      const messageId = message.id;  // Unique ID for deduplication
 
     if (message.command === "execute_ai_query") {
+      // Guard: Skip if already processed (prevents reactive loops in Svelte 5)
+      if (processedMessageIds.has(messageId)) {
+        console.log(`[execute_ai_query] Skipping already processed message: ${messageId}`);
+        return;
+      }
+      processedMessageIds.add(messageId);
+
       console.log(`[TokenCounter] execute_ai_query response: status=${message.status}, isLoading before clear=${isLoading}`);
       isLoading = false;
 
@@ -2814,11 +2822,32 @@
       const responseCommandId = message.id;
 
       // Find which chat this command belongs to
-      const chatId = commandToChatMap.get(responseCommandId);
+      let chatId = commandToChatMap.get(responseCommandId);
+
+      // Debug: Log if chatId not found (helps diagnose race conditions)
+      if (!chatId) {
+        console.warn(`[execute_ai_query] No chatId found for commandId=${responseCommandId}, using activeChatId=${activeChatId} as fallback`);
+        // Fallback: use active chat if command mapping not found
+        // This handles edge cases where the map was cleared or response arrived late
+        chatId = activeChatId;
+      }
+
       if (chatId) {
+        // Debug: Log what we're searching for
+        console.log(`[execute_ai_query] Looking for commandId=${responseCommandId} in chatId=${chatId}`);
+
         chatHistories.update(h => {
           const newMap = new Map(h);
           const hist = newMap.get(chatId) || [];
+
+          // Debug: Log all commandIds in history
+          const commandIds = hist.filter(m => m.commandId).map(m => m.commandId);
+          console.log(`[execute_ai_query] History commandIds:`, commandIds);
+
+          // Check if we found a match
+          const found = hist.some(m => m.commandId === responseCommandId);
+          console.log(`[execute_ai_query] Found matching message: ${found}`);
+
           newMap.set(chatId, hist.map(m =>
             m.commandId === responseCommandId ? {
               ...m,
@@ -2869,6 +2898,14 @@
 
         // Clean up the command mapping
         commandToChatMap.delete(responseCommandId);
+      }
+
+      // Cleanup old processed IDs to prevent memory leak
+      if (processedMessageIds.size > 100) {
+        const firstId = processedMessageIds.values().next().value;
+        if (firstId) {
+          processedMessageIds.delete(firstId);
+        }
       }
 
       autoScroll();
