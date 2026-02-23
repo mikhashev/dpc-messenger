@@ -1002,7 +1002,8 @@ class Settings:
 
     def get_dpc_agent_telegram_transcription_enabled(self) -> bool:
         """Check if voice message transcription is enabled for agent Telegram bot."""
-        return self.getboolean('dpc_agent_telegram', 'transcription_enabled', fallback=True)
+        value = self.get('dpc_agent_telegram', 'transcription_enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
 
     def get_dpc_agent_config(self) -> dict:
         """Get all DPC agent configuration as a dict."""
