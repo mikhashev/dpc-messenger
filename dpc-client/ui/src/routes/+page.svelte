@@ -2197,12 +2197,25 @@
     selectedProviderForNewChat = "";
   }
 
-  function handleAddAgentChat() {
+  async function handleAddAgentChat() {
     // Check if dpc_agent provider exists
     const agentProvider = $availableProviders?.providers?.find((p: any) => p.alias === 'dpc_agent');
     if (!agentProvider) {
       alert("DPC Agent provider not configured. Add 'dpc_agent' to ~/.dpc/providers.json");
       return;
+    }
+
+    // Pre-initialize the agent and Telegram bridge
+    try {
+      const result = await sendCommand("prepare_agent", {});
+      if (result?.status === 'success') {
+        console.log('DPC Agent prepared:', result.message);
+      } else {
+        console.warn('Failed to prepare DPC Agent:', result?.message);
+      }
+    } catch (e) {
+      console.warn('Error preparing DPC Agent:', e);
+      // Continue anyway - agent will initialize lazily on first query
     }
 
     // Create new Agent chat ID

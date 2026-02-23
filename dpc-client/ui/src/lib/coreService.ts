@@ -879,7 +879,8 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_voice_transcription_config',  // v0.13.2 - auto-transcription config
             'save_voice_transcription_config',  // v0.13.2 - auto-transcription config
             'set_conversation_transcription',  // v0.13.2 - per-conversation transcription control
-            'get_conversation_transcription'  // v0.13.2 - per-conversation transcription control
+            'get_conversation_transcription',  // v0.13.2 - per-conversation transcription control
+            'prepare_agent'  // Pre-initialize DPC Agent and Telegram bridge
         ].includes(command);
 
         if (expectsResponse) {

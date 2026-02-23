@@ -1558,6 +1558,78 @@ class CoreService:
                 "message": f"Failed to set voice provider: {e}"
             }
 
+    async def prepare_agent(self) -> Dict[str, Any]:
+        """
+        Pre-initialize the DPC Agent provider and start the Telegram bridge.
+
+        Called by the UI when the user creates a new AI Agent chat, ensuring
+        that the agent (including Telegram bridge) is ready before any queries
+        are sent. This moves initialization from lazy to eager.
+
+        Returns:
+            Dictionary with:
+            - status: "success" or "error"
+            - message: Human-readable status message
+            - agent_status: Dict from DpcAgentProvider.get_status() if available
+        """
+        # Check if dpc_agent provider is configured
+        if "dpc_agent" not in self.llm_manager.providers:
+            return {
+                "status": "error",
+                "message": "DPC Agent provider is not configured. Add a 'dpc_agent' provider to ~/.dpc/providers.json"
+            }
+
+        try:
+            provider = self.llm_manager.providers["dpc_agent"]
+
+            # Import here to check type
+            from dpc_client_core.llm_manager import DpcAgentProvider
+
+            if not isinstance(provider, DpcAgentProvider):
+                return {
+                    "status": "error",
+                    "message": f"Provider 'dpc_agent' is not a DpcAgentProvider (type: {type(provider).__name__})"
+                }
+
+            # Check if already initialized (without triggering initialization)
+            current_status = provider.get_status()
+            if current_status.get("initialized"):
+                logger.info("DPC Agent already initialized")
+                return {
+                    "status": "success",
+                    "message": "DPC Agent already initialized",
+                    "agent_status": current_status
+                }
+
+            # Initialize the agent manager (this starts Telegram bridge)
+            logger.info("Pre-initializing DPC Agent...")
+            await provider._ensure_manager()
+
+            # Get updated status
+            agent_status = provider.get_status()
+
+            logger.info(f"DPC Agent initialized successfully")
+
+            return {
+                "status": "success",
+                "message": "DPC Agent initialized successfully",
+                "agent_status": agent_status
+            }
+
+        except RuntimeError as e:
+            # Handle initialization-specific errors
+            logger.error(f"DPC Agent initialization failed: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": f"DPC Agent initialization failed: {e}"
+            }
+        except Exception as e:
+            logger.error(f"Failed to prepare DPC Agent: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": f"Failed to prepare DPC Agent: {e}"
+            }
+
     async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
         Save and validate providers configuration.
