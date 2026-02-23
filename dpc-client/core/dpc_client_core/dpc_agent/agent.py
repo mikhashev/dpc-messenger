@@ -103,6 +103,9 @@ class DpcAgent:
         self.queue = TaskQueue(self.agent_root)
         self._queue_enabled = self.config.enable_task_queue
 
+        # Custom task handlers (extensible)
+        self._task_handlers: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
+
         # Event emitter for notifications
         self.events = get_event_emitter()
 
@@ -343,6 +346,44 @@ class DpcAgent:
         self.queue.stop_processor()
         log.info("Task processor stopped")
 
+    def register_task_handler(
+        self,
+        task_type: str,
+        handler: Callable[[Dict[str, Any]], Any],
+    ) -> None:
+        """
+        Register a custom task handler.
+
+        Args:
+            task_type: Task type name (e.g., "weather_forecast")
+            handler: Async or sync function that takes task data dict and returns result
+
+        Example:
+            async def handle_weather(data):
+                location = data.get("location")
+                return f"Weather for {location}: Sunny"
+
+            agent.register_task_handler("weather_forecast", handle_weather)
+        """
+        self._task_handlers[task_type] = handler
+        log.info(f"Registered task handler for type: {task_type}")
+
+    def unregister_task_handler(self, task_type: str) -> bool:
+        """
+        Unregister a custom task handler.
+
+        Args:
+            task_type: Task type to unregister
+
+        Returns:
+            True if handler was removed, False if not found
+        """
+        if task_type in self._task_handlers:
+            del self._task_handlers[task_type]
+            log.info(f"Unregistered task handler for type: {task_type}")
+            return True
+        return False
+
     async def _execute_task(self, task: Task) -> str:
         """
         Execute a queued task.
@@ -353,6 +394,21 @@ class DpcAgent:
         Returns:
             Task result string
         """
+        # Check custom handlers first
+        if task.task_type in self._task_handlers:
+            handler = self._task_handlers[task.task_type]
+            try:
+                import asyncio
+                result = handler(task.data)
+                # Support both sync and async handlers
+                if asyncio.iscoroutine(result):
+                    result = await result
+                return str(result)
+            except Exception as e:
+                log.error(f"Task handler error for {task.task_type}: {e}")
+                return f"Handler error: {e}"
+
+        # Built-in task types
         if task.task_type == "chat":
             return await self.process(
                 task.data.get("text", ""),
@@ -369,7 +425,7 @@ class DpcAgent:
             # Run code review
             return await self._execute_review(task.data)
         else:
-            return f"Unknown task type: {task.task_type}"
+            return f"Unknown task type: {task.task_type}. Register a handler with register_task_handler('{task.task_type}', handler)"
 
     async def _execute_review(self, data: Dict[str, Any]) -> str:
         """Execute a code review task."""
