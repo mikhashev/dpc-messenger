@@ -242,9 +242,8 @@ class EvolutionManager:
                     self._queue_for_approval(proposal)
 
             # Step 4: Update identity with learnings
-            await self._update_evolution_memory(cycle)
-
             cycle.completed_at = utc_now_iso()
+            await self._update_evolution_memory(cycle)
             cycle.rollback_available = True
             cycle.description = f"Proposed {cycle.changes_proposed} changes, applied {cycle.changes_applied}"
 
