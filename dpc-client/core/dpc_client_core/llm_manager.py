@@ -979,8 +979,8 @@ class LocalWhisperProvider(AIProvider):
             # Move model to device with CUDA fallback handling
             try:
                 model.to(device)
-            except RuntimeError as e:
-                if "NVIDIA" in str(e) or "CUDA" in str(e):
+            except (RuntimeError, AssertionError) as e:
+                if "NVIDIA" in str(e) or "CUDA" in str(e) or "not compiled" in str(e).lower():
                     # CUDA initialization failed (no GPU or driver), force CPU
                     logger.warning(f"Failed to initialize {device}: {e}")
                     logger.info("Forcing CPU mode for Whisper model")
