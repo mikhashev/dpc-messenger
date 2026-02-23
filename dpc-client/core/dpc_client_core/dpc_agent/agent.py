@@ -408,13 +408,18 @@ class DpcAgent:
             scheduled_at=scheduled_at,
         )
 
-        # Emit event
-        asyncio.create_task(self.events.emit(EventType.TASK_SCHEDULED, {
-            "task_id": task.id,
-            "task_type": task_type,
-            "priority": priority.name,
-            "delay_seconds": delay_seconds,
-        }))
+        # Emit event (only if there's a running event loop)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.events.emit(EventType.TASK_SCHEDULED, {
+                "task_id": task.id,
+                "task_type": task_type,
+                "priority": priority.name,
+                "delay_seconds": delay_seconds,
+            }))
+        except RuntimeError:
+            # No running event loop - skip event emission
+            log.debug(f"Task {task.id} scheduled (no event loop for emission)")
 
         return task
 
