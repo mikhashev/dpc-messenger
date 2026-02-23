@@ -381,15 +381,15 @@ Send a voice message and it will be transcribed and processed\\.
                 include_context=True,
             )
 
-            # Send response (truncate if needed)
+            # Send response (truncate if needed, escape for Markdown)
             if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
                 # Split long messages
                 chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
                 for i, chunk in enumerate(chunks):
                     prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                    await update.message.reply_text(prefix + chunk, parse_mode="Markdown")
+                    await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="Markdown")
             else:
-                await update.message.reply_text(response, parse_mode="Markdown")
+                await update.message.reply_text(escape_markdown(response), parse_mode="Markdown")
 
         except Exception as e:
             log.error(f"Error processing Telegram message: {e}", exc_info=True)
@@ -473,7 +473,7 @@ Send a voice message and it will be transcribed and processed\\.
                             # Send transcription back to user
                             if transcription_text:
                                 await update.message.reply_text(
-                                    f"📝 *Transcription:*\n{transcription_text}",
+                                    f"📝 *Transcription:*\n{escape_markdown(transcription_text)}",
                                     parse_mode="Markdown"
                                 )
                             else:
@@ -510,15 +510,15 @@ Send a voice message and it will be transcribed and processed\\.
                     include_context=True,
                 )
 
-                # Send response (truncate if needed)
+                # Send response (truncate if needed, escape for Markdown)
                 if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
                     # Split long messages
                     chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
                     for i, chunk in enumerate(chunks):
                         prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                        await update.message.reply_text(prefix + chunk, parse_mode="Markdown")
+                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="Markdown")
                 else:
-                    await update.message.reply_text(response, parse_mode="Markdown")
+                    await update.message.reply_text(escape_markdown(response), parse_mode="Markdown")
 
             # Clean up voice file
             try:
