@@ -540,7 +540,7 @@ def schedule_task(
 
     Args:
         ctx: Tool context
-        task_type: Type of task ('chat', 'improvement', 'review')
+        task_type: Type of task ('chat', 'improvement', 'review', or custom registered type)
         task_data: JSON string with task payload
         delay_seconds: Delay before execution (0 = immediate)
         priority: 'critical', 'high', 'normal', or 'low'
@@ -552,6 +552,13 @@ def schedule_task(
         # Check if agent has task queue
         if not hasattr(ctx, '_agent') or not hasattr(ctx._agent, 'queue'):
             return "⚠️ Task queue not available"
+
+        # Check if task type can be handled
+        builtin_types = {"chat", "improvement", "review"}
+        custom_handlers = getattr(ctx._agent, '_task_handlers', {})
+        if task_type not in builtin_types and task_type not in custom_handlers:
+            available = list(builtin_types) + list(custom_handlers.keys())
+            return f"⚠️ Unknown task type '{task_type}'. Available types: {available}. Register a handler with agent.register_task_handler('{task_type}', handler)"
 
         # Parse task data
         try:

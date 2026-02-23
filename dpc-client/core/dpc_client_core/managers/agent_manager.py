@@ -126,6 +126,11 @@ class DpcAgentManager:
             self._agent.start_evolution()
             log.info(f"Evolution started (interval={agent_config.evolution_interval_minutes}min, auto_apply={agent_config.evolution_auto_apply})")
 
+        # Start task processor if enabled
+        if agent_config.enable_task_queue:
+            await self._agent.start_task_processor()
+            log.info("Task processor started")
+
         # Initialize Telegram bridge for agent notifications
         await self._start_telegram_bridge()
 
