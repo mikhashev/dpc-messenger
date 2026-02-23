@@ -59,6 +59,9 @@ class EventType(Enum):
     BUDGET_WARNING = "budget_warning"
     RATE_LIMIT_HIT = "rate_limit_hit"
 
+    # Messaging
+    AGENT_MESSAGE = "agent_message"  # Agent-initiated message to user (e.g., via Telegram)
+
 
 @dataclass
 class AgentEvent:
@@ -94,6 +97,7 @@ EVENT_CATEGORIES = {
     "memory": [EventType.IDENTITY_UPDATED, EventType.SCRATCHPAD_UPDATED,
                EventType.KNOWLEDGE_UPDATED],
     "budget": [EventType.BUDGET_WARNING, EventType.RATE_LIMIT_HIT],
+    "messaging": [EventType.AGENT_MESSAGE],
 }
 
 
@@ -386,4 +390,26 @@ async def emit_code_modified(path: str, description: str, **kwargs) -> AgentEven
     return await get_event_emitter().emit(
         EventType.CODE_MODIFIED,
         {"path": path, "description": description[:200], **kwargs}
+    )
+
+
+async def emit_agent_message(message: str, priority: str = "normal", **kwargs) -> AgentEvent:
+    """
+    Emit an agent-initiated message for Telegram bridge.
+
+    Args:
+        message: The message content to send
+        priority: Message priority (urgent, high, normal, low)
+        **kwargs: Additional data to include
+
+    Returns:
+        The emitted event
+    """
+    return await get_event_emitter().emit(
+        EventType.AGENT_MESSAGE,
+        {
+            "message": message,
+            "priority": priority,  # urgent, high, normal, low
+            **kwargs
+        }
     )

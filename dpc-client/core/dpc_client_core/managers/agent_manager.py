@@ -163,11 +163,15 @@ class DpcAgentManager:
             # Get event filter
             event_filter = telegram_config.get("event_filter")
 
+            # Get transcription setting
+            transcription_enabled = telegram_config.get("transcription_enabled", True)
+
             # Create bridge
             self._telegram_bridge = AgentTelegramBridge(
                 bot_token=bot_token,
                 allowed_chat_ids=chat_ids,
                 event_filter=event_filter,
+                transcription_enabled=transcription_enabled,
             )
 
             # Set message handler for two-way communication

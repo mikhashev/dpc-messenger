@@ -269,7 +269,7 @@ class Settings:
             'enabled': 'false',  # Enable Telegram notifications for agent events
             'bot_token': '',  # Telegram bot token (separate from main DPC bot)
             'allowed_chat_ids': '',  # JSON array of chat IDs: ["123456789"]
-            'event_filter': 'task_completed,task_failed,evolution_cycle_completed,code_modified',  # Events to forward
+            'event_filter': 'task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message',  # Events to forward
         }
         # NOTE: Create a separate Telegram bot for agent monitoring via @BotFather
         # Get your chat ID via @userinfobot
@@ -997,8 +997,12 @@ class Settings:
     def get_dpc_agent_telegram_event_filter(self) -> list[str]:
         """Get list of event types to forward to Telegram."""
         filter_str = self.get('dpc_agent_telegram', 'event_filter',
-                              'task_completed,task_failed,evolution_cycle_completed,code_modified')
+                              'task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message')
         return [e.strip() for e in filter_str.split(',') if e.strip()]
+
+    def get_dpc_agent_telegram_transcription_enabled(self) -> bool:
+        """Check if voice message transcription is enabled for agent Telegram bot."""
+        return self.getboolean('dpc_agent_telegram', 'transcription_enabled', fallback=True)
 
     def get_dpc_agent_config(self) -> dict:
         """Get all DPC agent configuration as a dict."""
@@ -1023,6 +1027,7 @@ class Settings:
             'bot_token': self.get_dpc_agent_telegram_bot_token(),
             'allowed_chat_ids': self.get_dpc_agent_telegram_allowed_chat_ids(),
             'event_filter': self.get_dpc_agent_telegram_event_filter(),
+            'transcription_enabled': self.get_dpc_agent_telegram_transcription_enabled(),
         }
 
     def save_config(self):

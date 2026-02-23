@@ -160,6 +160,8 @@ class ContextFirewall:
             'get_evolution_stats': True,  # Read-only
             'approve_evolution_change': False,  # Modifies files, requires explicit permission
             'reject_evolution_change': True,  # Safe, just removes pending change
+            # Messaging tools (v0.18.0+)
+            'send_user_message': True,  # Agent-initiated Telegram messages
         }
 
         # Parse tool permissions from config, using defaults for missing tools
@@ -1314,6 +1316,8 @@ class ContextFirewall:
                                 # Extended sandbox tools (v0.16.0+)
                                 'extended_path_read', 'extended_path_list', 'extended_path_write',
                                 'list_extended_sandbox_paths',
+                                # Messaging tools (v0.18.0+)
+                                'send_user_message',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):

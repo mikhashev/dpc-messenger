@@ -29,9 +29,11 @@ Usage (from Telegram):
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 
 from ..dpc_agent.events import AgentEvent, EventType
@@ -63,6 +65,7 @@ EVENT_EMOJIS = {
     "knowledge_updated": "📚",
     "budget_warning": "⚠️",
     "rate_limit_hit": "🚫",
+    "agent_message": "🤖",
 }
 
 
@@ -106,6 +109,7 @@ class AgentTelegramBridge:
         allowed_chat_ids: List[str],
         event_filter: Optional[List[str]] = None,
         rate_limit: Optional[RateLimitConfig] = None,
+        transcription_enabled: bool = True,
     ):
         """
         Initialize agent Telegram bridge.
@@ -115,11 +119,13 @@ class AgentTelegramBridge:
             allowed_chat_ids: Chat IDs to send notifications to
             event_filter: List of event types to forward (None = all important events)
             rate_limit: Rate limiting configuration
+            transcription_enabled: Enable voice message transcription (default: True)
         """
         self.bot_token = bot_token
         self.allowed_chat_ids = [str(cid) for cid in allowed_chat_ids]  # Ensure strings
         self.event_filter = set(event_filter) if event_filter else self._default_event_filter()
         self.rate_limit = rate_limit or RateLimitConfig()
+        self.transcription_enabled = transcription_enabled
 
         self._bot = None
         self._application = None  # telegram.ext.Application
@@ -135,7 +141,7 @@ class AgentTelegramBridge:
         self._agent_manager: Optional["DpcAgentManager"] = None
 
         log.info(f"AgentTelegramBridge initialized for {len(allowed_chat_ids)} chat(s), "
-                f"filter={len(self.event_filter)} event types")
+                f"filter={len(self.event_filter)} event types, transcription={transcription_enabled}")
 
     def _default_event_filter(self) -> Set[str]:
         """Get default event filter - important events only."""
@@ -150,6 +156,8 @@ class AgentTelegramBridge:
             # Budget warnings
             EventType.BUDGET_WARNING.value,
             EventType.RATE_LIMIT_HIT.value,
+            # Agent-initiated messages
+            EventType.AGENT_MESSAGE.value,
         }
 
     def set_message_handler(self, handler: Callable, agent_manager: "DpcAgentManager" = None):
@@ -213,6 +221,9 @@ class AgentTelegramBridge:
             # Add handler for regular messages (non-commands)
             self._application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
 
+            # Add handler for voice messages
+            self._application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
+
             # Initialize and start polling
             await self._application.initialize()
             await self._application.start()
@@ -264,16 +275,17 @@ class AgentTelegramBridge:
 
         welcome = """🤖 *DPC Agent Bot*
 
-Welcome! You can send messages to the DPC Agent.
+Welcome! You can send messages to the DPC Agent\\.
 
 *Commands:*
 /help - Show available commands
 /status - Check agent status
 
 *Usage:*
-Just send any message and the agent will process it.
+Just send any message and the agent will process it\\.
+You can also send voice messages for transcription\\.
 
-Configure event types in `~/.dpc/config.ini` [dpc_agent_telegram] section.
+Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] section\\.
 """
         await update.message.reply_text(welcome, parse_mode="Markdown")
 
@@ -292,13 +304,17 @@ Configure event types in `~/.dpc/config.ini` [dpc_agent_telegram] section.
 /status - Check agent status
 
 *Sending Tasks:*
-Just type a message and the agent will process it.
+Just type a message and the agent will process it\\.
+You can also send voice messages for transcription\\.
 
 *Examples:*
 • "Show me the weather forecast"
 • "Check my recent git commits"
 • "What files are in memory/?"
 • "Schedule a task to review code in 5 minutes"
+
+*Voice Messages:*
+Send a voice message and it will be transcribed and processed\\.
 
 *Tips:*
 • Be specific in your requests
@@ -378,6 +394,141 @@ Just type a message and the agent will process it.
         except Exception as e:
             log.error(f"Error processing Telegram message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing message: {str(e)[:200]}")
+
+    async def _handle_voice_message(self, update, context):
+        """
+        Handle incoming voice message from Telegram with transcription.
+
+        Downloads the voice file, transcribes it using Whisper, and processes
+        the transcribed text through the agent.
+
+        Args:
+            update: Telegram Update object
+            context: Telegram Context object
+        """
+        chat_id = str(update.effective_chat.id)
+        voice = update.message.voice
+
+        # Check authorization
+        if chat_id not in self.allowed_chat_ids:
+            log.warning(f"Unauthorized voice message from chat_id={chat_id}")
+            await update.message.reply_text("⛔ Unauthorized. Your chat ID is not in the allowed list.")
+            return
+
+        # Check if we have a message handler
+        if not self._message_handler:
+            await update.message.reply_text("⚠️ Message handler not configured. Cannot process voice message.")
+            return
+
+        # Get voice metadata
+        duration = voice.duration
+        file_size = voice.file_size
+        file_id = voice.file_id
+
+        log.info(f"Processing voice message from chat {chat_id} (duration: {duration}s, size: {file_size} bytes)")
+
+        # Send "recording audio" action
+        await context.bot.send_chat_action(chat_id=chat_id, action="upload_voice")
+
+        try:
+            # Download voice file
+            voice_filename = f"agent_voice_{update.message.message_id}.ogg"
+            voice_dir = Path.home() / ".dpc" / "agent" / "voice"
+            voice_dir.mkdir(parents=True, exist_ok=True)
+            voice_path = voice_dir / voice_filename
+
+            # Download from Telegram
+            from telegram import Bot
+            file = await self._bot.get_file(file_id)
+            await file.download_to_drive(voice_path)
+            log.info(f"Downloaded voice file to {voice_path}")
+
+            # Transcribe if enabled
+            transcription_text = None
+
+            if self.transcription_enabled:
+                try:
+                    # Get transcription service via agent_manager -> service
+                    if self._agent_manager and hasattr(self._agent_manager, 'service'):
+                        service = self._agent_manager.service
+
+                        # Check if service has transcribe_audio method
+                        if hasattr(service, 'transcribe_audio'):
+                            # Read file and encode as base64
+                            with open(voice_path, "rb") as f:
+                                audio_data = f.read()
+                                audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+
+                            # Transcribe using service method
+                            transcription_result = await service.transcribe_audio(
+                                audio_base64=audio_base64,
+                                mime_type="audio/ogg"
+                            )
+
+                            transcription_text = transcription_result.get("text", "")
+                            provider = transcription_result.get("provider", "unknown")
+
+                            log.info(f"Transcribed voice message ({len(transcription_text)} chars, provider: {provider})")
+
+                            # Send transcription back to user
+                            if transcription_text:
+                                await update.message.reply_text(
+                                    f"📝 *Transcription:*\n{transcription_text}",
+                                    parse_mode="Markdown"
+                                )
+                            else:
+                                await update.message.reply_text("⚠️ No speech detected in voice message.")
+                                return
+                        else:
+                            log.warning("Service does not have transcribe_audio method")
+                            await update.message.reply_text("⚠️ Transcription service not available.")
+                            return
+                    else:
+                        log.warning("No access to service for transcription")
+                        await update.message.reply_text("⚠️ Transcription service not available.")
+                        return
+
+                except Exception as e:
+                    log.error(f"Failed to transcribe voice message: {e}", exc_info=True)
+                    await update.message.reply_text(f"❌ Transcription failed: {str(e)[:100]}")
+                    return
+            else:
+                await update.message.reply_text("⚠️ Voice transcription is disabled.")
+                return
+
+            # If we have transcription, process through agent
+            if transcription_text:
+                # Send "typing" action
+                await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+                log.info(f"Processing transcribed voice message from chat {chat_id}: {transcription_text[:50]}...")
+
+                # Call the message handler (agent_manager.process_message)
+                response = await self._message_handler(
+                    message=transcription_text,
+                    conversation_id=f"telegram-{chat_id}",
+                    include_context=True,
+                )
+
+                # Send response (truncate if needed)
+                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
+                    # Split long messages
+                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
+                    for i, chunk in enumerate(chunks):
+                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
+                        await update.message.reply_text(prefix + chunk, parse_mode="Markdown")
+                else:
+                    await update.message.reply_text(response, parse_mode="Markdown")
+
+            # Clean up voice file
+            try:
+                voice_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        except Exception as e:
+            log.error(f"Error processing voice message: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error processing voice message: {str(e)[:200]}")
 
     def _split_message(self, text: str, max_length: int) -> List[str]:
         """Split a long message into chunks."""
@@ -516,12 +667,12 @@ Just type a message and the agent will process it.
         emoji = EVENT_EMOJIS.get(event.type.value, "📍")
         timestamp = event.timestamp[11:19] if event.timestamp else "?"  # Just time
 
-        # Event type as title
-        title = event.type.value.replace("_", " ").title()
+        # Event type as title (escape for Markdown)
+        title = escape_markdown(event.type.value.replace("_", " ").title())
 
         lines = [
             f"{emoji} *{title}*",
-            f"⏰ `{timestamp}`",
+            f"⏰ `{escape_markdown(timestamp)}`",
         ]
 
         # Add event-specific details
@@ -529,28 +680,28 @@ Just type a message and the agent will process it.
 
         # Task events
         if "task_id" in data:
-            lines.append(f"📋 Task: `{data['task_id']}`")
+            lines.append(f"📋 Task: `{escape_markdown(str(data['task_id']))}`")
         if "task_type" in data:
-            lines.append(f"📁 Type: {data['task_type']}")
+            lines.append(f"📁 Type: {escape_markdown(str(data['task_type']))}")
         if "message_preview" in data:
-            preview = str(data["message_preview"])[:150]
+            preview = escape_markdown(str(data["message_preview"])[:150])
             lines.append(f"💬 Preview: {preview}")
         if "conversation_id" in data:
-            lines.append(f"🔗 Conv: `{data['conversation_id'][:30]}`")
+            lines.append(f"🔗 Conv: `{escape_markdown(str(data['conversation_id'][:30]))}`")
 
         # Tool events
         if "tool" in data:
-            lines.append(f"🔧 Tool: `{data['tool']}`")
+            lines.append(f"🔧 Tool: `{escape_markdown(str(data['tool']))}`")
 
         # Thought events
         if "thought_type" in data:
-            lines.append(f"💭 Thought: {data['thought_type']}")
+            lines.append(f"💭 Thought: {escape_markdown(str(data['thought_type']))}")
         if "thought_number" in data:
             lines.append(f"#️⃣ Number: {data['thought_number']}")
 
         # Evolution events
         if "cycle_id" in data:
-            lines.append(f"🔄 Cycle: `{data['cycle_id']}`")
+            lines.append(f"🔄 Cycle: `{escape_markdown(str(data['cycle_id']))}`")
         if "cycle_number" in data:
             lines.append(f"#️⃣ Cycle #: {data['cycle_number']}")
         if "files_modified" in data:
@@ -560,20 +711,34 @@ Just type a message and the agent will process it.
 
         # Code modified
         if "path" in data:
-            lines.append(f"📄 Path: `{data['path']}`")
+            lines.append(f"📄 Path: `{escape_markdown(str(data['path']))}`")
 
-        # Description/result
+        # Description/result - escape these as they contain free-form text
         if "description" in data:
-            desc = str(data["description"])[:200]
+            desc = escape_markdown(str(data["description"])[:200])
             lines.append(f"📝 {desc}")
         if "result" in data and data["result"]:
-            result = str(data["result"])[:200]
+            result = escape_markdown(str(data["result"])[:200])
             lines.append(f"📄 Result: {result}")
 
         # Error
         if "error" in data:
-            error = str(data["error"])[:200]
+            error = escape_markdown(str(data["error"])[:200])
             lines.append(f"❌ Error: {error}")
+
+        # Agent-initiated message (special formatting)
+        if event.type == EventType.AGENT_MESSAGE:
+            priority = data.get("priority", "normal")
+            priority_emojis = {"urgent": "🔴", "high": "🟠", "normal": "🟡", "low": "🟢"}
+            priority_emoji = priority_emojis.get(priority, "📍")
+
+            # Rebuild lines for AGENT_MESSAGE with priority
+            lines = [f"{priority_emoji} *Message from Agent* \\({priority}\\)"]
+
+            if "message" in data:
+                # Escape markdown and truncate long messages
+                msg = escape_markdown(str(data["message"])[:3500])
+                lines.append(f"\n{msg}")
 
         return "\n".join(lines)
 
@@ -616,6 +781,7 @@ Configure event types in `~/.dpc/config.ini` [dpc_agent_telegram] section.
             "bot_connected": self._bot is not None,
             "chat_count": len(self.allowed_chat_ids),
             "event_filter": list(self.event_filter),
+            "transcription_enabled": self.transcription_enabled,
             "rate_limit": {
                 "max_per_minute": self.rate_limit.max_events_per_minute,
                 "cooldown_seconds": self.rate_limit.cooldown_seconds,

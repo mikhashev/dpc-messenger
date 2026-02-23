@@ -95,6 +95,8 @@
         get_evolution_stats?: boolean;
         approve_evolution_change?: boolean;
         reject_evolution_change?: boolean;
+        // Messaging tools (v0.18.0+)
+        send_user_message?: boolean;
         [key: string]: boolean | string | undefined;
       };
       sandbox_extensions?: {
@@ -2284,6 +2286,43 @@
                               />
                               <div>
                                 <span class="event-name" style={tool.key === 'approve_evolution_change' ? 'color: var(--danger);' : ''}>{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Messaging Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Messaging Tools (user communication)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'send_user_message', label: 'Send User Message', desc: 'Send Telegram messages to user (agent-initiated)' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
                                 <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
                               </div>
                             </label>

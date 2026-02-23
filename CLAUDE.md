@@ -1188,6 +1188,7 @@ poetry run pytest tests/test_turn_connectivity.py
 - `docs/DEVICE_CONTEXT_SPEC.md` - Device context schema and special instructions specification
 - `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
 - `docs/DPC_AGENT_GUIDE.md` - Embedded autonomous AI agent testing and usage guide
+- `docs/DPC_AGENT_TELEGRAM.md` - Agent Telegram integration for two-way messaging
 - `specs/dptp_v1.md` - DPTP (D-PC Transfer Protocol) formal specification
 - `specs/hub_api_v1.md` - Hub API specification
 - `dpc-protocol/README.md` - Protocol library documentation and usage examples

@@ -202,6 +202,8 @@ CORE_TOOL_NAMES = {
     "browse_page", "fetch_json", "extract_links", "check_url", "search_web",
     # Review tools (safe, analysis only)
     "self_review", "request_critique", "compare_approaches", "quality_checklist", "consensus_check",
+    # Messaging tools (agent-to-user communication)
+    "send_user_message",
 }
 
 # Restricted tools (require explicit enable in config)
