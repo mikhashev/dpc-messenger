@@ -4218,11 +4218,9 @@ Respond in JSON format:
             )
 
             # Parse the response
-            import json
             response_text = response.get("response", "")
 
             # Try to extract JSON from the response
-            import re
             json_match = re.search(r'\{[\s\S]*\}', response_text)
             if json_match:
                 decision = json.loads(json_match.group())
