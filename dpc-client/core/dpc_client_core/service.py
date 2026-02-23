@@ -4289,8 +4289,8 @@ Respond in JSON format:
                 max_tokens=500
             )
 
-            # Parse the response
-            response_text = response.get("response", "")
+            # Parse the response (response is already a string when return_metadata=False)
+            response_text = response
 
             # Try to extract JSON from the response
             json_match = re.search(r'\{[\s\S]*\}', response_text)
