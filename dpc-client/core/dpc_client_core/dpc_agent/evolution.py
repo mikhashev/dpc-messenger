@@ -670,6 +670,10 @@ If no improvements are needed, respond with: {{"proposals": []}}
             self._status = EvolutionStatus.IDLE
             log.info("Evolution resumed")
 
+    def is_running(self) -> bool:
+        """Check if evolution is currently running."""
+        return self._status == EvolutionStatus.RUNNING
+
     def get_status(self) -> Dict[str, Any]:
         """Get evolution status."""
         return {

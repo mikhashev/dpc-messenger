@@ -66,6 +66,16 @@ EVENT_EMOJIS = {
 }
 
 
+def escape_markdown(text: str) -> str:
+    """
+    Escape special characters for Telegram Markdown v2.
+
+    Characters that need escaping: _ * [ ] ( ) ~ ` > # + - = | { } . !
+    """
+    special_chars = r"_*[]()~`>#+-=|{}.!"
+    return "".join(f"\\{c}" if c in special_chars else c for c in text)
+
+
 @dataclass
 class RateLimitConfig:
     """Configuration for rate limiting."""
@@ -316,7 +326,7 @@ Just type a message and the agent will process it.
                     status_lines.append(f"🧠 Consciousness: `{agent_status.get('consciousness_running', False)}`")
                     status_lines.append(f"📋 Task Queue: `{agent_status.get('queue_enabled', False)}`")
             except Exception as e:
-                status_lines.append(f"❌ Error getting status: {e}")
+                status_lines.append(f"❌ Error getting status: {escape_markdown(str(e))}")
         else:
             status_lines.append("⚠️ Agent manager not connected")
 
