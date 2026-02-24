@@ -247,6 +247,21 @@ result = await core_service.send_ai_query(
 - [ ] Multi-hop inference (chain multiple peers)
 - [ ] Inference result caching
 
+### ⚠️ Current Limitation: No Streaming Support
+
+Remote inference uses a **request-response pattern** over DPTP and does not support streaming responses. This means:
+
+- The requestor waits for the full response before displaying it
+- Long-running queries (e.g., thinking models like GLM-4.7) may take several minutes
+- Users see a loading indicator instead of real-time token streaming
+
+**Why streaming is not yet implemented:**
+1. Protocol changes needed to support chunked responses over DPTP
+2. Remote peer would need to send intermediate chunks during generation
+3. Handler would need to accumulate and forward chunks in real-time
+
+**Workaround:** Configure a longer timeout (up to 600 seconds) in the `dpc_agent` provider settings when using remote peer inference. This gives long-running queries enough time to complete.
+
 ---
 
 ## Testing
