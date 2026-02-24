@@ -104,6 +104,15 @@ class DpcLlmAdapter:
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
         """
+        # Check if dpc_agent provider has peer_id (remote inference) - KISS approach
+        dpc_agent_provider = self._llm_manager.providers.get("dpc_agent")
+        if dpc_agent_provider and hasattr(dpc_agent_provider, 'peer_id') and dpc_agent_provider.peer_id:
+            log.debug(f"Routing to remote peer: {dpc_agent_provider.peer_id}")
+            return await self._chat_via_remote_peer(
+                dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
+            )
+
+        # Local inference - existing logic
         # Convert message list to prompt string for DPC providers
         prompt = self._messages_to_prompt(messages)
 
@@ -161,6 +170,84 @@ class DpcLlmAdapter:
 
         except Exception as e:
             log.error(f"DPC LLM error: {e}")
+            raise
+
+    async def _chat_via_remote_peer(
+        self,
+        dpc_agent_provider: Any,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Route inference to remote peer when dpc_agent.peer_id is set.
+
+        This implements the KISS approach - instead of creating a separate
+        remote_peer provider, just add peer_id to dpc_agent config.
+
+        Args:
+            dpc_agent_provider: The DpcAgentProvider instance with peer_id set
+            messages: List of message dicts with role/content
+            tools: Optional list of tool schemas
+            on_stream_chunk: Optional streaming callback
+            conversation_id: Optional conversation ID
+
+        Returns:
+            (response_message, usage_dict) tuple in Ouroboros format
+        """
+        # Get CoreService from the provider (injected via set_service())
+        service = getattr(dpc_agent_provider, '_service', None)
+        if not service:
+            raise RuntimeError("DpcAgentProvider missing CoreService reference - cannot route to remote peer")
+
+        # Convert messages to prompt
+        prompt = self._messages_to_prompt(messages)
+
+        # Inject tools if provided
+        if tools:
+            log.debug(f"Injecting {len(tools)} tool descriptions into prompt for remote peer")
+            tool_descriptions = self._format_tools_for_prompt(tools)
+            prompt = f"{tool_descriptions}\n\n{prompt}"
+
+        try:
+            # Call remote inference via CoreService
+            log.info(f"Routing agent inference to remote peer: {dpc_agent_provider.peer_id}")
+            response = await service._request_inference_from_peer(
+                peer_id=dpc_agent_provider.peer_id,
+                prompt=prompt,
+                model=dpc_agent_provider.remote_model,
+                provider=dpc_agent_provider.remote_provider,
+                images=[],
+                timeout=120  # Longer timeout for agent queries
+            )
+
+            # Build response message in Ouroboros format
+            response_msg: Dict[str, Any] = {
+                "role": "assistant",
+                "content": response,
+            }
+
+            # Parse for tool calls if tools were provided
+            if tools:
+                log.debug(f"Parsing tool calls from remote response (len={len(response)})")
+                tool_calls = self._parse_tool_calls(response)
+                if tool_calls:
+                    response_msg["tool_calls"] = tool_calls
+                    log.info(f"Found {len(tool_calls)} tool call(s) from remote peer")
+
+            # Estimate usage
+            usage: Dict[str, Any] = {
+                "prompt_tokens": len(prompt) // 4,
+                "completion_tokens": len(response) // 4,
+                "total_tokens": (len(prompt) + len(response)) // 4,
+                "cost": 0.0,
+            }
+
+            return response_msg, usage
+
+        except Exception as e:
+            log.error(f"Remote peer inference error: {e}")
             raise
 
     def _messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
