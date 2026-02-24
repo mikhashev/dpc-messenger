@@ -80,6 +80,7 @@
     alias: '',
     type: 'ollama',
     model: '',
+    peer_id: '',  // For remote_peer type
   };
 
   // Load config when modal opens
@@ -313,6 +314,7 @@
       alias: '',
       type: 'ollama',
       model: '',
+      peer_id: '',  // For remote_peer type
     };
   }
 
@@ -1007,7 +1009,7 @@
             <button
               class="btn btn-primary"
               on:click={addNewProvider}
-              disabled={!newProvider.alias || (newProvider.type !== 'dpc_agent' && !newProvider.model)}
+              disabled={!newProvider.alias || (newProvider.type !== 'dpc_agent' && newProvider.type !== 'remote_peer' && !newProvider.model)}
             >
               Add Provider
             </button>
@@ -1376,12 +1378,23 @@
 
   .form-group input,
   .form-group select {
-    background: #1e1e1e;
-    border: 1px solid #333;
+    background: #2a2a2a;
+    border: 1px solid #444;
     color: #fff;
     padding: 8px;
     border-radius: 4px;
     font-size: 0.9rem;
+  }
+
+  .form-group select {
+    cursor: pointer;
+    min-height: 36px;
+  }
+
+  .form-group select option {
+    background: #2a2a2a;
+    color: #fff;
+    padding: 8px;
   }
 
   .form-group input:focus,
