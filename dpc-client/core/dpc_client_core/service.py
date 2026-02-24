@@ -302,6 +302,9 @@ class CoreService:
         # Track pending transcription requests (for request-response matching)
         self._pending_transcription_requests: Dict[str, asyncio.Future] = {}
 
+        # Track pending providers requests (for on-demand provider discovery)
+        self._pending_providers_requests: Dict[str, asyncio.Future] = {}
+
         # Voice transcription tracking (v0.13.2+ auto-transcription)
         self._voice_transcriptions: Dict[str, Dict[str, Any]] = {}  # transfer_id -> transcription_data
         self._transcription_locks: Dict[str, asyncio.Lock] = {}  # transfer_id -> lock (prevents concurrent transcription)
@@ -1720,6 +1723,74 @@ class CoreService:
                 "message": f"Failed to query model info: {str(e)}"
             }
 
+    async def query_remote_providers(self, peer_id: str, timeout: float = 10.0) -> Dict[str, Any]:
+        """
+        Query a remote peer for their available AI providers.
+
+        This sends a GET_PROVIDERS request to the peer and waits for their response.
+        Used by the UI to populate dropdown lists when configuring a remote_peer provider.
+
+        Args:
+            peer_id: The node ID of the remote peer
+            timeout: Maximum time to wait for response (default 10 seconds)
+
+        Returns:
+            Dictionary with:
+            - status: "success" or "error"
+            - providers: List of provider dicts with alias, model, type
+            - message: Error message if failed
+        """
+        from dpc_protocol.protocol import create_get_providers_message
+
+        try:
+            # Check if peer is connected
+            if peer_id not in self.p2p_manager.peers:
+                return {
+                    "status": "error",
+                    "message": f"Peer '{peer_id}' is not connected. Connect to the peer first."
+                }
+
+            # Check if we already have cached providers
+            if peer_id in self.peer_metadata and "providers" in self.peer_metadata[peer_id]:
+                cached_providers = self.peer_metadata[peer_id]["providers"]
+                if cached_providers:
+                    logger.debug("Returning cached providers for %s (%d providers)", peer_id, len(cached_providers))
+                    return {
+                        "status": "success",
+                        "providers": cached_providers,
+                        "cached": True
+                    }
+
+            # Create Future to wait for response
+            response_future: asyncio.Future = asyncio.Future()
+            self._pending_providers_requests[peer_id] = response_future
+
+            # Send GET_PROVIDERS request
+            await self.p2p_manager.send_message_to_peer(peer_id, create_get_providers_message())
+            logger.debug("Sent GET_PROVIDERS request to %s", peer_id)
+
+            # Wait for response
+            try:
+                providers = await asyncio.wait_for(response_future, timeout=timeout)
+                return {
+                    "status": "success",
+                    "providers": providers,
+                    "cached": False
+                }
+            except asyncio.TimeoutError:
+                self._pending_providers_requests.pop(peer_id, None)
+                return {
+                    "status": "error",
+                    "message": f"Timeout waiting for providers response from {peer_id} after {timeout}s"
+                }
+
+        except Exception as e:
+            logger.error("Error querying remote providers from %s: %s", peer_id, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": f"Failed to query remote providers: {str(e)}"
+            }
+
     def _validate_providers_config(self, config_dict: Dict[str, Any]) -> list:
         """
         Validate providers configuration structure.
@@ -1755,12 +1826,12 @@ class CoreService:
 
             if "type" not in provider:
                 errors.append(f"{prefix}: Missing 'type'")
-            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper", "dpc_agent"]:
+            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper", "dpc_agent", "remote_peer"]:
                 errors.append(f"{prefix}: Invalid type '{provider['type']}'")
 
-            # Model is required for all types except dpc_agent
+            # Model is required for all types except dpc_agent and remote_peer
             provider_type = provider.get("type")
-            if provider_type != "dpc_agent" and "model" not in provider:
+            if provider_type not in ["dpc_agent", "remote_peer"] and "model" not in provider:
                 errors.append(f"{prefix}: Missing 'model'")
 
             # Type-specific required fields
@@ -1768,6 +1839,8 @@ class CoreService:
                 errors.append(f"{prefix}: Ollama provider missing 'host'")
             if provider_type == "openai_compatible" and "base_url" not in provider:
                 errors.append(f"{prefix}: OpenAI provider missing 'base_url'")
+            if provider_type == "remote_peer" and "peer_id" not in provider:
+                errors.append(f"{prefix}: Remote peer provider missing 'peer_id'")
 
             # Optional context_window validation
             if "context_window" in provider:
@@ -5726,6 +5799,7 @@ Respond in JSON format:
         """
         Handle PROVIDERS_RESPONSE from a peer.
         Store the providers in peer metadata and broadcast to UI.
+        Also resolves any pending query_remote_providers request.
         """
         logger.debug("Received %d providers from %s", len(providers), peer_id)
 
@@ -5734,6 +5808,12 @@ Respond in JSON format:
             self.peer_metadata[peer_id] = {}
 
         self.peer_metadata[peer_id]["providers"] = providers
+
+        # Resolve pending request if any (for on-demand provider queries)
+        pending_future = self._pending_providers_requests.pop(peer_id, None)
+        if pending_future and not pending_future.done():
+            pending_future.set_result(providers)
+            logger.debug("Resolved pending providers request for %s", peer_id)
 
         # Broadcast to UI
         await self.local_api.broadcast_event("peer_providers_updated", {

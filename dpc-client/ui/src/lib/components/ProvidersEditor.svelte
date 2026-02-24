@@ -63,6 +63,11 @@
   let modelInfoError: string = '';
   let queriedProviderAlias: string = '';
 
+  // Remote peer providers state (for dropdown population)
+  let remotePeerProviders: Map<string, any[]> = new Map();  // peer_id -> providers list
+  let remotePeerLoading: string = '';  // peer_id being fetched
+  let remotePeerError: string = '';
+
   // Context window presets
   const CONTEXT_WINDOW_PRESETS = [
     { label: '2K tokens', value: 2048 },
@@ -423,6 +428,56 @@
       }
     }
   }
+
+  // Fetch remote peer's available providers
+  async function fetchRemotePeerProviders(peerId: string) {
+    if (!peerId || peerId.trim() === '') {
+      return;
+    }
+
+    remotePeerLoading = peerId;
+    remotePeerError = '';
+
+    try {
+      const result = await sendCommand('query_remote_providers', { peer_id: peerId });
+
+      if (result.status === 'success') {
+        remotePeerProviders.set(peerId, result.providers);
+        remotePeerProviders = remotePeerProviders; // Trigger reactivity
+      } else {
+        remotePeerError = result.message || 'Failed to fetch providers';
+      }
+    } catch (error) {
+      console.error('Error fetching remote peer providers:', error);
+      remotePeerError = `Error: ${error}`;
+    } finally {
+      remotePeerLoading = '';
+    }
+  }
+
+  // Get providers for a remote peer
+  function getRemotePeerProviders(peerId: string | undefined): any[] {
+    if (!peerId) return [];
+    return remotePeerProviders.get(peerId) || [];
+  }
+
+  // Get unique models from remote peer providers
+  function getRemotePeerModels(peerId: string | undefined): string[] {
+    const providers = getRemotePeerProviders(peerId);
+    const models = new Set<string>();
+    providers.forEach((p: any) => {
+      if (p.model) {
+        models.add(p.model);
+      }
+    });
+    return Array.from(models).sort();
+  }
+
+  // Check if peer providers are loading
+  function isRemotePeerLoading(peerId: string | undefined): boolean {
+    if (!peerId) return false;
+    return remotePeerLoading === peerId;
+  }
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
@@ -745,35 +800,77 @@
                     {#if editedConfig.providers[i].type === 'remote_peer'}
                       <div class="form-group">
                         <label for="peer-id-{i}">Peer ID</label>
-                        <input
-                          id="peer-id-{i}"
-                          type="text"
-                          bind:value={editedConfig.providers[i].peer_id}
-                          placeholder="dpc-node-alice-123"
-                        />
-                        <p class="help-text">The node ID of the remote peer (from their ~/.dpc/node.id)</p>
+                        <div class="input-with-button">
+                          <input
+                            id="peer-id-{i}"
+                            type="text"
+                            bind:value={editedConfig.providers[i].peer_id}
+                            placeholder="dpc-node-alice-123"
+                          />
+                          <button
+                            class="btn-fetch"
+                            on:click={() => fetchRemotePeerProviders(editedConfig!.providers[i].peer_id || '')}
+                            disabled={!editedConfig.providers[i].peer_id || isRemotePeerLoading(editedConfig.providers[i].peer_id)}
+                            title="Fetch available providers from this peer"
+                          >
+                            {isRemotePeerLoading(editedConfig.providers[i].peer_id) ? '⏳' : '🔍'}
+                          </button>
+                        </div>
+                        <p class="help-text">The node ID of the remote peer (must be connected). Click 🔍 to fetch available models.</p>
+                        {#if remotePeerError && remotePeerLoading === editedConfig.providers[i].peer_id}
+                          <p class="help-text warn">{remotePeerError}</p>
+                        {/if}
+                        {#if getRemotePeerProviders(editedConfig.providers[i].peer_id).length > 0}
+                          <p class="help-text success">✓ Found {getRemotePeerProviders(editedConfig.providers[i].peer_id).length} providers</p>
+                        {/if}
                       </div>
 
                       <div class="form-group">
-                        <label for="remote-model-{i}">Model (optional)</label>
-                        <input
-                          id="remote-model-{i}"
-                          type="text"
-                          bind:value={editedConfig.providers[i].model}
-                          placeholder="llama3:70b"
-                        />
-                        <p class="help-text">Specific model to request on the remote peer</p>
+                        <label for="remote-model-{i}">Model</label>
+                        {#if getRemotePeerModels(editedConfig.providers[i].peer_id).length > 0}
+                          <select
+                            id="remote-model-{i}"
+                            bind:value={editedConfig.providers[i].model}
+                          >
+                            <option value="">Any available model</option>
+                            {#each getRemotePeerModels(editedConfig.providers[i].peer_id) as model}
+                              <option value={model}>{model}</option>
+                            {/each}
+                          </select>
+                          <p class="help-text">Select model from remote peer (fetched)</p>
+                        {:else}
+                          <input
+                            id="remote-model-{i}"
+                            type="text"
+                            bind:value={editedConfig.providers[i].model}
+                            placeholder="llama3:70b"
+                          />
+                          <p class="help-text">Enter model name manually (or fetch providers first)</p>
+                        {/if}
                       </div>
 
                       <div class="form-group">
-                        <label for="remote-provider-{i}">Provider (optional)</label>
-                        <input
-                          id="remote-provider-{i}"
-                          type="text"
-                          bind:value={editedConfig.providers[i].provider}
-                          placeholder="ollama_text"
-                        />
-                        <p class="help-text">Specific provider alias on the remote peer</p>
+                        <label for="remote-provider-{i}">Provider</label>
+                        {#if getRemotePeerProviders(editedConfig.providers[i].peer_id).length > 0}
+                          <select
+                            id="remote-provider-{i}"
+                            bind:value={editedConfig.providers[i].provider}
+                          >
+                            <option value="">Any available provider</option>
+                            {#each getRemotePeerProviders(editedConfig.providers[i].peer_id) as prov}
+                              <option value={prov.alias}>{prov.alias} ({prov.type})</option>
+                            {/each}
+                          </select>
+                          <p class="help-text">Select provider from remote peer (fetched)</p>
+                        {:else}
+                          <input
+                            id="remote-provider-{i}"
+                            type="text"
+                            bind:value={editedConfig.providers[i].provider}
+                            placeholder="ollama_text"
+                          />
+                          <p class="help-text">Enter provider alias manually (or fetch providers first)</p>
+                        {/if}
                       </div>
 
                       <div class="form-group">
@@ -1424,6 +1521,43 @@
 
   .help-text.warn {
     color: #ffc107;
+  }
+
+  .help-text.success {
+    color: #28a745;
+  }
+
+  .input-with-button {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .input-with-button input {
+    flex: 1;
+  }
+
+  .btn-fetch {
+    background: #007acc;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 1rem;
+    min-width: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .btn-fetch:hover:not(:disabled) {
+    background: #005a9e;
+  }
+
+  .btn-fetch:disabled {
+    background: #666;
+    cursor: not-allowed;
   }
 
   .warn {
