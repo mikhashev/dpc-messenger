@@ -326,6 +326,9 @@
       provider.language = 'auto';
       provider.task = 'transcribe';
       provider.lazy_loading = true;
+    } else if (newProvider.type === 'dpc_agent') {
+      // dpc_agent doesn't require model - it uses the default AI provider
+      delete provider.model;
     }
 
     editedConfig.providers.push(provider);
@@ -479,18 +482,26 @@
                         <option value="anthropic">Anthropic</option>
                         <option value="zai">Z.AI</option>
                         <option value="local_whisper">Local Whisper</option>
+                        <option value="dpc_agent">DPC Agent</option>
                       </select>
                     </div>
 
-                    <div class="form-group">
-                      <label for="model-{i}">Model</label>
-                      <input
-                        id="model-{i}"
-                        type="text"
-                        bind:value={editedConfig.providers[i].model}
-                        placeholder="llama3.1:8b"
-                      />
-                    </div>
+                    {#if editedConfig.providers[i].type !== 'dpc_agent'}
+                      <div class="form-group">
+                        <label for="model-{i}">Model</label>
+                        <input
+                          id="model-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].model}
+                          placeholder="llama3.1:8b"
+                        />
+                      </div>
+                    {:else}
+                      <div class="form-info">
+                        <p><strong>DPC Agent</strong> - Embedded autonomous AI agent for task automation.</p>
+                        <p>Uses your configured default AI provider. No model or API key configuration needed.</p>
+                      </div>
+                    {/if}
 
                     <!-- Type-specific fields -->
                     {#if editedConfig.providers[i].type === 'ollama'}
@@ -837,6 +848,7 @@
                 <option value="anthropic">Anthropic</option>
                 <option value="zai">Z.AI</option>
                 <option value="local_whisper">Local Whisper</option>
+                <option value="dpc_agent">DPC Agent</option>
               </select>
             </div>
 
@@ -869,13 +881,17 @@
                 <p>Device: Auto-detect (CUDA if available)</p>
                 <p>Model will download on first use (~3GB)</p>
                 <p>GPU acceleration recommended for fast transcription</p>
+              {:else if newProvider.type === 'dpc_agent'}
+                <p>Embedded autonomous AI agent for task automation</p>
+                <p>Uses your configured default AI provider</p>
+                <p>No model or API key configuration required</p>
               {/if}
             </div>
 
             <button
               class="btn btn-primary"
               on:click={addNewProvider}
-              disabled={!newProvider.alias || !newProvider.model}
+              disabled={!newProvider.alias || (newProvider.type !== 'dpc_agent' && !newProvider.model)}
             >
               Add Provider
             </button>

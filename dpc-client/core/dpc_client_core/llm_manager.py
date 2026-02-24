@@ -1864,6 +1864,11 @@ class LLMManager:
                         "task": "transcribe",
                         "lazy_loading": True,
                         "_note": "Local Whisper transcription - GPU accelerated (CUDA, MLX)"
+                    },
+                    {
+                        "alias": "dpc_agent",
+                        "type": "dpc_agent",
+                        "_note": "Embedded autonomous AI agent for task automation - uses default AI provider"
                     }
                 ],
                 "_examples": {
