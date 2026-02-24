@@ -387,9 +387,11 @@ class TelegramBridge:
                             audio_base64 = base64.b64encode(audio_data).decode("utf-8")
 
                         # Transcribe using service method (handles provider selection)
+                        # v0.15.4: Pass provider_alias to respect voice_provider setting from providers.json
                         transcription_result = await self.service.transcribe_audio(
                             audio_base64=audio_base64,
-                            mime_type="audio/ogg"
+                            mime_type="audio/ogg",
+                            provider_alias=voice_provider_alias
                         )
 
                         transcription_text = transcription_result.get("text", "")
@@ -407,6 +409,24 @@ class TelegramBridge:
 
                 except Exception as e:
                     logger.error(f"Failed to transcribe voice message: {e}", exc_info=True)
+
+                    # v0.15.4: Notify Telegram user of transcription failure
+                    try:
+                        error_msg = str(e)
+                        if "VRAM" in error_msg or "memory" in error_msg.lower() or "CUDA" in error_msg:
+                            await self.telegram.send_message(
+                                chat_id,
+                                "⚠️ Transcription failed: GPU memory error. Try a shorter voice message."
+                            )
+                        else:
+                            # Truncate error message to avoid long Telegram messages
+                            display_error = error_msg[:100] if len(error_msg) > 100 else error_msg
+                            await self.telegram.send_message(
+                                chat_id,
+                                f"⚠️ Transcription failed: {display_error}"
+                            )
+                    except Exception as notify_error:
+                        logger.error(f"Failed to notify Telegram user of transcription error: {notify_error}")
 
             # Create voice attachment
             from ..conversation_monitor import Message as ConvMessage
