@@ -655,14 +655,33 @@ Send a voice message and it will be transcribed and processed\\.
         """
         Send a message to a Telegram chat.
 
+        Splits long messages into multiple parts instead of truncating.
+
         Args:
             chat_id: Target chat ID
             text: Message text (Markdown format)
         """
-        # Truncate if needed
+        # Split long messages instead of truncating
         if len(text) > TELEGRAM_MESSAGE_MAX_LENGTH:
-            text = text[:TELEGRAM_MESSAGE_MAX_LENGTH - 50] + "\n\n... (truncated)"
+            chunks = self._split_message(text, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
+            log.debug(f"[_send_message] Splitting message into {len(chunks)} parts")
+            for i, chunk in enumerate(chunks):
+                # Add part indicator for multi-part messages
+                if len(chunks) > 1:
+                    chunk = f"[{i+1}/{len(chunks)}]\n{chunk}"
+                await self._send_single_message(chat_id, chunk)
+            return
 
+        await self._send_single_message(chat_id, text)
+
+    async def _send_single_message(self, chat_id: str, text: str) -> None:
+        """
+        Send a single message to a Telegram chat (internal helper).
+
+        Args:
+            chat_id: Target chat ID
+            text: Message text (Markdown format)
+        """
         log.debug(f"[_send_message] Sending to chat_id={chat_id}, text_len={len(text)}")
 
         try:
@@ -752,15 +771,15 @@ Send a voice message and it will be transcribed and processed\\.
 
         # Description/result - escape these as they contain free-form text
         if "description" in data:
-            desc = escape_markdown(str(data["description"])[:200])
+            desc = escape_markdown(str(data["description"])[:500])  # Increased from 200
             lines.append(f"📝 {desc}")
         if "result" in data and data["result"]:
-            result = escape_markdown(str(data["result"])[:200])
+            result = escape_markdown(str(data["result"])[:1000])  # Increased from 200
             lines.append(f"📄 Result: {result}")
 
         # Error
         if "error" in data:
-            error = escape_markdown(str(data["error"])[:200])
+            error = escape_markdown(str(data["error"])[:500])  # Increased from 200
             lines.append(f"❌ Error: {error}")
 
         # Agent-initiated message (special formatting)
@@ -773,9 +792,9 @@ Send a voice message and it will be transcribed and processed\\.
             lines = [f"{priority_emoji} *Message from Agent* \\({priority}\\)"]
 
             if "message" in data:
-                # Escape markdown and truncate long messages
-                # Use full escape_markdown for proper Telegram Markdown v2 escaping
-                msg = escape_markdown(str(data["message"])[:3500])
+                # Escape markdown for proper Telegram Markdown v2 escaping
+                # No truncation - _send_message will split if needed
+                msg = escape_markdown(str(data["message"]))
                 lines.append(f"\n{msg}")
 
         return "\n".join(lines)

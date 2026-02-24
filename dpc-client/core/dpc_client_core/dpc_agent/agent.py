@@ -34,6 +34,7 @@ from .utils import (
     get_agent_root, ensure_agent_dirs, utc_now_iso, append_jsonl
 )
 from .task_queue import TaskQueue, TaskPriority, Task
+from .task_types import TaskTypeDefinition, BUILTIN_TASK_TYPES
 from .events import EventType, get_event_emitter
 from .budget import BillingModel, HybridBudget
 
@@ -105,6 +106,10 @@ class DpcAgent:
 
         # Custom task handlers (extensible)
         self._task_handlers: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
+
+        # Task type registry (agent-defined task types)
+        self._task_type_registry: Dict[str, TaskTypeDefinition] = {}
+        self._load_task_type_registry()  # Load persisted task types
 
         # Event emitter for notifications
         self.events = get_event_emitter()
@@ -384,6 +389,211 @@ class DpcAgent:
             return True
         return False
 
+    # -----------------------------------------------------------------------
+    # Task Type Registry Methods
+    # -----------------------------------------------------------------------
+
+    def _load_task_type_registry(self) -> None:
+        """Load task type registry from disk."""
+        registry_path = self.agent_root / "state" / "task_types.json"
+        if registry_path.exists():
+            try:
+                with open(registry_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for task_type, definition_data in data.get("task_types", {}).items():
+                    self._task_type_registry[task_type] = TaskTypeDefinition.from_dict(definition_data)
+                log.info(f"Loaded {len(self._task_type_registry)} task types from registry")
+            except Exception as e:
+                log.warning(f"Failed to load task type registry: {e}")
+
+    def _save_task_type_registry(self) -> None:
+        """Save task type registry to disk."""
+        registry_path = self.agent_root / "state" / "task_types.json"
+        try:
+            data = {
+                "task_types": {
+                    tt: definition.to_dict()
+                    for tt, definition in self._task_type_registry.items()
+                },
+                "updated_at": utc_now_iso(),
+            }
+            registry_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(registry_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            log.debug(f"Saved {len(self._task_type_registry)} task types to registry")
+        except Exception as e:
+            log.error(f"Failed to save task type registry: {e}")
+
+    def register_task_type(
+        self,
+        task_type: str,
+        description: str,
+        execution_prompt: str,
+        input_schema: Optional[Dict[str, Any]] = None,
+        examples: Optional[List[Dict[str, Any]]] = None,
+    ) -> TaskTypeDefinition:
+        """
+        Register a custom task type with execution instructions.
+
+        When a task of this type executes, the agent will follow the
+        execution_prompt with task.data variables substituted.
+
+        Args:
+            task_type: Unique identifier (e.g., "weather_report")
+            description: What this task type does
+            execution_prompt: Instructions for the agent to follow. Use {variable}
+                             placeholders that will be filled from task.data
+            input_schema: JSON schema for validating task.data (optional)
+            examples: Example task.data payloads (optional)
+
+        Returns:
+            The created TaskTypeDefinition
+
+        Example:
+            agent.register_task_type(
+                task_type="weather_report",
+                description="Fetch weather for a location",
+                execution_prompt="Fetch current weather for {location} and summarize it.",
+                input_schema={"type": "object", "properties": {"location": {"type": "string"}}},
+            )
+        """
+        definition = TaskTypeDefinition(
+            task_type=task_type,
+            description=description,
+            execution_prompt=execution_prompt,
+            input_schema=input_schema or {},
+            examples=examples or [],
+        )
+
+        # Store in registry
+        self._task_type_registry[task_type] = definition
+
+        # Auto-register a handler that runs the agent with the formatted prompt
+        self._task_handlers[task_type] = self._create_task_type_handler(definition)
+
+        # Persist to disk
+        self._save_task_type_registry()
+
+        log.info(f"Registered task type: {task_type}")
+        return definition
+
+    def unregister_task_type(self, task_type: str) -> bool:
+        """
+        Unregister a custom task type.
+
+        Args:
+            task_type: Task type to unregister
+
+        Returns:
+            True if type was removed, False if not found
+        """
+        if task_type in self._task_type_registry:
+            del self._task_type_registry[task_type]
+            # Also remove the auto-registered handler
+            if task_type in self._task_handlers:
+                del self._task_handlers[task_type]
+            self._save_task_type_registry()
+            log.info(f"Unregistered task type: {task_type}")
+            return True
+        return False
+
+    def get_task_type(self, task_type: str) -> Optional[TaskTypeDefinition]:
+        """
+        Get a task type definition.
+
+        Args:
+            task_type: Task type name
+
+        Returns:
+            TaskTypeDefinition if found, None otherwise
+        """
+        # Check custom registry first
+        if task_type in self._task_type_registry:
+            return self._task_type_registry[task_type]
+        # Then check built-in types
+        if task_type in BUILTIN_TASK_TYPES:
+            return BUILTIN_TASK_TYPES[task_type]
+        return None
+
+    def list_task_types(self) -> Dict[str, TaskTypeDefinition]:
+        """
+        List all registered task types (custom + built-in).
+
+        Returns:
+            Dictionary of task_type -> TaskTypeDefinition
+        """
+        result = dict(BUILTIN_TASK_TYPES)
+        result.update(self._task_type_registry)
+        return result
+
+    def _create_task_type_handler(
+        self, definition: TaskTypeDefinition
+    ) -> Callable[[Dict[str, Any]], Any]:
+        """
+        Create a handler function for a task type definition.
+
+        The handler formats the execution_prompt with task data and
+        runs the agent with that prompt.
+
+        Args:
+            definition: TaskTypeDefinition with execution instructions
+
+        Returns:
+            Async handler function
+        """
+        agent = self  # Capture reference
+
+        async def handler(task_data: Dict[str, Any]) -> str:
+            # Format the prompt with task data
+            prompt = definition.format_prompt(task_data)
+
+            # Run the agent with the formatted prompt
+            result = await agent.process(
+                message=prompt,
+                conversation_id=f"task-{definition.task_type}",
+            )
+            return result
+
+        return handler
+
+    def _convert_task_data_to_prompt(self, task_data: Dict[str, Any]) -> str:
+        """
+        Convert structured task data to a readable prompt.
+
+        This handles cases where an agent schedules a 'chat' task with
+        structured data instead of plain text. The structured data is
+        converted to a clear instruction for the agent to follow.
+
+        Args:
+            task_data: Structured task data dictionary
+
+        Returns:
+            A readable prompt string
+        """
+        # If task_data has a 'type' field, use it to construct a clear instruction
+        task_type = task_data.get("type", "")
+        action = task_data.get("action", "")
+
+        if task_type == "weather_request" or "weather" in task_type.lower():
+            location = task_data.get("location", "unknown location")
+            return f"Execute the scheduled task: Fetch current weather for {location} and provide a summary. If Telegram bridge is available, send the result to the user."
+
+        elif task_type == "reminder":
+            message = task_data.get("message", "")
+            return f"Execute the scheduled task: Remind the user: {message}"
+
+        elif action:
+            # Generic action-based prompt
+            return f"Execute the scheduled task: {action}. Task data: {json.dumps(task_data, ensure_ascii=False)}"
+
+        elif task_type:
+            # Generic type-based prompt
+            return f"Execute the scheduled task of type '{task_type}'. Task data: {json.dumps(task_data, ensure_ascii=False)}"
+
+        else:
+            # Fallback: convert entire dict to readable prompt
+            return f"Execute the following scheduled task: {json.dumps(task_data, ensure_ascii=False)}"
+
     async def _execute_task(self, task: Task) -> str:
         """
         Execute a queued task.
@@ -410,8 +620,15 @@ class DpcAgent:
 
         # Built-in task types
         if task.task_type == "chat":
+            # Get text from task data, or convert structured data to a prompt
+            text = task.data.get("text", "")
+            if not text:
+                # If no 'text' field, convert structured data to a readable prompt
+                # This handles cases where agent passes structured data to chat task
+                text = self._convert_task_data_to_prompt(task.data)
+
             return await self.process(
-                task.data.get("text", ""),
+                text,
                 conversation_id=task.id,
                 dpc_context=task.data.get("dpc_context"),
             )

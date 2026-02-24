@@ -22,6 +22,64 @@ log = logging.getLogger(__name__)
 # Priority levels for messages
 VALID_PRIORITIES = {"urgent", "high", "normal", "low"}
 
+# Telegram message limit (leave some buffer for formatting)
+MAX_MESSAGE_LENGTH = 4000
+
+
+def split_message(text: str, max_length: int = MAX_MESSAGE_LENGTH) -> List[str]:
+    """
+    Split a long message into multiple parts at natural boundaries.
+
+    Tries to split at paragraph breaks, then sentence breaks,
+    then word boundaries to avoid cutting mid-word.
+
+    Args:
+        text: The text to split
+        max_length: Maximum length per part
+
+    Returns:
+        List of message parts
+    """
+    if len(text) <= max_length:
+        return [text]
+
+    parts = []
+
+    while text:
+        if len(text) <= max_length:
+            parts.append(text)
+            break
+
+        # Find best split point (prefer paragraph, then sentence, then word)
+        split_pos = max_length
+
+        # Try to find paragraph break (double newline)
+        para_break = text.rfind("\n\n", 0, max_length)
+        if para_break > max_length // 2:
+            split_pos = para_break + 2
+        else:
+            # Try to find single newline
+            line_break = text.rfind("\n", 0, max_length)
+            if line_break > max_length // 2:
+                split_pos = line_break + 1
+            else:
+                # Try to find sentence end
+                for end in [". ", "! ", "? ", "。", "！", "？"]:
+                    sent_break = text.rfind(end, 0, max_length - 1)
+                    if sent_break > max_length // 2:
+                        split_pos = sent_break + len(end)
+                        break
+                else:
+                    # Fall back to word boundary
+                    word_break = text.rfind(" ", 0, max_length)
+                    if word_break > max_length // 2:
+                        split_pos = word_break + 1
+
+        parts.append(text[:split_pos])
+        text = text[split_pos:]
+
+    return parts
+
 
 async def send_user_message(ctx: ToolContext, message: str, priority: str = "normal") -> str:
     """
@@ -52,25 +110,29 @@ async def send_user_message(ctx: ToolContext, message: str, priority: str = "nor
     if not message or not message.strip():
         return "Error: Message cannot be empty"
 
-    # Truncate very long messages (Telegram has a 4096 char limit)
-    truncated = False
-    if len(message) > 3500:
-        message = message[:3500] + "... (truncated)"
-        truncated = True
+    # Split long messages instead of truncating
+    parts = split_message(message)
+    num_parts = len(parts)
 
     try:
-        # Emit the AGENT_MESSAGE event
-        # The AgentTelegramBridge will pick this up and forward to Telegram
-        await emit_agent_message(
-            message=message,
-            priority=priority,
-        )
+        # Emit each part as a separate message
+        for i, part in enumerate(parts):
+            # Add part indicator for multi-part messages
+            if num_parts > 1:
+                part_with_indicator = f"[{i+1}/{num_parts}]\n\n{part}"
+            else:
+                part_with_indicator = part
+
+            await emit_agent_message(
+                message=part_with_indicator,
+                priority=priority,
+            )
 
         result = f"Message sent to user via Telegram (priority: {priority})"
-        if truncated:
-            result += " [message was truncated due to length]"
+        if num_parts > 1:
+            result += f" [sent in {num_parts} parts]"
 
-        log.info(f"Agent sent user message (priority={priority}, len={len(message)})")
+        log.info(f"Agent sent user message (priority={priority}, len={len(message)}, parts={num_parts})")
         return result
 
     except Exception as e:
@@ -102,7 +164,7 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": (
                                 "The message to send. Supports Markdown formatting. "
-                                "Will be truncated if longer than 3500 characters."
+                                "Long messages will be automatically split into multiple parts."
                             )
                         },
                         "priority": {

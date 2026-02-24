@@ -626,6 +626,147 @@ def get_task_status(ctx: ToolContext, task_id: str) -> str:
         return f"⚠️ Error getting task status: {e}"
 
 
+def register_task_type(
+    ctx: ToolContext,
+    task_type: str,
+    description: str,
+    execution_prompt: str,
+    input_schema: str = "{}",
+) -> str:
+    """
+    Register a custom task type with execution instructions.
+
+    The agent will follow execution_prompt when the task runs,
+    with task.data variables substituted into the prompt.
+
+    IMPORTANT: Always register the task type BEFORE scheduling tasks of that type.
+
+    Args:
+        ctx: Tool context
+        task_type: Unique identifier (e.g., "weather_report"). Use snake_case.
+        description: What this task type does (human-readable)
+        execution_prompt: Instructions for the agent to follow when executing.
+                         Use {variable} placeholders that will be filled from task.data.
+        input_schema: JSON schema for validating task.data (optional, as JSON string)
+
+    Returns:
+        Confirmation message with task type details
+
+    Example:
+        register_task_type(
+            task_type="weather_report",
+            description="Fetch and summarize weather for a location",
+            execution_prompt="Fetch current weather for {location} and provide a summary.
+                             Use web search if needed. Include temperature and conditions.",
+            input_schema='{"type": "object", "properties": {"location": {"type": "string"}}}'
+        )
+
+        Then schedule: schedule_task("weather_report", '{"location": "New York"}', delay_seconds=60)
+    """
+    try:
+        # Check if agent is available
+        if not hasattr(ctx, '_agent'):
+            return "⚠️ Agent not available in context"
+
+        # Parse input schema
+        try:
+            schema = json.loads(input_schema) if input_schema else {}
+        except json.JSONDecodeError:
+            return "⚠️ input_schema must be valid JSON"
+
+        # Validate task_type format
+        if not task_type or not task_type.replace("_", "").isalnum():
+            return "⚠️ task_type must be alphanumeric with underscores (e.g., 'weather_report')"
+
+        # Check if it conflicts with built-in types
+        from ..task_types import BUILTIN_TASK_TYPES
+        if task_type in BUILTIN_TASK_TYPES:
+            return f"⚠️ Cannot override built-in task type: {task_type}"
+
+        # Register the task type
+        definition = ctx._agent.register_task_type(
+            task_type=task_type,
+            description=description,
+            execution_prompt=execution_prompt,
+            input_schema=schema,
+        )
+
+        return json.dumps({
+            "status": "registered",
+            "task_type": definition.task_type,
+            "description": definition.description,
+            "input_schema": definition.input_schema,
+            "message": f"✓ Task type '{task_type}' registered. You can now schedule tasks of this type."
+        }, indent=2)
+
+    except Exception as e:
+        return f"⚠️ Error registering task type: {e}"
+
+
+def list_task_types(ctx: ToolContext) -> str:
+    """
+    List all registered task types (custom and built-in).
+
+    Args:
+        ctx: Tool context
+
+    Returns:
+        JSON list of available task types with their descriptions
+    """
+    try:
+        if not hasattr(ctx, '_agent'):
+            return "⚠️ Agent not available in context"
+
+        task_types = ctx._agent.list_task_types()
+
+        result = {
+            "task_types": [
+                {
+                    "task_type": tt,
+                    "description": defn.description,
+                    "input_schema": defn.input_schema,
+                    "is_builtin": tt in ["chat", "improvement", "review"],
+                }
+                for tt, defn in task_types.items()
+            ],
+            "total": len(task_types),
+        }
+
+        return json.dumps(result, indent=2)
+
+    except Exception as e:
+        return f"⚠️ Error listing task types: {e}"
+
+
+def unregister_task_type(ctx: ToolContext, task_type: str) -> str:
+    """
+    Unregister a custom task type.
+
+    Args:
+        ctx: Tool context
+        task_type: Task type to unregister
+
+    Returns:
+        Confirmation message
+    """
+    try:
+        if not hasattr(ctx, '_agent'):
+            return "⚠️ Agent not available in context"
+
+        # Check if it's a built-in type
+        from ..task_types import BUILTIN_TASK_TYPES
+        if task_type in BUILTIN_TASK_TYPES:
+            return f"⚠️ Cannot unregister built-in task type: {task_type}"
+
+        if ctx._agent.unregister_task_type(task_type):
+            return f"✓ Task type '{task_type}' unregistered"
+        else:
+            return f"⚠️ Task type '{task_type}' not found"
+
+    except Exception as e:
+        return f"⚠️ Error unregistering task type: {e}"
+
+
 # ---------------------------------------------------------------------------
 # Evolution Tools
 # ---------------------------------------------------------------------------
@@ -1423,18 +1564,17 @@ def get_tools() -> List[ToolEntry]:
             name="schedule_task",
             schema={
                 "name": "schedule_task",
-                "description": "Schedule a task for future or background execution",
+                "description": "Schedule a task for future or background execution. For custom tasks: 1) First call register_task_type to define execution instructions, 2) Then call schedule_task. For 'chat' tasks: task_data must include 'text' field with the message to process.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task_type": {
                             "type": "string",
-                            "description": "Type of task",
-                            "enum": ["chat", "improvement", "review"]
+                            "description": "Type of task. Built-in: 'chat' (conversation), 'improvement' (self-improvement), 'review' (code review). Custom: any type registered via register_task_type."
                         },
                         "task_data": {
                             "type": "string",
-                            "description": "JSON string with task payload"
+                            "description": "JSON string with task payload. For 'chat' tasks: {\"text\": \"your message here\"}. For custom types: match the input_schema defined in register_task_type."
                         },
                         "delay_seconds": {
                             "type": "integer",
@@ -1474,6 +1614,75 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=get_task_status,
             timeout_sec=10,
+        ),
+
+        # Task type management tools
+        ToolEntry(
+            name="register_task_type",
+            schema={
+                "name": "register_task_type",
+                "description": "Register a custom task type with execution instructions. The agent will follow the execution_prompt when tasks of this type run. MUST call this BEFORE scheduling tasks of a custom type.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_type": {
+                            "type": "string",
+                            "description": "Unique identifier (e.g., 'weather_report'). Use snake_case."
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "What this task type does (human-readable)"
+                        },
+                        "execution_prompt": {
+                            "type": "string",
+                            "description": "Instructions for the agent to follow. Use {variable} placeholders that will be filled from task.data"
+                        },
+                        "input_schema": {
+                            "type": "string",
+                            "description": "JSON schema for validating task.data (optional, as JSON string)",
+                            "default": "{}"
+                        }
+                    },
+                    "required": ["task_type", "description", "execution_prompt"]
+                }
+            },
+            handler=register_task_type,
+            timeout_sec=10,
+        ),
+
+        ToolEntry(
+            name="list_task_types",
+            schema={
+                "name": "list_task_types",
+                "description": "List all registered task types (custom and built-in)",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            handler=list_task_types,
+            timeout_sec=5,
+        ),
+
+        ToolEntry(
+            name="unregister_task_type",
+            schema={
+                "name": "unregister_task_type",
+                "description": "Unregister a custom task type",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_type": {
+                            "type": "string",
+                            "description": "Task type to unregister"
+                        }
+                    },
+                    "required": ["task_type"]
+                }
+            },
+            handler=unregister_task_type,
+            timeout_sec=5,
         ),
 
         # Evolution tools
