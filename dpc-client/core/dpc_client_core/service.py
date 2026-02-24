@@ -1742,9 +1742,13 @@ class CoreService:
         """
         from dpc_protocol.protocol import create_get_providers_message
 
+        logger.info("[DEBUG] query_remote_providers called with peer_id=%s, timeout=%s", peer_id, timeout)
+
         try:
             # Check if peer is connected
+            logger.info("[DEBUG] Checking if peer %s is connected. Connected peers: %s", peer_id, list(self.p2p_manager.peers.keys()))
             if peer_id not in self.p2p_manager.peers:
+                logger.info("[DEBUG] Peer %s is NOT connected", peer_id)
                 return {
                     "status": "error",
                     "message": f"Peer '{peer_id}' is not connected. Connect to the peer first."
@@ -1754,7 +1758,7 @@ class CoreService:
             if peer_id in self.peer_metadata and "providers" in self.peer_metadata[peer_id]:
                 cached_providers = self.peer_metadata[peer_id]["providers"]
                 if cached_providers:
-                    logger.debug("Returning cached providers for %s (%d providers)", peer_id, len(cached_providers))
+                    logger.info("[DEBUG] Returning cached providers for %s (%d providers)", peer_id, len(cached_providers))
                     return {
                         "status": "success",
                         "providers": cached_providers,
@@ -1762,16 +1766,18 @@ class CoreService:
                     }
 
             # Create Future to wait for response
+            logger.info("[DEBUG] Creating Future and sending GET_PROVIDERS to %s", peer_id)
             response_future: asyncio.Future = asyncio.Future()
             self._pending_providers_requests[peer_id] = response_future
 
             # Send GET_PROVIDERS request
             await self.p2p_manager.send_message_to_peer(peer_id, create_get_providers_message())
-            logger.debug("Sent GET_PROVIDERS request to %s", peer_id)
+            logger.info("[DEBUG] Sent GET_PROVIDERS request to %s, waiting for response...", peer_id)
 
             # Wait for response
             try:
                 providers = await asyncio.wait_for(response_future, timeout=timeout)
+                logger.info("[DEBUG] Received %d providers from %s", len(providers), peer_id)
                 return {
                     "status": "success",
                     "providers": providers,
@@ -1779,13 +1785,14 @@ class CoreService:
                 }
             except asyncio.TimeoutError:
                 self._pending_providers_requests.pop(peer_id, None)
+                logger.info("[DEBUG] Timeout waiting for providers from %s after %ss", peer_id, timeout)
                 return {
                     "status": "error",
                     "message": f"Timeout waiting for providers response from {peer_id} after {timeout}s"
                 }
 
         except Exception as e:
-            logger.error("Error querying remote providers from %s: %s", peer_id, e, exc_info=True)
+            logger.error("[DEBUG] Error querying remote providers from %s: %s", peer_id, e, exc_info=True)
             return {
                 "status": "error",
                 "message": f"Failed to query remote providers: {str(e)}"
