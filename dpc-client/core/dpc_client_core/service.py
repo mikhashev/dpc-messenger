@@ -119,18 +119,11 @@ class CoreService:
         self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
         self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
 
-        # Inject CoreService reference into DpcAgentProvider if configured
-        if "dpc_agent" in self.llm_manager.providers:
-            dpc_agent_provider = self.llm_manager.providers["dpc_agent"]
-            if hasattr(dpc_agent_provider, 'set_service'):
-                dpc_agent_provider.set_service(self)
-                logger.info("Injected CoreService into DpcAgentProvider")
+        # Register callback for re-injecting CoreService after providers reload
+        self.llm_manager.set_on_providers_reload(self._inject_service_into_providers)
 
-        # Inject CoreService reference into RemotePeerProvider instances (v0.18.0+)
-        for alias, provider in self.llm_manager.providers.items():
-            if hasattr(provider, 'set_service') and provider.__class__.__name__ == 'RemotePeerProvider':
-                provider.set_service(self)
-                logger.info(f"Injected CoreService into RemotePeerProvider '{alias}'")
+        # Initial injection of CoreService reference into providers that need it
+        self._inject_service_into_providers()
 
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
@@ -419,6 +412,27 @@ class CoreService:
             self.message_router.register_handler(TelegramIncomingHandler(self))
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
+
+    def _inject_service_into_providers(self):
+        """
+        Inject CoreService reference into providers that need it.
+
+        Called during initialization and after providers are reloaded from config.
+        This ensures dpc_agent and remote_peer providers always have access to
+        CoreService for LLMManager and other services.
+        """
+        # Inject into DpcAgentProvider if configured
+        if "dpc_agent" in self.llm_manager.providers:
+            dpc_agent_provider = self.llm_manager.providers["dpc_agent"]
+            if hasattr(dpc_agent_provider, 'set_service'):
+                dpc_agent_provider.set_service(self)
+                logger.info("Injected CoreService into DpcAgentProvider")
+
+        # Inject into RemotePeerProvider instances (v0.18.0+)
+        for alias, provider in self.llm_manager.providers.items():
+            if hasattr(provider, 'set_service') and provider.__class__.__name__ == 'RemotePeerProvider':
+                provider.set_service(self)
+                logger.info(f"Injected CoreService into RemotePeerProvider '{alias}'")
 
     def _on_connection_status_changed(self, old_mode: OperationMode, new_mode: OperationMode):
         """Callback when connection status changes."""

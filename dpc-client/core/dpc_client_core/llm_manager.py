@@ -6,7 +6,7 @@ import asyncio
 import logging
 import base64
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple, TYPE_CHECKING
+from typing import Dict, Any, Optional, List, Tuple, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from dpc_client_core.service import CoreService
@@ -1916,11 +1916,26 @@ class LLMManager:
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
         self.voice_provider: str | None = None  # v0.13.0+: Voice transcription provider for auto-selection
 
+        # Callback for re-injecting CoreService after providers reload (v0.18.0+)
+        self._on_providers_reload_callback: Optional[Callable[[], None]] = None
+
         # Token counting manager (Phase 4 refactor - v0.12.1)
         from dpc_client_core.managers.token_count_manager import TokenCountManager
         self.token_count_manager = TokenCountManager()
 
         self._load_providers_from_config()
+
+    def set_on_providers_reload(self, callback: Callable[[], None]) -> None:
+        """
+        Register a callback to be called after providers are reloaded.
+
+        Used by CoreService to re-inject itself into dpc_agent and remote_peer
+        providers after configuration changes.
+
+        Args:
+            callback: Function to call after providers reload
+        """
+        self._on_providers_reload_callback = callback
 
     def _ensure_config_exists(self):
         """Creates a default providers.json file if one doesn't exist."""
@@ -2180,6 +2195,14 @@ class LLMManager:
                         if state.get('load_lock'):
                             provider._load_lock = state['load_lock']
                         logger.info(f"Restored loaded Whisper model state for '{alias}' (model stays in memory)")
+
+            # Call callback to re-inject CoreService into dpc_agent/remote_peer providers
+            if self._on_providers_reload_callback:
+                try:
+                    self._on_providers_reload_callback()
+                    logger.debug("Providers reload callback executed")
+                except Exception as cb_err:
+                    logger.warning("Error in providers reload callback: %s", cb_err)
 
         except Exception as e:
             logger.error("Error saving provider config: %s", e, exc_info=True)
