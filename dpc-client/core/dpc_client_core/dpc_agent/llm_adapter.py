@@ -213,7 +213,7 @@ class DpcLlmAdapter:
         try:
             # Call remote inference via CoreService
             log.info(f"Routing agent inference to remote peer: {dpc_agent_provider.peer_id}")
-            response = await service._request_inference_from_peer(
+            result = await service._request_inference_from_peer(
                 peer_id=dpc_agent_provider.peer_id,
                 prompt=prompt,
                 model=dpc_agent_provider.remote_model,
@@ -222,27 +222,50 @@ class DpcLlmAdapter:
                 timeout=120  # Longer timeout for agent queries
             )
 
+            # Extract response text from result dict
+            # _request_inference_from_peer returns: {"response": str, "tokens_used": int, ...}
+            if isinstance(result, dict):
+                response_text = result.get("response", "")
+                remote_tokens = result.get("tokens_used")
+                remote_prompt_tokens = result.get("prompt_tokens")
+                remote_response_tokens = result.get("response_tokens")
+            else:
+                # Fallback if result is already a string (shouldn't happen but be safe)
+                response_text = str(result) if result else ""
+                remote_tokens = None
+                remote_prompt_tokens = None
+                remote_response_tokens = None
+
             # Build response message in Ouroboros format
             response_msg: Dict[str, Any] = {
                 "role": "assistant",
-                "content": response,
+                "content": response_text,
             }
 
             # Parse for tool calls if tools were provided
             if tools:
-                log.debug(f"Parsing tool calls from remote response (len={len(response)})")
-                tool_calls = self._parse_tool_calls(response)
+                log.debug(f"Parsing tool calls from remote response (len={len(response_text)})")
+                tool_calls = self._parse_tool_calls(response_text)
                 if tool_calls:
                     response_msg["tool_calls"] = tool_calls
                     log.info(f"Found {len(tool_calls)} tool call(s) from remote peer")
 
-            # Estimate usage
-            usage: Dict[str, Any] = {
-                "prompt_tokens": len(prompt) // 4,
-                "completion_tokens": len(response) // 4,
-                "total_tokens": (len(prompt) + len(response)) // 4,
-                "cost": 0.0,
-            }
+            # Use actual token counts from remote if available, otherwise estimate
+            if remote_prompt_tokens and remote_response_tokens:
+                usage: Dict[str, Any] = {
+                    "prompt_tokens": remote_prompt_tokens,
+                    "completion_tokens": remote_response_tokens,
+                    "total_tokens": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
+                    "cost": 0.0,
+                }
+            else:
+                # Fallback estimation
+                usage: Dict[str, Any] = {
+                    "prompt_tokens": len(prompt) // 4,
+                    "completion_tokens": len(response_text) // 4,
+                    "total_tokens": (len(prompt) + len(response_text)) // 4,
+                    "cost": 0.0,
+                }
 
             return response_msg, usage
 
