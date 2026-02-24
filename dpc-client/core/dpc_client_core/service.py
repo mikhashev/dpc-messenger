@@ -126,6 +126,12 @@ class CoreService:
                 dpc_agent_provider.set_service(self)
                 logger.info("Injected CoreService into DpcAgentProvider")
 
+        # Inject CoreService reference into RemotePeerProvider instances (v0.18.0+)
+        for alias, provider in self.llm_manager.providers.items():
+            if hasattr(provider, 'set_service') and provider.__class__.__name__ == 'RemotePeerProvider':
+                provider.set_service(self)
+                logger.info(f"Injected CoreService into RemotePeerProvider '{alias}'")
+
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
             oauth_callback_host=self.settings.get_oauth_callback_host(),

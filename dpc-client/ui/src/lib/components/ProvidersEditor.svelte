@@ -9,7 +9,7 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper' | 'dpc_agent';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper' | 'dpc_agent' | 'remote_peer';
 
   type Provider = {
     alias: string;
@@ -29,6 +29,10 @@
     language?: string;       // 'auto' or specific language code
     task?: string;           // 'transcribe' or 'translate'
     lazy_loading?: boolean;  // Load model on first use
+    // Remote Peer specific (v0.18.0+)
+    peer_id?: string;        // Remote peer's node ID
+    provider?: string;       // Remote provider alias (optional)
+    timeout?: number;        // Request timeout in seconds
     // Thinking/reasoning (v0.15.0+)
     thinking?: {
       enabled?: boolean;
@@ -40,6 +44,7 @@
     default_provider: string;
     vision_provider?: string;  // Optional vision provider for image queries
     voice_provider?: string;   // v0.13.0+: Optional voice provider for transcription
+    agent_provider?: string;   // v0.18.0+: Optional agent provider for AI agent
     providers: Provider[];
   };
 
@@ -196,6 +201,10 @@
       if (editedConfig.voice_provider === provider.alias) {
         editedConfig.voice_provider = editedConfig.providers[0]?.alias || '';
       }
+      // v0.18.0+: If deleted provider was agent default, reset agent default
+      if (editedConfig.agent_provider === provider.alias) {
+        editedConfig.agent_provider = editedConfig.providers[0]?.alias || '';
+      }
       editedConfig = editedConfig; // Trigger reactivity
     }
   }
@@ -218,6 +227,13 @@
   function setVoiceDefault(alias: string) {
     if (!editedConfig) return;
     editedConfig.voice_provider = alias;
+    editedConfig = editedConfig; // Trigger reactivity
+  }
+
+  // Set agent default provider (v0.18.0+)
+  function setAgentDefault(alias: string) {
+    if (!editedConfig) return;
+    editedConfig.agent_provider = alias;
     editedConfig = editedConfig; // Trigger reactivity
   }
 
@@ -249,6 +265,11 @@
     // v0.13.0+: Auto-update voice_provider if this was the voice default
     if (editedConfig.voice_provider === oldAlias) {
       editedConfig.voice_provider = newAlias;
+    }
+
+    // v0.18.0+: Auto-update agent_provider if this was the agent default
+    if (editedConfig.agent_provider === oldAlias) {
+      editedConfig.agent_provider = newAlias;
     }
 
     // Update the tracked alias
@@ -329,6 +350,11 @@
     } else if (newProvider.type === 'dpc_agent') {
       // dpc_agent doesn't require model - it uses the default AI provider
       delete provider.model;
+    } else if (newProvider.type === 'remote_peer') {
+      // remote_peer requires peer_id, optionally model and timeout
+      provider.peer_id = newProvider.peer_id || '';
+      provider.timeout = 60;
+      delete provider.model; // Model is optional for remote_peer
     }
 
     editedConfig.providers.push(provider);
@@ -451,6 +477,7 @@
                     {#if provider.alias === displayConfig.default_provider}<span class="default-badge">⭐ Text Default</span>{/if}
                     {#if provider.alias === displayConfig.vision_provider}<span class="default-badge vision-badge">👁️ Vision Default</span>{/if}
                     {#if provider.alias === displayConfig.voice_provider}<span class="default-badge voice-badge">🎤 Voice Default</span>{/if}
+                    {#if provider.alias === displayConfig.agent_provider}<span class="default-badge agent-badge">🤖 Agent Default</span>{/if}
                   </h3>
                   {#if editMode}
                     <button class="btn-delete" on:click={() => deleteProvider(i)}>Delete</button>
@@ -483,10 +510,11 @@
                         <option value="zai">Z.AI</option>
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
+                        <option value="remote_peer">Remote Peer</option>
                       </select>
                     </div>
 
-                    {#if editedConfig.providers[i].type !== 'dpc_agent'}
+                    {#if editedConfig.providers[i].type !== 'dpc_agent' && editedConfig.providers[i].type !== 'remote_peer'}
                       <div class="form-group">
                         <label for="model-{i}">Model</label>
                         <input
@@ -496,10 +524,15 @@
                           placeholder="llama3.1:8b"
                         />
                       </div>
-                    {:else}
+                    {:else if editedConfig.providers[i].type === 'dpc_agent'}
                       <div class="form-info">
                         <p><strong>DPC Agent</strong> - Embedded autonomous AI agent for task automation.</p>
                         <p>Uses your configured default AI provider. No model or API key configuration needed.</p>
+                      </div>
+                    {:else if editedConfig.providers[i].type === 'remote_peer'}
+                      <div class="form-info">
+                        <p><strong>Remote Peer</strong> - Use a peer's AI model for inference.</p>
+                        <p>Configure peer_id, model, and timeout below. Requires compute sharing enabled on remote peer.</p>
                       </div>
                     {/if}
 
@@ -707,6 +740,54 @@
                       </div>
                     {/if}
 
+                    {#if editedConfig.providers[i].type === 'remote_peer'}
+                      <div class="form-group">
+                        <label for="peer-id-{i}">Peer ID</label>
+                        <input
+                          id="peer-id-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].peer_id}
+                          placeholder="dpc-node-alice-123"
+                        />
+                        <p class="help-text">The node ID of the remote peer (from their ~/.dpc/node.id)</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="remote-model-{i}">Model (optional)</label>
+                        <input
+                          id="remote-model-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].model}
+                          placeholder="llama3:70b"
+                        />
+                        <p class="help-text">Specific model to request on the remote peer</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="remote-provider-{i}">Provider (optional)</label>
+                        <input
+                          id="remote-provider-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].provider}
+                          placeholder="ollama_text"
+                        />
+                        <p class="help-text">Specific provider alias on the remote peer</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="timeout-{i}">Timeout (seconds)</label>
+                        <input
+                          id="timeout-{i}"
+                          type="number"
+                          bind:value={editedConfig.providers[i].timeout}
+                          placeholder="60"
+                          min="10"
+                          max="300"
+                        />
+                        <p class="help-text">Maximum time to wait for response from remote peer</p>
+                      </div>
+                    {/if}
+
                     <div class="form-group">
                       <label for="context-window-{i}">Context Window (optional)</label>
                       <select
@@ -765,6 +846,13 @@
                       >
                         {provider.alias === displayConfig.voice_provider ? '✓ Voice Default' : 'Set as Voice Default'}
                       </button>
+                      <button
+                        class="btn-set-default"
+                        class:active={provider.alias === displayConfig.agent_provider}
+                        on:click={() => setAgentDefault(provider.alias)}
+                      >
+                        {provider.alias === displayConfig.agent_provider ? '✓ Agent Default' : 'Set as Agent Default'}
+                      </button>
                     </div>
                   </div>
                 {:else}
@@ -811,6 +899,17 @@
                       <p><strong>Lazy Loading:</strong> {provider.lazy_loading !== false ? 'Enabled' : 'Disabled'}</p>
                     {/if}
 
+                    {#if provider.type === 'remote_peer'}
+                      <p><strong>Peer ID:</strong> {provider.peer_id}</p>
+                      {#if provider.model}
+                        <p><strong>Model:</strong> {provider.model}</p>
+                      {/if}
+                      {#if provider.provider}
+                        <p><strong>Remote Provider:</strong> {provider.provider}</p>
+                      {/if}
+                      <p><strong>Timeout:</strong> {provider.timeout || 60}s</p>
+                    {/if}
+
                     {#if provider.context_window}
                       <p><strong>Context Window:</strong> {provider.context_window.toLocaleString()} tokens</p>
                     {/if}
@@ -849,24 +948,37 @@
                 <option value="zai">Z.AI</option>
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
+                <option value="remote_peer">Remote Peer</option>
               </select>
             </div>
 
-            <div class="form-group">
-              <label for="new-model">Model</label>
-              <input
-                id="new-model"
-                type="text"
-                bind:value={newProvider.model}
-                placeholder={
-                  newProvider.type === 'ollama' ? 'llama3.1:8b' :
-                  newProvider.type === 'openai_compatible' ? 'gpt-4o' :
-                  newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
-                  newProvider.type === 'zai' ? 'glm-4.7' :
-                  'claude-3-5-sonnet-20240620'
-                }
-              />
-            </div>
+            {#if newProvider.type !== 'dpc_agent' && newProvider.type !== 'remote_peer'}
+              <div class="form-group">
+                <label for="new-model">Model</label>
+                <input
+                  id="new-model"
+                  type="text"
+                  bind:value={newProvider.model}
+                  placeholder={
+                    newProvider.type === 'ollama' ? 'llama3.1:8b' :
+                    newProvider.type === 'openai_compatible' ? 'gpt-4o' :
+                    newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
+                    newProvider.type === 'zai' ? 'glm-4.7' :
+                    'claude-3-5-sonnet-20240620'
+                  }
+                />
+              </div>
+            {:else if newProvider.type === 'remote_peer'}
+              <div class="form-group">
+                <label for="new-peer-id">Peer ID</label>
+                <input
+                  id="new-peer-id"
+                  type="text"
+                  bind:value={newProvider.peer_id}
+                  placeholder="dpc-node-alice-123"
+                />
+              </div>
+            {/if}
 
             <div class="form-info">
               <p><strong>Note:</strong> After adding the provider, you can configure additional settings in the edit mode.</p>
@@ -885,6 +997,10 @@
                 <p>Embedded autonomous AI agent for task automation</p>
                 <p>Uses your configured default AI provider</p>
                 <p>No model or API key configuration required</p>
+              {:else if newProvider.type === 'remote_peer'}
+                <p>Use a remote peer's AI model for inference</p>
+                <p>Requires compute sharing enabled on the remote peer</p>
+                <p>Configure peer_id after adding (in edit mode)</p>
               {/if}
             </div>
 
@@ -1181,6 +1297,11 @@
 
   .voice-badge {
     color: #9C27B0;
+    margin-left: 8px;
+  }
+
+  .agent-badge {
+    color: #4CAF50;
     margin-left: 8px;
   }
 

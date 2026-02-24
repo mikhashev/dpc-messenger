@@ -43,12 +43,36 @@ class DpcLlmAdapter:
         self._llm_manager = llm_manager
         self._default_model: Optional[str] = None
 
+    def _get_agent_provider_alias(self) -> Optional[str]:
+        """
+        Get the provider alias to use for agent inference.
+
+        Priority:
+        1. agent_provider (if configured)
+        2. default_provider (fallback)
+
+        Returns:
+            Provider alias string, or None if no provider configured
+        """
+        # v0.18.0+: Use agent_provider if configured
+        agent_provider = getattr(self._llm_manager, 'agent_provider', None)
+        if agent_provider and agent_provider in self._llm_manager.providers:
+            log.debug(f"Using agent_provider: {agent_provider}")
+            return agent_provider
+
+        # Fallback to default_provider
+        default_provider = self._llm_manager.default_provider
+        if default_provider and default_provider in self._llm_manager.providers:
+            log.debug(f"Using default_provider (fallback): {default_provider}")
+            return default_provider
+
+        return None
+
     def default_model(self) -> str:
         """Return the current DPC provider's model name."""
         try:
-            # LLMManager.default_provider is the alias name, providers is the dict
-            alias = self._llm_manager.default_provider
-            if alias and alias in self._llm_manager.providers:
+            alias = self._get_agent_provider_alias()
+            if alias:
                 provider = self._llm_manager.providers[alias]
                 return getattr(provider, "model", "dpc_default") or "dpc_default"
         except Exception as e:
@@ -90,10 +114,10 @@ class DpcLlmAdapter:
             prompt = f"{tool_descriptions}\n\n{prompt}"
 
         # Get response from DPC's LLMManager
-        # LLMManager.default_provider is the alias name, providers is the dict
-        alias = self._llm_manager.default_provider
-        if not alias or alias not in self._llm_manager.providers:
-            raise RuntimeError("No AI provider configured in DPC Messenger")
+        # Use agent_provider if configured, otherwise fallback to default_provider
+        alias = self._get_agent_provider_alias()
+        if not alias:
+            raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
         provider = self._llm_manager.providers[alias]
 
         # Call DPC provider - use streaming if available and callback provided
