@@ -432,9 +432,7 @@
   // Fetch remote peer's available providers
   // Uses shared peerProviders store from coreService (updated via peer_providers_updated event)
   async function fetchRemotePeerProviders(peerId: string) {
-    console.log('[DEBUG] fetchRemotePeerProviders called with peerId:', peerId);
     if (!peerId || peerId.trim() === '') {
-      console.log('[DEBUG] Empty peerId, returning early');
       return;
     }
 
@@ -442,29 +440,23 @@
     remotePeerError = '';
 
     try {
-      console.log('[DEBUG] Calling sendCommand query_remote_providers...');
       const result = await sendCommand('query_remote_providers', { peer_id: peerId });
-      console.log('[DEBUG] sendCommand result:', result);
 
       // Check if sendCommand returned false (WebSocket not connected)
       if (result === false) {
-        console.log('[DEBUG] sendCommand returned false - WebSocket not connected');
         remotePeerError = 'Backend not connected. Please check the service is running.';
         return;
       }
 
       if (result && result.status === 'success') {
-        console.log('[DEBUG] Success! Providers fetched:', result.providers.length);
         // The store is updated automatically via peer_providers_updated event in coreService.ts
       } else {
-        console.log('[DEBUG] Failed:', result);
         remotePeerError = result?.message || 'Failed to fetch providers';
       }
     } catch (error) {
-      console.error('[DEBUG] Error fetching remote peer providers:', error);
+      console.error('Error fetching remote peer providers:', error);
       remotePeerError = `Error: ${error}`;
     } finally {
-      console.log('[DEBUG] Finally block, clearing loading state');
       remotePeerLoading = '';
     }
   }
@@ -823,11 +815,7 @@
                           />
                           <button
                             class="btn-fetch"
-                            on:click={() => {
-                              console.log('[DEBUG] Button clicked! peer_id:', editedConfig?.providers[i]?.peer_id);
-                              alert('[DEBUG] Button clicked! Calling fetchRemotePeerProviders...');
-                              fetchRemotePeerProviders(editedConfig!.providers[i].peer_id || '');
-                            }}
+                            on:click={() => fetchRemotePeerProviders(editedConfig!.providers[i].peer_id || '')}
                             disabled={!editedConfig.providers[i].peer_id || isRemotePeerLoading(editedConfig.providers[i].peer_id)}
                             title="Fetch available providers from this peer"
                           >
