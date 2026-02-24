@@ -3,7 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand } from '$lib/coreService';
+  import { sendCommand, peerProviders } from '$lib/coreService';
 
   export let open: boolean = false;
 
@@ -64,8 +64,7 @@
   let queriedProviderAlias: string = '';
 
   // Remote peer providers state (for dropdown population)
-  // Using plain object instead of Map for proper Svelte reactivity
-  let remotePeerProviders: Record<string, any[]> = {};  // peer_id -> providers list
+  // Uses the shared peerProviders store from coreService for proper reactivity
   let remotePeerLoading: string = '';  // peer_id being fetched
   let remotePeerError: string = '';
 
@@ -431,6 +430,7 @@
   }
 
   // Fetch remote peer's available providers
+  // Uses shared peerProviders store from coreService (updated via peer_providers_updated event)
   async function fetchRemotePeerProviders(peerId: string) {
     console.log('[DEBUG] fetchRemotePeerProviders called with peerId:', peerId);
     if (!peerId || peerId.trim() === '') {
@@ -454,10 +454,8 @@
       }
 
       if (result && result.status === 'success') {
-        console.log('[DEBUG] Success! Providers:', result.providers);
-        // Use object spread for proper Svelte reactivity
-        remotePeerProviders = { ...remotePeerProviders, [peerId]: result.providers };
-        console.log('[DEBUG] remotePeerProviders updated:', remotePeerProviders);
+        console.log('[DEBUG] Success! Providers fetched:', result.providers.length);
+        // The store is updated automatically via peer_providers_updated event in coreService.ts
       } else {
         console.log('[DEBUG] Failed:', result);
         remotePeerError = result?.message || 'Failed to fetch providers';
@@ -471,10 +469,10 @@
     }
   }
 
-  // Get providers for a remote peer
+  // Get providers for a remote peer (uses shared store)
   function getRemotePeerProviders(peerId: string | undefined): any[] {
     if (!peerId) return [];
-    return remotePeerProviders[peerId] || [];
+    return $peerProviders.get(peerId) || [];
   }
 
   // Get unique models from remote peer providers
