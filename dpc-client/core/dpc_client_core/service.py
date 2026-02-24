@@ -1457,11 +1457,13 @@ class CoreService:
             - default_provider: str (text provider alias)
             - vision_provider: str (vision provider alias)
             - voice_provider: str (voice transcription provider alias) v0.13.0+
+            - agent_provider: str (AI agent provider alias) v0.18.0+
         """
         return {
             "default_provider": self.llm_manager.default_provider or "",
             "vision_provider": self.llm_manager.vision_provider or "",
-            "voice_provider": self.llm_manager.voice_provider or ""  # v0.13.0+
+            "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
+            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
         }
 
     async def get_providers_list(self) -> Dict[str, Any]:
@@ -1474,6 +1476,7 @@ class CoreService:
             - default_provider: Default text provider alias
             - vision_provider: Default vision provider alias
             - voice_provider: Default voice transcription provider alias v0.13.0+
+            - agent_provider: AI agent provider alias v0.18.0+
         """
         providers_info = []
         for alias, provider in self.llm_manager.providers.items():
@@ -1491,7 +1494,8 @@ class CoreService:
             "providers": providers_info,
             "default_provider": self.llm_manager.default_provider or "",
             "vision_provider": self.llm_manager.vision_provider or "",
-            "voice_provider": self.llm_manager.voice_provider or ""  # v0.13.0+
+            "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
+            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
         }
 
     def _provider_supports_voice(self, provider: Any) -> bool:

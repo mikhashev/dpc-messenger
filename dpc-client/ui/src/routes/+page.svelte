@@ -3582,7 +3582,7 @@
           {#each $availableProviders.providers as provider}
             <option value={provider.alias}>
               {#if provider.alias === 'dpc_agent'}
-                Agent (uses {$availableProviders?.default_provider || 'default'})
+                Agent (uses {$availableProviders?.agent_provider || $availableProviders?.default_provider || 'default'})
               {:else}
                 {provider.alias} - {provider.model}
               {/if}

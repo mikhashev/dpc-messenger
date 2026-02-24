@@ -26,6 +26,7 @@
     default_provider: string;
     vision_provider: string;
     voice_provider?: string;  // v0.13.0+
+    agent_provider?: string;  // v0.18.0+
   };
 
   // Props (Svelte 5 runes mode)
@@ -64,8 +65,9 @@
     const local = (providersList || []).map(p => {
       // Special display for dpc_agent: show underlying provider
       let displayText = `${p.alias} (${p.model}) - local`;
-      if (p.alias === 'dpc_agent' && defaultProviders?.default_provider) {
-        displayText = `Agent (uses ${defaultProviders.default_provider})`;
+      if (p.alias === 'dpc_agent') {
+        const underlying = defaultProviders?.agent_provider || defaultProviders?.default_provider;
+        displayText = `Agent (uses ${underlying || 'default'})`;
       }
       return {
         ...p,

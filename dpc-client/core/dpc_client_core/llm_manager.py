@@ -1597,7 +1597,8 @@ class DpcAgentProvider(AIProvider):
         # Remote peer inference ( v0.18.1+ KISS approach)
         # If set, agent routes inference to this peer instead of using local models
         self.peer_id = config.get("peer_id")  # Remote peer node ID
-        self.remote_model = config.get("remote_model")  # Model preference on self.remote_provider = config.get("remote_provider")  # Provider preference
+        self.remote_model = config.get("remote_model")  # Model preference on remote peer
+        self.remote_provider = config.get("remote_provider")  # Provider preference on remote peer
 
         # Note: Evolution settings are read from firewall (privacy_rules.json)
         # not from provider config - see agent_manager.py

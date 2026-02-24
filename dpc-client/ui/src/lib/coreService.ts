@@ -16,6 +16,7 @@ export interface DefaultProvidersResponse {
     default_provider: string;
     vision_provider: string;
     voice_provider?: string;  // v0.13.0+
+    agent_provider?: string;  // v0.18.0+
 }
 
 export interface ProvidersListResponse {
