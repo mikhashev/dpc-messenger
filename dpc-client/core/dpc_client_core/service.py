@@ -1488,6 +1488,13 @@ class CoreService:
             }
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)
+
+            # v0.18.1+: Add remote inference fields for dpc_agent provider
+            if alias == "dpc_agent":
+                provider_dict["peer_id"] = getattr(provider, 'peer_id', None)
+                provider_dict["remote_model"] = getattr(provider, 'remote_model', None)
+                provider_dict["remote_provider"] = getattr(provider, 'remote_provider', None)
+
             providers_info.append(provider_dict)
 
         return {

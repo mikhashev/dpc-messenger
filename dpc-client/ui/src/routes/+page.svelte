@@ -2220,9 +2220,20 @@
 
     // Create new Agent chat ID
     const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
-    // Include underlying provider in chat name for clarity
-    const underlyingProvider = $availableProviders?.default_provider || 'unknown';
-    const chatName = `Agent (${underlyingProvider})`;
+
+    // Determine display name based on whether using remote inference
+    let displayName: string;
+    if (agentProvider?.peer_id) {
+      // Remote inference - show remote model/provider info
+      const remoteModel = agentProvider.remote_model || 'unknown';
+      const remoteProvider = agentProvider.remote_provider ? `/${agentProvider.remote_provider}` : '';
+      displayName = `Agent (remote: ${remoteModel}${remoteProvider})`;
+    } else {
+      // Local inference - show the agent_provider or default_provider
+      const underlyingProvider = $availableProviders?.agent_provider || $availableProviders?.default_provider || 'unknown';
+      displayName = `Agent (${underlyingProvider})`;
+    }
+    const chatName = displayName;
 
     // Add to aiChats
     aiChats.update(chats => {
