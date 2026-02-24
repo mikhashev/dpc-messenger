@@ -64,7 +64,8 @@
   let queriedProviderAlias: string = '';
 
   // Remote peer providers state (for dropdown population)
-  let remotePeerProviders: Map<string, any[]> = new Map();  // peer_id -> providers list
+  // Using plain object instead of Map for proper Svelte reactivity
+  let remotePeerProviders: Record<string, any[]> = {};  // peer_id -> providers list
   let remotePeerLoading: string = '';  // peer_id being fetched
   let remotePeerError: string = '';
 
@@ -454,8 +455,9 @@
 
       if (result && result.status === 'success') {
         console.log('[DEBUG] Success! Providers:', result.providers);
-        remotePeerProviders.set(peerId, result.providers);
-        remotePeerProviders = remotePeerProviders; // Trigger reactivity
+        // Use object spread for proper Svelte reactivity
+        remotePeerProviders = { ...remotePeerProviders, [peerId]: result.providers };
+        console.log('[DEBUG] remotePeerProviders updated:', remotePeerProviders);
       } else {
         console.log('[DEBUG] Failed:', result);
         remotePeerError = result?.message || 'Failed to fetch providers';
@@ -472,7 +474,7 @@
   // Get providers for a remote peer
   function getRemotePeerProviders(peerId: string | undefined): any[] {
     if (!peerId) return [];
-    return remotePeerProviders.get(peerId) || [];
+    return remotePeerProviders[peerId] || [];
   }
 
   // Get unique models from remote peer providers
