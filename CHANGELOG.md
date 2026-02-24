@@ -2,6 +2,186 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
+## [0.18.0] - 2026-02-25
+
+### MAJOR FEATURES
+
+#### Embedded Autonomous AI Agent (DPC Agent)
+- **Full Agent Package** - Embedded autonomous AI agent with 40+ tools, delivered in MVP phases 1-5
+- **Tool System** - File operations (sandboxed), git, browser, search (grep-like), messaging, self-review
+- **Background Consciousness** - Proactive thinking loop between tasks
+- **Evolution System** - Self-modification with AI collaborative voting for knowledge commits
+- **Persistent Memory** - Scratchpad, identity, knowledge base stored in `~/.dpc/agent/`
+- **Task Queue** - Background task scheduling with priority levels
+- **Budget Tracking** - Subscription and pay-per-use billing models
+- **Custom Task Types** - Extensible task type registration
+- **LLM Adapter** - Integration with DPC's LLMManager (not external services)
+- Files: `dpc_client_core/dpc_agent/` (15 modules), `managers/agent_manager.py`
+
+#### Agent Telegram Integration
+- **Two-Way Messaging** - Send messages to agent and receive responses via Telegram
+- **Voice Transcription** - Transcribe Telegram voice messages using local Whisper
+- **Event Notifications** - Task completion, failures, evolution cycles, code modifications
+- **Agent-Initiated Messages** - Agent can proactively message users with priority levels
+- **Event Filtering** - Configurable event types per chat
+- **Rate Limiting** - 20 events/minute to prevent spam
+- Files: `managers/agent_telegram_bridge.py`, `docs/DPC_AGENT_TELEGRAM.md`
+
+#### Reasoning Model Support (DPTP v1.4)
+- **DeepSeek R1** - `<think>` tag parsing for visible reasoning
+- **Claude Extended Thinking** - Anthropic API with thinking budget configuration
+- **OpenAI o1/o3** - Hidden reasoning support
+- **ThinkingBlock Component** - Collapsible UI for displaying AI reasoning process
+- **Protocol Extension** - New `thinking` and `thinking_tokens` fields in REMOTE_INFERENCE_REQUEST/RESPONSE
+- Files: `ThinkingBlock.svelte`, `llm_manager.py`, `specs/dptp_v1.md`
+
+#### Remote Peer Inference Enhancements
+- **Provider Discovery** - Dynamic dropdown showing available remote peer models
+- **Configurable Timeout** - Up to 600 seconds for long-running inference
+- **Agent Integration** - DPC Agent can use remote peer as compute provider
+- **Streaming Limitation** - Documented no-streaming constraint (request-response pattern)
+- Files: `ProviderSelector.svelte`, `inference_orchestrator.py`, `docs/REMOTE_INFERENCE.md`
+
+#### Real-time AI Response Streaming
+- **Token-by-Token Display** - Incremental text rendering during generation
+- **Progress Indicators** - Tool execution status, round counter for multi-step reasoning
+- **Collapsible Raw Output** - Debug section for AI messages
+- **Performance Optimized** - Plain text during stream, markdown rendering on completion
+
+---
+
+### ENHANCEMENTS
+
+#### Z.AI Provider
+- Switched to Anthropic-compatible endpoint (`https://api.z.ai/api/anthropic`)
+- Avoids prepaid balance requirements
+- Extended thinking support for all GLM models
+- Better billing experience
+
+#### Firewall Enhancements
+- **Granular Agent Permissions** - Per-tool enable/disable controls in `privacy_rules.json`
+- **Sandbox Path Configuration** - UI for configuring extended read-only/read-write paths
+- **Search and Extended Tools** - New tool categories in Firewall Editor
+- Files: `firewall.py`, `FirewallEditor.svelte`
+
+#### UI Improvements
+- Agent chat title shows actual remote model name
+- Remote peer provider dropdown in provider selector
+- Collapsible raw output section for AI messages
+- Real-time agent progress display in chat
+- Telegram status shown only for P2P chats
+
+#### Provider System
+- New provider types: `dpc_agent`, `agent_provider`, `remote_peer`
+- Default `dpc_agent` provider in new installations
+- `prepare_agent` command for pre-initialization
+- `**kwargs` added to all provider `generate_response()` methods
+
+---
+
+### BUG FIXES
+
+- Fix AI vote evaluation parsing error in agent
+- Fix Telegram message delivery and chat UI updates
+- Fix `completed_at` timing in evolution memory updates
+- Fix async tool handlers in ToolRegistry.execute()
+- Fix missing `is_running` method and Telegram markdown escaping
+- Fix task type validation and processor start on init
+- Fix missing asyncio import for schedule_task
+- Fix redundant local imports causing UnboundLocalError
+- Fix ToolContext connection to DpcAgent for schedule_task
+- Fix brace-balanced JSON parsing for tool calls
+- Fix conversation_id passing through inference chain for progress tracking
+- Fix round_idx variable name in loop
+- Fix firewall validation for new tools and UI naming
+- Fix CoreService re-injection after providers reload
+- Fix Svelte reactivity for remote peer providers (plain object)
+- Fix `query_remote_providers` event handling
+- Fix remote provider attribute and agent_provider display
+- Fix response text extraction from remote inference result dict
+- Fix image sending to ai_chat_xxx conversations
+- Fix Telegram voice_provider setting and transcription failure notifications
+- Fix Telegram Markdown escaping in agent responses
+- Fix Telegram datetime to ISO string serialization
+- Fix Whisper AssertionError in CUDA fallback for CPU-only PyTorch
+- Add torchvision dependency for local Whisper transcription
+
+---
+
+### CONFIGURATION
+
+New `~/.dpc/config.ini` sections:
+```ini
+[dpc_agent]
+enabled = true
+background_consciousness = false
+budget_usd = 50
+max_rounds = 200
+context_window = 200000
+enable_task_queue = true
+billing_model = subscription
+
+[dpc_agent_telegram]
+enabled = false
+bot_token =
+allowed_chat_ids = []
+event_filter = task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message
+transcription_enabled = true
+```
+
+New `~/.dpc/privacy_rules.json` section:
+```json
+{
+  "dpc_agent": {
+    "enabled": true,
+    "tools": { "...per-tool permissions..." },
+    "sandbox_extensions": {
+      "read_only": [],
+      "read_write": []
+    },
+    "evolution": {
+      "enabled": false,
+      "interval_minutes": 60,
+      "auto_apply": false
+    }
+  }
+}
+```
+
+---
+
+### DPTP v1.4 Protocol Changes
+
+REMOTE_INFERENCE_REQUEST extended with thinking:
+```json
+{
+  "thinking": {
+    "enabled": true,
+    "budget_tokens": 10000
+  }
+}
+```
+
+REMOTE_INFERENCE_RESPONSE extended:
+```json
+{
+  "thinking": "reasoning content...",
+  "thinking_tokens": 50
+}
+```
+
+---
+
+### DOCUMENTATION
+
+- Added `docs/DPC_AGENT_GUIDE.md` - Complete agent testing and usage guide
+- Added `docs/DPC_AGENT_TELEGRAM.md` - Agent Telegram integration guide
+- Added `docs/REMOTE_INFERENCE.md` - Remote inference streaming limitation
+- Updated `dpc-client/core/README.md` with DPC Agent documentation
+- Updated `specs/dptp_v1.md` to v1.4
+
+---
+
 ## [0.13.0] - 2026-01-04
 
 ### MAJOR FEATURES

@@ -35,69 +35,7 @@
       device_context_access: boolean;
       knowledge_access: 'none' | 'read_only' | 'read_write';
       tools: {
-        _comment?: string;
-        // File operations
-        repo_read?: boolean;
-        repo_list?: boolean;
-        repo_write_commit?: boolean;
-        // Drive operations
-        drive_read?: boolean;
-        drive_list?: boolean;
-        drive_write?: boolean;
-        // Search tools (grep-like)
-        search_files?: boolean;
-        search_in_file?: boolean;
-        // Extended sandbox (custom paths)
-        extended_path_read?: boolean;
-        extended_path_list?: boolean;
-        extended_path_write?: boolean;
-        list_extended_sandbox_paths?: boolean;
-        // Memory/identity
-        update_scratchpad?: boolean;
-        update_identity?: boolean;
-        chat_history?: boolean;
-        // Knowledge
-        knowledge_read?: boolean;
-        knowledge_write?: boolean;
-        knowledge_list?: boolean;
-        // DPC integration
-        get_dpc_context?: boolean;
-        // Web tools
-        browse_page?: boolean;
-        fetch_json?: boolean;
-        extract_links?: boolean;
-        check_url?: boolean;
-        search_web?: boolean;
-        // Review tools
-        self_review?: boolean;
-        request_critique?: boolean;
-        compare_approaches?: boolean;
-        quality_checklist?: boolean;
-        consensus_check?: boolean;
-        // Git tools
-        git_status?: boolean;
-        git_diff?: boolean;
-        git_log?: boolean;
-        git_add?: boolean;
-        git_commit?: boolean;
-        git_branch?: boolean;
-        git_init?: boolean;
-        repo_commit_push?: boolean;
-        // Restricted tools
-        run_shell?: boolean;
-        claude_code_edit?: boolean;
-        // Task queue tools (v0.16.0+)
-        schedule_task?: boolean;
-        get_task_status?: boolean;
-        // Evolution tools (v0.16.0+)
-        pause_evolution?: boolean;
-        resume_evolution?: boolean;
-        get_evolution_stats?: boolean;
-        approve_evolution_change?: boolean;
-        reject_evolution_change?: boolean;
-        // Messaging tools (v0.18.0+)
-        send_user_message?: boolean;
-        [key: string]: boolean | string | undefined;
+        [key: string]: boolean | undefined;
       };
       sandbox_extensions?: {
         _comment?: string;
@@ -192,7 +130,7 @@
     editedRules = JSON.parse(JSON.stringify(rules));
 
     // Initialize evolution settings if missing
-    if (editedRules.dpc_agent && !editedRules.dpc_agent.evolution) {
+    if (editedRules && editedRules.dpc_agent && !editedRules.dpc_agent.evolution) {
       editedRules.dpc_agent.evolution = {
         enabled: false,
         interval_minutes: 60,
@@ -1865,17 +1803,18 @@
                               <input
                                 type="text"
                                 class="path-input"
-                                bind:value={editedRules.dpc_agent.sandbox_extensions.read_only[i]}
+                                bind:value={editedRules.dpc_agent.sandbox_extensions!.read_only![i]}
                                 placeholder="C:\Users\you\Documents\notes"
                               />
                               <button
                                 type="button"
                                 class="remove-path-btn"
                                 on:click={() => {
+                                  if (!editedRules?.dpc_agent) return;
                                   if (!editedRules.dpc_agent.sandbox_extensions) {
                                     editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
                                   }
-                                  editedRules.dpc_agent.sandbox_extensions.read_only = editedRules.dpc_agent.sandbox_extensions.read_only.filter((_: string, idx: number) => idx !== i);
+                                  editedRules.dpc_agent.sandbox_extensions.read_only = (editedRules.dpc_agent.sandbox_extensions.read_only || []).filter((_: string, idx: number) => idx !== i);
                                   editedRules = editedRules;
                                 }}
                               >✕</button>
@@ -1885,6 +1824,7 @@
                             type="button"
                             class="add-path-btn"
                             on:click={() => {
+                              if (!editedRules?.dpc_agent) return;
                               if (!editedRules.dpc_agent.sandbox_extensions) {
                                 editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
                               }
@@ -1907,17 +1847,18 @@
                               <input
                                 type="text"
                                 class="path-input"
-                                bind:value={editedRules.dpc_agent.sandbox_extensions.read_write[i]}
+                                bind:value={editedRules.dpc_agent.sandbox_extensions!.read_write![i]}
                                 placeholder="C:\Users\you\projects\myapp"
                               />
                               <button
                                 type="button"
                                 class="remove-path-btn"
                                 on:click={() => {
+                                  if (!editedRules?.dpc_agent) return;
                                   if (!editedRules.dpc_agent.sandbox_extensions) {
                                     editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
                                   }
-                                  editedRules.dpc_agent.sandbox_extensions.read_write = editedRules.dpc_agent.sandbox_extensions.read_write.filter((_: string, idx: number) => idx !== i);
+                                  editedRules.dpc_agent.sandbox_extensions.read_write = (editedRules.dpc_agent.sandbox_extensions.read_write || []).filter((_: string, idx: number) => idx !== i);
                                   editedRules = editedRules;
                                 }}
                               >✕</button>
@@ -1927,6 +1868,7 @@
                             type="button"
                             class="add-path-btn"
                             on:click={() => {
+                              if (!editedRules?.dpc_agent) return;
                               if (!editedRules.dpc_agent.sandbox_extensions) {
                                 editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
                               }
@@ -1941,21 +1883,21 @@
                       </div>
                     {:else if displayRules?.dpc_agent?.sandbox_extensions}
                       <div class="sandbox-paths-display">
-                        {#if displayRules.dpc_agent.sandbox_extensions.read_only?.length > 0}
+                        {#if (displayRules.dpc_agent.sandbox_extensions.read_only?.length ?? 0) > 0}
                           <div class="path-section">
                             <span class="path-label">📖 Read-Only Paths</span>
                             <ul class="path-list">
-                              {#each displayRules.dpc_agent.sandbox_extensions.read_only as path}
+                              {#each displayRules.dpc_agent.sandbox_extensions.read_only || [] as path}
                                 <li>{path}</li>
                               {/each}
                             </ul>
                           </div>
                         {/if}
-                        {#if displayRules.dpc_agent.sandbox_extensions.read_write?.length > 0}
+                        {#if (displayRules.dpc_agent.sandbox_extensions.read_write?.length ?? 0) > 0}
                           <div class="path-section">
                             <span class="path-label">✏️ Read-Write Paths</span>
                             <ul class="path-list">
-                              {#each displayRules.dpc_agent.sandbox_extensions.read_write as path}
+                              {#each displayRules.dpc_agent.sandbox_extensions.read_write || [] as path}
                                 <li>{path}</li>
                               {/each}
                             </ul>

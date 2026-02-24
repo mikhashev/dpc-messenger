@@ -50,16 +50,19 @@ class TestConversationMonitorInitialization:
     """Test conversation monitor creation with correct participants"""
 
     @pytest.mark.asyncio
-    async def test_local_ai_monitor_single_participant(self, core_service):
-        """Local AI conversations should have 1 participant (user)"""
+    async def test_local_ai_monitor_participants(self, core_service):
+        """Local AI conversations should have 2 participants (user + DPC Agent)"""
         monitor = core_service._get_or_create_conversation_monitor("local_ai")
 
         assert monitor is not None
         assert monitor.conversation_id == "local_ai"
-        assert len(monitor.participants) == 1
+        assert len(monitor.participants) == 2
         assert monitor.participants[0]["node_id"] == "dpc-node-test123"
         assert monitor.participants[0]["name"] == "User"
         assert monitor.participants[0]["context"] == "local"
+        assert monitor.participants[1]["node_id"] == "local_ai"
+        assert monitor.participants[1]["name"] == "DPC Agent"
+        assert monitor.participants[1]["context"] == "ai_agent"
 
     @pytest.mark.asyncio
     async def test_peer_chat_monitor_two_participants(self, core_service):

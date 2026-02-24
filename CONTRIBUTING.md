@@ -139,38 +139,35 @@ chore: maintenance tasks (dependencies, config)
 
 ### Example: Current State
 
-**Current Status (2026-01-17):**
-- `main`: Stable v0.15.1
+**Current Status (2026-02-25):**
+- `main`: Stable v0.18.0
 - `dev`: Active development (ready for new features)
 
-**Release v0.15.1 (Latest):**
+**Release v0.18.0 (Latest):**
+- Embedded autonomous AI agent (DPC Agent) with 40+ tools, consciousness, evolution
+- Agent Telegram integration (two-way messaging, voice transcription, event notifications)
+- Reasoning model support (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
+- Remote peer inference with provider discovery and configurable timeout
+- Real-time AI response streaming with progress indicators
+- Z.AI provider switched to Anthropic-compatible endpoint
+- Granular agent firewall permissions and sandbox path configuration
+- DPTP v1.4 protocol (thinking fields)
+- 30+ bug fixes across agent, UI, Telegram, Whisper, LLM providers
+
+**Release v0.15.1 (Previous):**
 - Telegram long message splitting (4096 char limit with part indicators)
 - Telegram video message support (was missing handler)
 - Fix transcription duplication in UI (hidden in ChatPanel when present)
 - Fix knowledge extraction for Telegram voice messages (includes transcription)
-- Multilingual knowledge extraction feature added to roadmap (deferred)
 - Whisper deprecation warnings fixed (dtype parameter, ignore_warning)
 
-**Release v0.15.0:**
-- Voice messages with local Whisper transcription (v0.13.0-v0.13.3)
-- Telegram bot integration (v0.14.0+)
-- Linux audio recording support via Rust (v0.15.0)
-- Z.AI provider for GLM models (v0.14.0+)
-- Token usage estimation with progressive warnings
-- Whisper VRAM management and model unloading
-- WAV format support for cross-platform compatibility
-- 40+ bug fixes and improvements
-
-**Release v0.12.0 (Previous):**
+**Release v0.12.0:**
 - Vision/Image support (screenshot sharing, remote vision inference)
 - Session management with voting
 - Chat history synchronization
 - Token counting system (Phase 3-4) with pre-query validation
 - AI instruction sets & wizard (multi-phase complete)
-- AI scope field-level filtering for device context
-- Pure mode AI chat (zero system instructions)
-- 30+ bug fixes (including critical TLS validation, hardcoded instructions leak)
-- Breaking changes (migration code removed, provider schema)
+- 30+ bug fixes
 
 ## Code Style
 
