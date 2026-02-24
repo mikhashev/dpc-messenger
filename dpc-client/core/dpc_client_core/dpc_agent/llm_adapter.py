@@ -212,14 +212,16 @@ class DpcLlmAdapter:
 
         try:
             # Call remote inference via CoreService
-            log.info(f"Routing agent inference to remote peer: {dpc_agent_provider.peer_id}")
+            # Use configurable timeout from dpc_agent provider (default 180s)
+            timeout = getattr(dpc_agent_provider, 'timeout', 180) or 180
+            log.info(f"Routing agent inference to remote peer: {dpc_agent_provider.peer_id} (timeout={timeout}s)")
             result = await service._request_inference_from_peer(
                 peer_id=dpc_agent_provider.peer_id,
                 prompt=prompt,
                 model=dpc_agent_provider.remote_model,
                 provider=dpc_agent_provider.remote_provider,
                 images=[],
-                timeout=120  # Longer timeout for agent queries
+                timeout=timeout
             )
 
             # Extract response text from result dict

@@ -669,6 +669,20 @@
                             <p class="help-text">Enter provider alias manually (or fetch providers first)</p>
                           {/if}
                         </div>
+
+                        <!-- Timeout for remote inference -->
+                        <div class="form-group">
+                          <label for="timeout-{i}">Timeout (seconds)</label>
+                          <input
+                            id="timeout-{i}"
+                            type="number"
+                            bind:value={editedConfig.providers[i].timeout}
+                            placeholder="180"
+                            min="30"
+                            max="600"
+                          />
+                          <p class="help-text">Timeout for remote inference (default: 180s, max: 600s)</p>
+                        </div>
                       {/if}
                     {/if}
 
