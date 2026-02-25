@@ -13,6 +13,7 @@ Core loop: send messages to LLM, execute tool calls, repeat until final response
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import json
 import logging
@@ -123,38 +124,51 @@ def _execute_single_tool(
     }
 
 
-def _execute_with_timeout(
+async def _execute_with_timeout(
     tools: "ToolRegistry",
     tc: Dict[str, Any],
     logs_dir: pathlib.Path,
     timeout_sec: int,
     task_id: str = "",
 ) -> Dict[str, Any]:
-    """Execute a tool call with a hard timeout using shared executor."""
+    """Execute a tool call with a hard timeout using shared executor.
+
+    Uses asyncio.run_in_executor to avoid blocking the event loop,
+    allowing other async operations (like handling other chats) to proceed.
+    """
     fn_name = tc["function"]["name"]
     tool_call_id = tc["id"]
 
     # Use shared executor to avoid memory leak from creating new executors
     executor = _get_shared_executor()
+    loop = asyncio.get_running_loop()
+
     try:
-        future = executor.submit(_execute_single_tool, tools, tc, logs_dir, task_id)
-        try:
-            return future.result(timeout=timeout_sec)
-        except TimeoutError:
-            result = f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit."
-            append_jsonl(logs_dir / "events.jsonl", {
-                "ts": utc_now_iso(),
-                "type": "tool_timeout",
-                "tool": fn_name,
-                "timeout_sec": timeout_sec,
-            })
-            return {
-                "tool_call_id": tool_call_id,
-                "fn_name": fn_name,
-                "result": result,
-                "is_error": True,
-                "args_for_log": {},
-            }
+        # Use run_in_executor to avoid blocking the event loop
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                executor,
+                _execute_single_tool,
+                tools, tc, logs_dir, task_id
+            ),
+            timeout=timeout_sec
+        )
+        return result
+    except asyncio.TimeoutError:
+        result = f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit."
+        append_jsonl(logs_dir / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "tool_timeout",
+            "tool": fn_name,
+            "timeout_sec": timeout_sec,
+        })
+        return {
+            "tool_call_id": tool_call_id,
+            "fn_name": fn_name,
+            "result": result,
+            "is_error": True,
+            "args_for_log": {},
+        }
     finally:
         # Don't shutdown the shared executor - it will be reused
         # Force garbage collection after each tool execution to prevent memory accumulation
@@ -285,7 +299,7 @@ async def run_llm_loop(
                 tool_name = tc["function"]["name"]
                 emit_progress(f"Executing {tool_name}...", tool_name, round_idx)
                 timeout = tools.get_timeout(tc["function"]["name"])
-                exec_result = _execute_with_timeout(tools, tc, logs_dir, timeout, task_id)
+                exec_result = await _execute_with_timeout(tools, tc, logs_dir, timeout, task_id)
 
                 truncated_result = _truncate_tool_result(exec_result["result"])
                 messages.append({
