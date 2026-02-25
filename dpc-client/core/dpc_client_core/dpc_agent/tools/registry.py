@@ -347,7 +347,7 @@ class ToolRegistry:
         Execute a tool by name with the given arguments.
 
         Handles both sync and async handlers. Async handlers are awaited
-        using asyncio.run() in a new event loop.
+        using a properly managed event loop to prevent memory leaks.
 
         Returns:
             Tool result as string (errors prefixed with ⚠️)
@@ -365,9 +365,20 @@ class ToolRegistry:
             result = entry.handler(self._ctx, **args)
             # Handle async handlers
             if asyncio.iscoroutine(result):
-                # Run the coroutine in a new event loop
+                # Run the coroutine in a properly managed event loop
                 # This is safe because execute() is called from a ThreadPoolExecutor
-                result = asyncio.run(result)
+                loop = asyncio.new_event_loop()
+                try:
+                    asyncio.set_event_loop(loop)
+                    result = loop.run_until_complete(result)
+                finally:
+                    # Clean up the event loop properly to prevent memory leaks
+                    try:
+                        loop.run_until_complete(loop.shutdown_asyncgens())
+                    except Exception:
+                        pass
+                    loop.close()
+                    asyncio.set_event_loop(None)
             return result
         except TypeError as e:
             return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
