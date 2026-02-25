@@ -125,6 +125,7 @@ class ContextFirewall:
             'knowledge_write': False,  # Controlled by knowledge_access
             'knowledge_list': True,
             'extract_knowledge': True,  # Extract knowledge from conversation to knowledge base
+            'deduplicate_identity': True,  # Clean up duplicate sections in identity
             # DPC integration
             'get_dpc_context': True,
             # Web tools

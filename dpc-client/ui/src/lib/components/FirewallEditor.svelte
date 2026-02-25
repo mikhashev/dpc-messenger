@@ -1958,10 +1958,12 @@
                       {#each [
                         { key: 'update_scratchpad', label: 'Update Scratchpad', desc: 'Update agent working memory' },
                         { key: 'update_identity', label: 'Update Identity', desc: 'Update agent identity' },
+                        { key: 'deduplicate_identity', label: 'Deduplicate Identity', desc: 'Clean up duplicate sections in identity' },
                         { key: 'chat_history', label: 'Chat History', desc: 'Access chat history' },
                         { key: 'knowledge_read', label: 'Read Knowledge', desc: 'Read knowledge base' },
                         { key: 'knowledge_write', label: 'Write Knowledge', desc: 'Write to knowledge base' },
                         { key: 'knowledge_list', label: 'List Knowledge', desc: 'List knowledge topics' },
+                        { key: 'extract_knowledge', label: 'Extract Knowledge', desc: 'Extract knowledge from conversation' },
                         { key: 'get_dpc_context', label: 'Get DPC Context', desc: 'Access DPC personal/device context' },
                       ] as tool}
                         <div class="notification-event-item">
