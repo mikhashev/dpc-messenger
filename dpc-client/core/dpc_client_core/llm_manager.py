@@ -1417,6 +1417,12 @@ class LocalWhisperProvider(AIProvider):
                     torch.cuda.empty_cache()
                     logger.debug(f"Cleared CUDA cache after transcription")
 
+                # Force garbage collection to clean up Python objects (v0.18.1+)
+                # This helps prevent memory accumulation when transcribing multiple voice messages
+                import gc
+                gc.collect()
+                logger.debug("Python garbage collection completed after transcription")
+
                 return {
                     "text": text,
                     "language": detected_language,

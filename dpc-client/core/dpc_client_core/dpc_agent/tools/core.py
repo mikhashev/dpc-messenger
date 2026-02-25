@@ -1104,6 +1104,10 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
     Returns:
         Search results with file:line:content format
     """
+    # Memory limits to prevent OOM issues
+    MAX_FILE_SIZE = 1024 * 1024  # 1MB per file
+    MAX_TOTAL_BYTES = 10 * 1024 * 1024  # 10MB total
+
     try:
         # Determine search directory
         if path and (path.startswith("/") or path.startswith("C:") or path.startswith("~")):
@@ -1128,6 +1132,8 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
         matches = []
         files_searched = 0
         files_with_matches = 0
+        total_bytes_read = 0
+        skipped_large_files = 0
 
         # Search files
         for file_path in search_dir.rglob(include_pattern):
@@ -1143,10 +1149,23 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
                                               '.db', '.sqlite', '.sqlite3'}:
                 continue
 
+            # Check file size to avoid reading huge files
+            try:
+                file_size = file_path.stat().st_size
+                if file_size > MAX_FILE_SIZE:
+                    skipped_large_files += 1
+                    continue
+                if total_bytes_read + file_size > MAX_TOTAL_BYTES:
+                    # Stop if we've read too much data
+                    break
+            except OSError:
+                continue
+
             files_searched += 1
 
             try:
                 content = file_path.read_text(encoding="utf-8", errors="ignore")
+                total_bytes_read += len(content)
                 rel_path = file_path.relative_to(search_dir)
 
                 for line_num, line in enumerate(content.splitlines(), 1):
@@ -1161,6 +1180,9 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
                         if len(matches) >= max_results:
                             break
 
+                # Clear content from memory after processing each file
+                del content
+
                 if len(matches) >= max_results:
                     break
 
@@ -1168,10 +1190,16 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
                 continue
 
         if not matches:
-            return f"No matches found for pattern '{pattern}' in {files_searched} files"
+            msg = f"No matches found for pattern '{pattern}' in {files_searched} files"
+            if skipped_large_files > 0:
+                msg += f" ({skipped_large_files} large files skipped)"
+            return msg
 
         result = [f"## Search Results for '{pattern}'"]
-        result.append(f"Found {len(matches)} matches in {files_with_matches} files (searched {files_searched} files)\n")
+        result.append(f"Found {len(matches)} matches in {files_with_matches} files (searched {files_searched} files)")
+        if skipped_large_files > 0:
+            result.append(f"_Note: {skipped_large_files} files >1MB were skipped to conserve memory_")
+        result.append("")
 
         # Group by file for better readability
         current_file = None

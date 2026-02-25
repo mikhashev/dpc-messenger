@@ -13,6 +13,7 @@ Core loop: send messages to LLM, execute tool calls, repeat until final response
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import pathlib
@@ -34,6 +35,19 @@ log = logging.getLogger(__name__)
 # Default configuration
 DEFAULT_MAX_ROUNDS = 200
 DEFAULT_TIMEOUT_SEC = 120
+
+# Shared ThreadPoolExecutor for tool execution (fixes memory leak from creating new executors)
+# Using max_workers=4 allows parallel tool execution while limiting resource usage
+_SHARED_EXECUTOR: Optional[ThreadPoolExecutor] = None
+
+
+def _get_shared_executor() -> ThreadPoolExecutor:
+    """Get or create the shared ThreadPoolExecutor for tool execution."""
+    global _SHARED_EXECUTOR
+    if _SHARED_EXECUTOR is None:
+        _SHARED_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="dpc_agent_tool")
+        log.debug("Created shared ThreadPoolExecutor for tool execution")
+    return _SHARED_EXECUTOR
 
 
 def _truncate_tool_result(result: Any) -> str:
@@ -116,11 +130,12 @@ def _execute_with_timeout(
     timeout_sec: int,
     task_id: str = "",
 ) -> Dict[str, Any]:
-    """Execute a tool call with a hard timeout."""
+    """Execute a tool call with a hard timeout using shared executor."""
     fn_name = tc["function"]["name"]
     tool_call_id = tc["id"]
 
-    executor = ThreadPoolExecutor(max_workers=1)
+    # Use shared executor to avoid memory leak from creating new executors
+    executor = _get_shared_executor()
     try:
         future = executor.submit(_execute_single_tool, tools, tc, logs_dir, task_id)
         try:
@@ -141,7 +156,9 @@ def _execute_with_timeout(
                 "args_for_log": {},
             }
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        # Don't shutdown the shared executor - it will be reused
+        # Force garbage collection after each tool execution to prevent memory accumulation
+        gc.collect()
 
 
 async def run_llm_loop(
