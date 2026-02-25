@@ -32,7 +32,8 @@ class InferenceOrchestrator:
         compute_host: Optional[str] = None,
         model: Optional[str] = None,
         provider: Optional[str] = None,
-        images: Optional[list] = None
+        images: Optional[list] = None,
+        conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute AI inference (local or remote).
@@ -43,6 +44,7 @@ class InferenceOrchestrator:
             model: Optional model name to use
             provider: Optional provider alias to use
             images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
+            conversation_id: Optional conversation ID for progress tracking (DPC Agent)
 
         Returns:
             Dict with 'response', 'model', 'provider', 'compute_host' keys
@@ -67,14 +69,16 @@ class InferenceOrchestrator:
             return await self._execute_local_inference(
                 prompt=prompt,
                 provider=provider,
-                images=images
+                images=images,
+                conversation_id=conversation_id
             )
 
     async def _execute_local_inference(
         self,
         prompt: str,
         provider: Optional[str] = None,
-        images: Optional[list] = None
+        images: Optional[list] = None,
+        conversation_id: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute local inference using llm_manager.
@@ -83,6 +87,7 @@ class InferenceOrchestrator:
             prompt: The prompt to send to the AI
             provider: Optional provider alias to use
             images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
+            conversation_id: Optional conversation ID for progress tracking (DPC Agent)
 
         Returns:
             Dict with 'response', 'model', 'provider', 'compute_host', and token metadata
@@ -95,7 +100,8 @@ class InferenceOrchestrator:
                 prompt,
                 provider_alias=provider,
                 images=images,
-                return_metadata=True
+                return_metadata=True,
+                conversation_id=conversation_id
             )
             result['compute_host'] = 'local'
             return result
@@ -147,7 +153,10 @@ class InferenceOrchestrator:
                 "tokens_used": result_data.get("tokens_used") if isinstance(result_data, dict) else None,
                 "model_max_tokens": result_data.get("model_max_tokens") if isinstance(result_data, dict) else None,
                 "prompt_tokens": result_data.get("prompt_tokens") if isinstance(result_data, dict) else None,
-                "response_tokens": result_data.get("response_tokens") if isinstance(result_data, dict) else None
+                "response_tokens": result_data.get("response_tokens") if isinstance(result_data, dict) else None,
+                # Include thinking fields if available (v1.4+)
+                "thinking": result_data.get("thinking") if isinstance(result_data, dict) else None,
+                "thinking_tokens": result_data.get("thinking_tokens") if isinstance(result_data, dict) else None,
             }
         except ConnectionError as e:
             raise ValueError(f"Compute host {compute_host} is not connected") from e

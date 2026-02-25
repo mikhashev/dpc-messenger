@@ -75,13 +75,62 @@
       "_setup": "Set environment variable: export ANTHROPIC_API_KEY='sk-ant-...'"
     },
 
+    "anthropic_thinking": {
+      "_comment": "Claude Extended Thinking (v1.4+) - Claude 3.7+ and Claude 4+ support extended thinking",
+      "alias": "claude_thinking",
+      "type": "anthropic",
+      "model": "claude-sonnet-4",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "context_window": 200000,
+      "thinking": {
+        "enabled": true,
+        "budget_tokens": 10000,
+        "show_by_default": false
+      },
+      "_note": "Enables Claude's extended thinking for complex reasoning tasks",
+      "_budget_tokens": "Token budget for thinking (higher = more thorough reasoning)",
+      "_supported_models": ["claude-3-7-sonnet", "claude-opus-4", "claude-sonnet-4", "claude-haiku-4"]
+    },
+
+    "deepseek_r1": {
+      "_comment": "DeepSeek R1 Thinking Model (v1.4+) - Local via Ollama with <think\\> tags",
+      "alias": "deepseek_r1",
+      "type": "ollama",
+      "model": "deepseek-r1:8b",
+      "host": "http://127.0.0.1:11434",
+      "context_window": 131072,
+      "_note": "DeepSeek R1 uses <think\\>...</think\\> tags for reasoning content",
+      "_setup": "Install model: ollama pull deepseek-r1:8b",
+      "_variants": ["deepseek-r1:1.5b", "deepseek-r1:7b", "deepseek-r1:8b", "deepseek-r1:14b", "deepseek-r1:32b", "deepseek-r1:70b"]
+    },
+
+    "openai_o1": {
+      "_comment": "OpenAI o1 Reasoning Model (v1.4+) - Uses hidden reasoning tokens",
+      "alias": "openai_o1",
+      "type": "openai_compatible",
+      "model": "o1",
+      "base_url": "https://api.openai.com/v1",
+      "api_key_env": "OPENAI_API_KEY",
+      "context_window": 200000,
+      "_note": "OpenAI o1 models perform reasoning internally (thinking not visible)",
+      "_variants": ["o1", "o1-mini", "o1-preview", "o3", "o3-mini"]
+    },
+
     "zai": {
       "alias": "zai_glm47",
       "type": "zai",
       "model": "glm-4.7",
       "api_key_env": "ZAI_API_KEY",
+      "base_url": "https://api.z.ai/api/anthropic",
+      "max_tokens": 8192,
+      "thinking": {
+        "enabled": true,
+        "budget_tokens": 10000
+      },
       "context_window": 128000,
       "_setup": "Set environment variable: export ZAI_API_KEY='your_key_here'",
+      "_note": "Uses Anthropic-compatible endpoint (not PaaS endpoint) to avoid prepaid balance requirements",
+      "_thinking": "All GLM models support extended thinking - enabled by default",
       "_available_models": {
         "text": ["glm-4.7", "glm-4.6", "glm-4.5", "glm-4.5-air", "glm-4.5-airx", "glm-4.5-flash", "glm-4-plus", "glm-4-128-0414-128k"],
         "vision": ["glm-4.6v-flash", "glm-4.5v", "glm-4.0v"]
@@ -176,7 +225,10 @@
     },
     "zai_fields": {
       "api_key": "API key (plaintext - alternative to api_key_env)",
-      "api_key_env": "Environment variable containing Z.AI API key (recommended)"
+      "api_key_env": "Environment variable containing Z.AI API key (recommended)",
+      "base_url": "API endpoint URL (default: https://api.z.ai/api/anthropic)",
+      "max_tokens": "Maximum tokens in response (default: 8192)",
+      "thinking": "Object with 'enabled' (bool) and 'budget_tokens' (int, default: 10000) for extended thinking"
     },
     "local_whisper_fields": {
       "device": "Device to use: 'cuda', 'cpu', 'mps' (macOS), or 'auto' (auto-detects best device)",

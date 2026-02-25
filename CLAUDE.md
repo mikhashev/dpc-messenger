@@ -1187,6 +1187,8 @@ poetry run pytest tests/test_turn_connectivity.py
 - `docs/LOGGING.md` - Logging system configuration and troubleshooting
 - `docs/DEVICE_CONTEXT_SPEC.md` - Device context schema and special instructions specification
 - `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
+- `docs/DPC_AGENT_GUIDE.md` - Embedded autonomous AI agent testing and usage guide
+- `docs/DPC_AGENT_TELEGRAM.md` - Agent Telegram integration for two-way messaging
 - `specs/dptp_v1.md` - DPTP (D-PC Transfer Protocol) formal specification
 - `specs/hub_api_v1.md` - Hub API specification
 - `dpc-protocol/README.md` - Protocol library documentation and usage examples
@@ -1209,10 +1211,13 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 
 Z.AI provides access to the GLM series of language models, including both text and vision capabilities.
 
+**Implementation Note:**
+D-PC Messenger uses Z.AI's **Anthropic-compatible endpoint** (`https://api.z.ai/api/anthropic`) via the `anthropic` Python SDK, not the PaaS endpoint. This avoids prepaid balance requirements and provides a more reliable billing experience.
+
 **Installation:**
 ```bash
 cd dpc-client/core
-poetry install  # Installs zai-sdk automatically
+poetry install  # anthropic package is already included
 ```
 
 **Configuration:**
@@ -1228,6 +1233,7 @@ poetry install  # Installs zai-sdk automatically
      "type": "zai",
      "model": "glm-4.7",
      "api_key_env": "ZAI_API_KEY",
+     "base_url": "https://api.z.ai/api/anthropic",
      "context_window": 128000
    }
    ```
@@ -1252,13 +1258,15 @@ Z.AI uses concurrency-based rate limiting (not token-based):
       "alias": "zai_glm47",
       "type": "zai",
       "model": "glm-4.7",
-      "api_key_env": "ZAI_API_KEY"
+      "api_key_env": "ZAI_API_KEY",
+      "base_url": "https://api.z.ai/api/anthropic"
     },
     {
       "alias": "zai_vision",
       "type": "zai",
       "model": "glm-4.6v-flash",
-      "api_key_env": "ZAI_API_KEY"
+      "api_key_env": "ZAI_API_KEY",
+      "base_url": "https://api.z.ai/api/anthropic"
     }
   ]
 }

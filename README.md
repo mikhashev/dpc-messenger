@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.15.1
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.18.0
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
@@ -74,8 +74,13 @@ If this vision resonates with you, let's connect:
 - **Voice Messages** - Cross-platform voice recording with local Whisper transcription (v0.13.0)
 - **Telegram Integration** - Bot integration for voice transcription and messaging bridge (v0.14.0)
 - **Linux Support** - Native audio recording via Rust, ALSA/PipeWire support (v0.15.0)
+- **DPC Agent** - Embedded autonomous AI agent with 40+ tools, background consciousness, evolution system, and persistent memory ([guide](./docs/DPC_AGENT_GUIDE.md)) (v0.18.0)
+- **Reasoning Models** - Native support for DeepSeek R1, Claude Extended Thinking, and OpenAI o1/o3 with visible thinking process (v0.18.0)
+- **Real-time AI Streaming** - Token-by-token response display with tool execution progress indicators (v0.18.0)
+- **Agent Telegram Bridge** - Two-way messaging with DPC Agent via Telegram, voice transcription, event notifications ([guide](./docs/DPC_AGENT_TELEGRAM.md)) (v0.18.0)
+- **Remote Peer Discovery** - Dynamic provider dropdown with configurable inference timeout up to 600s (v0.18.0)
 - **Token Usage Tracking** - Real-time estimation with progressive warnings (v0.12.0+)
-- **Z.AI Provider** - GLM model support with concurrency-based rate limiting (v0.14.0+)
+- **Z.AI Provider** - GLM model support via Anthropic-compatible endpoint with extended thinking (v0.14.0+)
 - **Local-First** - Your data stays on your device
 - **Universal Connectivity** - Intelligent 6-tier connection orchestrator ensures connectivity in nearly any network condition (IPv6, IPv4, WebRTC, UDP hole punching, volunteer relays, gossip)
 - **Hub-Optional Architecture** - Works with DHT bootstrap (pre-configured seeds or initial Hub connection), then fully autonomous via direct connections, hole punching, and relay nodes
@@ -85,10 +90,11 @@ If this vision resonates with you, let's connect:
 
 ### For Developers
 - **Open Protocol** - Extensible [DPTP (D-PC Transfer Protocol)](./specs/dptp_v1.md)
-  - **Note:** DPTP spec updated to v1.1 with full documentation for GOSSIP_MESSAGE, GOSSIP_SYNC, and corrected node ID format (32 hex chars).
+  - **Note:** DPTP spec updated to v1.4 with thinking fields for reasoning models (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3).
 - **Modular Design** - Clear separation of concerns
 - **Knowledge Architecture** - Git-like knowledge commits with cognitive bias mitigation ([architecture doc](./docs/KNOWLEDGE_ARCHITECTURE.md))
-- **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude)
+- **Agent Extensibility** - Custom task types, tool registry with firewall integration, sandboxed execution
+- **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude, Z.AI, DeepSeek)
 - **Production Ready** - Docker deployment, OAuth, rate limiting
 
 ---
@@ -104,13 +110,17 @@ If this vision resonates with you, let's connect:
 ┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
 │    Human A      │         │    Human B      │         │    Human C      │
 │  ┌───────────┐  │         │  ┌───────────┐  │         │  ┌───────────┐  │
-│  │ Local AI  │  │         │  │ Remote AI │  │         │  │ Vendor AI │  │
-│  │ (Ollama)  │──┼────────►│  │  (GPU)    │  │         │  │ (OpenAI)  │  │
-│  └───────────┘  │ Compute │  └───────────┘  │         │  └───────────┘  │
-│   • Context     │ Sharing │   • Context     │         │   • Context     │
-│   • Messages    │         │   • Messages    │◄───────►│   • Messages    │
-│   • Privacy     │         │   • Privacy     │  Group  │   • Privacy     │
-│     Rules       │         │     Rules       │  Chat   │     Rules       │
+│  │ Local AI  │  │ Compute │  │ Remote AI │  │         │  │ Vendor AI │  │
+│  │ (Ollama)  │◄─┼─────────┼──│  (Peer A) │  │         │  │ (OpenAI)  │  │
+│  └───────────┘  │ Sharing │  └───────────┘  │         │  └───────────┘  │
+│  ┌───────────┐  │         │                 │         │                 │
+│  │ DPC Agent │◄─┼─────────┼─ B uses A's     │         │   • Context     │
+│  │ (40+tools)│  │  Remote │   Agent/AI      │◄───────►│   • Messages    │
+│  └───────────┘  │  Infer. │                 │  Group  │   • Privacy     │
+│   • Context     │         │   • Context     │  Chat   │     Rules       │
+│   • Messages    │         │   • Messages    │         │                 │
+│   • Privacy     │         │   • Privacy     │         │                 │
+│     Rules       │         │     Rules       │         │                 │
 └────────┬────────┘         └────────┬────────┘         └────────┬────────┘
          │                           │                           │
          │                  ┌────────▼──────────┐                │
@@ -310,8 +320,13 @@ docker-compose -f docker-compose.prod.yml up -d
 - **[WEBRTC_SETUP_GUIDE.md](./docs/WEBRTC_SETUP_GUIDE.md)** - Complete WebRTC setup
 - **[README_WEBRTC_INTEGRATION.md](./docs/README_WEBRTC_INTEGRATION.md)** - Technical overview
 
+### DPC Agent
+- **[DPC_AGENT_GUIDE.md](./docs/DPC_AGENT_GUIDE.md)** - Embedded autonomous AI agent testing & usage guide
+- **[DPC_AGENT_TELEGRAM.md](./docs/DPC_AGENT_TELEGRAM.md)** - Agent Telegram integration & two-way messaging
+
 ### Configuration & Features
 - **[CONFIGURATION.md](./docs/CONFIGURATION.md)** - Complete configuration guide
+- **[REMOTE_INFERENCE.md](./docs/REMOTE_INFERENCE.md)** - Remote peer inference & compute sharing guide
 - **[OFFLINE_MODE.md](./docs/OFFLINE_MODE.md)** - Offline mode features & usage
 - **[LOGGING.md](./docs/LOGGING.md)** - Logging system configuration & troubleshooting
 - **Environment Variables** - All settings support env var overrides
@@ -324,6 +339,7 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ### Architecture & Design
 - **[KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md)** - Knowledge management architecture with cognitive bias mitigation
+- **[specs/dptp_v1.md](./specs/dptp_v1.md)** - DPTP v1.4 protocol specification (thinking fields, reasoning models)
 - **[specs/hub_api_v1.md](./specs/hub_api_v1.md)** - Hub API specification
 
 ### Legal
@@ -370,7 +386,7 @@ docker-compose -f docker-compose.prod.yml up -d
   - Markdown rendering with intelligent caching
 
 ### Phase 2: Team Collaboration + Disaster Resilience - IN PROGRESS (Q1-Q3 2026)
-**Status:** Decentralized Infrastructure COMPLETE ✅ (All 6 connection strategies production-ready) | **Target:** Small teams (2-20 members + AIs)
+**Status:** Decentralized Infrastructure COMPLETE ✅, AI Agent COMPLETE ✅ | **Target:** Small teams (2-20 members + AIs)
 
 **Resilient Infrastructure - COMPLETE ✅**
 - ✅ **DHT-based peer discovery** (v0.9.5) - Kademlia DHT, 73 tests passing, internet-wide validated
@@ -389,6 +405,14 @@ docker-compose -f docker-compose.prod.yml up -d
   - ✅ Progress tracking with accept/reject dialog
   - ✅ Per-peer storage isolation (`~/.dpc/conversations/{peer_id}/files/`)
   - ✅ Conversation history integration (metadata-only for token efficiency)
+
+**AI Agent & Reasoning - COMPLETE ✅ (v0.18.0)**
+- ✅ **DPC Agent** - Embedded autonomous AI with 40+ tools, consciousness, evolution, memory ([guide](./docs/DPC_AGENT_GUIDE.md))
+- ✅ **Agent Telegram Bridge** - Two-way messaging, voice transcription, event notifications ([guide](./docs/DPC_AGENT_TELEGRAM.md))
+- ✅ **Reasoning Models** - DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3 (DPTP v1.4)
+- ✅ **Remote Peer Discovery** - Dynamic provider dropdown, configurable timeout up to 600s
+- ✅ **Real-time Streaming** - Token-by-token AI response display with progress indicators
+- ✅ **Agent Firewall** - Granular per-tool permissions, sandboxed execution, extended paths
 
 **Team Collaboration Features - PLANNED (Q1-Q3 2026):**
 - Persistent team management with roles

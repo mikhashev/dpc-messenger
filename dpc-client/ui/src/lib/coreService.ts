@@ -16,6 +16,7 @@ export interface DefaultProvidersResponse {
     default_provider: string;
     vision_provider: string;
     voice_provider?: string;  // v0.13.0+
+    agent_provider?: string;  // v0.18.0+
 }
 
 export interface ProvidersListResponse {
@@ -123,6 +124,11 @@ export const whisperModelDownloadRequired = writable<any>(null);  // {model_name
 export const whisperModelDownloadStarted = writable<any>(null);  // {provider, model_name}
 export const whisperModelDownloadCompleted = writable<any>(null);  // {provider, model_name, cache_path}
 export const whisperModelDownloadFailed = writable<any>(null);  // {provider, error}
+
+// DPC Agent progress stores (v0.15.0+ - real-time agent progress in chat)
+export const agentProgress = writable<any>(null);  // {conversation_id, message, round, tool_name, ts}
+export const agentProgressClear = writable<any>(null);  // {conversation_id} - signal to clear progress
+export const agentTextChunk = writable<any>(null);  // {conversation_id, chunk, ts} - streaming text chunks
 
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
@@ -727,6 +733,23 @@ export function connectToCoreService() {
                     console.error("Whisper model download failed:", message.payload);
                     whisperModelDownloadFailed.set(message.payload);
                 }
+                // DPC Agent progress events (v0.15.0+ - real-time agent progress in chat)
+                else if (message.event === "agent_progress") {
+                    // Progress update from agent during tool execution
+                    // payload: {conversation_id, message, round, tool_name, ts}
+                    console.log("[AgentProgress]", message.payload?.tool_name || "thinking", `round ${message.payload?.round || "?"}`);
+                    agentProgress.set(message.payload);
+                }
+                else if (message.event === "agent_progress_clear") {
+                    // Signal to clear progress display (task completed/failed)
+                    console.log("[AgentProgress] Clear for conversation:", message.payload?.conversation_id);
+                    agentProgressClear.set(message.payload);
+                }
+                else if (message.event === "agent_text_chunk") {
+                    // Streaming text chunk from agent LLM response
+                    // payload: {conversation_id, chunk, ts}
+                    agentTextChunk.set(message.payload);
+                }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)
                     for (const [cmdId, cmd] of pendingCommands.entries()) {
@@ -857,7 +880,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_voice_transcription_config',  // v0.13.2 - auto-transcription config
             'save_voice_transcription_config',  // v0.13.2 - auto-transcription config
             'set_conversation_transcription',  // v0.13.2 - per-conversation transcription control
-            'get_conversation_transcription'  // v0.13.2 - per-conversation transcription control
+            'get_conversation_transcription',  // v0.13.2 - per-conversation transcription control
+            'prepare_agent',  // Pre-initialize DPC Agent and Telegram bridge
+            'query_remote_providers'  // v0.18.0 - fetch available providers from remote peer
         ].includes(command);
 
         if (expectsResponse) {

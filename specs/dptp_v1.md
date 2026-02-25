@@ -1,8 +1,8 @@
-# DPTP Specification: D-PC Transfer Protocol v1.2
+# DPTP Specification: D-PC Transfer Protocol v1.4
 
-**Version:** 1.2
+**Version:** 1.4
 **Status:** Stable
-**Date:** December 2025
+**Date:** February 2026
 **License:** CC0 1.0 Universal (Public Domain)
 
 ## 1. Overview
@@ -185,7 +185,11 @@ Requests the peer to execute an AI inference query using their local compute res
     "request_id": "550e8400-e29b-41d4-a716-446655440000",
     "prompt": "What is the capital of France?",
     "model": "llama3.1:70b",  // Optional
-    "provider": "ollama"      // Optional
+    "provider": "ollama",     // Optional
+    "thinking": {             // Optional: thinking mode configuration
+      "enabled": true,
+      "budget_tokens": 10000  // For Claude Extended Thinking
+    }
   }
 }
 ```
@@ -195,6 +199,9 @@ Requests the peer to execute an AI inference query using their local compute res
 - `prompt` (string, required): AI query text
 - `model` (string, optional): Specific model to use
 - `provider` (string, optional): AI provider (ollama, openai, anthropic)
+- `thinking` (object, optional): Thinking mode configuration
+  - `enabled` (boolean): Enable extended thinking/reasoning
+  - `budget_tokens` (integer): Token budget for thinking (Claude Extended Thinking)
 
 **Response:** REMOTE_INFERENCE_RESPONSE message
 
@@ -217,7 +224,9 @@ Returns the result of a remote inference request.
     "tokens_used": 156,
     "prompt_tokens": 12,
     "response_tokens": 144,
-    "model_max_tokens": 128000
+    "model_max_tokens": 128000,
+    "thinking": "Let me think about this question...",
+    "thinking_tokens": 50
   }
 }
 ```
@@ -242,6 +251,8 @@ Returns the result of a remote inference request.
 - `prompt_tokens` (integer, optional): Tokens in prompt
 - `response_tokens` (integer, optional): Tokens in response
 - `model_max_tokens` (integer, optional): Model's context window size
+- `thinking` (string, optional): Thinking/reasoning content from models with extended reasoning (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
+- `thinking_tokens` (integer, optional): Tokens used for thinking/reasoning
 
 **Fields (Error):**
 - `request_id` (string, required): Matches request UUID
@@ -1830,6 +1841,13 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.4 (February 2026)
+- **Thinking Mode Support:**
+  - Added `thinking` and `thinking_tokens` fields to REMOTE_INFERENCE_RESPONSE
+  - Added `thinking` configuration object to REMOTE_INFERENCE_REQUEST
+  - Supports reasoning models: DeepSeek R1 (`<think\>` tags), Claude Extended Thinking, OpenAI o1/o3
+  - Enables display of model reasoning process in collapsible UI component
 
 ### v1.3 (January 2026)
 - **FILE_OFFER enhancement:**

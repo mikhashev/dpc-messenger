@@ -1,0 +1,792 @@
+"""
+DPC Agent — Simplified Agent Orchestrator.
+
+A simplified version of Ouroboros's agent for DPC Messenger integration.
+Key differences from Ouroboros:
+- Single process (no workers/supervisor)
+- Uses DPC's LLMManager (not OpenRouter)
+- All state in ~/.dpc/agent/
+- No Telegram (uses DPC messaging)
+- Simplified task handling
+
+The agent:
+1. Receives messages from DPC
+2. Builds context (memory + DPC context)
+3. Runs LLM loop with tools
+4. Returns response
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import pathlib
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+
+from .llm_adapter import DpcLlmAdapter
+from .tools.registry import ToolRegistry, ToolContext
+from .memory import Memory
+from .context import build_llm_messages
+from .loop import run_llm_loop
+from .utils import (
+    get_agent_root, ensure_agent_dirs, utc_now_iso, append_jsonl
+)
+from .task_queue import TaskQueue, TaskPriority, Task
+from .task_types import TaskTypeDefinition, BUILTIN_TASK_TYPES
+from .events import EventType, get_event_emitter
+from .budget import BillingModel, HybridBudget
+
+if TYPE_CHECKING:
+    from ..llm_manager import LLMManager
+    from .consciousness import BackgroundConsciousness
+
+log = logging.getLogger(__name__)
+
+
+@dataclass
+class AgentConfig:
+    """Configuration for the DPC agent."""
+    budget_usd: float = 50.0
+    max_rounds: int = 200
+    # Tool control is via firewall (privacy_rules.json), not config
+    background_consciousness: bool = False
+
+    # Task queue settings
+    enable_task_queue: bool = True
+
+    # Evolution settings
+    evolution_enabled: bool = False
+    evolution_interval_minutes: int = 60
+    evolution_auto_apply: bool = False  # Require approval
+
+    # Budget settings
+    billing_model: str = "subscription"  # or "pay_per_use"
+
+
+class DpcAgent:
+    """
+    Simplified agent for DPC Messenger integration.
+
+    Usage:
+        agent = DpcAgent(llm_manager, config, firewall)
+        response = await agent.process("Hello!", "conv-123")
+    """
+
+    def __init__(
+        self,
+        llm_manager: "LLMManager",
+        config: Optional[AgentConfig] = None,
+        agent_root: Optional[pathlib.Path] = None,
+        firewall: Optional[Any] = None,  # ContextFirewall for tool control
+    ):
+        """
+        Initialize the agent.
+
+        Args:
+            llm_manager: DPC's LLMManager instance
+            config: Agent configuration
+            agent_root: Storage root (defaults to ~/.dpc/agent/)
+            firewall: ContextFirewall instance for tool permissions
+        """
+        self.config = config or AgentConfig()
+        self.agent_root = agent_root or get_agent_root()
+        self._firewall = firewall  # Firewall controls tool access
+        ensure_agent_dirs()
+
+        # Initialize components
+        self.llm = DpcLlmAdapter(llm_manager)
+        self.tools = ToolRegistry(agent_root=self.agent_root)
+        self.memory = Memory(agent_root=self.agent_root)
+
+        # Task queue for background execution
+        self.queue = TaskQueue(self.agent_root)
+        self._queue_enabled = self.config.enable_task_queue
+
+        # Custom task handlers (extensible)
+        self._task_handlers: Dict[str, Callable[[Dict[str, Any]], Any]] = {}
+
+        # Task type registry (agent-defined task types)
+        self._task_type_registry: Dict[str, TaskTypeDefinition] = {}
+        self._load_task_type_registry()  # Load persisted task types
+
+        # Event emitter for notifications
+        self.events = get_event_emitter()
+
+        # Budget tracker
+        billing_model = BillingModel.SUBSCRIPTION if self.config.billing_model == "subscription" else BillingModel.PAY_PER_USE
+        self.budget = HybridBudget(
+            provider="dpc_agent",
+            billing_model=self.config.billing_model,
+            budget_usd=self.config.budget_usd,
+        )
+
+        # Evolution manager (optional)
+        self._evolution: Optional[Any] = None  # EvolutionManager
+        self._evolution_enabled = self.config.evolution_enabled
+
+        # Background consciousness (optional)
+        self._consciousness: Optional["BackgroundConsciousness"] = None
+        self._consciousness_enabled = self.config.background_consciousness
+
+        log.info(f"DpcAgent initialized with storage at {self.agent_root}")
+
+    async def process(
+        self,
+        message: str,
+        conversation_id: str,
+        dpc_context: Optional[Dict[str, Any]] = None,
+        system_prompt: Optional[str] = None,
+        emit_progress: Optional[Callable[[str], None]] = None,
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+    ) -> str:
+        """
+        Process a user message and return response.
+
+        Args:
+            message: User's message text
+            conversation_id: Unique ID for this conversation
+            dpc_context: Optional DPC context (personal, device)
+            system_prompt: Optional custom system prompt
+            emit_progress: Optional callback for progress updates
+            on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
+
+        Returns:
+            Agent's response text
+        """
+        task = {
+            "id": conversation_id,
+            "type": "chat",
+            "text": message,
+        }
+
+        # Build LLM context
+        messages, cap_info = build_llm_messages(
+            agent_root=self.agent_root,
+            memory=self.memory,
+            task=task,
+            system_prompt=system_prompt,
+            dpc_context=dpc_context,
+        )
+
+        # Set tool context with firewall-controlled tool access
+        allowed_tools = self._get_allowed_tools()
+        ctx = ToolContext(
+            agent_root=self.agent_root,
+            current_task_id=conversation_id,
+            current_task_type="chat",
+            tool_whitelist=allowed_tools,
+            emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None: None),
+            firewall=self._firewall,  # For extended sandbox paths
+        )
+        ctx._agent = self  # Enable schedule_task and other agent-dependent tools
+        self.tools.set_context(ctx)
+
+        # Log task start
+        append_jsonl(self.agent_root / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "task_start",
+            "task_id": conversation_id,
+            "text_preview": message[:200] if message else "",
+        })
+
+        # Run LLM loop
+        response, usage, trace = await run_llm_loop(
+            messages=messages,
+            tools=self.tools,
+            llm=self.llm,
+            agent_root=self.agent_root,
+            emit_progress=emit_progress or (lambda msg, tool=None, rnd=None: None),
+            task_id=conversation_id,
+            budget_remaining_usd=self.config.budget_usd,
+            max_rounds=self.config.max_rounds,
+            on_stream_chunk=on_stream_chunk,
+            conversation_id=conversation_id,
+        )
+
+        # Log task completion
+        append_jsonl(self.agent_root / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "task_complete",
+            "task_id": conversation_id,
+            "response_preview": response[:200] if response else "",
+            "rounds": usage.get("rounds", 0),
+            "cost_usd": usage.get("cost", 0),
+        })
+
+        # Update budget
+        self._update_budget(usage.get("cost", 0))
+
+        return response
+
+    def _update_budget(self, cost: float) -> None:
+        """Update budget tracking in state file."""
+        state_path = self.agent_root / "state" / "state.json"
+        state = {}
+
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                log.debug("Failed to read state file", exc_info=True)
+
+        state["spent_usd"] = state.get("spent_usd", 0) + cost
+        state["budget_usd"] = self.config.budget_usd
+        state["last_updated"] = utc_now_iso()
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+
+    def _get_allowed_tools(self) -> Optional[set]:
+        """
+        Get set of allowed tools from firewall.
+
+        Returns:
+            Set of allowed tool names, or None if no firewall (all tools allowed)
+        """
+        if self._firewall is None:
+            log.warning("No firewall configured - all tools allowed")
+            return None  # No restriction
+
+        if not self._firewall.dpc_agent_enabled:
+            log.info("DPC Agent disabled in firewall")
+            return set()  # No tools allowed
+
+        allowed = self._firewall.get_allowed_agent_tools()
+        log.debug(f"Firewall allowed tools: {len(allowed)} tools")
+        return allowed
+
+    def get_memory(self) -> Memory:
+        """Get the memory instance for direct access."""
+        return self.memory
+
+    def get_tools(self) -> ToolRegistry:
+        """Get the tool registry for direct access."""
+        return self.tools
+
+    def reset_memory(self) -> None:
+        """Reset memory to defaults (clear scratchpad, identity)."""
+        self.memory.save_scratchpad(self.memory._default_scratchpad())
+        self.memory.save_identity(self.memory._default_identity())
+        log.info("Agent memory reset to defaults")
+
+    def start_consciousness(self, emit_progress: Optional[Callable[[str], None]] = None) -> None:
+        """
+        Start background consciousness if enabled.
+
+        Args:
+            emit_progress: Optional callback for consciousness events
+        """
+        if not self._consciousness_enabled:
+            log.debug("Background consciousness not enabled")
+            return
+
+        if self._consciousness is not None:
+            log.warning("Consciousness already running")
+            return
+
+        from .consciousness import BackgroundConsciousness
+
+        self._consciousness = BackgroundConsciousness(
+            agent=self,
+            emit_progress=emit_progress,
+        )
+        self._consciousness.start()
+        log.info("Background consciousness started")
+
+    def stop_consciousness(self) -> None:
+        """Stop background consciousness."""
+        if self._consciousness is not None:
+            self._consciousness.stop()
+            self._consciousness = None
+            log.info("Background consciousness stopped")
+
+    def is_consciousness_running(self) -> bool:
+        """Check if consciousness is running."""
+        return self._consciousness is not None and self._consciousness.is_running()
+
+    # -------------------------------------------------------------------------
+    # Task Queue Methods
+    # -------------------------------------------------------------------------
+
+    async def start_task_processor(self) -> None:
+        """Start background task processor."""
+        if not self._queue_enabled:
+            log.debug("Task queue not enabled")
+            return
+
+        # Set callbacks
+        async def on_task_start(task: Task) -> None:
+            await self.events.emit(EventType.TASK_STARTED, {
+                "task_id": task.id,
+                "task_type": task.task_type,
+            })
+
+        async def on_task_complete(task: Task) -> None:
+            await self.events.emit(EventType.TASK_COMPLETED, {
+                "task_id": task.id,
+                "task_type": task.task_type,
+                "result": task.result[:500] if task.result else None,
+            })
+
+        async def on_task_failed(task: Task) -> None:
+            await self.events.emit(EventType.TASK_FAILED, {
+                "task_id": task.id,
+                "task_type": task.task_type,
+                "error": task.error[:500] if task.error else None,
+            })
+
+        self.queue.set_callbacks(
+            on_task_start=on_task_start,
+            on_task_complete=on_task_complete,
+            on_task_failed=on_task_failed,
+        )
+
+        await self.queue.start_processor(self._execute_task)
+        log.info("Task processor started")
+
+    def stop_task_processor(self) -> None:
+        """Stop background task processor."""
+        self.queue.stop_processor()
+        log.info("Task processor stopped")
+
+    def register_task_handler(
+        self,
+        task_type: str,
+        handler: Callable[[Dict[str, Any]], Any],
+    ) -> None:
+        """
+        Register a custom task handler.
+
+        Args:
+            task_type: Task type name (e.g., "weather_forecast")
+            handler: Async or sync function that takes task data dict and returns result
+
+        Example:
+            async def handle_weather(data):
+                location = data.get("location")
+                return f"Weather for {location}: Sunny"
+
+            agent.register_task_handler("weather_forecast", handle_weather)
+        """
+        self._task_handlers[task_type] = handler
+        log.info(f"Registered task handler for type: {task_type}")
+
+    def unregister_task_handler(self, task_type: str) -> bool:
+        """
+        Unregister a custom task handler.
+
+        Args:
+            task_type: Task type to unregister
+
+        Returns:
+            True if handler was removed, False if not found
+        """
+        if task_type in self._task_handlers:
+            del self._task_handlers[task_type]
+            log.info(f"Unregistered task handler for type: {task_type}")
+            return True
+        return False
+
+    # -----------------------------------------------------------------------
+    # Task Type Registry Methods
+    # -----------------------------------------------------------------------
+
+    def _load_task_type_registry(self) -> None:
+        """Load task type registry from disk."""
+        registry_path = self.agent_root / "state" / "task_types.json"
+        if registry_path.exists():
+            try:
+                with open(registry_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                for task_type, definition_data in data.get("task_types", {}).items():
+                    self._task_type_registry[task_type] = TaskTypeDefinition.from_dict(definition_data)
+                log.info(f"Loaded {len(self._task_type_registry)} task types from registry")
+            except Exception as e:
+                log.warning(f"Failed to load task type registry: {e}")
+
+    def _save_task_type_registry(self) -> None:
+        """Save task type registry to disk."""
+        registry_path = self.agent_root / "state" / "task_types.json"
+        try:
+            data = {
+                "task_types": {
+                    tt: definition.to_dict()
+                    for tt, definition in self._task_type_registry.items()
+                },
+                "updated_at": utc_now_iso(),
+            }
+            registry_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(registry_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            log.debug(f"Saved {len(self._task_type_registry)} task types to registry")
+        except Exception as e:
+            log.error(f"Failed to save task type registry: {e}")
+
+    def register_task_type(
+        self,
+        task_type: str,
+        description: str,
+        execution_prompt: str,
+        input_schema: Optional[Dict[str, Any]] = None,
+        examples: Optional[List[Dict[str, Any]]] = None,
+    ) -> TaskTypeDefinition:
+        """
+        Register a custom task type with execution instructions.
+
+        When a task of this type executes, the agent will follow the
+        execution_prompt with task.data variables substituted.
+
+        Args:
+            task_type: Unique identifier (e.g., "weather_report")
+            description: What this task type does
+            execution_prompt: Instructions for the agent to follow. Use {variable}
+                             placeholders that will be filled from task.data
+            input_schema: JSON schema for validating task.data (optional)
+            examples: Example task.data payloads (optional)
+
+        Returns:
+            The created TaskTypeDefinition
+
+        Example:
+            agent.register_task_type(
+                task_type="weather_report",
+                description="Fetch weather for a location",
+                execution_prompt="Fetch current weather for {location} and summarize it.",
+                input_schema={"type": "object", "properties": {"location": {"type": "string"}}},
+            )
+        """
+        definition = TaskTypeDefinition(
+            task_type=task_type,
+            description=description,
+            execution_prompt=execution_prompt,
+            input_schema=input_schema or {},
+            examples=examples or [],
+        )
+
+        # Store in registry
+        self._task_type_registry[task_type] = definition
+
+        # Auto-register a handler that runs the agent with the formatted prompt
+        self._task_handlers[task_type] = self._create_task_type_handler(definition)
+
+        # Persist to disk
+        self._save_task_type_registry()
+
+        log.info(f"Registered task type: {task_type}")
+        return definition
+
+    def unregister_task_type(self, task_type: str) -> bool:
+        """
+        Unregister a custom task type.
+
+        Args:
+            task_type: Task type to unregister
+
+        Returns:
+            True if type was removed, False if not found
+        """
+        if task_type in self._task_type_registry:
+            del self._task_type_registry[task_type]
+            # Also remove the auto-registered handler
+            if task_type in self._task_handlers:
+                del self._task_handlers[task_type]
+            self._save_task_type_registry()
+            log.info(f"Unregistered task type: {task_type}")
+            return True
+        return False
+
+    def get_task_type(self, task_type: str) -> Optional[TaskTypeDefinition]:
+        """
+        Get a task type definition.
+
+        Args:
+            task_type: Task type name
+
+        Returns:
+            TaskTypeDefinition if found, None otherwise
+        """
+        # Check custom registry first
+        if task_type in self._task_type_registry:
+            return self._task_type_registry[task_type]
+        # Then check built-in types
+        if task_type in BUILTIN_TASK_TYPES:
+            return BUILTIN_TASK_TYPES[task_type]
+        return None
+
+    def list_task_types(self) -> Dict[str, TaskTypeDefinition]:
+        """
+        List all registered task types (custom + built-in).
+
+        Returns:
+            Dictionary of task_type -> TaskTypeDefinition
+        """
+        result = dict(BUILTIN_TASK_TYPES)
+        result.update(self._task_type_registry)
+        return result
+
+    def _create_task_type_handler(
+        self, definition: TaskTypeDefinition
+    ) -> Callable[[Dict[str, Any]], Any]:
+        """
+        Create a handler function for a task type definition.
+
+        The handler formats the execution_prompt with task data and
+        runs the agent with that prompt.
+
+        Args:
+            definition: TaskTypeDefinition with execution instructions
+
+        Returns:
+            Async handler function
+        """
+        agent = self  # Capture reference
+
+        async def handler(task_data: Dict[str, Any]) -> str:
+            # Format the prompt with task data
+            prompt = definition.format_prompt(task_data)
+
+            # Run the agent with the formatted prompt
+            result = await agent.process(
+                message=prompt,
+                conversation_id=f"task-{definition.task_type}",
+            )
+            return result
+
+        return handler
+
+    def _convert_task_data_to_prompt(self, task_data: Dict[str, Any]) -> str:
+        """
+        Convert structured task data to a readable prompt.
+
+        This handles cases where an agent schedules a 'chat' task with
+        structured data instead of plain text. The structured data is
+        converted to a clear instruction for the agent to follow.
+
+        Args:
+            task_data: Structured task data dictionary
+
+        Returns:
+            A readable prompt string
+        """
+        # If task_data has a 'type' field, use it to construct a clear instruction
+        task_type = task_data.get("type", "")
+        action = task_data.get("action", "")
+
+        if task_type == "weather_request" or "weather" in task_type.lower():
+            location = task_data.get("location", "unknown location")
+            return f"Execute the scheduled task: Fetch current weather for {location} and provide a summary. If Telegram bridge is available, send the result to the user."
+
+        elif task_type == "reminder":
+            message = task_data.get("message", "")
+            return f"Execute the scheduled task: Remind the user: {message}"
+
+        elif action:
+            # Generic action-based prompt
+            return f"Execute the scheduled task: {action}. Task data: {json.dumps(task_data, ensure_ascii=False)}"
+
+        elif task_type:
+            # Generic type-based prompt
+            return f"Execute the scheduled task of type '{task_type}'. Task data: {json.dumps(task_data, ensure_ascii=False)}"
+
+        else:
+            # Fallback: convert entire dict to readable prompt
+            return f"Execute the following scheduled task: {json.dumps(task_data, ensure_ascii=False)}"
+
+    async def _execute_task(self, task: Task) -> str:
+        """
+        Execute a queued task.
+
+        Args:
+            task: The task to execute
+
+        Returns:
+            Task result string
+        """
+        # Check custom handlers first
+        if task.task_type in self._task_handlers:
+            handler = self._task_handlers[task.task_type]
+            try:
+                import asyncio
+                result = handler(task.data)
+                # Support both sync and async handlers
+                if asyncio.iscoroutine(result):
+                    result = await result
+                return str(result)
+            except Exception as e:
+                log.error(f"Task handler error for {task.task_type}: {e}")
+                return f"Handler error: {e}"
+
+        # Built-in task types
+        if task.task_type == "chat":
+            # Get text from task data, or convert structured data to a prompt
+            text = task.data.get("text", "")
+            if not text:
+                # If no 'text' field, convert structured data to a readable prompt
+                # This handles cases where agent passes structured data to chat task
+                text = self._convert_task_data_to_prompt(task.data)
+
+            return await self.process(
+                text,
+                conversation_id=task.id,
+                dpc_context=task.data.get("dpc_context"),
+            )
+        elif task.task_type == "improvement":
+            # Execute planned improvement via evolution
+            if self._evolution:
+                cycle = await self._evolution.run_evolution_cycle()
+                return cycle.description
+            return "Evolution not enabled"
+        elif task.task_type == "review":
+            # Run code review
+            return await self._execute_review(task.data)
+        else:
+            return f"Unknown task type: {task.task_type}. Register a handler with register_task_handler('{task.task_type}', handler)"
+
+    async def _execute_review(self, data: Dict[str, Any]) -> str:
+        """Execute a code review task."""
+        # TODO: Implement review logic
+        return "Review not implemented"
+
+    def schedule_task(
+        self,
+        task_type: str,
+        data: Dict[str, Any],
+        priority: TaskPriority = TaskPriority.NORMAL,
+        delay_seconds: int = 0,
+    ) -> Task:
+        """
+        Schedule a task for execution.
+
+        Args:
+            task_type: Type of task ('chat', 'improvement', 'review')
+            data: Task payload
+            priority: Task priority
+            delay_seconds: Delay before execution
+
+        Returns:
+            Scheduled task
+        """
+        from datetime import datetime, timedelta
+
+        scheduled_at = None
+        if delay_seconds > 0:
+            scheduled_at = datetime.utcnow() + timedelta(seconds=delay_seconds)
+
+        task = self.queue.schedule(
+            task_type=task_type,
+            data=data,
+            priority=priority,
+            scheduled_at=scheduled_at,
+        )
+
+        # Emit event (only if there's a running event loop)
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self.events.emit(EventType.TASK_SCHEDULED, {
+                "task_id": task.id,
+                "task_type": task_type,
+                "priority": priority.name,
+                "delay_seconds": delay_seconds,
+            }))
+        except RuntimeError:
+            # No running event loop - skip event emission
+            log.debug(f"Task {task.id} scheduled (no event loop for emission)")
+
+        return task
+
+    # -------------------------------------------------------------------------
+    # Evolution Methods
+    # -------------------------------------------------------------------------
+
+    def start_evolution(self) -> None:
+        """Start automatic evolution cycles."""
+        if not self._evolution_enabled:
+            log.debug("Evolution not enabled")
+            return
+
+        if self._evolution is not None:
+            log.warning("Evolution already running")
+            return
+
+        from .evolution import EvolutionManager
+
+        self._evolution = EvolutionManager(
+            agent=self,
+            enabled=self._evolution_enabled,
+            interval_minutes=self.config.evolution_interval_minutes,
+            auto_apply=self.config.evolution_auto_apply,
+        )
+        self._evolution.start_automatic_evolution()
+        log.info("Evolution started")
+
+    def stop_evolution(self) -> None:
+        """Stop automatic evolution."""
+        if self._evolution is not None:
+            self._evolution.stop_automatic_evolution()
+            self._evolution = None
+            log.info("Evolution stopped")
+
+    def is_evolution_running(self) -> bool:
+        """Check if evolution is running."""
+        return self._evolution is not None and self._evolution.is_running()
+
+    def get_pending_evolution_changes(self) -> List[Dict[str, Any]]:
+        """Get pending evolution changes awaiting approval."""
+        if self._evolution:
+            return self._evolution.get_pending_changes()
+        return []
+
+    async def approve_evolution_change(self, change_id: str) -> bool:
+        """Approve a pending evolution change."""
+        if self._evolution:
+            return await self._evolution.approve_change(change_id)
+        return False
+
+    def reject_evolution_change(self, change_id: str) -> bool:
+        """Reject a pending evolution change."""
+        if self._evolution:
+            return self._evolution.reject_change(change_id)
+        return False
+
+    def get_status(self) -> Dict[str, Any]:
+        """Get agent status info."""
+        state_path = self.agent_root / "state" / "state.json"
+        state = {}
+        if state_path.exists():
+            try:
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+        return {
+            "agent_root": str(self.agent_root),
+            "budget_usd": self.config.budget_usd,
+            "spent_usd": state.get("spent_usd", 0),
+            "remaining_usd": max(0, self.config.budget_usd - state.get("spent_usd", 0)),
+            "max_rounds": self.config.max_rounds,
+            "billing_model": self.config.billing_model,
+            "tools_available": self.tools.available_tools(),
+            "memory_files": {
+                "scratchpad": self.memory.scratchpad_path().exists(),
+                "identity": self.memory.identity_path().exists(),
+                "dialogue_summary": self.memory.dialogue_summary_path().exists(),
+            },
+            "task_queue": {
+                "enabled": self._queue_enabled,
+                "running": self.queue.is_running(),
+                "stats": self.queue.get_stats(),
+            },
+            "consciousness": {
+                "enabled": self._consciousness_enabled,
+                "running": self.is_consciousness_running(),
+                "status": self._consciousness.get_status() if self._consciousness else None,
+            },
+            "evolution": {
+                "enabled": self._evolution_enabled,
+                "running": self.is_evolution_running(),
+                "status": self._evolution.get_status() if self._evolution else None,
+                "pending_changes": len(self.get_pending_evolution_changes()),
+            },
+        }

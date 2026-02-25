@@ -26,6 +26,7 @@
     default_provider: string;
     vision_provider: string;
     voice_provider?: string;  // v0.13.0+
+    agent_provider?: string;  // v0.18.0+
   };
 
   // Props (Svelte 5 runes mode)
@@ -61,12 +62,20 @@
   // Merged provider lists (Phase 2: combines local + remote providers)
   // Phase 2.3: Add uniqueId to track provider source for remote vision routing
   const mergedProviders = $derived(() => {
-    const local = (providersList || []).map(p => ({
-      ...p,
-      source: 'local' as const,
-      displayText: `${p.alias} (${p.model}) - local`,
-      uniqueId: `local:${p.alias}`  // Unique identifier for selection tracking
-    }));
+    const local = (providersList || []).map(p => {
+      // Special display for dpc_agent: show underlying provider
+      let displayText = `${p.alias} (${p.model}) - local`;
+      if (p.alias === 'dpc_agent') {
+        const underlying = defaultProviders?.agent_provider || defaultProviders?.default_provider;
+        displayText = `Agent (uses ${underlying || 'default'})`;
+      }
+      return {
+        ...p,
+        source: 'local' as const,
+        displayText,
+        uniqueId: `local:${p.alias}`  // Unique identifier for selection tracking
+      };
+    });
 
     if (selectedComputeHost === "local") {
       return local;

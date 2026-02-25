@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Last Updated:** January 2026 | **Current Version:** 0.15.1 | **Current Phase:** Phase 2.1 - Decentralized Infrastructure
+> **Last Updated:** February 2026 | **Current Version:** 0.18.0 | **Current Phase:** Phase 2.1 - Decentralized Infrastructure
 
 ---
 

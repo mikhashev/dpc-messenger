@@ -268,7 +268,7 @@ class TestContextFiltering:
     @pytest.fixture
     def sample_personal_context_for_peer(self):
         """Sample personal context for peer filtering tests."""
-        from dpc_protocol.pcm_core import PersonalContext, InstructionBlock, Profile, Topic
+        from dpc_protocol.pcm_core import PersonalContext, Profile, Topic
 
         return PersonalContext(
             version=1,
@@ -276,9 +276,6 @@ class TestContextFiltering:
                 name="Test User",
                 description="A test user",
                 core_values=["testing"]
-            ),
-            instruction=InstructionBlock(
-                primary="You are a helpful assistant."
             ),
             knowledge={
                 "Python": Topic(summary="Python expert")
@@ -300,7 +297,7 @@ class TestContextFiltering:
 
     def test_peer_specific_deny_overrides_wildcard_allow(self, firewall_with_context_rules, sample_personal_context_for_peer):
         """Test that specific deny rule takes precedence over wildcard allow for peer filtering."""
-        # Filter context for peer with wildcard allow + specific deny for instruction
+        # Filter context for peer with wildcard allow + specific deny
         filtered = firewall_with_context_rules.filter_context_for_peer(
             sample_personal_context_for_peer,
             "dpc-node-test-peer"
@@ -313,9 +310,6 @@ class TestContextFiltering:
         # Should have knowledge (allowed by wildcard)
         assert filtered.knowledge is not None
         assert len(filtered.knowledge) == 1
-
-        # Should NOT have instruction (specific deny overrides wildcard allow)
-        assert filtered.instruction is None or filtered.instruction == {}
 
 
 class TestComputeSharing:
@@ -593,7 +587,7 @@ class TestAIScopeFiltering:
     @pytest.fixture
     def sample_personal_context(self):
         """Sample personal context for testing."""
-        from dpc_protocol.pcm_core import PersonalContext, InstructionBlock, Profile, Topic
+        from dpc_protocol.pcm_core import PersonalContext, Profile, Topic
 
         return PersonalContext(
             version=1,
@@ -601,14 +595,6 @@ class TestAIScopeFiltering:
                 name="Test User",
                 description="A test user for AI scope filtering",
                 core_values=["testing", "quality"]
-            ),
-            instruction=InstructionBlock(
-                primary="You are a helpful AI assistant.",
-                bias_mitigation={
-                    "multi_perspective_analysis": True,
-                    "challenge_status_quo": True,
-                    "cultural_sensitivity": True
-                }
             ),
             knowledge={
                 "Python Programming": Topic(
@@ -662,10 +648,6 @@ class TestAIScopeFiltering:
         assert len(filtered.knowledge) == 1
         assert "Python Programming" in filtered.knowledge
 
-        # Should NOT have instruction (specific deny overrides wildcard allow)
-        # The instruction field should be None or empty dict
-        assert filtered.instruction is None or filtered.instruction == {}
-
     def test_specific_field_access_only(self, firewall_with_ai_scope_rules, sample_personal_context):
         """Test that restricted mode only allows specific fields."""
         filtered = firewall_with_ai_scope_rules.filter_personal_context_for_ai_scope(
@@ -683,9 +665,6 @@ class TestAIScopeFiltering:
         # Should NOT have knowledge (not in rules)
         assert filtered.knowledge is None or filtered.knowledge == {}
 
-        # Should NOT have instruction (explicitly denied)
-        assert filtered.instruction is None or filtered.instruction == {}
-
     def test_multiple_specific_allows(self, firewall_with_ai_scope_rules, sample_personal_context):
         """Test personal scope with multiple specific allow rules."""
         filtered = firewall_with_ai_scope_rules.filter_personal_context_for_ai_scope(
@@ -701,9 +680,6 @@ class TestAIScopeFiltering:
         assert filtered.knowledge is not None
         assert len(filtered.knowledge) > 0
 
-        # Should NOT have instruction (specific deny)
-        assert filtered.instruction is None or filtered.instruction == {}
-
     def test_unknown_scope_denies_all(self, firewall_with_ai_scope_rules, sample_personal_context):
         """Test that unknown AI scope results in default deny."""
         filtered = firewall_with_ai_scope_rules.filter_personal_context_for_ai_scope(
@@ -714,7 +690,6 @@ class TestAIScopeFiltering:
         # All fields should be filtered out (default deny)
         assert filtered.profile is None or filtered.profile == {}
         assert filtered.knowledge is None or filtered.knowledge == {}
-        assert filtered.instruction is None or filtered.instruction == {}
 
 
 def test_validate_config_with_nested_comments():

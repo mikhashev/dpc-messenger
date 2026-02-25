@@ -50,6 +50,7 @@
     onResetUnreadCount,
     onGetPeerDisplayName,
     onAddAIChat,
+    onAddAgentChat,
     onDeleteAIChat,
     onDisconnectPeer
   }: {
@@ -75,6 +76,7 @@
     onResetUnreadCount: (peerId: string) => void;
     onGetPeerDisplayName: (peerId: string) => string;
     onAddAIChat: () => void;
+    onAddAgentChat?: () => void;
     onDeleteAIChat: (chatId: string) => void;
     onDisconnectPeer: (peerId: string) => void;
   } = $props();
@@ -361,13 +363,24 @@
     <div class="chat-list">
       <div class="chat-list-header">
         <h3>Chats</h3>
-        <button
-          class="btn-add-chat"
-          onclick={onAddAIChat}
-          title="Add a new AI chat with a different provider"
-        >
-          + AI
-        </button>
+        <div class="chat-buttons">
+          <button
+            class="btn-add-chat"
+            onclick={onAddAIChat}
+            title="Add a new AI chat with a different provider"
+          >
+            + AI
+          </button>
+          {#if onAddAgentChat}
+            <button
+              class="btn-add-chat btn-add-agent"
+              onclick={onAddAgentChat}
+              title="Start a new chat with the embedded DPC Agent"
+            >
+              + Agent
+            </button>
+          {/if}
+        </div>
       </div>
       <ul>
         <!-- AI Chats -->
@@ -793,6 +806,21 @@
   .btn-add-chat:active {
     transform: translateY(0);
     box-shadow: 0 1px 3px rgba(76, 175, 80, 0.2);
+  }
+
+  .chat-buttons {
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .btn-add-agent {
+    background: #9333ea;
+    box-shadow: 0 2px 4px rgba(147, 51, 234, 0.3);
+  }
+
+  .btn-add-agent:hover {
+    background: #7c3aed;
+    box-shadow: 0 4px 8px rgba(147, 51, 234, 0.4);
   }
 
   .chat-list ul {

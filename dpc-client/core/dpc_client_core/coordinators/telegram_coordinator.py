@@ -277,13 +277,17 @@ class TelegramBridge:
                 self.service.conversation_monitors[conversation_id] = monitor
 
             # Create Message object
+            # Use original Telegram message date for timestamp (v0.15.3)
+            # message.date is already a datetime.datetime object from Telegram Bot API
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-{message_id}",
                 conversation_id=conversation_id,
                 sender_node_id=dpc_message["sender_node_id"],
                 sender_name=sender_name,
                 text=text,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=msg_timestamp
             )
 
             # Add to monitor buffer
@@ -383,9 +387,11 @@ class TelegramBridge:
                             audio_base64 = base64.b64encode(audio_data).decode("utf-8")
 
                         # Transcribe using service method (handles provider selection)
+                        # v0.15.4: Pass provider_alias to respect voice_provider setting from providers.json
                         transcription_result = await self.service.transcribe_audio(
                             audio_base64=audio_base64,
-                            mime_type="audio/ogg"
+                            mime_type="audio/ogg",
+                            provider_alias=voice_provider_alias
                         )
 
                         transcription_text = transcription_result.get("text", "")
@@ -403,6 +409,24 @@ class TelegramBridge:
 
                 except Exception as e:
                     logger.error(f"Failed to transcribe voice message: {e}", exc_info=True)
+
+                    # v0.15.4: Notify Telegram user of transcription failure
+                    try:
+                        error_msg = str(e)
+                        if "VRAM" in error_msg or "memory" in error_msg.lower() or "CUDA" in error_msg:
+                            await self.telegram.send_message(
+                                chat_id,
+                                "⚠️ Transcription failed: GPU memory error. Try a shorter voice message."
+                            )
+                        else:
+                            # Truncate error message to avoid long Telegram messages
+                            display_error = error_msg[:100] if len(error_msg) > 100 else error_msg
+                            await self.telegram.send_message(
+                                chat_id,
+                                f"⚠️ Transcription failed: {display_error}"
+                            )
+                    except Exception as notify_error:
+                        logger.error(f"Failed to notify Telegram user of transcription error: {notify_error}")
 
             # Create voice attachment
             from ..conversation_monitor import Message as ConvMessage
@@ -447,13 +471,17 @@ class TelegramBridge:
             # NOTE: Include transcription in message text for knowledge extraction (v0.15.1+)
             # Transcription is also shown in VoicePlayer attachment for UI
             message_text = transcription_text if transcription_text else "Voice message"
+            # Use original Telegram message date for timestamp (v0.15.3)
+            # message.date is already a datetime.datetime object from Telegram Bot API
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-voice-{message.message_id}",
                 conversation_id=conversation_id,
                 sender_node_id=f"telegram-bot-{chat_id}",
                 sender_name=sender_name,
                 text=message_text,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=msg_timestamp
             )
             conv_message.attachment_transfer_id = f"telegram-{message.message_id}"
             conv_message.attachments = [voice_attachment]
@@ -552,13 +580,17 @@ class TelegramBridge:
 
             # Create message
             caption = message.caption or "Image"
+            # Use original Telegram message date for timestamp (v0.15.3)
+            # message.date is already a datetime.datetime object from Telegram Bot API
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-photo-{message.message_id}",
                 conversation_id=conversation_id,
                 sender_node_id=f"telegram-bot-{chat_id}",
                 sender_name=sender_name,
                 text=caption,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=msg_timestamp
             )
             conv_message.attachments = [image_attachment]
 
@@ -658,13 +690,17 @@ class TelegramBridge:
 
             # Create message
             caption = message.caption or filename
+            # Use original Telegram message date for timestamp (v0.15.3)
+            # message.date is already a datetime.datetime object from Telegram Bot API
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-document-{message.message_id}",
                 conversation_id=conversation_id,
                 sender_node_id=f"telegram-bot-{chat_id}",
                 sender_name=sender_name,
                 text=caption,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=msg_timestamp
             )
             conv_message.attachments = [file_attachment]
 
@@ -765,13 +801,17 @@ class TelegramBridge:
 
             # Create message
             caption = message.caption or f"Video ({video.duration}s)"
+            # Use original Telegram message date for timestamp (v0.15.3)
+            # message.date is already a datetime.datetime object from Telegram Bot API
+            # Convert to ISO string for JSON serialization
+            msg_timestamp = message.date.replace(tzinfo=timezone.utc).isoformat()
             conv_message = ConvMessage(
                 message_id=f"telegram-video-{message.message_id}",
                 conversation_id=conversation_id,
                 sender_node_id=f"telegram-bot-{chat_id}",
                 sender_name=sender_name,
                 text=caption,
-                timestamp=datetime.now(timezone.utc)
+                timestamp=msg_timestamp
             )
             conv_message.attachments = [video_attachment]
 

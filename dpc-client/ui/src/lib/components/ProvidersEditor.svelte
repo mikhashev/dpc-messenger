@@ -3,18 +3,18 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
-  import { sendCommand } from '$lib/coreService';
+  import { sendCommand, peerProviders } from '$lib/coreService';
 
   export let open: boolean = false;
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper' | 'dpc_agent';
 
   type Provider = {
     alias: string;
     type: ProviderType;
-    model: string;
+    model?: string;          // Optional for dpc_agent type
     host?: string;           // Ollama only
     base_url?: string;       // OpenAI only
     api_key?: string;        // Plaintext (local providers only)
@@ -29,12 +29,25 @@
     language?: string;       // 'auto' or specific language code
     task?: string;           // 'transcribe' or 'translate'
     lazy_loading?: boolean;  // Load model on first use
+    // Remote Peer specific (v0.18.0+)
+    peer_id?: string;        // Remote peer's node ID (also used by dpc_agent for remote inference)
+    provider?: string;       // Remote provider alias (optional)
+    timeout?: number;        // Request timeout in seconds
+    // DPC Agent remote inference (v0.18.1+ KISS approach)
+    remote_model?: string;   // Model preference for remote peer
+    remote_provider?: string; // Provider preference for remote peer
+    // Thinking/reasoning (v0.15.0+)
+    thinking?: {
+      enabled?: boolean;
+      budget_tokens?: number;
+    };
   };
 
   type ProvidersConfig = {
     default_provider: string;
     vision_provider?: string;  // Optional vision provider for image queries
     voice_provider?: string;   // v0.13.0+: Optional voice provider for transcription
+    agent_provider?: string;   // v0.18.0+: Optional agent provider for AI agent
     providers: Provider[];
   };
 
@@ -53,6 +66,11 @@
   let modelInfoError: string = '';
   let queriedProviderAlias: string = '';
 
+  // Remote peer providers state (for dropdown population)
+  // Uses the shared peerProviders store from coreService for proper reactivity
+  let remotePeerLoading: string = '';  // peer_id being fetched
+  let remotePeerError: string = '';
+
   // Context window presets
   const CONTEXT_WINDOW_PRESETS = [
     { label: '2K tokens', value: 2048 },
@@ -70,6 +88,7 @@
     alias: '',
     type: 'ollama',
     model: '',
+    peer_id: '',  // For dpc_agent remote inference
   };
 
   // Load config when modal opens
@@ -191,6 +210,10 @@
       if (editedConfig.voice_provider === provider.alias) {
         editedConfig.voice_provider = editedConfig.providers[0]?.alias || '';
       }
+      // v0.18.0+: If deleted provider was agent default, reset agent default
+      if (editedConfig.agent_provider === provider.alias) {
+        editedConfig.agent_provider = editedConfig.providers[0]?.alias || '';
+      }
       editedConfig = editedConfig; // Trigger reactivity
     }
   }
@@ -213,6 +236,13 @@
   function setVoiceDefault(alias: string) {
     if (!editedConfig) return;
     editedConfig.voice_provider = alias;
+    editedConfig = editedConfig; // Trigger reactivity
+  }
+
+  // Set agent default provider (v0.18.0+)
+  function setAgentDefault(alias: string) {
+    if (!editedConfig) return;
+    editedConfig.agent_provider = alias;
     editedConfig = editedConfig; // Trigger reactivity
   }
 
@@ -244,6 +274,11 @@
     // v0.13.0+: Auto-update voice_provider if this was the voice default
     if (editedConfig.voice_provider === oldAlias) {
       editedConfig.voice_provider = newAlias;
+    }
+
+    // v0.18.0+: Auto-update agent_provider if this was the agent default
+    if (editedConfig.agent_provider === oldAlias) {
+      editedConfig.agent_provider = newAlias;
     }
 
     // Update the tracked alias
@@ -287,6 +322,7 @@
       alias: '',
       type: 'ollama',
       model: '',
+      peer_id: '',  // For dpc_agent remote inference
     };
   }
 
@@ -321,6 +357,10 @@
       provider.language = 'auto';
       provider.task = 'transcribe';
       provider.lazy_loading = true;
+    } else if (newProvider.type === 'dpc_agent') {
+      // dpc_agent doesn't require model - it uses the default AI provider
+      // Optionally can have peer_id for remote inference
+      delete provider.model;
     }
 
     editedConfig.providers.push(provider);
@@ -387,6 +427,62 @@
       }
     }
   }
+
+  // Fetch remote peer's available providers
+  // Uses shared peerProviders store from coreService (updated via peer_providers_updated event)
+  async function fetchRemotePeerProviders(peerId: string) {
+    if (!peerId || peerId.trim() === '') {
+      return;
+    }
+
+    remotePeerLoading = peerId;
+    remotePeerError = '';
+
+    try {
+      const result = await sendCommand('query_remote_providers', { peer_id: peerId });
+
+      // Check if sendCommand returned false (WebSocket not connected)
+      if (result === false) {
+        remotePeerError = 'Backend not connected. Please check the service is running.';
+        return;
+      }
+
+      if (result && result.status === 'success') {
+        // The store is updated automatically via peer_providers_updated event in coreService.ts
+      } else {
+        remotePeerError = result?.message || 'Failed to fetch providers';
+      }
+    } catch (error) {
+      console.error('Error fetching remote peer providers:', error);
+      remotePeerError = `Error: ${error}`;
+    } finally {
+      remotePeerLoading = '';
+    }
+  }
+
+  // Get providers for a remote peer (uses shared store)
+  function getRemotePeerProviders(peerId: string | undefined): any[] {
+    if (!peerId) return [];
+    return $peerProviders.get(peerId) || [];
+  }
+
+  // Get unique models from remote peer providers
+  function getRemotePeerModels(peerId: string | undefined): string[] {
+    const providers = getRemotePeerProviders(peerId);
+    const models = new Set<string>();
+    providers.forEach((p: any) => {
+      if (p.model) {
+        models.add(p.model);
+      }
+    });
+    return Array.from(models).sort();
+  }
+
+  // Check if peer providers are loading
+  function isRemotePeerLoading(peerId: string | undefined): boolean {
+    if (!peerId) return false;
+    return remotePeerLoading === peerId;
+  }
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
@@ -443,6 +539,7 @@
                     {#if provider.alias === displayConfig.default_provider}<span class="default-badge">⭐ Text Default</span>{/if}
                     {#if provider.alias === displayConfig.vision_provider}<span class="default-badge vision-badge">👁️ Vision Default</span>{/if}
                     {#if provider.alias === displayConfig.voice_provider}<span class="default-badge voice-badge">🎤 Voice Default</span>{/if}
+                    {#if provider.alias === displayConfig.agent_provider}<span class="default-badge agent-badge">🤖 Agent Default</span>{/if}
                   </h3>
                   {#if editMode}
                     <button class="btn-delete" on:click={() => deleteProvider(i)}>Delete</button>
@@ -474,18 +571,120 @@
                         <option value="anthropic">Anthropic</option>
                         <option value="zai">Z.AI</option>
                         <option value="local_whisper">Local Whisper</option>
+                        <option value="dpc_agent">DPC Agent</option>
                       </select>
                     </div>
 
-                    <div class="form-group">
-                      <label for="model-{i}">Model</label>
-                      <input
-                        id="model-{i}"
-                        type="text"
-                        bind:value={editedConfig.providers[i].model}
-                        placeholder="llama3.1:8b"
-                      />
-                    </div>
+                    {#if editedConfig.providers[i].type !== 'dpc_agent'}
+                      <div class="form-group">
+                        <label for="model-{i}">Model</label>
+                        <input
+                          id="model-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].model}
+                          placeholder="llama3.1:8b"
+                        />
+                      </div>
+                    {:else if editedConfig.providers[i].type === 'dpc_agent'}
+                      <div class="form-info">
+                        <p><strong>DPC Agent</strong> - Embedded autonomous AI agent for task automation.</p>
+                        <p>Uses your configured default AI provider. Add peer_id below to use a remote peer's models instead.</p>
+                      </div>
+
+                      <!-- Remote Peer Configuration (optional) -->
+                      <div class="form-group">
+                        <label for="peer-id-{i}">Remote Peer ID (optional)</label>
+                        <div class="input-with-button">
+                          <input
+                            id="peer-id-{i}"
+                            type="text"
+                            bind:value={editedConfig.providers[i].peer_id}
+                            placeholder="Leave empty for local inference"
+                          />
+                          <button
+                            class="btn-fetch"
+                            on:click={() => fetchRemotePeerProviders(editedConfig!.providers[i].peer_id || '')}
+                            disabled={!editedConfig.providers[i].peer_id || isRemotePeerLoading(editedConfig.providers[i].peer_id)}
+                            title="Fetch available providers from this peer"
+                          >
+                            {isRemotePeerLoading(editedConfig.providers[i].peer_id) ? '⏳' : '🔍'}
+                          </button>
+                        </div>
+                        <p class="help-text">If set, agent uses this peer's models instead of local</p>
+                        {#if remotePeerError && remotePeerLoading === editedConfig.providers[i].peer_id}
+                          <p class="help-text warn">{remotePeerError}</p>
+                        {/if}
+                        {#if editedConfig.providers[i].peer_id && getRemotePeerProviders(editedConfig.providers[i].peer_id).length > 0}
+                          <p class="help-text success">✓ Found {getRemotePeerProviders(editedConfig.providers[i].peer_id).length} providers</p>
+                        {/if}
+                      </div>
+
+                      {#if editedConfig.providers[i].peer_id}
+                        <!-- Remote Model Selection -->
+                        <div class="form-group">
+                          <label for="remote-model-{i}">Remote Model</label>
+                          {#if getRemotePeerModels(editedConfig.providers[i].peer_id).length > 0}
+                            <select
+                              id="remote-model-{i}"
+                              bind:value={editedConfig.providers[i].remote_model}
+                            >
+                              <option value="">Any available model</option>
+                              {#each getRemotePeerModels(editedConfig.providers[i].peer_id) as model}
+                                <option value={model}>{model}</option>
+                              {/each}
+                            </select>
+                            <p class="help-text">Select model from remote peer (fetched)</p>
+                          {:else}
+                            <input
+                              id="remote-model-{i}"
+                              type="text"
+                              bind:value={editedConfig.providers[i].remote_model}
+                              placeholder="llama3:70b"
+                            />
+                            <p class="help-text">Enter model name manually (or fetch providers first)</p>
+                          {/if}
+                        </div>
+
+                        <!-- Remote Provider Selection -->
+                        <div class="form-group">
+                          <label for="remote-provider-{i}">Remote Provider</label>
+                          {#if getRemotePeerProviders(editedConfig.providers[i].peer_id).length > 0}
+                            <select
+                              id="remote-provider-{i}"
+                              bind:value={editedConfig.providers[i].remote_provider}
+                            >
+                              <option value="">Any available provider</option>
+                              {#each getRemotePeerProviders(editedConfig.providers[i].peer_id) as prov}
+                                <option value={prov.alias}>{prov.alias} ({prov.type})</option>
+                              {/each}
+                            </select>
+                            <p class="help-text">Select provider from remote peer (fetched)</p>
+                          {:else}
+                            <input
+                              id="remote-provider-{i}"
+                              type="text"
+                              bind:value={editedConfig.providers[i].remote_provider}
+                              placeholder="ollama_text"
+                            />
+                            <p class="help-text">Enter provider alias manually (or fetch providers first)</p>
+                          {/if}
+                        </div>
+
+                        <!-- Timeout for remote inference -->
+                        <div class="form-group">
+                          <label for="timeout-{i}">Timeout (seconds)</label>
+                          <input
+                            id="timeout-{i}"
+                            type="number"
+                            bind:value={editedConfig.providers[i].timeout}
+                            placeholder="180"
+                            min="30"
+                            max="600"
+                          />
+                          <p class="help-text">Timeout for remote inference (default: 180s, max: 600s)</p>
+                        </div>
+                      {/if}
+                    {/if}
 
                     <!-- Type-specific fields -->
                     {#if editedConfig.providers[i].type === 'ollama'}
@@ -749,6 +948,13 @@
                       >
                         {provider.alias === displayConfig.voice_provider ? '✓ Voice Default' : 'Set as Voice Default'}
                       </button>
+                      <button
+                        class="btn-set-default"
+                        class:active={provider.alias === displayConfig.agent_provider}
+                        on:click={() => setAgentDefault(provider.alias)}
+                      >
+                        {provider.alias === displayConfig.agent_provider ? '✓ Agent Default' : 'Set as Agent Default'}
+                      </button>
                     </div>
                   </div>
                 {:else}
@@ -795,6 +1001,16 @@
                       <p><strong>Lazy Loading:</strong> {provider.lazy_loading !== false ? 'Enabled' : 'Disabled'}</p>
                     {/if}
 
+                    {#if provider.type === 'dpc_agent' && provider.peer_id}
+                      <p><strong>Remote Peer ID:</strong> {provider.peer_id}</p>
+                      {#if provider.remote_model}
+                        <p><strong>Remote Model:</strong> {provider.remote_model}</p>
+                      {/if}
+                      {#if provider.remote_provider}
+                        <p><strong>Remote Provider:</strong> {provider.remote_provider}</p>
+                      {/if}
+                    {/if}
+
                     {#if provider.context_window}
                       <p><strong>Context Window:</strong> {provider.context_window.toLocaleString()} tokens</p>
                     {/if}
@@ -832,24 +1048,27 @@
                 <option value="anthropic">Anthropic</option>
                 <option value="zai">Z.AI</option>
                 <option value="local_whisper">Local Whisper</option>
+                <option value="dpc_agent">DPC Agent</option>
               </select>
             </div>
 
-            <div class="form-group">
-              <label for="new-model">Model</label>
-              <input
-                id="new-model"
-                type="text"
-                bind:value={newProvider.model}
-                placeholder={
-                  newProvider.type === 'ollama' ? 'llama3.1:8b' :
-                  newProvider.type === 'openai_compatible' ? 'gpt-4o' :
-                  newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
-                  newProvider.type === 'zai' ? 'glm-4.7' :
-                  'claude-3-5-sonnet-20240620'
-                }
-              />
-            </div>
+            {#if newProvider.type !== 'dpc_agent'}
+              <div class="form-group">
+                <label for="new-model">Model</label>
+                <input
+                  id="new-model"
+                  type="text"
+                  bind:value={newProvider.model}
+                  placeholder={
+                    newProvider.type === 'ollama' ? 'llama3.1:8b' :
+                    newProvider.type === 'openai_compatible' ? 'gpt-4o' :
+                    newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
+                    newProvider.type === 'zai' ? 'glm-4.7' :
+                    'claude-3-5-sonnet-20240620'
+                  }
+                />
+              </div>
+            {/if}
 
             <div class="form-info">
               <p><strong>Note:</strong> After adding the provider, you can configure additional settings in the edit mode.</p>
@@ -864,13 +1083,18 @@
                 <p>Device: Auto-detect (CUDA if available)</p>
                 <p>Model will download on first use (~3GB)</p>
                 <p>GPU acceleration recommended for fast transcription</p>
+              {:else if newProvider.type === 'dpc_agent'}
+                <p>Embedded autonomous AI agent for task automation</p>
+                <p>Uses your configured default AI provider</p>
+                <p>No model or API key configuration required</p>
+                <p>Optionally configure peer_id for remote inference</p>
               {/if}
             </div>
 
             <button
               class="btn btn-primary"
               on:click={addNewProvider}
-              disabled={!newProvider.alias || !newProvider.model}
+              disabled={!newProvider.alias || (newProvider.type !== 'dpc_agent' && !newProvider.model)}
             >
               Add Provider
             </button>
@@ -1163,6 +1387,11 @@
     margin-left: 8px;
   }
 
+  .agent-badge {
+    color: #4CAF50;
+    margin-left: 8px;
+  }
+
   .btn-delete {
     background: #dc3545;
     color: #fff;
@@ -1234,12 +1463,23 @@
 
   .form-group input,
   .form-group select {
-    background: #1e1e1e;
-    border: 1px solid #333;
+    background: #2a2a2a;
+    border: 1px solid #444;
     color: #fff;
     padding: 8px;
     border-radius: 4px;
     font-size: 0.9rem;
+  }
+
+  .form-group select {
+    cursor: pointer;
+    min-height: 36px;
+  }
+
+  .form-group select option {
+    background: #2a2a2a;
+    color: #fff;
+    padding: 8px;
   }
 
   .form-group input:focus,
@@ -1269,6 +1509,43 @@
 
   .help-text.warn {
     color: #ffc107;
+  }
+
+  .help-text.success {
+    color: #28a745;
+  }
+
+  .input-with-button {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  .input-with-button input {
+    flex: 1;
+  }
+
+  .btn-fetch {
+    background: #007acc;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 1rem;
+    min-width: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .btn-fetch:hover:not(:disabled) {
+    background: #005a9e;
+  }
+
+  .btn-fetch:disabled {
+    background: #666;
+    cursor: not-allowed;
   }
 
   .warn {

@@ -5,6 +5,7 @@
   import MarkdownMessage from './MarkdownMessage.svelte';
   import ImageMessage from './ImageMessage.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
+  import ThinkingBlock from './ThinkingBlock.svelte';
 
   // Message type definition
   type Message = {
@@ -15,6 +16,9 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
+    thinking?: string;  // Thinking/reasoning content (v1.4+)
+    thinkingTokens?: number;  // Tokens used for thinking (v1.4+)
+    streamingRaw?: string;  // v0.16.0+: Raw streaming text (shown in collapsible)
     attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
       type: 'file' | 'image' | 'voice';
       filename: string;
@@ -57,14 +61,36 @@
     conversationId,
     enableMarkdown = $bindable(true),
     chatWindowElement = $bindable(),
-    showTranscription = true  // v0.13.2+: Control transcription display
+    showTranscription = true,  // v0.13.2+: Control transcription display
+    agentProgressMessage = null,  // v0.15.0+: Agent progress message
+    agentProgressTool = null,  // v0.15.0+: Current tool being executed
+    agentProgressRound = 0,  // v0.15.0+: Current round number
+    agentStreamingText = ""  // v0.16.0+: Streaming text from agent
   }: {
     messages: Message[];
     conversationId: string;
     enableMarkdown?: boolean;
     chatWindowElement?: HTMLElement;
     showTranscription?: boolean;
+    agentProgressMessage?: string | null;
+    agentProgressTool?: string | null;
+    agentProgressRound?: number;
+    agentStreamingText?: string;
   } = $props();
+
+  // Debug: Log when progress props change
+  $effect(() => {
+    if (agentProgressTool || agentProgressMessage) {
+      console.log(`[ChatPanel] Progress props: tool=${agentProgressTool}, msg=${agentProgressMessage?.substring(0,50)}, round=${agentProgressRound}`);
+    }
+  });
+
+  // Auto-scroll when streaming text updates
+  $effect(() => {
+    if (agentStreamingText && chatWindowElement) {
+      chatWindowElement.scrollTop = chatWindowElement.scrollHeight;
+    }
+  });
 </script>
 
 <div class="chat-window" bind:this={chatWindowElement}>
@@ -83,6 +109,11 @@
           </strong>
           <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
+        <!-- Thinking block (v1.4+): Display AI reasoning before main response -->
+        {#if msg.sender === 'ai' && msg.thinking}
+          <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
+        {/if}
+
         <!-- Message text (hidden for voice attachments with transcription to avoid duplication, v0.15.1+) -->
         {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)}
           {#if msg.sender === 'ai' && enableMarkdown}
@@ -90,6 +121,17 @@
           {:else}
             <p>{msg.text}</p>
           {/if}
+        {/if}
+
+        <!-- Raw streaming output (v0.16.0+): Collapsible section showing incremental text -->
+        {#if msg.sender === 'ai' && msg.streamingRaw && msg.streamingRaw.length > 50}
+          <details class="streaming-raw-details">
+            <summary class="streaming-raw-summary">
+              <span class="streaming-raw-icon">📝</span>
+              <span>Raw output ({msg.streamingRaw.length} chars)</span>
+            </summary>
+            <pre class="streaming-raw-content">{msg.streamingRaw}</pre>
+          </details>
         {/if}
 
         <!-- Attachments (Phase 2.5: Images + Files + v0.13.0: Voice) -->
@@ -147,6 +189,38 @@
   {:else}
     <div class="empty-chat">
       <p>No messages yet. Start the conversation!</p>
+    </div>
+  {/if}
+
+  <!-- Agent progress indicator (v0.15.0+) -->
+  {#if agentProgressTool || agentProgressMessage}
+    <div class="agent-progress">
+      <div class="agent-progress-spinner"></div>
+      <div class="agent-progress-content">
+        {#if agentProgressTool}
+          <span class="agent-progress-tool">🔧 {agentProgressTool}</span>
+        {/if}
+        {#if agentProgressRound > 0}
+          <span class="agent-progress-round">Round {agentProgressRound}</span>
+        {/if}
+        {#if agentProgressMessage}
+          <span class="agent-progress-message">{agentProgressMessage}</span>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
+  <!-- Agent streaming text (v0.16.0+) - Shows AI response as it's generated -->
+  {#if agentStreamingText}
+    <div class="message ai-streaming">
+      <div class="message-header">
+        <strong>AI Assistant</strong>
+        <span class="streaming-indicator">✨ Generating...</span>
+      </div>
+      <!-- Always use plain text during streaming for performance - markdown renders on final message -->
+      <div class="message-text streaming-content">
+        <pre class="streaming-plain">{agentStreamingText}</pre>
+      </div>
     </div>
   {/if}
 </div>
@@ -283,5 +357,148 @@
     border-radius: 8px;
     color: #555;
     font-size: 13px;
+  }
+
+  /* Agent progress indicator (v0.15.0+) */
+  .agent-progress {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    margin: 8px 0;
+    background: linear-gradient(135deg, #e3f2fd 0%, #f3e5f5 100%);
+    border: 1px solid #90caf9;
+    border-radius: 12px;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.8; }
+  }
+
+  .agent-progress-spinner {
+    width: 20px;
+    height: 20px;
+    border: 2px solid #90caf9;
+    border-top-color: #1976d2;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
+  }
+
+  .agent-progress-content {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+  }
+
+  .agent-progress-tool {
+    font-weight: 600;
+    color: #1565c0;
+  }
+
+  .agent-progress-round {
+    font-size: 0.85em;
+    color: #666;
+    background: rgba(0,0,0,0.05);
+    padding: 2px 8px;
+    border-radius: 10px;
+  }
+
+  .agent-progress-message {
+    color: #555;
+    font-size: 0.9em;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Agent streaming text (v0.16.0+) */
+  .ai-streaming {
+    background: linear-gradient(135deg, #e8f5e9 0%, #f1f8e9 100%);
+    border: 1px solid #a5d6a7;
+    animation: fade-in 0.3s ease;
+  }
+
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .streaming-indicator {
+    color: #4caf50;
+    font-size: 0.75rem;
+    margin-left: 8px;
+    animation: blink 1.5s ease-in-out infinite;
+  }
+
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  .streaming-content {
+    min-height: 20px;
+  }
+
+  .streaming-plain {
+    margin: 0;
+    padding: 0;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    font-family: inherit;
+    font-size: inherit;
+    background: transparent;
+    color: inherit;
+    line-height: 1.5;
+  }
+
+  /* Collapsible raw streaming output (v0.16.0+) */
+  .streaming-raw-details {
+    margin-top: 0.75rem;
+    border: 1px solid #e0e0e0;
+    border-radius: 6px;
+    background: #fafafa;
+  }
+
+  .streaming-raw-summary {
+    padding: 0.5rem 0.75rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: #666;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    user-select: none;
+  }
+
+  .streaming-raw-summary:hover {
+    background: #f0f0f0;
+  }
+
+  .streaming-raw-icon {
+    font-size: 0.9rem;
+  }
+
+  .streaming-raw-content {
+    margin: 0;
+    padding: 0.75rem;
+    border-top: 1px solid #e0e0e0;
+    background: #f5f5f5;
+    font-family: 'Courier New', Consolas, Monaco, monospace;
+    font-size: 0.8rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-height: 300px;
+    overflow-y: auto;
+    color: #555;
   }
 </style>

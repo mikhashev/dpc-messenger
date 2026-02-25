@@ -28,6 +28,27 @@
       allow_groups: string[];
       allowed_models: string[];
     };
+    dpc_agent?: {
+      _comment?: string;
+      enabled: boolean;
+      personal_context_access: boolean;
+      device_context_access: boolean;
+      knowledge_access: 'none' | 'read_only' | 'read_write';
+      tools: {
+        [key: string]: boolean | undefined;
+      };
+      sandbox_extensions?: {
+        _comment?: string;
+        read_only?: string[];
+        read_write?: string[];
+      };
+      evolution?: {
+        _comment?: string;
+        enabled: boolean;
+        interval_minutes: number;
+        auto_apply: boolean;
+      };
+    };
     file_transfer?: {
       _comment?: string;
       groups?: Record<string, any>;
@@ -52,7 +73,7 @@
   };
 
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'peers' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'dpc-agent' | 'peers' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -107,6 +128,15 @@
     editMode = true;
     // Deep copy the rules for editing
     editedRules = JSON.parse(JSON.stringify(rules));
+
+    // Initialize evolution settings if missing
+    if (editedRules && editedRules.dpc_agent && !editedRules.dpc_agent.evolution) {
+      editedRules.dpc_agent.evolution = {
+        enabled: false,
+        interval_minutes: 60,
+        auto_apply: false
+      };
+    }
   }
 
   // Cancel editing
@@ -581,6 +611,13 @@
           on:click={() => selectedTab = 'notifications'}
         >
           Notifications
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'dpc-agent'}
+          on:click={() => selectedTab = 'dpc-agent'}
+        >
+          Agent Permissions
         </button>
         <button
           class="tab"
@@ -1461,6 +1498,797 @@
             {/if}
           </div>
 
+        {:else if selectedTab === 'dpc-agent'}
+          <div class="section">
+            <h3>DPC Agent Permissions</h3>
+            <p class="help-text">Control what the embedded AI agent can access and which tools it can use.</p>
+
+            {#if displayRules?.dpc_agent}
+              <div class="compute-settings">
+                <!-- Master Enable Toggle -->
+                <div class="setting-item">
+                  <label>
+                    {#if editMode && editedRules?.dpc_agent}
+                      <input
+                        type="checkbox"
+                        id="dpc-agent-enabled"
+                        bind:checked={editedRules.dpc_agent.enabled}
+                      />
+                    {:else}
+                      <input
+                        type="checkbox"
+                        id="dpc-agent-enabled-display"
+                        checked={displayRules.dpc_agent.enabled}
+                        disabled
+                      />
+                    {/if}
+                    <strong>Enable DPC Agent</strong>
+                  </label>
+                  <p class="help-text-small">Master toggle for the embedded autonomous AI agent</p>
+                </div>
+
+                {#if displayRules.dpc_agent.enabled}
+                  <!-- Context Access Section -->
+                  <div class="subsection">
+                    <h4>Context Access</h4>
+                    <p class="help-text-small">Control which DPC context the agent can read</p>
+
+                    <div class="setting-item">
+                      <label>
+                        {#if editMode && editedRules?.dpc_agent}
+                          <input
+                            type="checkbox"
+                            id="dpc-agent-personal"
+                            bind:checked={editedRules.dpc_agent.personal_context_access}
+                          />
+                        {:else}
+                          <input
+                            type="checkbox"
+                            checked={displayRules.dpc_agent.personal_context_access}
+                            disabled
+                          />
+                        {/if}
+                        <span>Personal Context Access</span>
+                      </label>
+                    </div>
+
+                    <div class="setting-item">
+                      <label>
+                        {#if editMode && editedRules?.dpc_agent}
+                          <input
+                            type="checkbox"
+                            id="dpc-agent-device"
+                            bind:checked={editedRules.dpc_agent.device_context_access}
+                          />
+                        {:else}
+                          <input
+                            type="checkbox"
+                            checked={displayRules.dpc_agent.device_context_access}
+                            disabled
+                          />
+                        {/if}
+                        <span>Device Context Access</span>
+                      </label>
+                    </div>
+
+                    <div class="setting-item">
+                      <span><strong>Knowledge Access:</strong></span>
+                      {#if editMode && editedRules?.dpc_agent}
+                        <select bind:value={editedRules.dpc_agent.knowledge_access}>
+                          <option value="none">None</option>
+                          <option value="read_only">Read Only</option>
+                          <option value="read_write">Read & Write</option>
+                        </select>
+                      {:else}
+                        <span class="value">{displayRules.dpc_agent.knowledge_access}</span>
+                      {/if}
+                    </div>
+                  </div>
+
+                  <!-- Evolution Settings Section -->
+                  <div class="subsection">
+                    <h4>Evolution Settings</h4>
+                    <p class="help-text-small">Configure autonomous self-modification behavior</p>
+
+                    <div class="setting-item">
+                      <label>
+                        {#if editMode && editedRules?.dpc_agent?.evolution}
+                          <input
+                            type="checkbox"
+                            id="dpc-agent-evolution-enabled"
+                            bind:checked={editedRules.dpc_agent.evolution.enabled}
+                          />
+                        {:else}
+                          <input
+                            type="checkbox"
+                            id="dpc-agent-evolution-enabled-display"
+                            checked={displayRules.dpc_agent.evolution?.enabled || false}
+                            disabled
+                          />
+                        {/if}
+                        <span>Enable Evolution</span>
+                      </label>
+                      <p class="help-text-small">Allow agent to autonomously improve itself within sandbox</p>
+                    </div>
+
+                    {#if (editMode ? editedRules?.dpc_agent?.evolution?.enabled : displayRules.dpc_agent.evolution?.enabled)}
+                      <div class="setting-item" style="margin-top: 0.75rem;">
+                        <span><strong>Interval (minutes):</strong></span>
+                        {#if editMode && editedRules?.dpc_agent?.evolution}
+                          <input
+                            type="number"
+                            id="dpc-agent-evolution-interval"
+                            min="1"
+                            max="1440"
+                            bind:value={editedRules.dpc_agent.evolution.interval_minutes}
+                            style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
+                          />
+                        {:else}
+                          <span class="value">{displayRules.dpc_agent.evolution?.interval_minutes || 60}</span>
+                        {/if}
+                        <span class="help-text-small" style="margin-left: 0.5rem;">Time between evolution cycles</span>
+                      </div>
+
+                      <div class="setting-item" style="margin-top: 0.5rem;">
+                        <label>
+                          {#if editMode && editedRules?.dpc_agent?.evolution}
+                            <input
+                              type="checkbox"
+                              id="dpc-agent-evolution-auto-apply"
+                              bind:checked={editedRules.dpc_agent.evolution.auto_apply}
+                            />
+                          {:else}
+                            <input
+                              type="checkbox"
+                              id="dpc-agent-evolution-auto-apply-display"
+                              checked={displayRules.dpc_agent.evolution?.auto_apply || false}
+                              disabled
+                            />
+                          {/if}
+                          <span>Auto-Apply Changes</span>
+                        </label>
+                        <p class="help-text-small">If disabled, changes require manual approval</p>
+                      </div>
+                    {:else if editMode && editedRules?.dpc_agent}
+                      <!-- Initialize evolution object if missing when user enables it -->
+                      {#if !editedRules.dpc_agent.evolution}
+                        {@html ''}
+                      {/if}
+                    {/if}
+
+                    {#if !editMode}
+                      <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
+                        <strong>Evolution</strong> allows the agent to modify its own memory files
+                        (identity.md, scratchpad.md, knowledge/*.md) within the ~/.dpc/agent/ sandbox.
+                        When auto-apply is disabled, you must manually approve each change.
+                      </div>
+                    {/if}
+                  </div>
+
+                  <!-- Tool Permissions Section -->
+                  <div class="subsection">
+                    <h4>Tool Permissions</h4>
+                    <p class="help-text-small">Control which tools the agent can use (enable/disable individually)</p>
+
+                    <!-- File Operations -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">File Operations (sandboxed)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'repo_read', label: 'Read Files', desc: 'Read files in sandbox' },
+                        { key: 'repo_list', label: 'List Files', desc: 'List directory contents' },
+                        { key: 'repo_write_commit', label: 'Write Files', desc: 'Create/modify files in sandbox' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Search Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Search Tools (grep-like)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'search_files', label: 'Search Files', desc: 'Search for patterns across multiple files' },
+                        { key: 'search_in_file', label: 'Search in File', desc: 'Search in specific file with context' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Extended Sandbox -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Extended Sandbox (custom paths)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'extended_path_read', label: 'Extended Read', desc: 'Read from custom paths outside sandbox' },
+                        { key: 'extended_path_list', label: 'Extended List', desc: 'List directories in custom paths' },
+                        { key: 'extended_path_write', label: 'Extended Write', desc: 'Write to custom paths (requires read_write)' },
+                        { key: 'list_extended_sandbox_paths', label: 'List Extended Paths', desc: 'View configured extended paths' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Sandbox Path Configuration -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Configure Extended Paths</h5>
+                    <p class="help-text-small" style="margin-bottom: 0.5rem;">Add directories outside the default sandbox that the agent can access</p>
+
+                    {#if editMode && editedRules?.dpc_agent}
+                      <div class="sandbox-paths-config">
+                        <!-- Read-Only Paths -->
+                        <div class="path-section">
+                          <span class="path-label">📖 Read-Only Paths</span>
+                          <p class="help-text-small">Agent can read but not modify files in these directories</p>
+
+                          {#each (editedRules.dpc_agent.sandbox_extensions?.read_only || []) as path, i}
+                            <div class="path-entry">
+                              <input
+                                type="text"
+                                class="path-input"
+                                bind:value={editedRules.dpc_agent.sandbox_extensions!.read_only![i]}
+                                placeholder="C:\Users\you\Documents\notes"
+                              />
+                              <button
+                                type="button"
+                                class="remove-path-btn"
+                                on:click={() => {
+                                  if (!editedRules?.dpc_agent) return;
+                                  if (!editedRules.dpc_agent.sandbox_extensions) {
+                                    editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
+                                  }
+                                  editedRules.dpc_agent.sandbox_extensions.read_only = (editedRules.dpc_agent.sandbox_extensions.read_only || []).filter((_: string, idx: number) => idx !== i);
+                                  editedRules = editedRules;
+                                }}
+                              >✕</button>
+                            </div>
+                          {/each}
+                          <button
+                            type="button"
+                            class="add-path-btn"
+                            on:click={() => {
+                              if (!editedRules?.dpc_agent) return;
+                              if (!editedRules.dpc_agent.sandbox_extensions) {
+                                editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
+                              }
+                              if (!editedRules.dpc_agent.sandbox_extensions.read_only) {
+                                editedRules.dpc_agent.sandbox_extensions.read_only = [];
+                              }
+                              editedRules.dpc_agent.sandbox_extensions.read_only = [...editedRules.dpc_agent.sandbox_extensions.read_only, ''];
+                              editedRules = editedRules;
+                            }}
+                          >+ Add Read-Only Path</button>
+                        </div>
+
+                        <!-- Read-Write Paths -->
+                        <div class="path-section" style="margin-top: 1rem;">
+                          <span class="path-label">✏️ Read-Write Paths</span>
+                          <p class="help-text-small">Agent can read and modify files in these directories</p>
+
+                          {#each (editedRules.dpc_agent.sandbox_extensions?.read_write || []) as path, i}
+                            <div class="path-entry">
+                              <input
+                                type="text"
+                                class="path-input"
+                                bind:value={editedRules.dpc_agent.sandbox_extensions!.read_write![i]}
+                                placeholder="C:\Users\you\projects\myapp"
+                              />
+                              <button
+                                type="button"
+                                class="remove-path-btn"
+                                on:click={() => {
+                                  if (!editedRules?.dpc_agent) return;
+                                  if (!editedRules.dpc_agent.sandbox_extensions) {
+                                    editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
+                                  }
+                                  editedRules.dpc_agent.sandbox_extensions.read_write = (editedRules.dpc_agent.sandbox_extensions.read_write || []).filter((_: string, idx: number) => idx !== i);
+                                  editedRules = editedRules;
+                                }}
+                              >✕</button>
+                            </div>
+                          {/each}
+                          <button
+                            type="button"
+                            class="add-path-btn"
+                            on:click={() => {
+                              if (!editedRules?.dpc_agent) return;
+                              if (!editedRules.dpc_agent.sandbox_extensions) {
+                                editedRules.dpc_agent.sandbox_extensions = { read_only: [], read_write: [] };
+                              }
+                              if (!editedRules.dpc_agent.sandbox_extensions.read_write) {
+                                editedRules.dpc_agent.sandbox_extensions.read_write = [];
+                              }
+                              editedRules.dpc_agent.sandbox_extensions.read_write = [...editedRules.dpc_agent.sandbox_extensions.read_write, ''];
+                              editedRules = editedRules;
+                            }}
+                          >+ Add Read-Write Path</button>
+                        </div>
+                      </div>
+                    {:else if displayRules?.dpc_agent?.sandbox_extensions}
+                      <div class="sandbox-paths-display">
+                        {#if (displayRules.dpc_agent.sandbox_extensions.read_only?.length ?? 0) > 0}
+                          <div class="path-section">
+                            <span class="path-label">📖 Read-Only Paths</span>
+                            <ul class="path-list">
+                              {#each displayRules.dpc_agent.sandbox_extensions.read_only || [] as path}
+                                <li>{path}</li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                        {#if (displayRules.dpc_agent.sandbox_extensions.read_write?.length ?? 0) > 0}
+                          <div class="path-section">
+                            <span class="path-label">✏️ Read-Write Paths</span>
+                            <ul class="path-list">
+                              {#each displayRules.dpc_agent.sandbox_extensions.read_write || [] as path}
+                                <li>{path}</li>
+                              {/each}
+                            </ul>
+                          </div>
+                        {/if}
+                        {#if !displayRules.dpc_agent.sandbox_extensions.read_only?.length && !displayRules.dpc_agent.sandbox_extensions.read_write?.length}
+                          <p class="help-text-small" style="font-style: italic;">No extended paths configured</p>
+                        {/if}
+                      </div>
+                    {:else}
+                      <p class="help-text-small" style="font-style: italic;">No extended paths configured</p>
+                    {/if}
+
+                    <!-- Web Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Web Tools</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'search_web', label: 'Web Search', desc: 'Search the web via DuckDuckGo' },
+                        { key: 'browse_page', label: 'Browse Page', desc: 'Fetch and parse web pages' },
+                        { key: 'fetch_json', label: 'Fetch JSON', desc: 'Fetch JSON from APIs' },
+                        { key: 'extract_links', label: 'Extract Links', desc: 'Extract links from pages' },
+                        { key: 'check_url', label: 'Check URL', desc: 'Check if URL is accessible' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Memory & Knowledge -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Memory & Knowledge</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'update_scratchpad', label: 'Update Scratchpad', desc: 'Update agent working memory' },
+                        { key: 'update_identity', label: 'Update Identity', desc: 'Update agent identity' },
+                        { key: 'chat_history', label: 'Chat History', desc: 'Access chat history' },
+                        { key: 'knowledge_read', label: 'Read Knowledge', desc: 'Read knowledge base' },
+                        { key: 'knowledge_write', label: 'Write Knowledge', desc: 'Write to knowledge base' },
+                        { key: 'knowledge_list', label: 'List Knowledge', desc: 'List knowledge topics' },
+                        { key: 'get_dpc_context', label: 'Get DPC Context', desc: 'Access DPC personal/device context' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Git Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Git Tools</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'git_status', label: 'Git Status', desc: 'Check git status' },
+                        { key: 'git_diff', label: 'Git Diff', desc: 'Show git diff' },
+                        { key: 'git_log', label: 'Git Log', desc: 'Show git log' },
+                        { key: 'git_add', label: 'Git Add', desc: 'Stage files' },
+                        { key: 'git_commit', label: 'Git Commit', desc: 'Create commits' },
+                        { key: 'git_branch', label: 'Git Branch', desc: 'List branches' },
+                        { key: 'git_init', label: 'Git Init', desc: 'Initialize repo' },
+                        { key: 'repo_commit_push', label: 'Git Push', desc: 'Push to remote' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Drive Operations -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Drive Operations (direct filesystem)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'drive_read', label: 'Drive Read', desc: 'Read files from drive' },
+                        { key: 'drive_list', label: 'Drive List', desc: 'List drive contents' },
+                        { key: 'drive_write', label: 'Drive Write', desc: 'Write files to drive' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Review Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Review Tools (safe analysis)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'self_review', label: 'Self Review', desc: 'Review own work' },
+                        { key: 'request_critique', label: 'Request Critique', desc: 'Request feedback' },
+                        { key: 'compare_approaches', label: 'Compare Approaches', desc: 'Compare solutions' },
+                        { key: 'quality_checklist', label: 'Quality Checklist', desc: 'Run quality checks' },
+                        { key: 'consensus_check', label: 'Consensus Check', desc: 'Check consensus' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Restricted Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--danger);">Restricted Tools (security sensitive)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'run_shell', label: 'Shell Access', desc: 'Execute shell commands' },
+                        { key: 'claude_code_edit', label: 'Code Editing', desc: 'Edit code via Claude Code' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name" style="color: var(--danger);">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name" style="color: var(--danger);">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Task Queue Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Task Queue Tools (background scheduling)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'schedule_task', label: 'Schedule Task', desc: 'Schedule tasks for future execution' },
+                        { key: 'get_task_status', label: 'Task Status', desc: 'Check status of scheduled tasks' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Evolution Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Evolution Tools (agent self-modification)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'pause_evolution', label: 'Pause Evolution', desc: 'Pause automatic evolution cycles' },
+                        { key: 'resume_evolution', label: 'Resume Evolution', desc: 'Resume paused evolution' },
+                        { key: 'get_evolution_stats', label: 'Evolution Stats', desc: 'Get evolution statistics' },
+                        { key: 'approve_evolution_change', label: 'Approve Change', desc: 'Approve pending self-modification (dangerous)' },
+                        { key: 'reject_evolution_change', label: 'Reject Change', desc: 'Reject pending changes' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name" style={tool.key === 'approve_evolution_change' ? 'color: var(--danger);' : ''}>{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name" style={tool.key === 'approve_evolution_change' ? 'color: var(--danger);' : ''}>{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+
+                    <!-- Messaging Tools -->
+                    <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Messaging Tools (user communication)</h5>
+                    <div class="notification-events">
+                      {#each [
+                        { key: 'send_user_message', label: 'Send User Message', desc: 'Send Telegram messages to user (agent-initiated)' },
+                      ] as tool}
+                        <div class="notification-event-item">
+                          {#if editMode && editedRules?.dpc_agent?.tools}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                bind:checked={editedRules.dpc_agent.tools[tool.key]}
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {:else}
+                            <label for="agent-tool-{tool.key}">
+                              <input
+                                type="checkbox"
+                                id="agent-tool-{tool.key}"
+                                checked={displayRules.dpc_agent.tools[tool.key]}
+                                disabled
+                              />
+                              <div>
+                                <span class="event-name">{tool.label}</span>
+                                <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                              </div>
+                            </label>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              <p class="empty">DPC Agent settings not configured.</p>
+            {/if}
+
+            {#if !editMode}
+              <div class="info-box" style="margin-top: 1.5rem;">
+                <strong>Info:</strong> The DPC Agent is an embedded autonomous AI that can perform tasks on your behalf.
+                These settings control what data it can access and which tools it can use.
+                File operations are always sandboxed to ~/.dpc/agent/.
+                Shell access and code editing are disabled by default for security.
+              </div>
+            {/if}
+          </div>
+
         {:else if selectedTab === 'peers'}
           <div class="section">
             <h3>Peer Permissions</h3>
@@ -2068,6 +2896,98 @@
   .event-name {
     text-transform: capitalize;
     font-size: 0.9rem;
+  }
+
+  /* Sandbox path configuration styles */
+  .sandbox-paths-config {
+    margin-top: 0.5rem;
+    padding: 0.75rem;
+    background: #f9f9f9;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+  }
+
+  .path-section {
+    margin-bottom: 0.5rem;
+  }
+
+  .path-label {
+    font-weight: 500;
+    color: #333;
+    margin-bottom: 0.25rem;
+    display: block;
+  }
+
+  .path-entry {
+    display: flex;
+    gap: 0.5rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .path-input {
+    flex: 1;
+    padding: 0.5rem;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.9rem;
+    font-family: monospace;
+  }
+
+  .path-input:focus {
+    outline: none;
+    border-color: #1976d2;
+    box-shadow: 0 0 0 2px rgba(25, 118, 210, 0.2);
+  }
+
+  .remove-path-btn {
+    padding: 0.5rem 0.75rem;
+    background: #ffebee;
+    color: #c62828;
+    border: 1px solid #ffcdd2;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+  }
+
+  .remove-path-btn:hover {
+    background: #ffcdd2;
+  }
+
+  .add-path-btn {
+    width: 100%;
+    padding: 0.5rem;
+    background: #e3f2fd;
+    color: #1565c0;
+    border: 1px dashed #90caf9;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.9rem;
+    margin-top: 0.25rem;
+  }
+
+  .add-path-btn:hover {
+    background: #bbdefb;
+  }
+
+  .sandbox-paths-display {
+    padding: 0.75rem;
+    background: #f9f9f9;
+    border-radius: 6px;
+    border: 1px solid #e0e0e0;
+  }
+
+  .path-list {
+    margin: 0.25rem 0 0 0;
+    padding-left: 1.5rem;
+    list-style-type: disc;
+  }
+
+  .path-list li {
+    font-family: monospace;
+    font-size: 0.85rem;
+    padding: 0.25rem 0;
+    color: #555;
+    word-break: break-all;
   }
 
   /* v0.13.3: Fix for macOS WebKit event handler detachment issue */

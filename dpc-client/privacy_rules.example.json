@@ -164,5 +164,50 @@
       "session_result": true,
       "connection_status": false
     }
+  },
+
+  "dpc_agent": {
+    "_comment": "DPC Agent Permissions - Control what the embedded AI agent can access. The agent is an autonomous AI that can perform tasks on your behalf.",
+    "enabled": true,
+    "personal_context_access": true,
+    "device_context_access": true,
+    "knowledge_access": "read_only",
+    "tools": {
+      "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
+      "repo_read": true,
+      "repo_list": true,
+      "repo_write_commit": false,
+      "drive_read": false,
+      "drive_list": false,
+      "drive_write": false,
+      "update_scratchpad": true,
+      "update_identity": true,
+      "chat_history": true,
+      "knowledge_read": true,
+      "knowledge_write": false,
+      "knowledge_list": true,
+      "get_dpc_context": true,
+      "web_search": true,
+      "browse_page": true,
+      "fetch_json": true,
+      "extract_links": true,
+      "check_url": true,
+      "search_web": true,
+      "self_review": true,
+      "request_critique": true,
+      "compare_approaches": true,
+      "quality_checklist": true,
+      "consensus_check": true,
+      "git_status": false,
+      "git_diff": false,
+      "git_log": false,
+      "git_add": false,
+      "git_commit": false,
+      "git_branch": false,
+      "git_init": false,
+      "repo_commit_push": false,
+      "run_shell": false,
+      "claude_code_edit": false
+    }
   }
 }

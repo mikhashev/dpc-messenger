@@ -1,6 +1,6 @@
 # D-PC Messenger Documentation Index
 
-> **Version:** 0.10.0 | **Last Updated:** December 8, 2025
+> **Version:** 0.18.0 | **Last Updated:** February 25, 2026
 
 Welcome to the D-PC Messenger documentation! This index helps you navigate our comprehensive documentation library (44+ files, 25,000+ lines).
 

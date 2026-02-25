@@ -46,6 +46,9 @@ class ContextFirewall:
         # Parse notification settings
         self._parse_notification_settings()
 
+        # Parse DPC agent settings
+        self._parse_dpc_agent_settings()
+
     def _parse_compute_settings(self):
         """Parse compute sharing settings from the config."""
         compute = self.rules.get('compute', {})
@@ -85,6 +88,218 @@ class ContextFirewall:
         })
         logger.debug("Notification settings updated: enabled=%s, events=%s",
                      self.notifications_enabled, self.notification_events)
+
+    def _parse_dpc_agent_settings(self):
+        """Parse DPC agent settings from the config."""
+        dpc_agent = self.rules.get('dpc_agent', {})
+        self.dpc_agent_enabled = dpc_agent.get('enabled', True)
+        self.dpc_agent_personal_context_access = dpc_agent.get('personal_context_access', True)
+        self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', True)
+        self.dpc_agent_knowledge_access = dpc_agent.get('knowledge_access', 'read_only')
+
+        # All available tools with their default values
+        # True = enabled by default, False = disabled by default (security)
+        all_tools_defaults = {
+            # File operations (sandboxed to ~/.dpc/agent/)
+            'repo_read': True,
+            'repo_list': True,
+            'repo_write_commit': False,  # Can write files
+            # Drive operations (direct file system access)
+            'drive_read': False,
+            'drive_list': False,
+            'drive_write': False,
+            # Extended sandbox (v0.16.0+ - paths outside default sandbox)
+            'extended_path_read': False,  # Requires sandbox_extensions config
+            'extended_path_list': False,
+            'extended_path_write': False,  # Requires read_write in sandbox_extensions
+            'list_extended_sandbox_paths': True,  # Safe - just lists config
+            # Search tools (v0.16.0+ - grep-like functionality)
+            'search_files': True,  # Safe - read-only search
+            'search_in_file': True,  # Safe - read-only search
+            # Memory/identity
+            'update_scratchpad': True,
+            'update_identity': True,
+            'chat_history': True,
+            # Knowledge
+            'knowledge_read': True,
+            'knowledge_write': False,  # Controlled by knowledge_access
+            'knowledge_list': True,
+            # DPC integration
+            'get_dpc_context': True,
+            # Web tools
+            'browse_page': True,
+            'fetch_json': True,
+            'extract_links': True,
+            'check_url': True,
+            'search_web': True,
+            # Review tools (safe, analysis only)
+            'self_review': True,
+            'request_critique': True,
+            'compare_approaches': True,
+            'quality_checklist': True,
+            'consensus_check': True,
+            # Git tools (read-only)
+            'git_status': False,
+            'git_diff': False,
+            'git_log': False,
+            # Git tools (modify files)
+            'git_add': False,
+            'git_commit': False,
+            'git_branch': False,
+            'git_init': False,
+            'repo_commit_push': False,  # Can push to remote
+            # Restricted tools (security sensitive)
+            'run_shell': False,
+            'claude_code_edit': False,
+            # Task queue tools (v0.16.0+)
+            'schedule_task': True,  # Safe, just scheduling
+            'get_task_status': True,  # Read-only
+            # Evolution tools (v0.16.0+)
+            'pause_evolution': True,  # Control, doesn't modify files
+            'resume_evolution': True,  # Control, doesn't modify files
+            'get_evolution_stats': True,  # Read-only
+            'approve_evolution_change': False,  # Modifies files, requires explicit permission
+            'reject_evolution_change': True,  # Safe, just removes pending change
+            # Messaging tools (v0.18.0+)
+            'send_user_message': True,  # Agent-initiated Telegram messages
+        }
+
+        # Parse tool permissions from config, using defaults for missing tools
+        tools = dpc_agent.get('tools', {})
+        self.dpc_agent_tools: Dict[str, bool] = {}
+        for tool_name, default_enabled in all_tools_defaults.items():
+            self.dpc_agent_tools[tool_name] = tools.get(tool_name, default_enabled)
+
+        # Parse sandbox extensions (v0.16.0+ - custom paths outside default sandbox)
+        sandbox_extensions = dpc_agent.get('sandbox_extensions', {})
+        self.sandbox_read_only_paths: List[str] = sandbox_extensions.get('read_only', [])
+        self.sandbox_read_write_paths: List[str] = sandbox_extensions.get('read_write', [])
+
+        # Validate and normalize paths
+        self.sandbox_read_only_paths = [self._normalize_path(p) for p in self.sandbox_read_only_paths if p]
+        self.sandbox_read_write_paths = [self._normalize_path(p) for p in self.sandbox_read_write_paths if p]
+
+        # Parse evolution settings (v0.17.0+)
+        evolution = dpc_agent.get('evolution', {})
+        self.evolution_enabled = evolution.get('enabled', False)
+        self.evolution_interval_minutes = evolution.get('interval_minutes', 60)
+        self.evolution_auto_apply = evolution.get('auto_apply', False)
+
+        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s",
+                     self.dpc_agent_enabled,
+                     self.dpc_agent_personal_context_access,
+                     self.dpc_agent_device_context_access,
+                     self.dpc_agent_knowledge_access,
+                     len([t for t in self.dpc_agent_tools.values() if t]),
+                     len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths),
+                     self.evolution_enabled)
+
+    def _normalize_path(self, path_str: str) -> str:
+        """Normalize a path string for comparison."""
+        try:
+            p = Path(path_str).expanduser().resolve()
+            return str(p)
+        except Exception:
+            logger.warning(f"Invalid path in sandbox_extensions: {path_str}")
+            return ""
+
+    def is_extended_path_allowed(self, path: str, require_write: bool = False) -> bool:
+        """
+        Check if a path is in the extended sandbox (outside ~/.dpc/agent/).
+
+        Args:
+            path: Path to check
+            require_write: If True, check for write access; if False, read access is sufficient
+
+        Returns:
+            True if the path is allowed for the requested access level
+        """
+        if not self.dpc_agent_enabled:
+            return False
+
+        try:
+            normalized = str(Path(path).expanduser().resolve())
+        except Exception:
+            return False
+
+        # Check read_write paths first (they also allow read)
+        for allowed_path in self.sandbox_read_write_paths:
+            if allowed_path and normalized.startswith(allowed_path):
+                return True
+
+        # If write is required, read_only paths are not sufficient
+        if require_write:
+            return False
+
+        # Check read_only paths
+        for allowed_path in self.sandbox_read_only_paths:
+            if allowed_path and normalized.startswith(allowed_path):
+                return True
+
+        return False
+
+    def get_extended_paths(self) -> Dict[str, List[str]]:
+        """Get all extended sandbox paths."""
+        return {
+            'read_only': self.sandbox_read_only_paths,
+            'read_write': self.sandbox_read_write_paths,
+        }
+
+    def can_agent_access_context(self, context_type: str) -> bool:
+        """
+        Check if the DPC agent can access a specific context type.
+
+        Args:
+            context_type: Type of context ('personal', 'device', 'knowledge')
+
+        Returns:
+            True if agent can access this context type
+        """
+        if not self.dpc_agent_enabled:
+            return False
+
+        if context_type == 'personal':
+            return self.dpc_agent_personal_context_access
+        elif context_type == 'device':
+            return self.dpc_agent_device_context_access
+        elif context_type == 'knowledge':
+            # knowledge_access can be 'read_only', 'read_write', or 'none'
+            return self.dpc_agent_knowledge_access != 'none'
+
+        return False
+
+    def can_agent_write_knowledge(self) -> bool:
+        """Check if the agent can write to knowledge base."""
+        if not self.dpc_agent_enabled:
+            return False
+        return self.dpc_agent_knowledge_access == 'read_write'
+
+    def get_allowed_agent_tools(self) -> set:
+        """
+        Get the set of tools the agent is allowed to use.
+
+        Returns:
+            Set of allowed tool names based on firewall configuration
+        """
+        if not self.dpc_agent_enabled:
+            return set()
+
+        allowed = set()
+
+        # Add tools that are enabled in configuration
+        for tool_name, is_enabled in self.dpc_agent_tools.items():
+            if is_enabled:
+                allowed.add(tool_name)
+
+        # Override: get_dpc_context requires personal_context_access
+        if not self.dpc_agent_personal_context_access:
+            allowed.discard('get_dpc_context')
+
+        # Override: knowledge_write requires read_write access
+        if self.dpc_agent_knowledge_access != 'read_write':
+            allowed.discard('knowledge_write')
+
+        return allowed
 
     def _ensure_file_exists(self):
         """Creates a default, secure privacy_rules.json file if one doesn't exist."""
@@ -212,6 +427,64 @@ class ContextFirewall:
                         "session_proposal": True,
                         "session_result": True,
                         "connection_status": False
+                    }
+                },
+                "dpc_agent": {
+                    "_comment": "DPC Agent permissions - Control what the embedded AI agent can access",
+                    "enabled": True,
+                    "personal_context_access": True,
+                    "device_context_access": True,
+                    "knowledge_access": "read_only",
+                    "evolution": {
+                        "_comment": "Evolution settings - autonomous self-modification within sandbox",
+                        "enabled": False,
+                        "interval_minutes": 60,
+                        "auto_apply": False
+                    },
+                    "tools": {
+                        "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
+                        "repo_read": True,
+                        "repo_list": True,
+                        "repo_write_commit": False,
+                        "drive_read": False,
+                        "drive_list": False,
+                        "drive_write": False,
+                        "update_scratchpad": True,
+                        "update_identity": True,
+                        "chat_history": True,
+                        "knowledge_read": True,
+                        "knowledge_write": False,
+                        "knowledge_list": True,
+                        "get_dpc_context": True,
+                        "browse_page": True,
+                        "fetch_json": True,
+                        "extract_links": True,
+                        "check_url": True,
+                        "search_web": True,
+                        "self_review": True,
+                        "request_critique": True,
+                        "compare_approaches": True,
+                        "quality_checklist": True,
+                        "consensus_check": True,
+                        "git_status": False,
+                        "git_diff": False,
+                        "git_log": False,
+                        "git_add": False,
+                        "git_commit": False,
+                        "git_branch": False,
+                        "git_init": False,
+                        "repo_commit_push": False,
+                        "run_shell": False,
+                        "claude_code_edit": False,
+                        "_comment_task": "Task queue tools - safe scheduling and status checks",
+                        "schedule_task": True,
+                        "get_task_status": True,
+                        "_comment_evolution": "Evolution tools - control agent self-modification",
+                        "pause_evolution": True,
+                        "resume_evolution": True,
+                        "get_evolution_stats": True,
+                        "approve_evolution_change": False,
+                        "reject_evolution_change": True
                     }
                 },
                 "file_transfer": {
@@ -793,7 +1066,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', '_comment']
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', 'dpc_agent', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -986,6 +1259,89 @@ class ContextFirewall:
                             for event_name, enabled in notifications['events'].items():
                                 if not isinstance(enabled, bool):
                                     errors.append(f"'notifications.events.{event_name}' must be a boolean (true or false)")
+
+            # Validate dpc_agent section
+            if 'dpc_agent' in config_dict:
+                dpc_agent = config_dict['dpc_agent']
+                if not isinstance(dpc_agent, dict):
+                    errors.append("'dpc_agent' section must be a dictionary")
+                else:
+                    if 'enabled' in dpc_agent and not isinstance(dpc_agent['enabled'], bool):
+                        errors.append("'dpc_agent.enabled' must be a boolean (true or false)")
+
+                    if 'personal_context_access' in dpc_agent and not isinstance(dpc_agent['personal_context_access'], bool):
+                        errors.append("'dpc_agent.personal_context_access' must be a boolean")
+
+                    if 'device_context_access' in dpc_agent and not isinstance(dpc_agent['device_context_access'], bool):
+                        errors.append("'dpc_agent.device_context_access' must be a boolean")
+
+                    if 'knowledge_access' in dpc_agent:
+                        valid_access = ['none', 'read_only', 'read_write']
+                        if dpc_agent['knowledge_access'] not in valid_access:
+                            errors.append(f"'dpc_agent.knowledge_access' must be one of: {valid_access}")
+
+                    if 'tools' in dpc_agent:
+                        tools = dpc_agent['tools']
+                        if not isinstance(tools, dict):
+                            errors.append("'dpc_agent.tools' must be a dictionary")
+                        else:
+                            # All valid tool names
+                            valid_tools = {
+                                # File operations
+                                'repo_read', 'repo_list', 'repo_write_commit',
+                                # Drive operations
+                                'drive_read', 'drive_list', 'drive_write',
+                                # Memory/identity
+                                'update_scratchpad', 'update_identity', 'chat_history',
+                                # Knowledge
+                                'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                # DPC integration
+                                'get_dpc_context',
+                                # Web tools
+                                'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
+                                # Review tools
+                                'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
+                                # Git tools
+                                'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
+                                'repo_commit_push',
+                                # Restricted tools
+                                'run_shell', 'claude_code_edit',
+                                # Task queue tools (v0.16.0+)
+                                'schedule_task', 'get_task_status',
+                                # Evolution tools (v0.16.0+)
+                                'pause_evolution', 'resume_evolution', 'get_evolution_stats',
+                                'approve_evolution_change', 'reject_evolution_change',
+                                # Search tools (v0.16.0+)
+                                'search_files', 'search_in_file',
+                                # Extended sandbox tools (v0.16.0+)
+                                'extended_path_read', 'extended_path_list', 'extended_path_write',
+                                'list_extended_sandbox_paths',
+                                # Messaging tools (v0.18.0+)
+                                'send_user_message',
+                            }
+                            for tool_name, tool_enabled in tools.items():
+                                if tool_name.startswith('_'):
+                                    continue  # Skip comments
+                                if tool_name not in valid_tools:
+                                    errors.append(f"Unknown tool in dpc_agent.tools: '{tool_name}'")
+                                if not isinstance(tool_enabled, bool):
+                                    errors.append(f"'dpc_agent.tools.{tool_name}' must be a boolean")
+
+                    # Validate evolution settings (v0.17.0+)
+                    if 'evolution' in dpc_agent:
+                        evolution = dpc_agent['evolution']
+                        if not isinstance(evolution, dict):
+                            errors.append("'dpc_agent.evolution' must be a dictionary")
+                        else:
+                            if 'enabled' in evolution and not isinstance(evolution['enabled'], bool):
+                                errors.append("'dpc_agent.evolution.enabled' must be a boolean")
+                            if 'interval_minutes' in evolution:
+                                if not isinstance(evolution['interval_minutes'], int):
+                                    errors.append("'dpc_agent.evolution.interval_minutes' must be an integer")
+                                elif evolution['interval_minutes'] < 1:
+                                    errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
+                            if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
+                                errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
 
             # Validate image_transfer section
             if 'image_transfer' in config_dict:

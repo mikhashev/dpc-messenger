@@ -6,7 +6,11 @@ import asyncio
 import logging
 import base64
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from dpc_client_core.service import CoreService
+    from dpc_client_core.managers.agent_manager import DpcAgentManager
 
 # Import client libraries
 from openai import AsyncOpenAI
@@ -42,8 +46,17 @@ class AIProvider:
         self.config = config
         self.model = config.get("model")
 
-    async def generate_response(self, prompt: str) -> str:
-        """Generates a response from the AI model."""
+    async def generate_response(self, prompt: str, **kwargs) -> str:
+        """
+        Generates a response from the AI model.
+
+        Args:
+            prompt: The input prompt text
+            **kwargs: Additional arguments (e.g., conversation_id) for compatibility
+
+        Returns:
+            The AI model's response text
+        """
         raise NotImplementedError
 
     def supports_vision(self) -> bool:
@@ -70,6 +83,34 @@ class AIProvider:
         """
         raise NotImplementedError(f"Vision API not implemented for {self.__class__.__name__}")
 
+    def supports_thinking(self) -> bool:
+        r"""
+        Returns True if this provider supports thinking/reasoning mode.
+
+        Thinking mode models perform extended reasoning before producing
+        their final response. Examples include:
+        - DeepSeek R1 (with <think\> tags)
+        - Claude Extended Thinking (Claude 3.7+, Claude 4+)
+        - OpenAI o1/o3 (reasoning models)
+
+        Returns:
+            bool: True if thinking mode is supported, False by default
+        """
+        return False
+
+    def get_thinking_params(self) -> Dict[str, Any]:
+        """
+        Return provider-specific thinking parameters.
+
+        Override this method to return parameters like:
+        - budget_tokens (Claude)
+        - reasoning_effort (OpenAI o1/o3)
+
+        Returns:
+            Dict with thinking parameters, empty by default
+        """
+        return {}
+
 # --- Concrete Provider Implementations ---
 
 # Vision-capable Ollama models (for auto-detection)
@@ -82,6 +123,59 @@ OLLAMA_VISION_MODELS = [
     "moondream",        # Moondream
 ]
 
+# Thinking/reasoning models (for auto-detection)
+# These models perform extended reasoning before producing their final response
+OLLAMA_THINKING_MODELS = [
+    "deepseek-r1",      # DeepSeek R1 (all variants)
+    "deepseek-reasoner",
+]
+
+OPENAI_THINKING_MODELS = [
+    "o1", "o1-mini", "o1-preview", "o1-pro",
+    "o3", "o3-mini", "o3-pro",
+    "o4-mini",
+]
+
+ANTHROPIC_THINKING_MODELS = [
+    "claude-3-7",       # Claude 3.7 Sonnet (extended thinking)
+    "claude-opus-4",    # Claude Opus 4 (extended thinking)
+    "claude-sonnet-4",  # Claude Sonnet 4 (extended thinking)
+    "claude-haiku-4",   # Claude Haiku 4 (extended thinking)
+]
+
+
+def parse_thinking_tags(content: str) -> Tuple[str, Optional[str]]:
+    r"""
+    Parse <think\>...</think\> tags from model response content.
+
+    Used by DeepSeek R1 and similar models that embed thinking/reasoning
+    in their response using XML-style tags.
+
+    Args:
+        content: Raw response content that may contain <think\> tags
+
+    Returns:
+        Tuple of (final_content, thinking_content):
+        - final_content: Content with <think\> tags removed
+        - thinking_content: Extracted thinking text, or None if no tags found
+    """
+    import re
+
+    # Pattern matches <think\>...</think\> with any content inside (including newlines)
+    think_pattern = r'<think\s*>(.*?)</think\s*>'
+    matches = re.findall(think_pattern, content, re.DOTALL | re.IGNORECASE)
+
+    if matches:
+        # Join multiple thinking blocks with newlines
+        thinking = '\n'.join(match.strip() for match in matches if match.strip())
+
+        # Remove thinking tags from final content
+        final_content = re.sub(think_pattern, '', content, flags=re.DOTALL | re.IGNORECASE).strip()
+
+        return final_content, thinking if thinking else None
+
+    return content, None
+
 class OllamaProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
@@ -91,7 +185,11 @@ class OllamaProvider(AIProvider):
         """Check if this Ollama model supports vision/multimodal inputs."""
         return any(vm in self.model.lower() for vm in OLLAMA_VISION_MODELS)
 
-    async def generate_response(self, prompt: str) -> str:
+    def supports_thinking(self) -> bool:
+        """Check if this Ollama model is a thinking/reasoning model."""
+        return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
+
+    async def generate_response(self, prompt: str, **kwargs) -> str:
         try:
             message = {'role': 'user', 'content': prompt}
 
@@ -260,7 +358,11 @@ class OpenAICompatibleProvider(AIProvider):
         vision_models = ["gpt-4o", "gpt-4-turbo", "gpt-4o-mini"]
         return any(vm in self.model for vm in vision_models)
 
-    async def generate_response(self, prompt: str) -> str:
+    def supports_thinking(self) -> bool:
+        """Check if this is an OpenAI reasoning model (o1/o3 series)."""
+        return any(tm in self.model.lower() for tm in OPENAI_THINKING_MODELS)
+
+    async def generate_response(self, prompt: str, **kwargs) -> str:
         try:
             response = await self.client.chat.completions.create(
                 model=self.model,
@@ -325,22 +427,105 @@ class AnthropicProvider(AIProvider):
         # Set to None or omit from config to use model's maximum
         self.max_tokens = config.get("max_tokens", 4096)
 
+        # Thinking/reasoning configuration (Claude Extended Thinking)
+        # Claude 3.7+ and Claude 4+ support extended thinking with budget_tokens
+        self.thinking_enabled = config.get("thinking", {}).get("enabled", False)
+        self.thinking_budget_tokens = config.get("thinking", {}).get("budget_tokens", 10000)
+
+        # Store last thinking content for retrieval by LLMManager
+        self._last_thinking: Optional[str] = None
+
     def supports_vision(self) -> bool:
         """Claude 3+ models support vision"""
         vision_models = ["claude-3", "claude-opus", "claude-sonnet", "claude-haiku"]
         return any(vm in self.model for vm in vision_models)
 
-    async def generate_response(self, prompt: str) -> str:
+    def supports_thinking(self) -> bool:
+        """Check if this Claude model supports extended thinking (Claude 3.7+/4+)."""
+        return any(tm in self.model.lower() for tm in ANTHROPIC_THINKING_MODELS)
+
+    def get_thinking_params(self) -> Dict[str, Any]:
+        """Return Claude-specific thinking parameters."""
+        if self.supports_thinking() and self.thinking_enabled:
+            return {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+            }
+        return {}
+
+    async def generate_response(self, prompt: str, **kwargs) -> str:
         try:
-            # Use configured max_tokens or default (Anthropic requires max_tokens parameter)
-            message = await self.client.messages.create(
-                model=self.model,
-                max_tokens=self.max_tokens if self.max_tokens else 4096,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            return message.content[0].text
+            # Determine max_tokens value
+            # When thinking is enabled, max_tokens must be > budget_tokens
+            effective_max_tokens = self.max_tokens if self.max_tokens else 4096
+
+            # Build API parameters
+            api_params = {
+                "model": self.model,
+                "max_tokens": effective_max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+
+            # Add extended thinking if enabled and supported
+            if self.supports_thinking() and self.thinking_enabled:
+                # Ensure max_tokens > budget_tokens (API requirement)
+                if effective_max_tokens <= self.thinking_budget_tokens:
+                    # Set max_tokens to budget + buffer for actual response
+                    effective_max_tokens = self.thinking_budget_tokens + 4096
+                    api_params["max_tokens"] = effective_max_tokens
+                    logger.info(f"Adjusted max_tokens to {effective_max_tokens} to exceed budget_tokens ({self.thinking_budget_tokens})")
+
+                api_params["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+                logger.info(f"Claude extended thinking enabled (budget={self.thinking_budget_tokens} tokens)")
+            elif self.supports_thinking() and not self.thinking_enabled:
+                logger.info(f"Claude model {self.model} supports thinking but it's disabled in config")
+            else:
+                logger.debug(f"Claude model {self.model} does not support extended thinking")
+
+            message = await self.client.messages.create(**api_params)
+
+            # Parse content blocks - handle both thinking and text blocks
+            thinking_text = None
+            final_text = None
+
+            for block in message.content:
+                if hasattr(block, 'type'):
+                    if block.type == "thinking":
+                        thinking_text = getattr(block, 'thinking', None)
+                    elif block.type == "text":
+                        final_text = getattr(block, 'text', None)
+
+            # Store thinking for retrieval by LLMManager
+            self._last_thinking = thinking_text
+
+            if thinking_text:
+                logger.info(f"Claude extended thinking: {len(thinking_text)} chars")
+
+            # Return text content (only from text blocks, never from thinking blocks)
+            if final_text:
+                return final_text
+            elif message.content:
+                # Fallback: look for any text block in content
+                for block in message.content:
+                    if hasattr(block, 'type') and block.type == "text" and hasattr(block, 'text'):
+                        return block.text
+                # No text block found - return empty rather than repr of thinking block
+                logger.warning(f"No text block found in response, only thinking blocks")
+                return ""
+            else:
+                return ""
+
         except Exception as e:
             raise RuntimeError(f"Anthropic provider '{self.alias}' failed: {e}") from e
+
+    def get_last_thinking(self) -> Optional[str]:
+        """Get the thinking content from the last response (for Claude extended thinking)."""
+        return self._last_thinking
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """
@@ -387,7 +572,14 @@ class AnthropicProvider(AIProvider):
             raise RuntimeError(f"Anthropic vision API failed for '{self.alias}': {e}") from e
 
 class ZaiProvider(AIProvider):
-    """Z.AI provider for GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)"""
+    """
+    Z.AI provider for GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)
+
+    Uses Anthropic-compatible endpoint (https://api.z.ai/api/anthropic)
+    instead of PaaS endpoint to avoid prepaid balance requirements.
+
+    All GLM models support extended thinking via API parameter.
+    """
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
 
@@ -401,36 +593,210 @@ class ZaiProvider(AIProvider):
         if not api_key:
             raise ValueError(f"API key not found for Z.AI provider '{self.alias}'")
 
-        # Initialize Z.AI client (synchronous SDK confirmed from docs)
-        from zai import ZaiClient
-        self.client = ZaiClient(api_key=api_key)
+        # Use Anthropic-compatible endpoint (same as law7-services)
+        base_url = config.get("base_url", "https://api.z.ai/api/anthropic")
+        self.client = AsyncAnthropic(api_key=api_key, base_url=base_url)
+
+        # Read max_tokens from config (optional, defaults to 8192 if not specified)
+        # Matches law7-services default for GLM models
+        self.max_tokens = config.get("max_tokens", 8192)
+
+        # Thinking/reasoning configuration (GLM Extended Thinking)
+        # All GLM models support extended thinking with budget_tokens
+        self.thinking_enabled = config.get("thinking", {}).get("enabled", True)
+        self.thinking_budget_tokens = config.get("thinking", {}).get("budget_tokens", 10000)
+
+        # Store last thinking content for retrieval by LLMManager
+        self._last_thinking: Optional[str] = None
 
     def supports_vision(self) -> bool:
         """GLM vision models: models with 'v' suffix (glm-4.6v-flash, glm-4.5v, glm-4.0v)"""
-        # Vision models confirmed from rate limits page
         vision_models = ["glm-4.6v", "glm-4.5v", "glm-4.0v", "glm-4v"]
         return any(vm in self.model.lower() for vm in vision_models)
 
-    async def generate_response(self, prompt: str) -> str:
-        """Generate text response using Z.AI GLM model"""
+    def supports_thinking(self) -> bool:
+        """All GLM models support extended thinking."""
+        return True
+
+    def get_thinking_params(self) -> Dict[str, Any]:
+        """Return GLM-specific thinking parameters."""
+        if self.thinking_enabled:
+            return {
+                "thinking": {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+            }
+        return {}
+
+    def get_last_thinking(self) -> Optional[str]:
+        """Get the thinking content from the last response."""
+        return self._last_thinking
+
+    async def generate_response(self, prompt: str, **kwargs) -> str:
+        """Generate text response using Z.AI GLM model with extended thinking"""
         try:
-            # Z.AI SDK is synchronous, wrap in asyncio.to_thread()
-            response = await asyncio.to_thread(
-                self.client.chat.completions.create,
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            return response.choices[0].message.content
+            # Determine max_tokens value
+            # When thinking is enabled, max_tokens must be > budget_tokens
+            effective_max_tokens = self.max_tokens if self.max_tokens else 8192
+
+            # Build API parameters
+            api_params = {
+                "model": self.model,
+                "max_tokens": effective_max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+
+            # Add extended thinking if enabled (all GLM models support it)
+            if self.thinking_enabled:
+                # Ensure max_tokens > budget_tokens (API requirement)
+                if effective_max_tokens <= self.thinking_budget_tokens:
+                    # Set max_tokens to budget + buffer for actual response
+                    effective_max_tokens = self.thinking_budget_tokens + 4096
+                    api_params["max_tokens"] = effective_max_tokens
+                    logger.info(f"Adjusted max_tokens to {effective_max_tokens} to exceed budget_tokens ({self.thinking_budget_tokens})")
+
+                api_params["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+                logger.info(f"GLM extended thinking enabled (budget={self.thinking_budget_tokens} tokens)")
+            else:
+                logger.debug(f"GLM extended thinking disabled for {self.model}")
+
+            message = await self.client.messages.create(**api_params)
+
+            # Parse content blocks - handle both thinking and text blocks
+            thinking_text = None
+            final_text = None
+
+            for block in message.content:
+                if hasattr(block, 'type'):
+                    if block.type == "thinking":
+                        thinking_text = getattr(block, 'thinking', None)
+                    elif block.type == "text":
+                        final_text = getattr(block, 'text', None)
+
+            # Store thinking for retrieval by LLMManager
+            self._last_thinking = thinking_text
+
+            if thinking_text:
+                logger.info(f"GLM extended thinking: {len(thinking_text)} chars")
+
+            # Return text content (only from text blocks, never from thinking blocks)
+            if final_text:
+                return final_text
+            elif message.content:
+                # Fallback: look for any text block in content
+                for block in message.content:
+                    if hasattr(block, 'type') and block.type == "text" and hasattr(block, 'text'):
+                        return block.text
+                # No text block found - return empty rather than repr of thinking block
+                logger.warning(f"No text block found in response, only thinking blocks")
+                return ""
+            else:
+                return ""
+
         except Exception as e:
             raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {e}") from e
+
+    async def generate_response_stream(
+        self,
+        prompt: str,
+        on_chunk: callable,
+        conversation_id: str = None
+    ) -> str:
+        """
+        Generate text response with streaming.
+
+        Args:
+            prompt: User message text
+            on_chunk: Async callback for each text chunk: await on_chunk(chunk, conversation_id)
+            conversation_id: Optional conversation ID for chunk callbacks
+
+        Returns:
+            Full response text (accumulated from all chunks)
+        """
+        try:
+            # Determine max_tokens value
+            effective_max_tokens = self.max_tokens if self.max_tokens else 8192
+
+            # Build API parameters
+            api_params = {
+                "model": self.model,
+                "max_tokens": effective_max_tokens,
+                "messages": [{"role": "user", "content": prompt}],
+            }
+
+            # Add extended thinking if enabled (all GLM models support it)
+            if self.thinking_enabled:
+                if effective_max_tokens <= self.thinking_budget_tokens:
+                    effective_max_tokens = self.thinking_budget_tokens + 4096
+                    api_params["max_tokens"] = effective_max_tokens
+
+                api_params["thinking"] = {
+                    "type": "enabled",
+                    "budget_tokens": self.thinking_budget_tokens
+                }
+                logger.info(f"GLM streaming with thinking enabled (budget={self.thinking_budget_tokens} tokens)")
+            else:
+                logger.debug(f"GLM streaming without thinking for {self.model}")
+
+            # Note: Do NOT add stream=True - messages.stream() is already a streaming method
+
+            # Stream response
+            full_text = ""
+            thinking_text = ""
+
+            async with self.client.messages.stream(**api_params) as stream:
+                async for text in stream.text_stream:
+                    full_text += text
+                    # Call the chunk callback
+                    if on_chunk:
+                        await on_chunk(text, conversation_id)
+
+                # After streaming, check for thinking blocks in final message
+                # This handles the case where LLM produces only thinking, no text
+                if self.thinking_enabled and not full_text:
+                    try:
+                        final_message = await stream.get_final_message()
+                        for block in final_message.content:
+                            if hasattr(block, 'type') and block.type == "thinking":
+                                thinking_text = getattr(block, 'thinking', "")
+                                if thinking_text:
+                                    logger.info(f"GLM streaming thinking (no text): {len(thinking_text)} chars")
+                                    self._last_thinking = thinking_text
+                    except Exception as e:
+                        logger.debug(f"Could not get final message for thinking: {e}")
+
+            # Store thinking for retrieval if available
+            if thinking_text:
+                self._last_thinking = thinking_text
+                logger.info(f"GLM streaming thinking: {len(thinking_text)} chars")
+
+            # If no text produced but thinking was done, return a summary
+            if not full_text and thinking_text:
+                logger.warning("GLM extended thinking produced no text output, using thinking summary")
+                # Return a brief indication that thinking occurred
+                # The actual thinking is stored in _last_thinking for retrieval
+                full_text = "(thinking completed - see reasoning for details)"
+            elif not full_text:
+                logger.warning("GLM streaming produced no output")
+
+            logger.info(f"GLM streaming completed: {len(full_text)} chars")
+            return full_text
+
+        except Exception as e:
+            logger.error(f"Z.AI streaming failed: {e}", exc_info=True)
+            raise RuntimeError(f"Z.AI streaming provider '{self.alias}' failed: {e}") from e
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """
         Z.AI vision API for GLM-V models (glm-4.6v-flash, glm-4.5v, glm-4.0v)
-        Assuming OpenAI-compatible multimodal format (needs verification)
+        Uses Anthropic-compatible image format.
         """
         try:
-            # Build multimodal message content (OpenAI-compatible format)
+            # Build multimodal message content (Anthropic format)
             content = [{"type": "text", "text": prompt}]
 
             for img in images:
@@ -445,22 +811,20 @@ class ZaiProvider(AIProvider):
 
                 mime_type = img.get("mime_type", "image/png")
                 content.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{mime_type};base64,{base64_data}",
-                        "detail": "high"
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": mime_type,
+                        "data": base64_data
                     }
                 })
 
-            # Z.AI SDK is synchronous, wrap in asyncio.to_thread()
-            response = await asyncio.to_thread(
-                self.client.chat.completions.create,
+            response = await self.client.messages.create(
                 model=self.model,
-                messages=[{"role": "user", "content": content}],
-                temperature=kwargs.get("temperature", 0.7),
-                max_tokens=kwargs.get("max_tokens", 4000)
+                max_tokens=kwargs.get("max_tokens", 8192),
+                messages=[{"role": "user", "content": content}]
             )
-            return response.choices[0].message.content
+            return response.content[0].text
         except Exception as e:
             raise RuntimeError(f"Z.AI vision API failed for '{self.alias}': {e}") from e
 
@@ -642,8 +1006,8 @@ class LocalWhisperProvider(AIProvider):
             # Move model to device with CUDA fallback handling
             try:
                 model.to(device)
-            except RuntimeError as e:
-                if "NVIDIA" in str(e) or "CUDA" in str(e):
+            except (RuntimeError, AssertionError) as e:
+                if "NVIDIA" in str(e) or "CUDA" in str(e) or "not compiled" in str(e).lower():
                     # CUDA initialization failed (no GPU or driver), force CPU
                     logger.warning(f"Failed to initialize {device}: {e}")
                     logger.info("Forcing CPU mode for Whisper model")
@@ -1077,13 +1441,398 @@ class LocalWhisperProvider(AIProvider):
                 logger.error(f"Local transcription failed: {e}", exc_info=True)
                 raise RuntimeError(f"Local Whisper transcription failed: {e}") from e
 
-    async def generate_response(self, prompt: str) -> str:
+    async def generate_response(self, prompt: str, **kwargs) -> str:
         """Not implemented - LocalWhisperProvider only supports transcription."""
         raise NotImplementedError("LocalWhisperProvider does not support text generation")
 
     def supports_vision(self) -> bool:
         """LocalWhisperProvider does not support vision."""
         return False
+
+
+class RemotePeerProvider(AIProvider):
+    """
+    Remote peer inference provider.
+
+    This provider enables using a remote peer's AI model for inference,
+    allowing users to leverage more powerful models on other machines
+    or share compute resources within trusted peer groups.
+
+    Configuration example (~/.dpc/providers.json):
+    {
+        "alias": "remote_alice_llama70b",
+        "type": "remote_peer",
+        "peer_id": "dpc-node-alice-123",
+        "model": "llama3:70b",
+        "provider": "ollama_text",  // Optional: remote provider alias
+        "timeout": 60,
+        "context_window": 131072
+    }
+
+    Security: Remote inference requests are controlled by the firewall
+    in privacy_rules.json under the 'compute' section. The remote peer
+    must have compute sharing enabled and the requester whitelisted.
+    """
+
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        super().__init__(alias, config)
+
+        # Remote peer configuration
+        self.peer_id = config.get("peer_id")
+        self.model = config.get("model")  # Model to request on remote peer
+        self.remote_provider = config.get("provider")  # Optional: specific provider on remote
+        self.timeout = config.get("timeout", 60.0)
+
+        if not self.peer_id:
+            raise ValueError(f"RemotePeerProvider '{alias}' requires 'peer_id' in config")
+
+        # CoreService reference (injected by LLMManager)
+        self._service = None
+
+        logger.info(f"RemotePeerProvider '{alias}' initialized (peer={self.peer_id}, "
+                   f"model={self.model}, timeout={self.timeout}s)")
+
+    def set_service(self, service: "CoreService") -> None:
+        """
+        Inject CoreService reference for remote inference.
+
+        Called by CoreService during initialization.
+        """
+        self._service = service
+        logger.debug(f"RemotePeerProvider '{self.alias}': CoreService injected")
+
+    async def generate_response(
+        self,
+        prompt: str,
+        conversation_id: str = None,
+        images: list = None,
+        **kwargs
+    ) -> str:
+        """
+        Generate response using remote peer's AI model.
+
+        Args:
+            prompt: The prompt to send to the remote peer
+            conversation_id: Optional conversation ID (not used for remote)
+            images: Optional list of images for vision queries
+            **kwargs: Additional arguments (ignored for remote)
+
+        Returns:
+            Response text from the remote peer's model
+
+        Raises:
+            RuntimeError: If CoreService not injected or remote inference fails
+        """
+        if not self._service:
+            raise RuntimeError(f"RemotePeerProvider '{self.alias}': CoreService not injected")
+
+        logger.info(f"RemotePeerProvider '{self.alias}': Requesting inference from peer {self.peer_id}")
+
+        try:
+            # Use CoreService's remote inference method
+            response = await self._service._request_inference_from_peer(
+                peer_id=self.peer_id,
+                prompt=prompt,
+                model=self.model,
+                provider=self.remote_provider,
+                images=images,
+                timeout=self.timeout
+            )
+            return response
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"Remote inference to peer {self.peer_id} timed out after {self.timeout}s")
+        except Exception as e:
+            logger.error(f"RemotePeerProvider '{self.alias}': Remote inference failed: {e}")
+            raise RuntimeError(f"Remote inference failed: {e}")
+
+    def supports_vision(self) -> bool:
+        """RemotePeerProvider supports vision if the remote model supports it."""
+        return True  # Assume remote peer can handle vision if model supports it
+
+
+class DpcAgentProvider(AIProvider):
+    """
+    Embedded autonomous AI agent provider.
+
+    This provider exposes the embedded DpcAgent as an AI provider option,
+    enabling access to:
+    - 40+ tools for file operations, web search, memory management
+    - Persistent identity and scratchpad memory
+    - Background consciousness (optional)
+    - Evolution: autonomous self-modification within sandbox (~/.dpc/agent/)
+      (configured in privacy_rules.json under dpc_agent.evolution)
+
+    Configuration example (~/.dpc/providers.json):
+    {
+        "alias": "dpc_agent",
+        "type": "dpc_agent",
+        "tools": ["repo_read", "repo_list", "web_search", "update_scratchpad"],
+        "background_consciousness": false,
+        "budget_usd": 50,
+        "max_rounds": 200,
+        "context_window": 200000
+    }
+
+    Note: Evolution settings are configured in ~/.dpc/privacy_rules.json:
+    {
+        "dpc_agent": {
+            "evolution": {
+                "enabled": true,
+                "interval_minutes": 60,
+                "auto_apply": false
+            }
+        }
+    }
+    """
+
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        super().__init__(alias, config)
+
+        # Agent configuration
+        self.enabled_tools = config.get("tools", [])  # Tool whitelist
+        self.background_consciousness = config.get("background_consciousness", False)
+        self.budget_usd = config.get("budget_usd", 50.0)
+        self.max_rounds = config.get("max_rounds", 200)
+
+        # Remote peer inference ( v0.18.1+ KISS approach)
+        # If set, agent routes inference to this peer instead of using local models
+        self.peer_id = config.get("peer_id")  # Remote peer node ID
+        self.remote_model = config.get("remote_model")  # Model preference on remote peer
+        self.remote_provider = config.get("remote_provider")  # Provider preference on remote peer
+        self.timeout = config.get("timeout", 180)  # Timeout for remote inference (default 3 minutes)
+
+        # Note: Evolution settings are read from firewall (privacy_rules.json)
+        # not from provider config - see agent_manager.py
+
+        # Set model name for token counting (uses underlying provider's model)
+        self.model = "dpc_agent"  # Identifier for token counting
+
+        # Agent manager (lazy initialization)
+        self._manager = None
+        self._service = None  # Injected by LLMManager during initialization
+
+        logger.info(f"DpcAgentProvider '{alias}' initialized (tools={len(self.enabled_tools)}, "
+                   f"budget=${self.budget_usd}, consciousness={self.background_consciousness})")
+
+    def set_service(self, service: "CoreService") -> None:
+        """
+        Inject CoreService reference for LLMManager access.
+
+        Called by CoreService during initialization to enable
+        the agent to use DPC's AI providers.
+        """
+        self._service = service
+        logger.debug(f"DpcAgentProvider '{self.alias}': CoreService injected")
+
+    async def _ensure_manager(self) -> "DpcAgentManager":
+        """
+        Ensure the agent manager is initialized.
+
+        Returns:
+            DpcAgentManager instance
+
+        Raises:
+            RuntimeError: If CoreService not injected or initialization fails
+        """
+        if self._manager is not None:
+            return self._manager
+
+        if self._service is None:
+            raise RuntimeError(
+                f"DpcAgentProvider '{self.alias}' requires CoreService reference. "
+                "Ensure the provider is properly initialized by CoreService."
+            )
+
+        # Import here to avoid circular imports
+        from dpc_client_core.managers.agent_manager import DpcAgentManager
+
+        # Create manager with configuration
+        # Note: Evolution settings are read from firewall (privacy_rules.json)
+        self._manager = DpcAgentManager(self._service, {
+            "tools": self.enabled_tools,
+            "background_consciousness": self.background_consciousness,
+            "budget_usd": self.budget_usd,
+            "max_rounds": self.max_rounds,
+        })
+
+        # Start the agent
+        await self._manager.start()
+        logger.info(f"DpcAgentProvider '{self.alias}': Agent manager started")
+
+        return self._manager
+
+    async def generate_response(self, prompt: str, conversation_id: str = None, **kwargs) -> str:
+        """
+        Process a message through the autonomous agent.
+
+        Args:
+            prompt: User message text
+            conversation_id: Optional conversation ID for progress tracking
+            **kwargs: Additional arguments (ignored)
+
+        Returns:
+            Agent's response text
+
+        Raises:
+            RuntimeError: If agent processing fails
+        """
+        try:
+            manager = await self._ensure_manager()
+
+            # Use provided conversation_id or generate one
+            if not conversation_id:
+                import hashlib
+                conversation_id = hashlib.md5(prompt.encode()).hexdigest()[:16]
+
+            # Process through agent with DPC context
+            response = await manager.process_message(
+                message=prompt,
+                conversation_id=conversation_id,
+                include_context=True,
+            )
+
+            logger.info(f"DpcAgentProvider '{self.alias}': Generated response ({len(response)} chars)")
+            return response
+
+        except Exception as e:
+            logger.error(f"DpcAgentProvider '{self.alias}' failed: {e}", exc_info=True)
+            raise RuntimeError(f"Embedded agent failed: {e}") from e
+
+    async def generate_response_stream(
+        self,
+        prompt: str,
+        on_chunk: callable,
+        conversation_id: str = None,
+        **kwargs
+    ) -> str:
+        """
+        Process a message through the autonomous agent with streaming.
+
+        Args:
+            prompt: User message text
+            on_chunk: Async callback for each text chunk: await on_chunk(chunk, conversation_id)
+            conversation_id: Optional conversation ID for progress tracking
+            **kwargs: Additional arguments (ignored)
+
+        Returns:
+            Agent's response text (accumulated from all chunks)
+        """
+        try:
+            manager = await self._ensure_manager()
+
+            # Use provided conversation_id or generate one
+            if not conversation_id:
+                import hashlib
+                conversation_id = hashlib.md5(prompt.encode()).hexdigest()[:16]
+
+            # Note: We don't pass on_chunk to manager - the manager handles
+            # broadcasting directly via local_api. This avoids callback chain issues.
+            response = await manager.process_message(
+                message=prompt,
+                conversation_id=conversation_id,
+                include_context=True,
+                on_stream_chunk=None,  # Manager handles broadcast directly
+            )
+
+            logger.info(f"DpcAgentProvider '{self.alias}': Generated streaming response ({len(response)} chars)")
+            return response
+
+        except Exception as e:
+            logger.error(f"DpcAgentProvider '{self.alias}' streaming failed: {e}", exc_info=True)
+            raise RuntimeError(f"Embedded agent streaming failed: {e}") from e
+
+    def supports_vision(self) -> bool:
+        """
+        The agent supports vision through VLM tools.
+
+        Returns:
+            True (agent has analyze_screenshot and vlm_query tools)
+        """
+        return True
+
+    async def generate_with_vision(
+        self, prompt: str, images: List[Dict[str, Any]], **kwargs
+    ) -> str:
+        """
+        Handle vision queries by routing through the agent.
+
+        The agent can use VLM tools (analyze_screenshot, vlm_query)
+        to process images.
+
+        Args:
+            prompt: Text prompt
+            images: List of image dicts with path/mime_type/base64
+            **kwargs: Additional parameters (ignored by agent)
+
+        Returns:
+            Agent's response (may include image analysis)
+        """
+        # For now, delegate to text generation
+        # The agent can use VLM tools internally if needed
+        # Future: Inject image info into prompt for agent awareness
+        enhanced_prompt = prompt
+
+        if images:
+            image_info = []
+            for img in images:
+                if "path" in img:
+                    image_info.append(f"[Image: {img['path']}]")
+                elif "base64" in img:
+                    image_info.append("[Image: base64 data]")
+
+            if image_info:
+                enhanced_prompt = f"{prompt}\n\nAttached images:\n" + "\n".join(image_info)
+
+        return await self.generate_response(enhanced_prompt)
+
+    def supports_thinking(self) -> bool:
+        """
+        The agent supports extended thinking via background consciousness.
+
+        Returns:
+            True if background_consciousness is enabled
+        """
+        return self.background_consciousness
+
+    def get_thinking_params(self) -> Dict[str, Any]:
+        """
+        Return agent-specific thinking parameters.
+
+        Returns:
+            Dict with consciousness configuration
+        """
+        return {
+            "consciousness_mode": "background" if self.background_consciousness else "disabled",
+            "enabled": self.background_consciousness,
+        }
+
+    def get_status(self) -> Dict[str, Any]:
+        """
+        Get agent status information.
+
+        Returns:
+            Dict with agent status (initialized, config, etc.)
+        """
+        if self._manager is None:
+            return {
+                "initialized": False,
+                "alias": self.alias,
+            }
+
+        return {
+            "initialized": True,
+            "alias": self.alias,
+            "manager_status": self._manager.get_status(),
+        }
+
+    async def shutdown(self) -> None:
+        """
+        Shutdown the agent manager gracefully.
+        """
+        if self._manager is not None:
+            await self._manager.stop()
+            self._manager = None
+            logger.info(f"DpcAgentProvider '{self.alias}': Agent manager stopped")
 
 
 # --- The Manager Class ---
@@ -1094,6 +1843,8 @@ PROVIDER_MAP = {
     "anthropic": AnthropicProvider,
     "zai": ZaiProvider,
     "local_whisper": LocalWhisperProvider,  # v0.13.1+: Local Whisper transcription
+    "dpc_agent": DpcAgentProvider,  # Embedded autonomous AI agent
+    "remote_peer": RemotePeerProvider,  # v0.18.0+: Remote peer inference
 }
 
 # Default context window sizes for common models (in tokens)
@@ -1172,11 +1923,26 @@ class LLMManager:
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
         self.voice_provider: str | None = None  # v0.13.0+: Voice transcription provider for auto-selection
 
+        # Callback for re-injecting CoreService after providers reload (v0.18.0+)
+        self._on_providers_reload_callback: Optional[Callable[[], None]] = None
+
         # Token counting manager (Phase 4 refactor - v0.12.1)
         from dpc_client_core.managers.token_count_manager import TokenCountManager
         self.token_count_manager = TokenCountManager()
 
         self._load_providers_from_config()
+
+    def set_on_providers_reload(self, callback: Callable[[], None]) -> None:
+        """
+        Register a callback to be called after providers are reloaded.
+
+        Used by CoreService to re-inject itself into dpc_agent and remote_peer
+        providers after configuration changes.
+
+        Args:
+            callback: Function to call after providers reload
+        """
+        self._on_providers_reload_callback = callback
 
     def _ensure_config_exists(self):
         """Creates a default providers.json file if one doesn't exist."""
@@ -1191,6 +1957,7 @@ class LLMManager:
                 "default_provider": "ollama_text",
                 "vision_provider": "ollama_vision",
                 "voice_provider": "local_whisper_large",  # v0.13.0+: Local Whisper or OpenAI-compatible
+                "agent_provider": "dpc_agent",  # v0.18.0+: AI Agent provider (dpc_agent or any other provider)
                 "providers": [
                     {
                         "alias": "ollama_text",
@@ -1221,6 +1988,11 @@ class LLMManager:
                         "task": "transcribe",
                         "lazy_loading": True,
                         "_note": "Local Whisper transcription - GPU accelerated (CUDA, MLX)"
+                    },
+                    {
+                        "alias": "dpc_agent",
+                        "type": "dpc_agent",
+                        "_note": "Embedded autonomous AI agent for task automation - uses default AI provider"
                     }
                 ],
                 "_examples": {
@@ -1354,6 +2126,7 @@ class LLMManager:
             self.default_provider = config.get("default_provider")
             self.vision_provider = config.get("vision_provider")  # Load vision provider for auto-selection
             self.voice_provider = config.get("voice_provider")  # v0.13.0+: Load voice provider for auto-selection
+            self.agent_provider = config.get("agent_provider")  # v0.18.0+: Load agent provider for AI agent
 
             for provider_config in config.get("providers", []):
                 alias = provider_config.get("alias")
@@ -1376,6 +2149,10 @@ class LLMManager:
             if self.default_provider and self.default_provider not in self.providers:
                 logger.warning("Default provider '%s' not found in loaded providers", self.default_provider)
                 self.default_provider = None
+
+            if self.agent_provider and self.agent_provider not in self.providers:
+                logger.warning("Agent provider '%s' not found in loaded providers", self.agent_provider)
+                self.agent_provider = None
 
         except Exception as e:
             logger.error("Error parsing provider config file: %s", e, exc_info=True)
@@ -1425,6 +2202,14 @@ class LLMManager:
                         if state.get('load_lock'):
                             provider._load_lock = state['load_lock']
                         logger.info(f"Restored loaded Whisper model state for '{alias}' (model stays in memory)")
+
+            # Call callback to re-inject CoreService into dpc_agent/remote_peer providers
+            if self._on_providers_reload_callback:
+                try:
+                    self._on_providers_reload_callback()
+                    logger.debug("Providers reload callback executed")
+                except Exception as cb_err:
+                    logger.warning("Error in providers reload callback: %s", cb_err)
 
         except Exception as e:
             logger.error("Error saving provider config: %s", e, exc_info=True)
@@ -1606,7 +2391,30 @@ class LLMManager:
             response = await provider.generate_with_vision(prompt, images, **kwargs)
         else:
             logger.info("Routing query to provider '%s' with model '%s'", alias_to_use, provider.model)
-            response = await provider.generate_response(prompt)
+            response = await provider.generate_response(prompt, **kwargs)
+
+        # Check if this is a thinking model and extract thinking content
+        thinking_content = None
+        thinking_tokens = None
+        if provider.supports_thinking():
+            logger.info("Provider '%s' supports thinking mode", provider.model)
+
+            # First, check if provider stores thinking separately (e.g., Claude extended thinking)
+            if hasattr(provider, 'get_last_thinking'):
+                thinking_content = provider.get_last_thinking()
+                if thinking_content:
+                    logger.info("Retrieved stored thinking content (%d chars)", len(thinking_content))
+
+            # If no stored thinking, try parsing <think\> tags from response (e.g., DeepSeek R1)
+            if not thinking_content:
+                response, thinking_content = parse_thinking_tags(response)
+                if thinking_content:
+                    logger.info("Parsed thinking tags from response (%d chars)", len(thinking_content))
+
+            if thinking_content:
+                thinking_tokens = self.count_tokens(thinking_content, provider.model)
+        else:
+            logger.debug("Provider '%s' does not support thinking mode", provider.model)
 
         if return_metadata:
             # Count tokens in prompt and response
@@ -1617,19 +2425,17 @@ class LLMManager:
             # Get model's context window
             context_window = self.get_context_window(provider.model)
 
-            # Get the actual model name from result if available, otherwise use provider.model
-            # (Some providers return the actual model name like "claude-haiku-4.5" in the result)
-            actual_model = result.get("model", provider.model)
-
             return {
                 "response": response,
                 "provider": alias_to_use,
-                "model": actual_model,
+                "model": provider.model,
                 "tokens_used": total_tokens,
                 "prompt_tokens": prompt_tokens,
                 "response_tokens": response_tokens,
                 "model_max_tokens": context_window,
-                "vision_used": bool(images)  # NEW: Indicate if vision API was used
+                "vision_used": bool(images),  # Indicate if vision API was used
+                "thinking": thinking_content,  # Thinking/reasoning content (if any)
+                "thinking_tokens": thinking_tokens,  # Tokens used for thinking
             }
         return response
 

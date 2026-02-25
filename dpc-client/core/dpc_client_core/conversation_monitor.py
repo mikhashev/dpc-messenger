@@ -146,7 +146,17 @@ class ConversationMonitor:
                     role = "peer"
                 break
 
-        self.add_message(role, message.text)
+        # Extract metadata for proper chat history display (v0.15.3)
+        # Use ISO format timestamp from message
+        timestamp = message.timestamp if hasattr(message, 'timestamp') else None
+        sender_node_id = message.sender_node_id
+        sender_name = message.sender_name
+        # Extract attachments if present (dynamic attribute for Telegram messages)
+        attachments = getattr(message, 'attachments', None)
+
+        self.add_message(role, message.text, attachments=attachments,
+                        timestamp=timestamp, sender_node_id=sender_node_id,
+                        sender_name=sender_name)
         logger.debug(f"Added message to history: role={role}, text_len={len(message.text)}")
 
         # Only run automatic detection if enabled
@@ -1147,7 +1157,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
     # --- Conversation History Methods (Phase 7) ---
 
-    def add_message(self, role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None):
+    def add_message(self, role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None,
+                    timestamp: Optional[str] = None, sender_node_id: Optional[str] = None,
+                    sender_name: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1155,6 +1167,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             content: Message content
             attachments: Optional list of attachment metadata dicts
                 Example: [{"type": "file", "filename": "...", "size_bytes": 123, ...}]
+            timestamp: Optional ISO format timestamp (e.g., "2026-01-19T12:34:56Z")
+            sender_node_id: Optional sender node ID (for proper attribution in chat history)
+            sender_name: Optional sender display name
 
         Note: This also adds to message_buffer and full_conversation for knowledge extraction.
         """
@@ -1162,6 +1177,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         message_dict = {"role": role, "content": content}
         if attachments:
             message_dict["attachments"] = attachments
+        if timestamp:
+            message_dict["timestamp"] = timestamp
+        if sender_node_id:
+            message_dict["sender_node_id"] = sender_node_id
+        if sender_name:
+            message_dict["sender_name"] = sender_name
         self.message_history.append(message_dict)
 
         # Also add to knowledge extraction buffers (v0.13.2 fix for voice messages)

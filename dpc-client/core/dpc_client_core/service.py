@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import asdict
 import json
 import logging
+import re
 import uuid
 import websockets
 import socket
@@ -117,6 +118,13 @@ class CoreService:
         # Initialize all major components
         self.firewall = ContextFirewall(DPC_HOME_DIR / PRIVACY_RULES)
         self.llm_manager = LLMManager(DPC_HOME_DIR / PROVIDERS_CONFIG)
+
+        # Register callback for re-injecting CoreService after providers reload
+        self.llm_manager.set_on_providers_reload(self._inject_service_into_providers)
+
+        # Initial injection of CoreService reference into providers that need it
+        self._inject_service_into_providers()
+
         self.hub_client = HubClient(
             api_base_url=self.settings.get_hub_url(),
             oauth_callback_host=self.settings.get_oauth_callback_host(),
@@ -287,6 +295,9 @@ class CoreService:
         # Track pending transcription requests (for request-response matching)
         self._pending_transcription_requests: Dict[str, asyncio.Future] = {}
 
+        # Track pending providers requests (for on-demand provider discovery)
+        self._pending_providers_requests: Dict[str, asyncio.Future] = {}
+
         # Voice transcription tracking (v0.13.2+ auto-transcription)
         self._voice_transcriptions: Dict[str, Dict[str, Any]] = {}  # transfer_id -> transcription_data
         self._transcription_locks: Dict[str, asyncio.Lock] = {}  # transfer_id -> lock (prevents concurrent transcription)
@@ -401,6 +412,27 @@ class CoreService:
             self.message_router.register_handler(TelegramIncomingHandler(self))
 
         logger.info("Registered %d message handlers", len(self.message_router.get_registered_commands()))
+
+    def _inject_service_into_providers(self):
+        """
+        Inject CoreService reference into providers that need it.
+
+        Called during initialization and after providers are reloaded from config.
+        This ensures dpc_agent and remote_peer providers always have access to
+        CoreService for LLMManager and other services.
+        """
+        # Inject into DpcAgentProvider if configured
+        if "dpc_agent" in self.llm_manager.providers:
+            dpc_agent_provider = self.llm_manager.providers["dpc_agent"]
+            if hasattr(dpc_agent_provider, 'set_service'):
+                dpc_agent_provider.set_service(self)
+                logger.info("Injected CoreService into DpcAgentProvider")
+
+        # Inject into RemotePeerProvider instances (v0.18.0+)
+        for alias, provider in self.llm_manager.providers.items():
+            if hasattr(provider, 'set_service') and provider.__class__.__name__ == 'RemotePeerProvider':
+                provider.set_service(self)
+                logger.info(f"Injected CoreService into RemotePeerProvider '{alias}'")
 
     def _on_connection_status_changed(self, old_mode: OperationMode, new_mode: OperationMode):
         """Callback when connection status changes."""
@@ -1425,11 +1457,13 @@ class CoreService:
             - default_provider: str (text provider alias)
             - vision_provider: str (vision provider alias)
             - voice_provider: str (voice transcription provider alias) v0.13.0+
+            - agent_provider: str (AI agent provider alias) v0.18.0+
         """
         return {
             "default_provider": self.llm_manager.default_provider or "",
             "vision_provider": self.llm_manager.vision_provider or "",
-            "voice_provider": self.llm_manager.voice_provider or ""  # v0.13.0+
+            "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
+            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
         }
 
     async def get_providers_list(self) -> Dict[str, Any]:
@@ -1442,6 +1476,7 @@ class CoreService:
             - default_provider: Default text provider alias
             - vision_provider: Default vision provider alias
             - voice_provider: Default voice transcription provider alias v0.13.0+
+            - agent_provider: AI agent provider alias v0.18.0+
         """
         providers_info = []
         for alias, provider in self.llm_manager.providers.items():
@@ -1453,13 +1488,21 @@ class CoreService:
             }
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)
+
+            # v0.18.1+: Add remote inference fields for dpc_agent provider
+            if alias == "dpc_agent":
+                provider_dict["peer_id"] = getattr(provider, 'peer_id', None)
+                provider_dict["remote_model"] = getattr(provider, 'remote_model', None)
+                provider_dict["remote_provider"] = getattr(provider, 'remote_provider', None)
+
             providers_info.append(provider_dict)
 
         return {
             "providers": providers_info,
             "default_provider": self.llm_manager.default_provider or "",
             "vision_provider": self.llm_manager.vision_provider or "",
-            "voice_provider": self.llm_manager.voice_provider or ""  # v0.13.0+
+            "voice_provider": self.llm_manager.voice_provider or "",  # v0.13.0+
+            "agent_provider": getattr(self.llm_manager, 'agent_provider', None) or ""  # v0.18.0+
         }
 
     def _provider_supports_voice(self, provider: Any) -> bool:
@@ -1549,6 +1592,78 @@ class CoreService:
                 "message": f"Failed to set voice provider: {e}"
             }
 
+    async def prepare_agent(self) -> Dict[str, Any]:
+        """
+        Pre-initialize the DPC Agent provider and start the Telegram bridge.
+
+        Called by the UI when the user creates a new AI Agent chat, ensuring
+        that the agent (including Telegram bridge) is ready before any queries
+        are sent. This moves initialization from lazy to eager.
+
+        Returns:
+            Dictionary with:
+            - status: "success" or "error"
+            - message: Human-readable status message
+            - agent_status: Dict from DpcAgentProvider.get_status() if available
+        """
+        # Check if dpc_agent provider is configured
+        if "dpc_agent" not in self.llm_manager.providers:
+            return {
+                "status": "error",
+                "message": "DPC Agent provider is not configured. Add a 'dpc_agent' provider to ~/.dpc/providers.json"
+            }
+
+        try:
+            provider = self.llm_manager.providers["dpc_agent"]
+
+            # Import here to check type
+            from dpc_client_core.llm_manager import DpcAgentProvider
+
+            if not isinstance(provider, DpcAgentProvider):
+                return {
+                    "status": "error",
+                    "message": f"Provider 'dpc_agent' is not a DpcAgentProvider (type: {type(provider).__name__})"
+                }
+
+            # Check if already initialized (without triggering initialization)
+            current_status = provider.get_status()
+            if current_status.get("initialized"):
+                logger.info("DPC Agent already initialized")
+                return {
+                    "status": "success",
+                    "message": "DPC Agent already initialized",
+                    "agent_status": current_status
+                }
+
+            # Initialize the agent manager (this starts Telegram bridge)
+            logger.info("Pre-initializing DPC Agent...")
+            await provider._ensure_manager()
+
+            # Get updated status
+            agent_status = provider.get_status()
+
+            logger.info(f"DPC Agent initialized successfully")
+
+            return {
+                "status": "success",
+                "message": "DPC Agent initialized successfully",
+                "agent_status": agent_status
+            }
+
+        except RuntimeError as e:
+            # Handle initialization-specific errors
+            logger.error(f"DPC Agent initialization failed: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": f"DPC Agent initialization failed: {e}"
+            }
+        except Exception as e:
+            logger.error(f"Failed to prepare DPC Agent: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "message": f"Failed to prepare DPC Agent: {e}"
+            }
+
     async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
         Save and validate providers configuration.
@@ -1633,6 +1748,81 @@ class CoreService:
                 "message": f"Failed to query model info: {str(e)}"
             }
 
+    async def query_remote_providers(self, peer_id: str, timeout: float = 10.0) -> Dict[str, Any]:
+        """
+        Query a remote peer for their available AI providers.
+
+        This sends a GET_PROVIDERS request to the peer and waits for their response.
+        Used by the UI to populate dropdown lists when configuring a remote_peer provider.
+
+        Args:
+            peer_id: The node ID of the remote peer
+            timeout: Maximum time to wait for response (default 10 seconds)
+
+        Returns:
+            Dictionary with:
+            - status: "success" or "error"
+            - providers: List of provider dicts with alias, model, type
+            - message: Error message if failed
+        """
+        from dpc_protocol.protocol import create_get_providers_message
+
+        logger.info("[DEBUG] query_remote_providers called with peer_id=%s, timeout=%s", peer_id, timeout)
+
+        try:
+            # Check if peer is connected
+            logger.info("[DEBUG] Checking if peer %s is connected. Connected peers: %s", peer_id, list(self.p2p_manager.peers.keys()))
+            if peer_id not in self.p2p_manager.peers:
+                logger.info("[DEBUG] Peer %s is NOT connected", peer_id)
+                return {
+                    "status": "error",
+                    "message": f"Peer '{peer_id}' is not connected. Connect to the peer first."
+                }
+
+            # Check if we already have cached providers
+            if peer_id in self.peer_metadata and "providers" in self.peer_metadata[peer_id]:
+                cached_providers = self.peer_metadata[peer_id]["providers"]
+                if cached_providers:
+                    logger.info("[DEBUG] Returning cached providers for %s (%d providers)", peer_id, len(cached_providers))
+                    return {
+                        "status": "success",
+                        "providers": cached_providers,
+                        "cached": True
+                    }
+
+            # Create Future to wait for response
+            logger.info("[DEBUG] Creating Future and sending GET_PROVIDERS to %s", peer_id)
+            response_future: asyncio.Future = asyncio.Future()
+            self._pending_providers_requests[peer_id] = response_future
+
+            # Send GET_PROVIDERS request
+            await self.p2p_manager.send_message_to_peer(peer_id, create_get_providers_message())
+            logger.info("[DEBUG] Sent GET_PROVIDERS request to %s, waiting for response...", peer_id)
+
+            # Wait for response
+            try:
+                providers = await asyncio.wait_for(response_future, timeout=timeout)
+                logger.info("[DEBUG] Received %d providers from %s", len(providers), peer_id)
+                return {
+                    "status": "success",
+                    "providers": providers,
+                    "cached": False
+                }
+            except asyncio.TimeoutError:
+                self._pending_providers_requests.pop(peer_id, None)
+                logger.info("[DEBUG] Timeout waiting for providers from %s after %ss", peer_id, timeout)
+                return {
+                    "status": "error",
+                    "message": f"Timeout waiting for providers response from {peer_id} after {timeout}s"
+                }
+
+        except Exception as e:
+            logger.error("[DEBUG] Error querying remote providers from %s: %s", peer_id, e, exc_info=True)
+            return {
+                "status": "error",
+                "message": f"Failed to query remote providers: {str(e)}"
+            }
+
     def _validate_providers_config(self, config_dict: Dict[str, Any]) -> list:
         """
         Validate providers configuration structure.
@@ -1668,18 +1858,21 @@ class CoreService:
 
             if "type" not in provider:
                 errors.append(f"{prefix}: Missing 'type'")
-            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper"]:
+            elif provider["type"] not in ["ollama", "openai_compatible", "anthropic", "zai", "local_whisper", "dpc_agent", "remote_peer"]:
                 errors.append(f"{prefix}: Invalid type '{provider['type']}'")
 
-            if "model" not in provider:
+            # Model is required for all types except dpc_agent and remote_peer
+            provider_type = provider.get("type")
+            if provider_type not in ["dpc_agent", "remote_peer"] and "model" not in provider:
                 errors.append(f"{prefix}: Missing 'model'")
 
             # Type-specific required fields
-            provider_type = provider.get("type")
             if provider_type == "ollama" and "host" not in provider:
                 errors.append(f"{prefix}: Ollama provider missing 'host'")
             if provider_type == "openai_compatible" and "base_url" not in provider:
                 errors.append(f"{prefix}: OpenAI provider missing 'base_url'")
+            if provider_type == "remote_peer" and "peer_id" not in provider:
+                errors.append(f"{prefix}: Remote peer provider missing 'peer_id'")
 
             # Optional context_window validation
             if "context_window" in provider:
@@ -4029,13 +4222,37 @@ class CoreService:
             Dict with status and result
         """
         try:
-            # Cast vote through ConsensusManager
+            # Check if this is an AI chat proposal (AI agent needs to vote too)
+            is_ai_chat = False
+            ai_agent_node_id = None
+            if proposal_id in self.consensus_manager.sessions:
+                session = self.consensus_manager.sessions[proposal_id]
+                conversation_id = session.proposal.conversation_id
+                if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
+                    is_ai_chat = True
+                    ai_agent_node_id = conversation_id
+
+            # Cast user's vote through ConsensusManager
+            # For AI chats, don't broadcast to peers (use no-op)
+            broadcast_func = self._broadcast_to_peers
+            if is_ai_chat:
+                async def _no_op_broadcast(message: Dict[str, Any]) -> None:
+                    pass  # AI chats are private, no peer broadcast
+                broadcast_func = _no_op_broadcast
+
             success = await self.consensus_manager.cast_vote(
                 proposal_id=proposal_id,
                 vote=vote,
                 comment=comment,
-                broadcast_func=self._broadcast_to_peers
+                broadcast_func=broadcast_func
             )
+
+            if success and is_ai_chat:
+                # User voted first, now trigger AI agent to evaluate and vote
+                logger.info("User voted on AI chat proposal %s, triggering AI evaluation", proposal_id)
+                asyncio.create_task(
+                    self._ai_agent_vote_on_proposal(proposal_id, ai_agent_node_id)
+                )
 
             if success:
                 return {
@@ -4053,6 +4270,178 @@ class CoreService:
             return {
                 "status": "error",
                 "message": str(e)
+            }
+
+    async def _ai_agent_vote_on_proposal(self, proposal_id: str, ai_agent_node_id: str) -> None:
+        """Have the AI agent evaluate and cast a vote on a knowledge proposal.
+
+        The AI agent reviews the proposed knowledge entries and makes a reasoned
+        decision to approve, reject, or request changes.
+
+        Args:
+            proposal_id: ID of the proposal to vote on
+            ai_agent_node_id: The AI agent's node_id (same as conversation_id)
+        """
+        try:
+            # Get the proposal
+            if proposal_id not in self.consensus_manager.sessions:
+                logger.warning("AI vote: Proposal %s not found", proposal_id)
+                return
+
+            session = self.consensus_manager.sessions[proposal_id]
+            proposal = session.proposal
+
+            # Check if AI already voted (prevent double voting)
+            if ai_agent_node_id in session.votes:
+                logger.info("AI agent %s already voted on proposal %s", ai_agent_node_id, proposal_id)
+                return
+
+            # Evaluate the proposal using AI
+            ai_decision = await self._evaluate_knowledge_proposal_for_ai_vote(proposal)
+
+            logger.info(
+                "AI agent %s voting on proposal %s: %s - %s",
+                ai_agent_node_id, proposal_id, ai_decision["vote"], ai_decision.get("comment", "")
+            )
+
+            # Cast AI's vote (directly through consensus_manager, no broadcast for AI chats)
+            from dpc_protocol.knowledge_commit import CommitVote
+
+            vote_obj = CommitVote(
+                proposal_id=proposal_id,
+                voter_node_id=ai_agent_node_id,
+                vote=ai_decision["vote"],
+                comment=ai_decision.get("comment"),
+                is_required_dissent=False
+            )
+
+            # Record the vote
+            session.votes[ai_agent_node_id] = vote_obj
+
+            # Broadcast AI vote to UI
+            await self.local_api.broadcast_event(
+                "knowledge_vote_received",
+                {
+                    "proposal_id": proposal_id,
+                    "voter_node_id": ai_agent_node_id,
+                    "voter_name": "DPC Agent",
+                    "vote": ai_decision["vote"],
+                    "comment": ai_decision.get("comment", "")
+                }
+            )
+
+            # Check if voting is complete (all participants have voted)
+            if len(session.votes) == len(session.proposal.participants):
+                await self.consensus_manager._finalize_vote(session)
+
+        except Exception as e:
+            logger.error("Error in AI agent voting: %s", e, exc_info=True)
+
+    async def _evaluate_knowledge_proposal_for_ai_vote(self, proposal) -> Dict[str, Any]:
+        """Evaluate a knowledge proposal and return an AI vote decision.
+
+        The AI reviews each knowledge entry for accuracy, relevance, and quality,
+        then decides whether to approve, reject, or request changes.
+
+        Args:
+            proposal: KnowledgeCommitProposal to evaluate
+
+        Returns:
+            Dict with 'vote' (approve/reject/request_changes) and 'comment'
+        """
+        try:
+            # Build evaluation prompt
+            entries_text = ""
+            for i, entry in enumerate(proposal.entries, 1):
+                entries_text += f"\n{i}. {entry.content} (confidence: {entry.confidence:.2f})"
+                if hasattr(entry, 'tags') and entry.tags:
+                    entries_text += f" [tags: {', '.join(entry.tags)}]"
+
+            prompt = f"""You are reviewing a knowledge commit proposal from a conversation you just participated in as the DPC Agent. You need to vote on whether this knowledge should be saved to the user's personal knowledge base.
+
+**Proposal Topic:** {proposal.topic}
+**Summary:** {proposal.summary}
+**Average Confidence:** {proposal.avg_confidence:.2f}
+
+**Knowledge Entries:**{entries_text}
+
+**Your Task:**
+Evaluate each entry for:
+1. **Accuracy**: Is this factually correct based on standard knowledge? (Not opinions)
+2. **Relevance**: Is this genuinely useful knowledge worth preserving?
+3. **Redundancy**: Does this duplicate or contradict existing common knowledge?
+4. **Quality**: Is the entry clear, specific, and well-formulated?
+
+**Voting Options:**
+- `approve`: Knowledge is accurate, relevant, and worth saving
+- `reject`: Knowledge is factually incorrect, irrelevant, or harmful
+- `request_changes`: Knowledge has potential but needs revision (explain what)
+
+**IMPORTANT:**
+- Be thoughtful but not overly critical - personal knowledge is subjective
+- Technical facts, user preferences, and learned insights are all valid
+- If most entries are good but a few need work, vote request_changes
+- Only reject if the knowledge is genuinely problematic
+
+Respond in JSON format:
+{{
+    "vote": "approve" | "reject" | "request_changes",
+    "comment": "Brief explanation of your decision (1-2 sentences)",
+    "entry_feedback": [
+        {{"index": 1, "assessment": "good" | "needs_work" | "problematic", "note": "optional note"}}
+    ]
+}}
+"""
+
+            # Use the LLM to evaluate
+            response = await self.llm_manager.query(
+                prompt=prompt,
+                provider_alias=None,  # Use default provider
+                max_tokens=500
+            )
+
+            # Parse the response (response is already a string when return_metadata=False)
+            response_text = response
+
+            # Try to extract JSON from the response
+            json_match = re.search(r'\{[\s\S]*\}', response_text)
+            if json_match:
+                decision = json.loads(json_match.group())
+            else:
+                # Fallback: try parsing the whole response
+                decision = json.loads(response_text)
+
+            vote = decision.get("vote", "approve")
+            comment = decision.get("comment", "")
+
+            # Add entry feedback to comment if available
+            entry_feedback = decision.get("entry_feedback", [])
+            if entry_feedback and vote == "request_changes":
+                feedback_notes = []
+                for ef in entry_feedback:
+                    if ef.get("assessment") != "good" and ef.get("note"):
+                        feedback_notes.append(f"Entry {ef.get('index')}: {ef.get('note')}")
+                if feedback_notes:
+                    comment += " | " + "; ".join(feedback_notes[:3])  # Limit to 3 notes
+
+            return {
+                "vote": vote,
+                "comment": comment[:500]  # Limit comment length
+            }
+
+        except json.JSONDecodeError as e:
+            logger.warning("AI vote evaluation returned invalid JSON: %s", e)
+            # Default to approve on parsing error (generous interpretation)
+            return {
+                "vote": "approve",
+                "comment": "AI evaluation completed (defaulting to approve due to parsing issue)"
+            }
+        except Exception as e:
+            logger.error("Error in AI vote evaluation: %s", e, exc_info=True)
+            # Default to approve on error
+            return {
+                "vote": "approve",
+                "comment": "AI evaluation encountered an error, defaulting to user's judgment"
             }
 
     async def _broadcast_to_peers(self, message: Dict[str, Any]) -> None:
@@ -4076,13 +4465,18 @@ class CoreService:
             # Build participants list
             participants = []
 
-            if conversation_id == "local_ai":
-                # Local AI chat: just the user
+            if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
+                # AI chat: user + AI agent as participant (for collaborative knowledge voting)
                 participants = [
                     {
                         "node_id": self.p2p_manager.node_id,
                         "name": "User",
                         "context": "local"
+                    },
+                    {
+                        "node_id": conversation_id,  # AI agent uses conversation_id as its node_id
+                        "name": "DPC Agent",
+                        "context": "ai_agent"
                     }
                 ]
             else:
@@ -4148,9 +4542,9 @@ class CoreService:
                     proposal.to_dict()
                 )
 
-                # For local_ai and telegram conversations, don't broadcast knowledge to peers (privacy)
+                # For local_ai, ai_chat_xxx, and telegram conversations, don't broadcast knowledge to peers (privacy)
                 # For peer conversations, broadcast for collaborative consensus
-                if conversation_id == "local_ai" or conversation_id.startswith("telegram-"):
+                if conversation_id == "local_ai" or conversation_id.startswith("ai_") or conversation_id.startswith("telegram-"):
                     logger.info("%s - private conversation, knowledge will not be shared with peers", conversation_id)
                     # Use no-op broadcast function (local-only approval)
                     async def _no_op_broadcast(message: Dict[str, Any]) -> None:
@@ -4252,12 +4646,21 @@ class CoreService:
 
             # Convert to frontend format (role, content, attachments)
             # v0.13.2+: Merge transcription data into voice attachments from _voice_transcriptions
+            # v0.15.3+: Include timestamp and sender info for proper chat history display
             messages = []
             for msg in history:
                 message_dict = {
                     "role": msg["role"],
                     "content": msg["content"]
                 }
+                # Add timestamp if present (v0.15.3)
+                if "timestamp" in msg:
+                    message_dict["timestamp"] = msg["timestamp"]
+                # Add sender info if present (v0.15.3)
+                if "sender_node_id" in msg:
+                    message_dict["sender_node_id"] = msg["sender_node_id"]
+                if "sender_name" in msg:
+                    message_dict["sender_name"] = msg["sender_name"]
                 if "attachments" in msg:
                     # Deep copy attachments to avoid mutating original
                     attachments = []
@@ -4890,11 +5293,11 @@ class CoreService:
         Send an image from clipboard paste (Phase 2.3: Vision + Remote Vision).
 
         Handles two cases:
-        - AI Chat (local_ai): Save image, run vision analysis (local or remote), broadcast result
+        - AI Chat (local_ai or ai_chat_xxx): Save image, run vision analysis (local or remote), broadcast result
         - P2P Chat: Generate thumbnail, send FILE_OFFER with image_metadata
 
         Args:
-            conversation_id: 'local_ai' for AI chat, or node_id for P2P chat
+            conversation_id: 'local_ai' or 'ai_chat_xxx' for AI chat, or node_id for P2P chat
             image_base64: Data URL (e.g., "data:image/png;base64,...")
             filename: Suggested filename (e.g., "screenshot_1234567890.png")
             caption: Optional text caption (will be included in vision query for AI chat)
@@ -4942,8 +5345,8 @@ class CoreService:
             # Extract dimensions
             dimensions = get_image_dimensions(tmp_path)
 
-            if conversation_id == "local_ai":
-                # AI Chat: Run vision analysis
+            if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
+                # AI Chat: Run vision analysis (supports local_ai and ai_chat_xxx conversations)
                 logger.info(f"AI chat vision analysis: {filename} ({dimensions['width']}x{dimensions['height']})")
 
                 # Build query with caption (if provided)
@@ -4966,7 +5369,7 @@ class CoreService:
 
                 # Broadcast AI response to UI
                 await self.local_api.broadcast_event("ai_response_with_image", {
-                    "conversation_id": "local_ai",
+                    "conversation_id": conversation_id,
                     "query": query,
                     "response": response_metadata["response"],
                     "provider": response_metadata["provider"],
@@ -4978,7 +5381,7 @@ class CoreService:
 
                 return {
                     "status": "analyzed",
-                    "conversation_id": "local_ai",
+                    "conversation_id": conversation_id,
                     "filename": filename,
                     "dimensions": dimensions
                 }
@@ -5094,7 +5497,7 @@ class CoreService:
             "reason": reason
         }
 
-    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None):
+    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None):
         """
         Send an AI query, either to local LLM or to a remote peer for inference.
 
@@ -5105,6 +5508,7 @@ class CoreService:
             compute_host: Optional node_id of peer to use for inference (None = local)
             model: Optional model name to use
             provider: Optional provider alias to use
+            conversation_id: Optional conversation ID for progress tracking (DPC Agent)
 
         Returns:
             Dict with 'response', 'model', 'provider', and 'compute_host' keys
@@ -5117,7 +5521,8 @@ class CoreService:
             prompt=prompt,
             compute_host=compute_host,
             model=model,
-            provider=provider
+            provider=provider,
+            conversation_id=conversation_id
         )
 
     # --- Context Request Methods ---
@@ -5203,7 +5608,9 @@ class CoreService:
                 response_tokens=result.get("response_tokens"),
                 model_max_tokens=result.get("model_max_tokens"),
                 model=actual_model,
-                provider=result.get("provider")
+                provider=result.get("provider"),
+                thinking=result.get("thinking"),
+                thinking_tokens=result.get("thinking_tokens")
             )
             await self.p2p_manager.send_message_to_peer(peer_id, success_response)
             logger.debug("Sent inference result to %s", peer_id)
@@ -5424,6 +5831,7 @@ class CoreService:
         """
         Handle PROVIDERS_RESPONSE from a peer.
         Store the providers in peer metadata and broadcast to UI.
+        Also resolves any pending query_remote_providers request.
         """
         logger.debug("Received %d providers from %s", len(providers), peer_id)
 
@@ -5432,6 +5840,12 @@ class CoreService:
             self.peer_metadata[peer_id] = {}
 
         self.peer_metadata[peer_id]["providers"] = providers
+
+        # Resolve pending request if any (for on-demand provider queries)
+        pending_future = self._pending_providers_requests.pop(peer_id, None)
+        if pending_future and not pending_future.done():
+            pending_future.set_result(providers)
+            logger.debug("Resolved pending providers request for %s", peer_id)
 
         # Broadcast to UI
         await self.local_api.broadcast_event("peer_providers_updated", {
@@ -6093,15 +6507,20 @@ class CoreService:
                 prompt=final_prompt,
                 compute_host=compute_host,
                 model=model,
-                provider=provider
+                provider=provider,
+                conversation_id=conversation_id
             )
             # result is a dict with 'response', 'model', 'provider', 'compute_host'
             # and potentially 'tokens_used', 'model_max_tokens' for local inference
+            # and 'thinking', 'thinking_tokens' for reasoning models (v1.4+)
             response_payload = {
                 "content": result["response"],
                 "model": result["model"],
                 "provider": result["provider"],
-                "compute_host": result["compute_host"]
+                "compute_host": result["compute_host"],
+                # Include thinking fields if available (v1.4+)
+                "thinking": result.get("thinking"),
+                "thinking_tokens": result.get("thinking_tokens"),
             }
 
             # Phase 7: Add AI response to conversation history

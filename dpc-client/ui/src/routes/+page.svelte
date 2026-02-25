@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -43,6 +43,7 @@
     timestamp: number;
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
+    streamingRaw?: string;  // v0.16.0+: Raw streaming text (shown in collapsible)
     attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
       type: 'file' | 'image' | 'voice';
       filename: string;
@@ -103,6 +104,27 @@
   // Whisper model loading state (v0.13.3+ Model Pre-loading)
   let whisperModelLoading = $state(false);
   let whisperModelLoadError = $state<string | null>(null);
+
+  // DPC Agent progress state (v0.15.0+ - real-time agent progress)
+  let agentProgressMessage = $state<string | null>(null);
+  let agentProgressTool = $state<string | null>(null);
+  let agentProgressRound = $state<number>(0);
+  let agentStreamingText = $state<string>("");  // Accumulated streaming text from agent
+  let lastActiveChatId: string | null = null;  // Non-reactive tracker for chat switches
+
+  // Throttled streaming: accumulate chunks in non-reactive buffer, flush to state periodically
+  let streamingBuffer = "";  // Non-reactive buffer for chunks
+  let streamingFlushTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  // Helper to clear streaming state (buffer + state)
+  function clearAgentStreaming() {
+    if (streamingFlushTimeout) {
+      clearTimeout(streamingFlushTimeout);
+      streamingFlushTimeout = null;
+    }
+    streamingBuffer = "";
+    agentStreamingText = "";
+  }
 
   // Dual provider selection (Phase 1: separate text and vision providers)
   // Managed by ProviderSelector component (extracted)
@@ -250,6 +272,74 @@
       console.error(`[Whisper] Model loading failed: ${$whisperModelLoadingFailed.error}`);
       whisperModelLoading = false;
       whisperModelLoadError = $whisperModelLoadingFailed.error;
+    }
+  });
+
+  // DPC Agent progress (v0.15.0+): Show real-time agent progress in chat
+  $effect(() => {
+    if ($agentProgress) {
+      const { conversation_id, message, round, tool_name, ts } = $agentProgress;
+      console.log(`[AgentProgress] Conv: ${conversation_id}, Tool: ${tool_name}, Round: ${round}`);
+      console.log(`[AgentProgress] activeChatId: ${activeChatId}, match: ${activeChatId === conversation_id}`);
+
+      // Only show progress for the active AI chat
+      if (activeChatId === conversation_id) {
+        console.log(`[AgentProgress] Setting progress: tool=${tool_name}, round=${round}`);
+        agentProgressMessage = message || null;
+        agentProgressTool = tool_name || null;
+        agentProgressRound = round || 0;
+      } else {
+        console.log(`[AgentProgress] SKIPPED - conversation_id mismatch`);
+      }
+    }
+  });
+
+  // Clear agent progress when switching chats (only when activeChatId actually changes)
+  $effect(() => {
+    // This effect tracks activeChatId - only runs when it changes
+    if (activeChatId !== lastActiveChatId) {
+      // Clear progress and streaming state when switching chats
+      agentProgressMessage = null;
+      agentProgressTool = null;
+      agentProgressRound = 0;
+      clearAgentStreaming();
+      lastActiveChatId = activeChatId;
+      console.log(`[ChatSwitch] Cleared progress for chat switch to: ${activeChatId}`);
+    }
+  });
+
+  $effect(() => {
+    if ($agentProgressClear) {
+      const { conversation_id } = $agentProgressClear;
+      // Clear progress when task completes/fails
+      if (activeChatId === conversation_id) {
+        agentProgressMessage = null;
+        agentProgressTool = null;
+        agentProgressRound = 0;
+        clearAgentStreaming();
+      }
+    }
+  });
+
+  // DPC Agent streaming text (v0.16.0+ - real-time text streaming)
+  // Throttled approach: accumulate chunks in buffer, flush to state every 100ms
+  $effect(() => {
+    if ($agentTextChunk) {
+      const { conversation_id, chunk } = $agentTextChunk;
+      // Only accumulate chunks for the active AI chat
+      if (activeChatId === conversation_id) {
+        // Add to non-reactive buffer
+        streamingBuffer += chunk;
+
+        // Throttle state updates - flush buffer to state every 100ms
+        if (!streamingFlushTimeout) {
+          streamingFlushTimeout = setTimeout(() => {
+            agentStreamingText += streamingBuffer;
+            streamingBuffer = "";
+            streamingFlushTimeout = null;
+          }, 100);
+        }
+      }
     }
   });
 
@@ -694,6 +784,15 @@
     setActiveChat(activeChatId);
   });
 
+  // Reactive: Sync provider dropdown with chat-specific provider when switching chats
+  $effect(() => {
+    const chatProvider = $chatProviders.get(activeChatId);
+    if (chatProvider && chatProvider !== 'local_ai') {
+      // Update dropdown to show chat-specific provider (e.g., dpc_agent)
+      selectedTextProvider = `local:${chatProvider}`;
+    }
+  });
+
   // Reactive: Open commit dialog when proposal received
   $effect(() => {
     if ($knowledgeCommitProposal) {
@@ -907,6 +1006,14 @@
   // Reactive: Check if current chat is a Telegram chat (for UI adjustments)
   let isTelegramChat = $derived(activeChatId.startsWith('telegram-'));
 
+  // Reactive: Check if current chat is a P2P chat (not local AI, not AI chat, not Telegram)
+  // P2P chats are identified by node IDs like 'dpc-node-xxx'
+  let isP2PChat = $derived(
+    activeChatId !== 'local_ai' &&
+    !activeChatId.startsWith('ai_') &&
+    !activeChatId.startsWith('telegram-')
+  );
+
   // Reactive: Check if current chat is an AI chat (excluding Telegram which are stored in aiChats for sidebar)
   // Telegram chats are in $aiChats for sidebar display but are NOT AI chats
   let isActuallyAIChat = $derived($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-'));
@@ -936,17 +1043,41 @@
             if (result.status === 'success' && result.messages && result.messages.length > 0) {
               console.log(`[ChatHistory] Loaded ${result.message_count} messages from backend`);
 
-              // Convert backend format to frontend format
+              // Convert backend format to frontend format (v0.15.3: use backend metadata)
               chatHistories.update(map => {
                 const newMap = new Map(map);
-                const loadedMessages = result.messages.map((msg: any, index: number) => ({
-                  id: `backend-${index}-${Date.now()}`,
-                  sender: msg.role === 'user' ? 'user' : activeChatId,
-                  senderName: msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId),
-                  text: msg.content,
-                  timestamp: Date.now() - (result.messages.length - index) * 1000,
-                  attachments: msg.attachments || []
-                }));
+                const loadedMessages = result.messages.map((msg: any, index: number) => {
+                  // Use backend's timestamp if available (ISO format), otherwise generate fake timestamp
+                  let timestamp;
+                  if (msg.timestamp) {
+                    // Parse ISO timestamp to Date (milliseconds)
+                    timestamp = new Date(msg.timestamp).getTime();
+                  } else {
+                    // Fallback to fake timestamp (sequential from now)
+                    timestamp = Date.now() - (result.messages.length - index) * 1000;
+                  }
+
+                  // Use backend's sender info if available, otherwise fallback to role-based logic
+                  let sender;
+                  let senderName;
+                  if (msg.sender_node_id) {
+                    sender = msg.sender_node_id;
+                    senderName = msg.sender_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId));
+                  } else {
+                    // Fallback for messages without sender info (old format)
+                    sender = msg.role === 'user' ? 'user' : activeChatId;
+                    senderName = msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId);
+                  }
+
+                  return {
+                    id: `backend-${index}-${Date.now()}`,
+                    sender: sender,
+                    senderName: senderName,
+                    text: msg.content,
+                    timestamp: timestamp,
+                    attachments: msg.attachments || []
+                  };
+                });
                 newMap.set(activeChatId, loadedMessages);
                 console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages`);
                 return newMap;
@@ -1672,6 +1803,9 @@
     // Clear draft for this chat after sending
     chatDraftInputs = new Map(chatDraftInputs).set(activeChatId, "");
 
+    // Clear streaming text when sending a new message
+    clearAgentStreaming();
+
     chatHistories.update(h => {
       const newMap = new Map(h);
       const hist = newMap.get(activeChatId) || [];
@@ -1718,17 +1852,25 @@
         payload.context_ids = Array.from(selectedPeerContexts);
       }
 
-      // Phase 2.3: Parse text provider to support remote text inference
-      const textProvider = parseProviderSelection(selectedTextProvider);
+      // Determine provider: use chat-specific provider if set, otherwise use dropdown selection
+      const chatSpecificProvider = $chatProviders.get(activeChatId);
 
-      if (textProvider.source === 'remote' && textProvider.nodeId) {
-        // Remote inference - send compute_host and provider alias
-        payload.compute_host = textProvider.nodeId;
-        payload.provider = textProvider.alias;
+      if (chatSpecificProvider) {
+        // Use chat-specific provider (e.g., dpc_agent for agent chats)
+        payload.provider = chatSpecificProvider;
       } else {
-        // Local inference - pass provider alias
-        if (textProvider.alias) {
+        // Fall back to dropdown selection (supports remote inference)
+        const textProvider = parseProviderSelection(selectedTextProvider);
+
+        if (textProvider.source === 'remote' && textProvider.nodeId) {
+          // Remote inference - send compute_host and provider alias
+          payload.compute_host = textProvider.nodeId;
           payload.provider = textProvider.alias;
+        } else {
+          // Local inference - pass provider alias
+          if (textProvider.alias) {
+            payload.provider = textProvider.alias;
+          }
         }
       }
 
@@ -2053,6 +2195,73 @@
   function cancelAddAIChat() {
     showAddAIChatDialog = false;
     selectedProviderForNewChat = "";
+  }
+
+  async function handleAddAgentChat() {
+    // Check if dpc_agent provider exists
+    const agentProvider = $availableProviders?.providers?.find((p: any) => p.alias === 'dpc_agent');
+    if (!agentProvider) {
+      alert("DPC Agent provider not configured. Add 'dpc_agent' to ~/.dpc/providers.json");
+      return;
+    }
+
+    // Pre-initialize the agent and Telegram bridge
+    try {
+      const result = await sendCommand("prepare_agent", {});
+      if (result?.status === 'success') {
+        console.log('DPC Agent prepared:', result.message);
+      } else {
+        console.warn('Failed to prepare DPC Agent:', result?.message);
+      }
+    } catch (e) {
+      console.warn('Error preparing DPC Agent:', e);
+      // Continue anyway - agent will initialize lazily on first query
+    }
+
+    // Create new Agent chat ID
+    const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
+
+    // Determine display name based on whether using remote inference
+    let displayName: string;
+    if (agentProvider?.peer_id) {
+      // Remote inference - show remote model/provider info
+      const remoteModel = agentProvider.remote_model || 'unknown';
+      const remoteProvider = agentProvider.remote_provider ? `/${agentProvider.remote_provider}` : '';
+      displayName = `Agent (remote: ${remoteModel}${remoteProvider})`;
+    } else {
+      // Local inference - show the agent_provider or default_provider
+      const underlyingProvider = $availableProviders?.agent_provider || $availableProviders?.default_provider || 'unknown';
+      displayName = `Agent (${underlyingProvider})`;
+    }
+    const chatName = displayName;
+
+    // Add to aiChats
+    aiChats.update(chats => {
+      const newMap = new Map(chats);
+      newMap.set(chatId, {
+        name: chatName,
+        provider: 'dpc_agent',
+        instruction_set_name: 'none'
+      });
+      return newMap;
+    });
+
+    // Set provider for this chat
+    chatProviders.update(map => {
+      const newMap = new Map(map);
+      newMap.set(chatId, 'dpc_agent');
+      return newMap;
+    });
+
+    // Initialize chat history
+    chatHistories.update(h => {
+      const newMap = new Map(h);
+      newMap.set(chatId, []);
+      return newMap;
+    });
+
+    // Switch to the new chat
+    activeChatId = chatId;
   }
 
   async function handleDeleteAIChat(chatId: string) {
@@ -2586,10 +2795,22 @@
   $effect(() => {
     if ($coreMessages?.id) {
       const message = $coreMessages;
+      const messageId = message.id;  // Unique ID for deduplication
 
     if (message.command === "execute_ai_query") {
+      // Guard: Skip if already processed (prevents reactive loops in Svelte 5)
+      if (processedMessageIds.has(messageId)) {
+        console.log(`[execute_ai_query] Skipping already processed message: ${messageId}`);
+        return;
+      }
+      processedMessageIds.add(messageId);
+
       console.log(`[TokenCounter] execute_ai_query response: status=${message.status}, isLoading before clear=${isLoading}`);
       isLoading = false;
+
+      // Capture streaming text before clearing (for collapsible raw output)
+      const capturedStreamingText = agentStreamingText;
+      clearAgentStreaming();  // Clear streaming text when final response arrives
       console.log(`[TokenCounter] isLoading cleared: ${isLoading}`);
 
       const newText = message.status === "OK"
@@ -2597,6 +2818,9 @@
         : `Error: ${message.payload?.message || 'Unknown error'}`;
       const newSender = message.status === "OK" ? 'ai' : 'system';
       const modelName = message.status === "OK" ? message.payload.model : undefined;
+      // v1.4+: Extract thinking fields for reasoning models
+      const thinkingContent = message.status === "OK" ? message.payload.thinking : undefined;
+      const thinkingTokenCount = message.status === "OK" ? message.payload.thinking_tokens : undefined;
 
       // Show toast notification for errors (helps remote users see host failures)
       if (message.status !== "OK") {
@@ -2609,13 +2833,43 @@
       const responseCommandId = message.id;
 
       // Find which chat this command belongs to
-      const chatId = commandToChatMap.get(responseCommandId);
+      let chatId = commandToChatMap.get(responseCommandId);
+
+      // Debug: Log if chatId not found (helps diagnose race conditions)
+      if (!chatId) {
+        console.warn(`[execute_ai_query] No chatId found for commandId=${responseCommandId}, using activeChatId=${activeChatId} as fallback`);
+        // Fallback: use active chat if command mapping not found
+        // This handles edge cases where the map was cleared or response arrived late
+        chatId = activeChatId;
+      }
+
       if (chatId) {
+        // Debug: Log what we're searching for
+        console.log(`[execute_ai_query] Looking for commandId=${responseCommandId} in chatId=${chatId}`);
+
         chatHistories.update(h => {
           const newMap = new Map(h);
           const hist = newMap.get(chatId) || [];
+
+          // Debug: Log all commandIds in history
+          const commandIds = hist.filter(m => m.commandId).map(m => m.commandId);
+          console.log(`[execute_ai_query] History commandIds:`, commandIds);
+
+          // Check if we found a match
+          const found = hist.some(m => m.commandId === responseCommandId);
+          console.log(`[execute_ai_query] Found matching message: ${found}`);
+
           newMap.set(chatId, hist.map(m =>
-            m.commandId === responseCommandId ? { ...m, sender: newSender, text: newText, model: modelName, commandId: undefined } : m
+            m.commandId === responseCommandId ? {
+              ...m,
+              sender: newSender,
+              text: newText,
+              model: modelName,
+              thinking: thinkingContent,  // v1.4+: Thinking/reasoning content
+              thinkingTokens: thinkingTokenCount,  // v1.4+: Thinking token count
+              streamingRaw: capturedStreamingText || undefined,  // v0.16.0+: Raw streaming text
+              commandId: undefined
+            } : m
           ));
           return newMap;
         });
@@ -2655,6 +2909,14 @@
 
         // Clean up the command mapping
         commandToChatMap.delete(responseCommandId);
+      }
+
+      // Cleanup old processed IDs to prevent memory leak
+      if (processedMessageIds.size > 100) {
+        const firstId = processedMessageIds.values().next().value;
+        if (firstId) {
+          processedMessageIds.delete(firstId);
+        }
       }
 
       autoScroll();
@@ -2791,6 +3053,7 @@
       onResetUnreadCount={resetUnreadCount}
       onGetPeerDisplayName={getPeerDisplayName}
       onAddAIChat={handleAddAIChat}
+      onAddAgentChat={handleAddAgentChat}
       onDeleteAIChat={handleDeleteAIChat}
       onDisconnectPeer={handleDisconnectPeer}
     />
@@ -2835,8 +3098,10 @@
             </label>
           {/if}
 
-          <!-- Telegram bot integration status (v0.14.0+) -->
-          <TelegramStatus conversationId={activeChatId} />
+          <!-- Telegram bot integration status (v0.14.0+) - P2P chats only -->
+          {#if isP2PChat}
+            <TelegramStatus conversationId={activeChatId} />
+          {/if}
         </div>
 
         {#if !chatHeaderCollapsed}
@@ -2879,6 +3144,10 @@
         bind:enableMarkdown
         bind:chatWindowElement={chatWindow}
         showTranscription={autoTranscribeEnabled}
+        agentProgressMessage={agentProgressMessage}
+        agentProgressTool={agentProgressTool}
+        agentProgressRound={agentProgressRound}
+        agentStreamingText={agentStreamingText}
       />
 
       <div class="chat-input">
@@ -3323,7 +3592,11 @@
         <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
           {#each $availableProviders.providers as provider}
             <option value={provider.alias}>
-              {provider.alias} - {provider.model}
+              {#if provider.alias === 'dpc_agent'}
+                Agent (uses {$availableProviders?.agent_provider || $availableProviders?.default_provider || 'default'})
+              {:else}
+                {provider.alias} - {provider.model}
+              {/if}
             </option>
           {/each}
         </select>

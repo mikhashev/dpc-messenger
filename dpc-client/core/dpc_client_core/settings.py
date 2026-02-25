@@ -244,6 +244,29 @@ class Settings:
         # Future: Will support group chat bridging (single message to DPC group).
         # See telegram_coordinator.py:_forward_to_p2p_peers() for implementation details.
 
+        # DPC Agent runtime settings (security/permission settings are in privacy_rules.json)
+        # Note: enabled, tools, and evolution_* settings are configured via Firewall Rules UI
+        self._config['dpc_agent'] = {
+            'background_consciousness': 'false',  # Enable background thinking between tasks (optional)
+            'budget_usd': '50',  # Maximum budget per task in USD
+            'max_rounds': '200',  # Maximum LLM rounds before stopping
+            'context_window': '200000',  # Agent context window size (tokens)
+            'enable_task_queue': 'true',  # Enable background task scheduling
+            'billing_model': 'subscription',  # 'subscription' or 'pay_per_use'
+        }
+        # NOTE: The agent is sandboxed to ~/.dpc/agent/ directory.
+        # Security settings (enabled, tools, evolution) are configured via Firewall Rules UI
+        # which writes to ~/.dpc/privacy_rules.json.
+
+        self._config['dpc_agent_telegram'] = {
+            'enabled': 'false',  # Enable Telegram notifications for agent events
+            'bot_token': '',  # Telegram bot token (separate from main DPC bot)
+            'allowed_chat_ids': '',  # JSON array of chat IDs: ["123456789"]
+            'event_filter': 'task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message',  # Events to forward
+        }
+        # NOTE: Create a separate Telegram bot for agent monitoring via @BotFather
+        # Get your chat ID via @userinfobot
+
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
             'console': 'true',  # Enable console output
@@ -251,6 +274,19 @@ class Settings:
             'file': '~/.dpc/logs/dpc-client.log',  # Log file path
             'max_bytes': '10485760',  # Max bytes per log file before rotation (10MB)
             'backup_count': '5'  # Number of backup log files to keep
+        }
+
+        # Per-module log level overrides (reduce verbosity of verbose third-party libs)
+        self._config['logging.modules'] = {
+            # HTTP libraries - very verbose at DEBUG
+            'httpcore': 'WARNING',
+            'httpx': 'WARNING',
+            # Anthropic SDK - verbose request logging
+            'anthropic': 'WARNING',
+            # Telegram bot - verbose polling
+            'telegram.ext.Application': 'INFO',
+            # OpenAI SDK
+            'openai': 'WARNING',
         }
 
         # Ensure directory exists
@@ -880,6 +916,101 @@ class Settings:
             import logging
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to save last_update_id: {e}")
+
+    # DPC Agent Runtime Settings
+    # Note: Security/permission settings (enabled, tools, evolution) are in privacy_rules.json
+    # Configure via Firewall Rules UI in the desktop app.
+
+    def get_dpc_agent_background_consciousness(self) -> bool:
+        """Check if background consciousness (thinking between tasks) is enabled."""
+        value = self.get('dpc_agent', 'background_consciousness', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    # NOTE: Tool control is now handled via privacy_rules.json firewall only
+    # See: dpc_agent.tools in ~/.dpc/privacy_rules.json
+
+    def get_dpc_agent_budget_usd(self) -> float:
+        """Get maximum budget per task in USD."""
+        return float(self.get('dpc_agent', 'budget_usd', '50'))
+
+    def get_dpc_agent_max_rounds(self) -> int:
+        """Get maximum LLM rounds before stopping."""
+        return int(self.get('dpc_agent', 'max_rounds', '200'))
+
+    def get_dpc_agent_context_window(self) -> int:
+        """Get agent context window size in tokens."""
+        return int(self.get('dpc_agent', 'context_window', '200000'))
+
+    def get_dpc_agent_enable_task_queue(self) -> bool:
+        """Check if task queue (background scheduling) is enabled."""
+        value = self.get('dpc_agent', 'enable_task_queue', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    # Note: Evolution settings are configured via Firewall Rules UI (privacy_rules.json)
+    # See: dpc_agent.evolution in ~/.dpc/privacy_rules.json
+
+    def get_dpc_agent_billing_model(self) -> str:
+        """Get billing model ('subscription' or 'pay_per_use')."""
+        return self.get('dpc_agent', 'billing_model', 'subscription')
+
+    # DPC Agent Telegram Settings
+
+    def get_dpc_agent_telegram_enabled(self) -> bool:
+        """Check if Telegram notifications for agent events are enabled."""
+        value = self.get('dpc_agent_telegram', 'enabled', 'false')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dpc_agent_telegram_bot_token(self) -> str:
+        """Get Telegram bot token for agent notifications."""
+        return self.get('dpc_agent_telegram', 'bot_token', '')
+
+    def get_dpc_agent_telegram_allowed_chat_ids(self) -> list[str]:
+        """Get list of allowed chat IDs for agent Telegram notifications."""
+        import json
+        chat_ids_str = self.get('dpc_agent_telegram', 'allowed_chat_ids', '[]')
+        try:
+            return json.loads(chat_ids_str)
+        except json.JSONDecodeError:
+            return []
+
+    def get_dpc_agent_telegram_event_filter(self) -> list[str]:
+        """Get list of event types to forward to Telegram."""
+        filter_str = self.get('dpc_agent_telegram', 'event_filter',
+                              'task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message')
+        return [e.strip() for e in filter_str.split(',') if e.strip()]
+
+    def get_dpc_agent_telegram_transcription_enabled(self) -> bool:
+        """Check if voice message transcription is enabled for agent Telegram bot."""
+        value = self.get('dpc_agent_telegram', 'transcription_enabled', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_dpc_agent_config(self) -> dict:
+        """Get DPC agent runtime configuration as a dict.
+
+        Note: Security/permission settings (enabled, tools, evolution) are
+        configured via the Firewall Rules UI (privacy_rules.json), not here.
+        """
+        return {
+            # Runtime settings from config.ini
+            'background_consciousness': self.get_dpc_agent_background_consciousness(),
+            'budget_usd': self.get_dpc_agent_budget_usd(),
+            'max_rounds': self.get_dpc_agent_max_rounds(),
+            'context_window': self.get_dpc_agent_context_window(),
+            'enable_task_queue': self.get_dpc_agent_enable_task_queue(),
+            'billing_model': self.get_dpc_agent_billing_model(),
+            # Security settings configured via Firewall Rules UI (privacy_rules.json):
+            # - enabled, tools, evolution_enabled, evolution_interval_minutes, evolution_auto_apply
+        }
+
+    def get_dpc_agent_telegram_config(self) -> dict:
+        """Get all DPC agent Telegram configuration as a dict."""
+        return {
+            'enabled': self.get_dpc_agent_telegram_enabled(),
+            'bot_token': self.get_dpc_agent_telegram_bot_token(),
+            'allowed_chat_ids': self.get_dpc_agent_telegram_allowed_chat_ids(),
+            'event_filter': self.get_dpc_agent_telegram_event_filter(),
+            'transcription_enabled': self.get_dpc_agent_telegram_transcription_enabled(),
+        }
 
     def save_config(self):
         """Save configuration to file."""
