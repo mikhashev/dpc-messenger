@@ -85,8 +85,21 @@
   
   let activeChatId = $state('local_ai');
   let currentInput = $state("");
-  let isLoading = $state(false);
+  let chatLoadingStates = $state(new Map<string, boolean>());  // Per-chat loading state
   let chatWindow = $state<HTMLElement>();  // Bound to ChatPanel's chatWindowElement
+
+  // Helper to check if a specific chat is loading
+  function isChatLoading(chatId: string): boolean {
+    return chatLoadingStates.get(chatId) || false;
+  }
+
+  // Helper to set loading state for a specific chat
+  function setChatLoading(chatId: string, loading: boolean): void {
+    chatLoadingStates = new Map(chatLoadingStates).set(chatId, loading);
+  }
+
+  // Computed property - checks if current chat is loading
+  let isLoading = $derived(isChatLoading(activeChatId));
   let peerInput = $state("");  // RENAMED from peerUri for clarity
   let selectedComputeHost = $state("local");  // "local" or node_id for remote inference
   let selectedRemoteModel = $state("");  // Selected model when using remote compute host
@@ -341,6 +354,81 @@
         }
       }
     }
+  });
+
+  // Clear streaming state when switching away from AI chats
+  // This prevents stale "Generating..." indicators when returning to an AI chat
+  $effect(() => {
+    // Track the current chat ID reactively
+    const currentChatId = activeChatId;
+
+    // Clear streaming state when chat changes
+    return () => {
+      // This cleanup runs when activeChatId changes
+      clearAgentStreaming();
+      agentProgressMessage = null;
+      agentProgressTool = null;
+      agentProgressRound = 0;
+    };
+  });
+
+  // Persist AI chats (including Agent chats) to localStorage for page refresh recovery
+  // Debounced to avoid excessive writes
+  let aiChatsSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    // Track aiChats reactively
+    $aiChats;
+
+    // Clear any pending save
+    if (aiChatsSaveTimeout) {
+      clearTimeout(aiChatsSaveTimeout);
+    }
+
+    // Debounce save by 500ms
+    aiChatsSaveTimeout = setTimeout(() => {
+      try {
+        // Only save AI chats (excluding Telegram and local_ai)
+        const aiChatsToSave = Object.fromEntries(
+          Array.from($aiChats.entries())
+            .filter(([id, info]) =>
+              id.startsWith('ai_') &&
+              !id.startsWith('telegram-') &&
+              info.provider !== 'telegram'
+            )
+        );
+        localStorage.setItem('dpc-ai-chats', JSON.stringify(aiChatsToSave));
+        console.log(`[AI Chats] Persisted ${Object.keys(aiChatsToSave).length} AI chats to localStorage`);
+      } catch (error) {
+        console.error('[AI Chats] Failed to persist chats:', error);
+      }
+    }, 500);
+  });
+
+  // Persist AI chat histories to localStorage for page refresh recovery
+  // Debounced to avoid excessive writes
+  let chatHistoriesSaveTimeout: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    // Track chatHistories reactively
+    $chatHistories;
+
+    // Clear any pending save
+    if (chatHistoriesSaveTimeout) {
+      clearTimeout(chatHistoriesSaveTimeout);
+    }
+
+    // Debounce save by 500ms
+    chatHistoriesSaveTimeout = setTimeout(() => {
+      try {
+        // Only save histories for AI chats (excluding Telegram)
+        const historiesToSave = Object.fromEntries(
+          Array.from($chatHistories.entries())
+            .filter(([id, _]) => id.startsWith('ai_') && !id.startsWith('telegram-'))
+        );
+        localStorage.setItem('dpc-ai-chat-histories', JSON.stringify(historiesToSave));
+      } catch (error) {
+        console.error('[AI Chats] Failed to persist chat histories:', error);
+      }
+    }, 500);
   });
 
   // Telegram bot integration (v0.14.0+): Handle incoming Telegram messages
@@ -768,6 +856,60 @@
       }
     } catch (error) {
       console.error('[Telegram] Failed to restore chats from localStorage:', error);
+    }
+
+    // Restore AI chats (including Agent chats) from localStorage (for page refresh recovery)
+    try {
+      const savedAIChats = localStorage.getItem('dpc-ai-chats');
+      if (savedAIChats) {
+        const aiChatsData = JSON.parse(savedAIChats);
+        let restoredCount = 0;
+
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          for (const [id, info] of Object.entries(aiChatsData)) {
+            // Only restore if not already in aiChats (excluding telegram chats)
+            if (!newMap.has(id) && !id.startsWith('telegram-')) {
+              newMap.set(id, info as { name: string; provider: string; instruction_set_name?: string });
+              restoredCount++;
+            }
+          }
+          return newMap;
+        });
+
+        if (restoredCount > 0) {
+          console.log(`[AI Chats] Restored ${restoredCount} AI chats from localStorage`);
+        }
+      }
+    } catch (error) {
+      console.error('[AI Chats] Failed to restore chats from localStorage:', error);
+    }
+
+    // Restore AI chat histories from localStorage (for page refresh recovery)
+    try {
+      const savedHistories = localStorage.getItem('dpc-ai-chat-histories');
+      if (savedHistories) {
+        const historiesData = JSON.parse(savedHistories);
+        let restoredCount = 0;
+
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          for (const [id, messages] of Object.entries(historiesData)) {
+            // Only restore if not already in chatHistories (excluding telegram chats)
+            if (!newMap.has(id) && !id.startsWith('telegram-')) {
+              newMap.set(id, messages as Message[]);
+              restoredCount++;
+            }
+          }
+          return newMap;
+        });
+
+        if (restoredCount > 0) {
+          console.log(`[AI Chats] Restored ${restoredCount} chat histories from localStorage`);
+        }
+      }
+    } catch (error) {
+      console.error('[AI Chats] Failed to restore chat histories from localStorage:', error);
     }
   });
 
@@ -1660,7 +1802,7 @@
 
         // AI chat: Send for vision analysis
         try {
-          isLoading = true;
+          setChatLoading(activeChatId, true);
 
           // Parse vision provider to extract compute_host for remote vision
           const visionProvider = parseProviderSelection(selectedVisionProvider);
@@ -1680,14 +1822,14 @@
 
           await sendCommand('send_image', payload);
           autoScroll();
-          // Note: Don't set isLoading = false here!
+          // Note: Don't clear loading here!
           // The ai_response_with_image event handler will clear it when the vision response arrives
         } catch (error) {
           console.error('Error sending image:', error);
           fileOfferToastMessage = `Failed to send image: ${error}`;
           showFileOfferToast = true;
           setTimeout(() => showFileOfferToast = false, 5000);
-          isLoading = false;  // Only clear loading on error
+          setChatLoading(activeChatId, false);  // Only clear loading on error
         }
       } else if (activeChatId.startsWith('telegram-')) {
         // Telegram chat: Save image to temp file and send via Telegram
@@ -1816,7 +1958,7 @@
     // Check if this is an AI chat (local_ai or ai_chat_*), but NOT a Telegram chat
     // Telegram chats are in $aiChats for sidebar display but should NOT trigger AI queries
     if ($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')) {
-      isLoading = true;
+      setChatLoading(activeChatId, true);
       const commandId = crypto.randomUUID();
 
       // Track which chat this command belongs to
@@ -1876,7 +2018,7 @@
 
       const success = sendCommand("execute_ai_query", payload, commandId);
       if (!success) {
-        isLoading = false;
+        setChatLoading(activeChatId, false);
         chatHistories.update(h => {
           const newMap = new Map(h);
           const hist = newMap.get(activeChatId) || [];
@@ -2805,13 +2947,9 @@
       }
       processedMessageIds.add(messageId);
 
-      console.log(`[TokenCounter] execute_ai_query response: status=${message.status}, isLoading before clear=${isLoading}`);
-      isLoading = false;
-
       // Capture streaming text before clearing (for collapsible raw output)
       const capturedStreamingText = agentStreamingText;
       clearAgentStreaming();  // Clear streaming text when final response arrives
-      console.log(`[TokenCounter] isLoading cleared: ${isLoading}`);
 
       const newText = message.status === "OK"
         ? message.payload.content
@@ -2841,6 +2979,12 @@
         // Fallback: use active chat if command mapping not found
         // This handles edge cases where the map was cleared or response arrived late
         chatId = activeChatId;
+      }
+
+      // Clear loading state for the specific chat that received the response
+      if (chatId) {
+        setChatLoading(chatId, false);
+        console.log(`[TokenCounter] Loading cleared for chatId=${chatId}`);
       }
 
       if (chatId) {
@@ -2928,7 +3072,7 @@
   $effect(() => {
     if ($aiResponseWithImage) {
       const response = $aiResponseWithImage;
-      isLoading = false;
+      setChatLoading(response.conversation_id, false);
 
       chatHistories.update(h => {
         const newMap = new Map(h);
