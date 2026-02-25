@@ -372,9 +372,9 @@ This file tracks the agent's self-understanding and evolving identity.
             return start_idx, end_idx
 
         # Remove duplicate sections (keep first occurrence)
+        duplicates_removed = 0
         if len(section_occurrences) > 1:
             # Remove duplicates from end to start to preserve indices
-            duplicates_removed = 0
             for dup_start in reversed(section_occurrences[1:]):
                 _, dup_end = get_section_bounds(dup_start)
                 del lines[dup_start:dup_end]

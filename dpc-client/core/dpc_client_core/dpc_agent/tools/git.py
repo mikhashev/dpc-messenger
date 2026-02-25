@@ -37,6 +37,10 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
 
     work_dir = Path(cwd) if cwd else ctx.agent_root
 
+    # If path is relative, join with agent_root before resolving
+    if cwd and not work_dir.is_absolute():
+        work_dir = ctx.agent_root / work_dir
+
     # Ensure working directory is within sandbox
     try:
         resolved = work_dir.resolve()
@@ -54,7 +58,7 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
             cwd=str(work_dir),
             capture_output=True,
             text=True,
-            timeout_sec=30,
+            timeout=30,
         )
 
         return {
