@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 from ..dpc_agent.agent import DpcAgent, AgentConfig
 from ..dpc_agent.utils import get_agent_root, ensure_agent_dirs, utc_now_iso
 from ..dpc_agent.events import get_event_emitter, EventType
+from ..conversation_monitor import ConversationMonitor
 
 if TYPE_CHECKING:
     from ..service import CoreService
@@ -65,6 +66,10 @@ class DpcAgentManager:
 
         # Telegram bridge for notifications
         self._telegram_bridge = None
+
+        # Conversation monitors for agent sessions (reuse existing ConversationMonitor)
+        # Key: conversation_id, Value: ConversationMonitor instance
+        self._agent_monitors: Dict[str, ConversationMonitor] = {}
 
         log.info(f"DpcAgentManager initialized with storage at {self.agent_root}")
 
@@ -244,6 +249,19 @@ class DpcAgentManager:
             "message_preview": message[:100] if len(message) > 100 else message,
         })
 
+        # Get or create ConversationMonitor for this agent conversation (reuse existing)
+        monitor = self._get_or_create_agent_monitor(conversation_id)
+
+        # Track user message in monitor (reuse existing method)
+        node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
+        monitor.add_message(
+            role="user",
+            content=message,
+            timestamp=utc_now_iso(),
+            sender_node_id=node_id,
+            sender_name="User"
+        )
+
         # Get DPC context if requested
         dpc_context = None
         if include_context:
@@ -271,13 +289,40 @@ class DpcAgentManager:
                 # Note: We do NOT call on_stream_chunk here to avoid callback chain issues
                 # The broadcast above is sufficient for UI updates
 
+            # Get session state for agent context (token usage, context window)
+            session_state = self.get_session_state(conversation_id)
+
             response = await self.agent.process(
                 message=message,
                 conversation_id=conversation_id,
                 dpc_context=dpc_context,
                 emit_progress=emit_progress_with_context,
                 on_stream_chunk=emit_stream_chunk,
+                session_state=session_state,
+                conversation_monitor=monitor,  # For knowledge extraction tool
             )
+
+            # Track agent response in monitor (reuse existing method)
+            monitor.add_message(
+                role="assistant",
+                content=response,
+                timestamp=utc_now_iso(),
+                sender_node_id="dpc-agent",
+                sender_name="DPC Agent"
+            )
+
+            # Update token count in monitor after agent response
+            # Get token usage from agent's last response
+            if hasattr(self._agent, '_last_usage') and self._agent._last_usage:
+                usage = self._agent._last_usage
+                if usage.get("prompt_tokens"):
+                    # Get context window from LLMManager (reuse existing)
+                    llm_manager = getattr(self.service, "llm_manager", None)
+                    if llm_manager:
+                        model = llm_manager.get_active_model_name()
+                        context_window = llm_manager.get_context_window(model)
+                        monitor.set_token_limit(context_window)
+                    monitor.set_token_count(usage["prompt_tokens"])
 
             # Emit TASK_COMPLETED event
             await emitter.emit(EventType.TASK_COMPLETED, {
@@ -340,6 +385,88 @@ class DpcAgentManager:
             log.debug("Device context access denied by firewall")
 
         return context
+
+    def _get_or_create_agent_monitor(self, conversation_id: str) -> ConversationMonitor:
+        """
+        Get or create a ConversationMonitor for agent conversations.
+
+        Reuses CoreService's existing ConversationMonitor infrastructure
+        to track messages and token usage for agent sessions.
+
+        Args:
+            conversation_id: Unique ID for this conversation
+
+        Returns:
+            ConversationMonitor instance for this conversation
+        """
+        if conversation_id not in self._agent_monitors:
+            # Create participants list for agent conversation
+            node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
+            participants = [
+                {
+                    "node_id": node_id,
+                    "name": "User",
+                    "context": "local"
+                },
+                {
+                    "node_id": "dpc-agent",
+                    "name": "DPC Agent",
+                    "context": "agent"
+                }
+            ]
+
+            # Get settings and LLM manager from CoreService
+            settings = getattr(self.service, "settings", None)
+            llm_manager = getattr(self.service, "llm_manager", None)
+
+            # Create monitor with same settings as P2P conversations
+            self._agent_monitors[conversation_id] = ConversationMonitor(
+                conversation_id=conversation_id,
+                participants=participants,
+                llm_manager=llm_manager,
+                knowledge_threshold=0.7,
+                settings=settings,
+                ai_query_func=getattr(self.service, "send_ai_query", None),
+                auto_detect=False,  # Manual extraction only (agent triggers via tool)
+                instruction_set_name="general"
+            )
+
+            log.debug(f"Created ConversationMonitor for agent conversation: {conversation_id}")
+
+        return self._agent_monitors[conversation_id]
+
+    def get_session_state(self, conversation_id: str) -> Dict[str, Any]:
+        """
+        Get session state for an agent conversation.
+
+        Returns token usage, context window, and other session info
+        that the agent can use to make decisions about session management.
+
+        Args:
+            conversation_id: The conversation to get state for
+
+        Returns:
+            Dict with tokens_used, tokens_limit, usage_percent, messages_count,
+            should_extract_knowledge
+        """
+        monitor = self._agent_monitors.get(conversation_id)
+        if not monitor:
+            return {
+                "tokens_used": 0,
+                "tokens_limit": 128000,
+                "usage_percent": 0,
+                "messages_count": 0,
+                "should_extract_knowledge": False,
+            }
+
+        usage = monitor.get_token_usage()
+        return {
+            "tokens_used": usage.get("tokens_used", 0),
+            "tokens_limit": usage.get("token_limit", 128000),
+            "usage_percent": usage.get("usage_percent", 0),
+            "messages_count": len(monitor.message_history),
+            "should_extract_knowledge": monitor.should_suggest_extraction(),
+        }
 
     def _emit_progress(
         self,

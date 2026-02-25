@@ -1281,6 +1281,95 @@ def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines
 
 
 # ---------------------------------------------------------------------------
+# Knowledge Extraction (Session Management)
+# ---------------------------------------------------------------------------
+
+def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool = False) -> str:
+    """
+    Extract knowledge from the current conversation and save to knowledge base.
+
+    This tool uses the existing ConversationMonitor's generate_commit_proposal()
+    method to extract structured knowledge from the conversation history.
+
+    Args:
+        ctx: Tool context
+        topic: Optional topic to focus extraction on
+        force: Extract even if knowledge threshold not met
+
+    Returns:
+        Summary of extracted knowledge or error message
+    """
+    try:
+        # Get ConversationMonitor from context
+        monitor = getattr(ctx, 'conversation_monitor', None)
+        if not monitor:
+            return "⚠️ No conversation monitor available for this session"
+
+        # Check message count
+        if len(monitor.message_history) < 2:
+            return "⚠️ Not enough messages in conversation to extract knowledge (need at least 2)"
+
+        # Run async extraction in sync context
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # We're in an async context, but this is a sync tool
+            # Use asyncio.run_coroutine_threadsafe or return a message
+            return "⚠️ Knowledge extraction requires async context. Use force=True to attempt extraction."
+
+        # Run extraction
+        proposal = asyncio.run(monitor.generate_commit_proposal(force=force))
+
+        if not proposal:
+            return "No knowledge extracted from conversation. Try with force=True to extract anyway."
+
+        # Save to agent's knowledge directory
+        knowledge_dir = ctx.agent_root / "knowledge"
+        knowledge_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate filename from topic or timestamp
+        safe_topic = "".join(c if c.isalnum() or c in " _-" else "_" for c in (topic or proposal.topic or "knowledge"))
+        safe_topic = safe_topic[:50].strip() or "knowledge"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_topic}_{timestamp}.json"
+        filepath = knowledge_dir / filename
+
+        # Build knowledge entry
+        knowledge_entry = {
+            "topic": proposal.topic,
+            "summary": proposal.summary,
+            "entries": [
+                {
+                    "content": entry.content if hasattr(entry, 'content') else str(entry),
+                    "tags": entry.tags if hasattr(entry, 'tags') else [],
+                    "confidence": entry.confidence if hasattr(entry, 'confidence') else 1.0,
+                }
+                for entry in (proposal.entries or [])
+            ],
+            "conversation_id": proposal.conversation_id,
+            "participants": proposal.participants if hasattr(proposal, 'participants') else [],
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
+            "extraction_method": "agent_tool",
+        }
+
+        # Write to file
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(knowledge_entry, f, indent=2, ensure_ascii=False)
+
+        log.info(f"Extracted knowledge saved to {filepath}")
+
+        return f"✅ Knowledge extracted successfully!\n\n**Topic:** {proposal.topic}\n**Summary:** {proposal.summary[:200]}...\n**Entries:** {len(proposal.entries)}\n**Saved to:** knowledge/{filename}"
+
+    except Exception as e:
+        log.error(f"Knowledge extraction error: {e}", exc_info=True)
+        return f"⚠️ Knowledge extraction error: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Tool Registry Export
 # ---------------------------------------------------------------------------
 
@@ -1562,6 +1651,32 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=knowledge_list,
             timeout_sec=10,
+        ),
+
+        # Knowledge extraction from conversation
+        ToolEntry(
+            name="extract_knowledge",
+            schema={
+                "name": "extract_knowledge",
+                "description": "Extract knowledge from the current conversation and save to knowledge base. Use this when the conversation contains valuable insights worth preserving.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Optional topic to focus extraction on"
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Extract even if knowledge threshold not met",
+                            "default": False
+                        }
+                    },
+                    "required": []
+                }
+            },
+            handler=extract_knowledge,
+            timeout_sec=60,  # May need time for LLM-based extraction
         ),
 
         # DPC integration

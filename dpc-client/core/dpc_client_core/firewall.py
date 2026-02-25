@@ -124,6 +124,7 @@ class ContextFirewall:
             'knowledge_read': True,
             'knowledge_write': False,  # Controlled by knowledge_access
             'knowledge_list': True,
+            'extract_knowledge': True,  # Extract knowledge from conversation to knowledge base
             # DPC integration
             'get_dpc_context': True,
             # Web tools

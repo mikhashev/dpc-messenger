@@ -50,6 +50,9 @@ class ToolContext:
     # Reference to DPC service for DPC-specific tools
     dpc_service: Optional[Any] = None
 
+    # ConversationMonitor for knowledge extraction (set by agent_manager)
+    conversation_monitor: Optional[Any] = None
+
     # Tool whitelist (if set, only these tools are allowed)
     tool_whitelist: Optional[set] = None
 
