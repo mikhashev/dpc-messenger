@@ -1,7 +1,7 @@
 # Product Vision & Strategy: The D-PC Messenger
 
-**Version:** 2.0
-**Status:** Approved Concept for MVP 2.0
+**Version:** 3.0
+**Status:** Production Platform (v0.18.0)
 
 ## 1. Executive Summary (TL;DR)
 
@@ -9,9 +9,12 @@ We are not building "just another messenger." We are building the world's first 
 
 Furthermore, we are building the first communication tool that allows users to form a **Decentralized Compute Pool**, enabling them to securely share not just their knowledge, but also their local AI processing power within a trusted network.
 
+Additionally, our embedded **DPC Agent** brings autonomous AI into the P2P network — an AI assistant that lives within your private infrastructure, uses your team's collective knowledge, and can coordinate tasks across peers.
+
 **The Core Ideas:**
 1.  Communication is ephemeral. Knowledge is permanent.
 2.  Intelligence is a network resource.
+3.  Autonomous AI should serve the user, not the platform.
 
 Our product, the "D-PC Messenger," provides a familiar chat interface. Under the hood, it uses AI mediators and the D-PC protocol to transform chaotic human communication into an organized knowledge base and to create a collaborative, privacy-preserving supercomputer from the collective hardware of its users.
 
@@ -85,20 +88,28 @@ The "D-PC Messenger" is the **first reference implementation** of the D-PC proto
 
 ## 7. Current Status & Next Steps
 
-**Phase 1 Complete: v0.8.0 Beta MVP ✅**
-- ✅ **Remote inference** - 2-user compute sharing working (proven foundation)
-- ✅ **Context collaboration** - Secure P2P knowledge sharing
+**Phase 1 Complete: Federated MVP ✅ (v0.8.0)**
+- ✅ **Remote inference** - P2P compute sharing with provider discovery
+- ✅ **Context collaboration** - Secure P2P knowledge sharing with firewall
+- ✅ **Knowledge Commits** - Git-like versioned knowledge with bias mitigation
 - ✅ **Core architecture** - APIs, data structures, UX/UI for compute and context sharing
-- ✅ **Breakthrough features** - Knowledge Commits + P2P Compute Sharing (both working)
-- ✅ **IPv6 support** - Dual-stack connections (IPv4 + IPv6)
-- ✅ **Enhanced UX** - Markdown rendering, context window management, improved diagnostics
 
-**Phase 2 Expansion: Enhanced Federation (Q1-Q2 2026)**
+**Phase 1.5 Complete: Extended Features ✅ (v0.9.0 - v0.18.0)**
+- ✅ **Disaster-resilient connectivity** - 6-tier fallback: IPv6 → IPv4 → WebRTC → hole punch → relay → gossip
+- ✅ **DHT peer discovery** - Hub-optional Kademlia implementation
+- ✅ **File transfer** - Chunked, hash-verified, progress tracking
+- ✅ **Voice messages** - Cross-platform recording, Whisper transcription
+- ✅ **DPC Agent** - Embedded autonomous AI with 40+ tools, evolution system, background consciousness
+- ✅ **Telegram integration** - Bot with voice transcription, messaging bridge, agent bridge
+- ✅ **Reasoning models** - DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3
+- ✅ **Real-time streaming** - Token-by-token AI response display
 
-Building on proven 2-user model:
-- **Group collaboration** - Extend to multi-party scenarios (3+ users)
-- **Advanced remote inference** - Model discovery, streaming responses, usage tracking
-- **Multi-peer knowledge commits** - Collaborative knowledge building across groups
-- **Compute marketplace** - Discovery and metering of shared computational resources
+**Phase 2: Team Collaboration (Q2-Q3 2026)**
 
-**Our Achievement:** We have successfully built the **"D-PC Messenger,"** a working tool for collaborative intelligence that uniquely combines the sharing of **knowledge (context)** and **computation (inference)** in a private, user-sovereign network. The foundation is solid; now we expand to group scenarios.
+Building on the complete infrastructure:
+- **Team management** - Persistent teams, invite codes, group chat UI
+- **Team knowledge** - Shared repositories, collaborative editing, commit templates
+- **Team compute** - Pools, load balancing, agent team integration
+- **Group collaboration** - Multi-party scenarios (3+ users) with presence and typing
+
+**Our Achievement:** We have successfully built the **"D-PC Messenger,"** a production-ready platform (v0.18.0, 645+ commits) for collaborative intelligence that uniquely combines the sharing of **knowledge (context)**, **computation (inference)**, and **autonomous AI assistance (DPC Agent)** in a private, user-sovereign network. The foundation is mature; now we expand to team scenarios.

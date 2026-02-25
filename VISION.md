@@ -16,7 +16,7 @@ We're building **D-PC Messenger** — a peer-to-peer protocol that enables priva
 - 18-24 month window before Big Tech locks down AI infrastructure
 - Technology ready (WebRTC, cryptographic identity mature)
 
-**Current Status:** v0.8.0 Beta - Feature-complete MVP with production-ready P2P, context sharing, and compute collaboration
+**Current Status:** v0.18.0 - Production-ready platform with P2P messaging, AI agent, voice messages, 6-tier resilient connectivity, and compute sharing
 
 **Business Model:** We're validating multiple sustainable revenue paths aligned with our mission (Red Hat model, managed infrastructure, grants, compute marketplace, hybrid). This is intentional methodology—build the right foundation, then commit to optimal monetization approach.
 
@@ -401,7 +401,7 @@ We're building a movement, not just a customer base.
 
 ## Business Model: Strategic Validation Phase
 
-**Current State:** We've built the core technology and proven it works (v0.7.0 Federated MVP complete). We're now entering business model validation phase with community and co-founder input.
+**Current State:** We've built the core technology and proven it works (v0.18.0 with 645+ commits). We're now entering business model validation phase with community and co-founder input.
 
 ### Our Approach
 
@@ -578,13 +578,13 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 - Background: Hardware (3D printers, CNC) → Software (PHP, Python) → AI/ML
 - Product Owner at US startup (led 5-person engineering team)
 - Yandex ML/Data Analytics certification (330 hours, Nov 2024)
-- **Shipped:** v0.8.0 Beta MVP—production-ready WebRTC, OAuth authentication (Google + GitHub), encrypted messaging, local AI integration, P2P compute sharing, IPv6 support, markdown rendering, and context-aware AI instructions
+- **Shipped:** v0.18.0 — production-ready P2P with 6-tier resilient connectivity, embedded AI agent (40+ tools), voice messages with transcription, file transfer, Telegram integration, reasoning model support, DHT peer discovery, and real-time AI streaming
 
 **What I Bring:**
 - Product vision refined through iterative development—from initial concept to differentiated 'transactional communication' paradigm
-- Proven execution—shipped complete working system with breakthrough features
+- Proven execution—shipped v0.18.0 with 645+ commits, 46K+ lines of production Python, full desktop app
 - Rapid development velocity using modern practices and AI-assisted tooling
-- Technical credibility (2K+ lines of tested, working code)
+- Technical credibility: 6-tier resilient P2P, embedded AI agent, DHT peer discovery, knowledge commits — all production-ready
 - Passion for privacy & digital sovereignty
 - **Core Belief:** Privacy is the foundation for a new economics of knowledge and personal data
 
@@ -623,32 +623,37 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 ## Roadmap
 
 ### Phase 1: Federated MVP ✅ (Completed - v0.8.0)
-- Direct TLS P2P connections
-- WebRTC with NAT traversal
-- Federation Hub for discovery
-- OAuth authentication (Google + GitHub)
-- Cryptographic node identity
-- Local AI integration (Ollama, OpenAI, Anthropic)
-- Encrypted backups
+- Direct TLS P2P connections with IPv6 dual-stack
+- WebRTC with NAT traversal (STUN/TURN)
+- Federation Hub for discovery (OAuth: Google + GitHub)
+- Cryptographic node identity (RSA, X.509)
+- Local AI integration (Ollama, OpenAI, Anthropic, Z.AI)
+- Encrypted backups, context firewall, offline mode
 - Remote inference (P2P compute sharing)
-- IPv6 support (dual-stack connections)
-- External IP connection support
-- Markdown rendering for AI responses
-- Context-aware AI instructions
-- Improved connection diagnostics
+- Knowledge commits with bias mitigation
 
-### Phase 2: Enhanced Federation (Q1-Q2 2026)
-- Multi-hub federation
-- Advanced context firewall (tag-based sharing)
-- Peer-to-peer knowledge sharing
-- Remote inference enhancements (model discovery, usage tracking)
-- Mobile clients (Android, iOS)
+### Phase 1.5: Extended Features ✅ (v0.9.0 - v0.18.0)
+- **Disaster-resilient infrastructure** - DHT peer discovery, 6-tier connection fallback (IPv6 → IPv4 → WebRTC → hole punch → relay → gossip)
+- **File transfer** - Chunked, hash-verified, progress tracking
+- **Voice messages** - Cross-platform recording, Whisper transcription
+- **Vision & images** - Screenshot sharing, remote vision inference
+- **Telegram bot integration** - Voice transcription, messaging bridge
+- **DPC Agent** - Embedded autonomous AI with 40+ tools, evolution system, background consciousness
+- **Reasoning models** - DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3
+- **Real-time streaming** - Token-by-token AI response display
 
-### Phase 3: True P2P (2026-2027)
-- DHT-based peer discovery (Hub-optional operation)
-- Blockchain-based identity (optional)
-- Full decentralization
-- AI compute marketplace
+### Phase 2: Team Collaboration (Q2-Q3 2026)
+- Persistent team management and group chat UI
+- Team knowledge repository with collaborative editing
+- Team compute pools and activity feeds
+- Agent integration with team workflows
+
+### Phase 3: Scaling & Mass Decentralization (2027+)
+- Mobile clients (iOS, Android)
+- Multi-hub federation for large organizations
+- 100% Hub-free operation
+- Advanced security (hardware wallets, social recovery)
+- Compute marketplace
 
 ---
 
@@ -749,9 +754,9 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 - Cypherpunk principles (privacy, freedom, open protocols)
 
 ### 5. Execution
-- Working MVP (not just slides)
-- Technical founder who ships
-- Clear roadmap (Phase 1 → 2 → 3)
+- Working product at v0.18.0 (645+ commits, not just slides)
+- Technical founder who ships (10 major versions in 4 months)
+- Clear roadmap (Phase 1 ✅ → Phase 1.5 ✅ → Phase 2 in progress → Phase 3 planned)
 
 ### 6. Success Metrics for Infrastructure Plays
 - **Infrastructure metrics:** Protocol adoption, users controlling data, industry norm shifts

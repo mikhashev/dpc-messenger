@@ -934,7 +934,7 @@ sync_interval = 600          # Sync every 10 minutes
 - [WebRTC Setup Guide](./WEBRTC_SETUP_GUIDE.md)
 - [GitHub OAuth Setup](./GITHUB_AUTH_SETUP.md)
 - [Firewall Configuration](../dpc-client/privacy_rules.example.json)
-- [Fixes Summary](../FIXES_SUMMARY.md)
+- [Changelog](../CHANGELOG.md)
 
 ---
 

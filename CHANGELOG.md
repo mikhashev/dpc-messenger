@@ -861,7 +861,7 @@ FILE_OFFER payload extended with `voice_metadata`:
   - Configuration: `[hole_punch] enabled = true` (default)
 
 ### Documentation
-- Added [docs/RELEASE_NOTES_V0_10_1.md](docs/RELEASE_NOTES_V0_10_1.md)
+- Added docs/RELEASE_NOTES_V0_10_1.md (archived to docs/archive/)
 - Added [docs/MANUAL_TESTING_GUIDE.md](docs/MANUAL_TESTING_GUIDE.md)
 - Updated CLAUDE.md with DTLS implementation notes
 - Updated README.md version to 0.10.1

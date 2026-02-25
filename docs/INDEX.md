@@ -1,8 +1,8 @@
 # D-PC Messenger Documentation Index
 
-> **Version:** 0.18.0 | **Last Updated:** February 25, 2026
+> **Version:** 0.18.0 | **Last Updated:** February 2026
 
-Welcome to the D-PC Messenger documentation! This index helps you navigate our comprehensive documentation library (44+ files, 25,000+ lines).
+Welcome to the D-PC Messenger documentation! This index helps you navigate our comprehensive documentation library.
 
 ---
 
@@ -11,7 +11,7 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 ### Getting Started
 - **[Quick Start Guide](QUICK_START.md)** - 5-minute setup for new users
 - **[Configuration Guide](CONFIGURATION.md)** - Complete configuration reference
-- **[Release Notes v0.10.0](RELEASE_NOTES_V0_10_0.md)** - Latest release highlights
+- **[Changelog](../CHANGELOG.md)** - Version history and release highlights
 
 ### Core Concepts
 - **[User Sovereignty](USER_SOVEREIGNTY.md)** - Philosophy & privacy principles
@@ -38,7 +38,8 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 
 **Using Features:**
 - [Remote Inference](REMOTE_INFERENCE.md) - P2P compute sharing
-- [Remote AI Provider Selection](REMOTE_AI_PROVIDER_SELECTION.md) - AI provider switching
+- [DPC Agent Guide](DPC_AGENT_GUIDE.md) - Embedded autonomous AI agent
+- [Telegram Setup](TELEGRAM_SETUP.md) - Telegram bot integration
 - [Manual Knowledge Save](MANUAL_KNOWLEDGE_SAVE.md) - Knowledge commit procedures
 
 **Privacy & Security:**
@@ -60,6 +61,7 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 **Integration Guides:**
 - [UI Integration Guide](UI_INTEGRATION_GUIDE.md) - Frontend integration with backend
 - [WebRTC Integration](README_WEBRTC_INTEGRATION.md) - WebRTC peer connection implementation
+- [DPC Agent Telegram](DPC_AGENT_TELEGRAM.md) - Agent Telegram integration
 - [Knowledge Compacting](KNOWLEDGE_COMPACTING.md) - Knowledge cleanup mechanisms
 - [Knowledge Detection Testing](KNOWLEDGE_DETECTION_TESTING.md) - Testing knowledge detection
 
@@ -74,11 +76,15 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 **Deployment:**
 - [WebRTC Setup Guide](WEBRTC_SETUP_GUIDE.md) - Production WebRTC deployment
 - [Hub TURN Integration](HUB_TURN_INTEGRATION.md) - Hub-level TURN server setup
+- [Server Configuration](SERVER_CONFIGURATION.md) - STUN/TURN server config
+- [TURN Setup](TURN_SETUP.md) - TURN credentials setup
 - [macOS Build](MACOS_BUILD.md) - macOS-specific build instructions
+- [Linux WebRTC Limitations](LINUX_WEBRTC_LIMITATIONS.md) - Linux audio/WebRTC troubleshooting
 
 **Operations:**
 - [Logging Guide](LOGGING.md) - Debugging and troubleshooting
 - [Configuration Guide](CONFIGURATION.md) - Server configuration options
+- [Voice Messages Known Issues](VOICE_MESSAGES_KNOWN_ISSUES.md) - Platform-specific voice issues
 
 ---
 
@@ -107,10 +113,7 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 - [CLA.md](../CLA.md) - Contributor License Agreement
 
 **Release Information:**
-- [Changelog](../CHANGELOG.md) - Version history (v0.1.0 - v0.10.0)
-- [Release Notes v0.10.0](RELEASE_NOTES_V0_10_0.md) - Latest release
-- [Release Notes v0.9.0](RELEASE_NOTES_V0_9_0.md) - Previous release
-- [FIXES_SUMMARY.md](../FIXES_SUMMARY.md) - Bug fixes and improvements
+- [Changelog](../CHANGELOG.md) - Complete version history (v0.1.0 - v0.18.0)
 
 ---
 
@@ -122,7 +125,6 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 - **Client Core**: [dpc-client/core/README.md](../dpc-client/core/README.md) - Core service quick reference
 - **Server Configuration**: [SERVER_CONFIGURATION.md](SERVER_CONFIGURATION.md) - STUN/TURN server config
 - **TURN Setup**: [TURN_SETUP.md](TURN_SETUP.md) - TURN credentials setup
-- **DTLS Research**: [DTLS_RESEARCH.md](DTLS_RESEARCH.md) - DTLS library research notes
 - **Client UI**: [dpc-client/ui/README.md](../dpc-client/ui/README.md) - UI reference
 
 ### Hub Documentation
@@ -146,7 +148,8 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 - [Knowledge Architecture](KNOWLEDGE_ARCHITECTURE.md) - Knowledge commit system
 - [Knowledge Compacting](KNOWLEDGE_COMPACTING.md) - Cleanup mechanisms
 - [Remote Inference](REMOTE_INFERENCE.md) - P2P compute sharing
-- [Remote AI Provider Selection](REMOTE_AI_PROVIDER_SELECTION.md) - Provider switching
+- [DPC Agent Guide](DPC_AGENT_GUIDE.md) - Embedded autonomous AI agent
+- [DPC Agent Telegram](DPC_AGENT_TELEGRAM.md) - Agent Telegram integration
 
 ### Privacy & Security
 - [User Sovereignty](USER_SOVEREIGNTY.md) - Privacy principles
@@ -167,16 +170,10 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 
 ---
 
-## Version-Specific Documentation
+## Version History
 
-### Current Version (v0.10.0)
-- [Release Notes v0.10.0](RELEASE_NOTES_V0_10_0.md) - Phase 6 completion
-- [Fallback Logic](FALLBACK_LOGIC.md) - 6-tier connection hierarchy
-- [Configuration Guide](CONFIGURATION.md) - Updated for v0.10.0
-
-### Previous Versions
-- [Release Notes v0.9.0](RELEASE_NOTES_V0_9_0.md) - DHT implementation
-- [Changelog](../CHANGELOG.md) - Full version history
+- [Changelog](../CHANGELOG.md) - Full version history (v0.1.0 - v0.18.0)
+- [docs/archive/](archive/) - Archived release notes and historical documents
 
 ---
 
@@ -199,18 +196,17 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 
 ## Documentation Statistics
 
-**Total Documentation:**
-- **Root Docs:** 10 files, 5,865 lines
-- **docs/ Directory:** 24 files, 16,147 lines
-- **Package Docs:** 7 files, 2,310 lines
-- **Specifications:** 3 files, 848 lines
-- **Grand Total:** 44 files, 25,170 lines
+**Active Documentation:**
+- **Root Docs:** 10 files (README, CLAUDE.md, VISION, ROADMAP, etc.)
+- **docs/ Directory:** 29 active files + archive/
+- **Package Docs:** 7 files (per-package READMEs)
+- **Specifications:** 2 files (DPTP v1, Hub API v1)
 
-**Recent Updates (December 2025):**
-- Phase 6 completion documentation
-- Connection orchestrator integration
-- v0.10.0 release notes
-- Updated configuration guide
+**Recent Additions (v0.18.0):**
+- DPC Agent Guide - Embedded autonomous AI agent
+- DPC Agent Telegram - Agent Telegram integration
+- Telegram Setup - Bot configuration
+- Voice Messages Known Issues - Platform-specific troubleshooting
 
 ---
 
