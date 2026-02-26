@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Last Updated:** February 2026 | **Current Version:** 0.18.0 | **Current Phase:** Phase 2 - Team Collaboration + Decentralized Infrastructure
+> **Last Updated:** February 2026 | **Current Version:** 0.19.0 | **Current Phase:** Phase 2 - Team Collaboration + Decentralized Infrastructure
 
 ---
 
@@ -135,7 +135,7 @@ The foundation for team collaboration is in place:
 | # | Feature | Complexity | Description |
 |---|---------|------------|-------------|
 | 1 | **Persistent Team Management** | Medium | Team objects (`~/.dpc/teams.json`), UI sidebar, auto-firewall integration |
-| 2 | **Group Chat UI** | Medium | Multi-participant chat, presence indicators, typing notifications |
+| 2 | **Group Chat** | Medium | **DONE (v0.19.0)** - Multi-participant chat with text, files, voice, screenshots, transcription, knowledge commits, session management |
 | 3 | **Team Firewall Presets** | Low | Pre-configured policies (Work Team, Study Group, Full Trust) |
 | 4 | **Team Invite & Onboarding** | Medium | Short-lived invite codes, QR sharing, auto-connect workflow |
 

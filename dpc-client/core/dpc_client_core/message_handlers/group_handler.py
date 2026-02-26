@@ -204,6 +204,9 @@ class GroupDeleteHandler(MessageHandler):
             )
             return None
 
+        # Capture group name before deletion for UI notification
+        group_name = group.name if group else group_id
+
         # Remove local group data
         self.service.group_manager.handle_group_deleted(group_id)
 
@@ -215,6 +218,7 @@ class GroupDeleteHandler(MessageHandler):
         await self.service.local_api.broadcast_event("group_deleted", {
             "group_id": group_id,
             "deleted_by": sender_node_id,
+            "group_name": group_name,
         })
 
         return None

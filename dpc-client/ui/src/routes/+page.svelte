@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, leaveGroup, deleteGroup } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -22,6 +22,7 @@
   import TelegramStatus from "$lib/components/TelegramStatus.svelte";
   import FileTransferUI from "$lib/components/FileTransferUI.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
+  import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
   import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
   import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
   import VoicePlayer from "$lib/components/VoicePlayer.svelte";
@@ -192,6 +193,7 @@
   let showProvidersEditor = $state(false);
   let showCommitDialog = $state(false);
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
+  let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
   // Initialize from localStorage (browser-safe)
   let autoKnowledgeDetection = $state(
     typeof window !== 'undefined' && localStorage.getItem('autoKnowledgeDetection') === 'true'
@@ -1140,25 +1142,41 @@
     tokenWarningLevel === 'critical' || tokenWarningLevel === 'warning'
   );
 
-  // Reactive: Check if current peer is connected (for enabling/disabling send controls)
-  let isPeerConnected = $derived(!activeChatId.startsWith('ai_') && activeChatId !== 'local_ai'
-    ? ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
-    : true); // AI chats don't require peer connection
+  // Reactive: Check if current peer/group is connected (for enabling/disabling send controls)
+  let isPeerConnected = $derived(
+    activeChatId.startsWith('ai_') || activeChatId === 'local_ai'
+      ? true  // AI chats don't require peer connection
+      : activeChatId.startsWith('group-')
+        ? (() => {
+            // Group chat: at least one other member online
+            const group = $groupChats.get(activeChatId);
+            if (!group) return false;
+            const selfId = $nodeStatus?.node_id || '';
+            return group.members?.some((m: string) =>
+              m !== selfId && ($nodeStatus?.peer_info?.some((p: any) => p.node_id === m) ?? false)
+            ) ?? false;
+          })()
+        : ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
+  );
 
   // Reactive: Check if current chat is a Telegram chat (for UI adjustments)
   let isTelegramChat = $derived(activeChatId.startsWith('telegram-'));
 
-  // Reactive: Check if current chat is a P2P chat (not local AI, not AI chat, not Telegram)
+  // Reactive: Check if current chat is a P2P chat (not local AI, not AI chat, not Telegram, not group)
   // P2P chats are identified by node IDs like 'dpc-node-xxx'
   let isP2PChat = $derived(
     activeChatId !== 'local_ai' &&
     !activeChatId.startsWith('ai_') &&
-    !activeChatId.startsWith('telegram-')
+    !activeChatId.startsWith('telegram-') &&
+    !activeChatId.startsWith('group-')
   );
 
   // Reactive: Check if current chat is an AI chat (excluding Telegram which are stored in aiChats for sidebar)
   // Telegram chats are in $aiChats for sidebar display but are NOT AI chats
   let isActuallyAIChat = $derived($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-'));
+
+  // Reactive: Check if current chat is a group chat (v0.19.0)
+  let isGroupChat = $derived(activeChatId.startsWith('group-'));
 
   // Reactive: Sync chat history from backend when switching to peer chat with no messages (v0.11.2)
   // Handles page refresh scenario: frontend loses chatHistories, backend keeps conversation_monitors
@@ -1896,6 +1914,18 @@
           showFileOfferToast = true;
           setTimeout(() => showFileOfferToast = false, 5000);
         }
+      } else if (activeChatId.startsWith('group-')) {
+        // Group chat: Send screenshot via group fan-out (v0.19.0)
+        try {
+          await sendGroupImage(activeChatId, imageData.dataUrl, imageData.filename, text);
+          console.log("Group screenshot transfer initiated");
+        } catch (error) {
+          console.error('Error sending group screenshot:', error);
+          const errorMsg = error instanceof Error ? error.message : String(error);
+          fileOfferToastMessage = `Failed to send screenshot: ${errorMsg}`;
+          showFileOfferToast = true;
+          setTimeout(() => showFileOfferToast = false, 5000);
+        }
       } else {
         // P2P chat: Send screenshot via file transfer
         try {
@@ -2043,6 +2073,9 @@
       } catch (error) {
         console.error('[Telegram] Failed to send message:', error);
       }
+    } else if (activeChatId.startsWith('group-')) {
+      // Group chat: Send via group fan-out (v0.19.0)
+      sendGroupMessage(activeChatId, text);
     } else {
       // P2P chat: Send via P2P
       sendCommand("send_p2p_message", { target_node_id: activeChatId, text });
@@ -2202,6 +2235,63 @@
   function closeNewSessionDialog() {
     showNewSessionDialog = false;
     newSessionProposal.set(null);
+  }
+
+  // Group chat handlers (v0.19.0)
+  async function handleCreateGroup(event: CustomEvent) {
+    const { name, topic, member_node_ids } = event.detail;
+    try {
+      const result = await createGroupChat(name, topic, member_node_ids);
+      if (result && result.status === "success" && result.group) {
+        const groupId = result.group.group_id;
+        // Ensure chatHistories entry exists
+        chatHistories.update(h => {
+          if (!h.has(groupId)) {
+            const newMap = new Map(h);
+            newMap.set(groupId, []);
+            return newMap;
+          }
+          return h;
+        });
+        // Switch to the new group chat
+        activeChatId = groupId;
+      }
+      showNewGroupDialog = false;
+    } catch (e) {
+      console.error("Failed to create group:", e);
+    }
+  }
+
+  async function handleLeaveGroup(groupId: string) {
+    try {
+      await leaveGroup(groupId);
+      if (activeChatId === groupId) {
+        activeChatId = 'local_ai';
+      }
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        newMap.delete(groupId);
+        return newMap;
+      });
+    } catch (e) {
+      console.error("Failed to leave group:", e);
+    }
+  }
+
+  async function handleDeleteGroup(groupId: string) {
+    try {
+      await deleteGroup(groupId);
+      if (activeChatId === groupId) {
+        activeChatId = 'local_ai';
+      }
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        newMap.delete(groupId);
+        return newMap;
+      });
+    } catch (e) {
+      console.error("Failed to delete group:", e);
+    }
   }
 
   // Model download dialog handlers (v0.13.5)
@@ -2522,6 +2612,21 @@
           }]);
           return newMap;
         });
+      } else if (activeChatId.startsWith('group-')) {
+        // Group chat: Send file via group fan-out (v0.19.0)
+        const group = $groupChats.get(activeChatId);
+        const groupName = group?.name || 'group';
+        if (confirm(`Send "${fileName}" to group "${groupName}"?`)) {
+          try {
+            await sendGroupFile(activeChatId, filePath);
+            console.log(`[Group] File transfer initiated: ${fileName}`);
+          } catch (error) {
+            console.error('Error sending group file:', error);
+            fileOfferToastMessage = `Failed to send file to group: ${error}`;
+            showFileOfferToast = true;
+            setTimeout(() => showFileOfferToast = false, 5000);
+          }
+        }
       } else {
         // P2P file transfer with confirmation dialog (existing behavior)
         // Get recipient name from peer info
@@ -2806,6 +2911,18 @@
         });
 
         console.log(`[Telegram] Sent voice message to Telegram`);
+      } else if (activeChatId.startsWith('group-')) {
+        // Group chat: Convert blob to base64 and send via group voice fan-out (v0.19.0)
+        const arrayBuffer = await blob.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+        let binaryString = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < uint8Array.length; i += chunkSize) {
+          const chunk = uint8Array.subarray(i, i + chunkSize);
+          binaryString += String.fromCharCode(...chunk);
+        }
+        const base64Audio = btoa(binaryString);
+        await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm');
       } else if (activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
         // For P2P chats, send via file transfer
         await sendVoiceMessage(activeChatId, blob, duration);
@@ -3160,6 +3277,138 @@
     }
   });
 
+  // Group text message routing (v0.19.0)
+  $effect(() => {
+    if ($groupTextReceived) {
+      const msg = $groupTextReceived;
+      const messageId = msg.message_id || `${msg.group_id}-${msg.sender_node_id}-${Date.now()}`;
+
+      if (!processedMessageIds.has(messageId)) {
+        processedMessageIds.add(messageId);
+
+        const wasNearBottom = isNearBottom(chatWindow);
+
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          const hist = newMap.get(msg.group_id) || [];
+          newMap.set(msg.group_id, [...hist, {
+            id: crypto.randomUUID(),
+            sender: msg.sender_node_id,
+            senderName: msg.sender_name,
+            text: msg.text,
+            timestamp: Date.now()
+          }]);
+          return newMap;
+        });
+
+        if (wasNearBottom || activeChatId === msg.group_id) {
+          autoScroll();
+        }
+
+        if (processedMessageIds.size > 100) {
+          const firstId = processedMessageIds.values().next().value;
+          if (firstId) processedMessageIds.delete(firstId);
+        }
+      }
+    }
+  });
+
+  // Group file/image/voice message routing (v0.19.0)
+  $effect(() => {
+    if ($groupFileReceived) {
+      const msg = $groupFileReceived;
+      const messageId = msg.message_id || `group-file-${msg.group_id}-${Date.now()}`;
+
+      if (!processedMessageIds.has(messageId)) {
+        processedMessageIds.add(messageId);
+
+        const wasNearBottom = isNearBottom(chatWindow);
+
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          const hist = newMap.get(msg.group_id) || [];
+          const messageData: any = {
+            id: crypto.randomUUID(),
+            sender: msg.sender_node_id,
+            senderName: msg.sender_name,
+            text: msg.text || "",
+            timestamp: Date.now()
+          };
+          if (msg.attachments && msg.attachments.length > 0) {
+            messageData.attachments = msg.attachments;
+          }
+          newMap.set(msg.group_id, [...hist, messageData]);
+          return newMap;
+        });
+
+        if (wasNearBottom || activeChatId === msg.group_id) {
+          autoScroll();
+        }
+
+        if (processedMessageIds.size > 100) {
+          const firstId = processedMessageIds.values().next().value;
+          if (firstId) processedMessageIds.delete(firstId);
+        }
+      }
+    }
+  });
+
+  // Group invite notification (v0.19.0)
+  $effect(() => {
+    if ($groupInviteReceived) {
+      const invite = $groupInviteReceived;
+      const creatorName = invite.creator_name || invite.created_by?.slice(0, 16) || 'Someone';
+      fileOfferToastMessage = `${creatorName} added you to group "${invite.name}"`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+
+      // Ensure chat history entry exists for the new group
+      chatHistories.update(h => {
+        if (!h.has(invite.group_id)) {
+          const newMap = new Map(h);
+          newMap.set(invite.group_id, []);
+          return newMap;
+        }
+        return h;
+      });
+    }
+  });
+
+  // Group deletion notification (v0.19.0)
+  $effect(() => {
+    if ($groupDeleted) {
+      const deleted = $groupDeleted;
+      fileOfferToastMessage = `Group "${deleted.group_name || deleted.group_id}" was deleted`;
+      showFileOfferToast = true;
+      setTimeout(() => showFileOfferToast = false, 5000);
+
+      // Switch away if viewing deleted group
+      if (activeChatId === deleted.group_id) {
+        activeChatId = 'local_ai';
+      }
+      // Clean up chat history
+      chatHistories.update(h => {
+        const newMap = new Map(h);
+        newMap.delete(deleted.group_id);
+        return newMap;
+      });
+    }
+  });
+
+  // Group member left notification (v0.19.0)
+  $effect(() => {
+    if ($groupMemberLeft) {
+      const left = $groupMemberLeft;
+      const memberName = left.member_name || left.node_id?.slice(0, 16) || 'A member';
+      const group = $groupChats.get(left.group_id);
+      if (group) {
+        fileOfferToastMessage = `${memberName} left "${group.name}"`;
+        showFileOfferToast = true;
+        setTimeout(() => showFileOfferToast = false, 4000);
+      }
+    }
+  });
+
   let activeMessages = $derived($chatHistories.get(activeChatId) || []);
 
   // Auto-scroll when activeMessages change (for all chat types)
@@ -3200,6 +3449,11 @@
       onAddAgentChat={handleAddAgentChat}
       onDeleteAIChat={handleDeleteAIChat}
       onDisconnectPeer={handleDisconnectPeer}
+      groupChats={$groupChats}
+      onCreateGroup={() => showNewGroupDialog = true}
+      onLeaveGroup={handleLeaveGroup}
+      onDeleteGroup={handleDeleteGroup}
+      selfNodeId={$nodeStatus?.node_id || ""}
     />
 
 
@@ -3215,7 +3469,12 @@
           >
             <h2>
               <span class="collapse-indicator">{chatHeaderCollapsed ? '▶' : '▼'}</span>
-              {#if isActuallyAIChat}
+              {#if isGroupChat}
+                {$groupChats.get(activeChatId)?.name || 'Group Chat'}
+                <span class="group-header-meta">
+                  ({$groupChats.get(activeChatId)?.members?.length || 0} members)
+                </span>
+              {:else if isActuallyAIChat}
                 {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
               {:else}
                 Chat with {getPeerDisplayName(activeChatId)}
@@ -3249,6 +3508,11 @@
         </div>
 
         {#if !chatHeaderCollapsed}
+          <!-- Group topic display (v0.19.0) -->
+          {#if isGroupChat && $groupChats.get(activeChatId)?.topic}
+            <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
+          {/if}
+
           <!-- ProviderSelector: AI chats only (not Telegram) -->
           {#if isActuallyAIChat}
           <ProviderSelector
@@ -3530,6 +3794,14 @@
   proposal={$newSessionProposal}
   on:vote={handleSessionVote}
   on:close={closeNewSessionDialog}
+/>
+
+<!-- New Group Dialog (v0.19.0) -->
+<NewGroupDialog
+  bind:open={showNewGroupDialog}
+  connectedPeers={($nodeStatus?.peer_info || []).map((p: any) => ({ node_id: p.node_id, name: p.name || p.node_id }))}
+  on:create={handleCreateGroup}
+  on:cancel={() => showNewGroupDialog = false}
 />
 
 <!-- Model Download Dialog (v0.13.5) -->
@@ -3854,6 +4126,20 @@
 
   .chat-header-toggle:hover {
     opacity: 0.7;
+  }
+
+  .group-header-meta {
+    font-size: 0.7em;
+    color: #888;
+    font-weight: 400;
+    margin-left: 0.3em;
+  }
+
+  .group-topic {
+    font-size: 0.85rem;
+    color: #aaa;
+    padding: 0.2rem 0.8rem;
+    font-style: italic;
   }
 
   .collapse-indicator {

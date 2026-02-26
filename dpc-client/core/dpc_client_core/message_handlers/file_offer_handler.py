@@ -76,6 +76,7 @@ class FileOfferHandler(MessageHandler):
         chunk_hashes = payload.get("chunk_hashes")
         image_metadata = payload.get("image_metadata")
         voice_metadata = payload.get("voice_metadata")
+        group_id = payload.get("group_id")  # v0.19.0+: Group file transfers
 
         # Detect transfer type
         is_image = mime_type and mime_type.startswith("image/") and image_metadata
@@ -128,7 +129,7 @@ class FileOfferHandler(MessageHandler):
         # Broadcast appropriate event based on type
         if is_image:
             # Image offer: include thumbnail and dimensions
-            await self.service.local_api.broadcast_event("image_offer_received", {
+            event_data = {
                 "transfer_id": transfer_id,
                 "node_id": sender_node_id,
                 "sender_name": sender_name,
@@ -141,10 +142,13 @@ class FileOfferHandler(MessageHandler):
                 "thumbnail": image_metadata.get("thumbnail_base64", ""),
                 "source": image_metadata.get("source", "unknown"),
                 "captured_at": image_metadata.get("captured_at", "")
-            })
+            }
+            if group_id:
+                event_data["group_id"] = group_id
+            await self.service.local_api.broadcast_event("image_offer_received", event_data)
         elif is_voice:
             # Voice offer: include duration and codec info
-            await self.service.local_api.broadcast_event("voice_offer_received", {
+            event_data = {
                 "transfer_id": transfer_id,
                 "node_id": sender_node_id,
                 "sender_name": sender_name,
@@ -158,10 +162,13 @@ class FileOfferHandler(MessageHandler):
                 "channels": voice_metadata.get("channels", 1),
                 "codec": voice_metadata.get("codec", "unknown"),
                 "recorded_at": voice_metadata.get("recorded_at", "")
-            })
+            }
+            if group_id:
+                event_data["group_id"] = group_id
+            await self.service.local_api.broadcast_event("voice_offer_received", event_data)
         else:
             # Regular file offer: standard notification
-            await self.service.local_api.broadcast_event("file_transfer_offered", {
+            event_data = {
                 "transfer_id": transfer_id,
                 "node_id": sender_node_id,
                 "sender_name": sender_name,
@@ -170,7 +177,10 @@ class FileOfferHandler(MessageHandler):
                 "size_mb": round(size_bytes / (1024 * 1024), 2),
                 "mime_type": mime_type,
                 "hash": hash_value
-            })
+            }
+            if group_id:
+                event_data["group_id"] = group_id
+            await self.service.local_api.broadcast_event("file_transfer_offered", event_data)
 
         # Create pending download transfer
         from ..managers.file_transfer_manager import FileTransfer, TransferStatus
@@ -192,7 +202,8 @@ class FileOfferHandler(MessageHandler):
             chunks_failed=set(),  # v0.11.1: Track failed chunks for retry
             retry_count={},  # v0.11.1: Track retry attempts per chunk
             image_metadata=image_metadata,  # Store image metadata for chat display (v0.12.0+)
-            voice_metadata=voice_metadata   # Store voice metadata for chat display (v0.13.0+)
+            voice_metadata=voice_metadata,  # Store voice metadata for chat display (v0.13.0+)
+            group_id=group_id              # Group ID for group file transfers (v0.19.0+)
         )
         file_transfer_manager.active_transfers[transfer_id] = transfer
 

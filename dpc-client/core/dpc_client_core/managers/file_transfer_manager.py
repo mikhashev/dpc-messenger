@@ -106,6 +106,7 @@ class FileTransfer:
     max_retries: int = 3                 # Max retries per chunk
     image_metadata: Optional[dict] = None  # Image metadata (dimensions, thumbnail, etc.) v0.12.0+
     voice_metadata: Optional[dict] = None  # Voice metadata (duration, sample_rate, codec) v0.13.0+
+    group_id: Optional[str] = None  # Group ID for group file transfers (v0.19.0+)
 
 
 class FileTransferManager:
@@ -353,7 +354,8 @@ class FileTransferManager:
         file_path: Path,
         progress_callback: Optional[Callable[[str, int, int], None]] = None,
         image_metadata: Optional[Dict[str, Any]] = None,
-        voice_metadata: Optional[Dict[str, Any]] = None
+        voice_metadata: Optional[Dict[str, Any]] = None,
+        group_id: Optional[str] = None
     ) -> str:
         """
         Initiate file transfer to peer.
@@ -445,7 +447,8 @@ class FileTransferManager:
             progress_callback=progress_callback,
             chunk_hashes=chunk_hashes,  # v0.11.1: Store for retry requests
             image_metadata=image_metadata,  # Store image metadata for screenshots (v0.12.0+)
-            voice_metadata=voice_metadata   # Store voice metadata for voice messages (v0.13.0+)
+            voice_metadata=voice_metadata,  # Store voice metadata for voice messages (v0.13.0+)
+            group_id=group_id              # Group ID for group file transfers (v0.19.0+)
         )
         self.active_transfers[transfer_id] = transfer
 
@@ -467,6 +470,10 @@ class FileTransferManager:
         # Add voice metadata if provided (v0.13.0+: Voice Messages)
         if voice_metadata:
             payload["voice_metadata"] = voice_metadata
+
+        # Add group_id if provided (v0.19.0+: Group file transfers)
+        if group_id:
+            payload["group_id"] = group_id
 
         await self.p2p_manager.send_message_to_peer(node_id, {
             "command": "FILE_OFFER",
@@ -744,17 +751,24 @@ class FileTransferManager:
             if is_image and transfer.image_metadata:
                 caption_text = transfer.image_metadata.get("text", "")
 
-            await self.local_api.broadcast_event("new_p2p_message", {
+            # Route to group chat or P2P chat based on group_id
+            message_event = {
                 "sender_node_id": node_id,
                 "sender_name": sender_name,
                 "text": caption_text,  # Sender's caption (empty if not provided)
                 "message_id": message_id,
                 "attachments": [attachment]
-            })
+            }
+
+            if transfer.group_id:
+                message_event["group_id"] = transfer.group_id
+                await self.local_api.broadcast_event("group_file_received", message_event)
+            else:
+                await self.local_api.broadcast_event("new_p2p_message", message_event)
             logger.debug(f"Broadcasted {'image' if is_image else 'voice' if is_voice else 'file'} received message to UI: {transfer.filename}")
 
             # Broadcast completion event to hide active transfer panel
-            await self.local_api.broadcast_event("file_transfer_complete", {
+            completion_event = {
                 "transfer_id": transfer.transfer_id,
                 "node_id": node_id,
                 "filename": transfer.filename,
@@ -764,11 +778,16 @@ class FileTransferManager:
                 "hash": transfer.hash,
                 "mime_type": transfer.mime_type,
                 "status": "completed"
-            })
+            }
+            if transfer.group_id:
+                completion_event["group_id"] = transfer.group_id
+            await self.local_api.broadcast_event("file_transfer_complete", completion_event)
 
             # Add to backend conversation monitor (RECEIVER SIDE)
             # This ensures transcriptions can be attached and knowledge extraction works
-            conversation_monitor = self.service._get_or_create_conversation_monitor(node_id)
+            # For group transfers, key on group_id; for P2P, key on node_id
+            monitor_key = transfer.group_id if transfer.group_id else node_id
+            conversation_monitor = self.service._get_or_create_conversation_monitor(monitor_key)
             if conversation_monitor:
                 # Determine message content based on attachment type
                 if is_voice:
@@ -791,7 +810,8 @@ class FileTransferManager:
                     node_id=node_id,
                     file_path=file_path,
                     voice_metadata=transfer.voice_metadata,
-                    is_sender=False  # Recipient-side transcription
+                    is_sender=False,  # Recipient-side transcription
+                    group_id=transfer.group_id
                 )
             )
 

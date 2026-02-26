@@ -1047,8 +1047,20 @@ class CoreService:
                     except Exception as e:
                         logger.error(f"Failed to request chat history from {peer_id}: {e}")
 
+        # Auto-sync group metadata with newly connected peers (v0.19.0+)
+        for peer_id in self.p2p_manager.peers:
+            shared_groups = self.group_manager.get_groups_for_peer(peer_id)
+            for group in shared_groups:
+                try:
+                    await self.p2p_manager.send_message_to_peer(peer_id, {
+                        "command": "GROUP_SYNC",
+                        "payload": group.to_dict()
+                    })
+                except Exception as e:
+                    logger.debug("Failed to sync group %s with %s: %s", group.group_id, peer_id[:20], e)
+
         await self.local_api.broadcast_event("status_update", await self.get_status())
-    
+
     async def on_p2p_message_received(self, sender_node_id: str, message: Dict[str, Any]):
         """
         Callback function that is triggered when a P2P message is received.
@@ -3484,7 +3496,8 @@ class CoreService:
         file_path: Path,
         voice_metadata: Dict[str, Any],
         is_sender: bool,
-        allow_model_load: bool = False
+        allow_model_load: bool = False,
+        group_id: Optional[str] = None
     ) -> None:
         """
         Conditionally trigger auto-transcription for a voice message.
@@ -3665,7 +3678,7 @@ class CoreService:
 
                 # 12. Broadcast transcription to peers (only if not empty)
                 logger.info(f"Broadcasting transcription to peer {node_id}: {len(transcription_text)} chars")
-                await self._broadcast_voice_transcription(node_id, transfer_id, transcription_data)
+                await self._broadcast_voice_transcription(node_id, transfer_id, transcription_data, group_id=group_id)
 
                 # 13. Notify UI
                 await self.local_api.broadcast_event("voice_transcription_complete", {
@@ -3882,15 +3895,17 @@ class CoreService:
         self,
         node_id: str,
         transfer_id: str,
-        transcription_data: Dict[str, Any]
+        transcription_data: Dict[str, Any],
+        group_id: Optional[str] = None
     ) -> None:
         """
         Broadcast VOICE_TRANSCRIPTION message to peer(s).
 
         Args:
-            node_id: Peer node ID to send to
+            node_id: Peer node ID to send to (for P2P)
             transfer_id: Voice message transfer ID
             transcription_data: Transcription result
+            group_id: If set, fan-out to all group members (v0.19.0)
         """
         message = {
             "command": "VOICE_TRANSCRIPTION",
@@ -3901,12 +3916,25 @@ class CoreService:
             }
         }
 
-        # Send to specific peer
-        try:
-            await self.p2p_manager.send_message_to_peer(node_id, message)
-            logger.debug(f"Broadcasted VOICE_TRANSCRIPTION for {transfer_id} to {node_id}")
-        except Exception as e:
-            logger.error(f"Failed to broadcast transcription to {node_id}: {e}")
+        if group_id and hasattr(self, 'group_manager'):
+            # Group chat: Fan-out to all connected group members
+            group = self.group_manager.get_group(group_id)
+            if group:
+                connected = self.p2p_coordinator.get_connected_peers()
+                for member_id in group.members:
+                    if member_id != self.p2p_manager.node_id and member_id in connected:
+                        try:
+                            await self.p2p_manager.send_message_to_peer(member_id, message)
+                            logger.debug(f"Broadcasted VOICE_TRANSCRIPTION for {transfer_id} to group member {member_id}")
+                        except Exception as e:
+                            logger.error(f"Failed to broadcast transcription to group member {member_id}: {e}")
+        else:
+            # P2P: Send to specific peer
+            try:
+                await self.p2p_manager.send_message_to_peer(node_id, message)
+                logger.debug(f"Broadcasted VOICE_TRANSCRIPTION for {transfer_id} to {node_id}")
+            except Exception as e:
+                logger.error(f"Failed to broadcast transcription to {node_id}: {e}")
 
     async def get_firewall_rules(self) -> Dict[str, Any]:
         """Get current firewall rules as JSON dict for editor.
@@ -4795,17 +4823,29 @@ Respond in JSON format:
                 result = await self.reset_conversation(conversation_id)
                 return result
 
-            # P2P chats: use proposal flow
-            # Get participants (all peers in conversation)
-            # For now, conversation_id is the peer_id in P2P mode
-            participants = {self.p2p_manager.node_id, conversation_id}
+            # Group chats: participants from group members
+            if conversation_id.startswith("group-"):
+                group = self.group_manager.get_group(conversation_id)
+                if not group:
+                    return {"status": "error", "message": f"Group {conversation_id} not found"}
 
-            # Check if peer is connected
-            if conversation_id not in self.p2p_manager.peers:
-                return {
-                    "status": "error",
-                    "message": "Peer must be online to propose new session"
-                }
+                participants = set(group.members)
+                # Check at least one other member is online
+                connected = self.p2p_coordinator.get_connected_peers()
+                online_members = [m for m in group.members if m != self.p2p_manager.node_id and m in connected]
+                if not online_members:
+                    return {"status": "error", "message": "No group members are online"}
+            else:
+                # P2P chats: use proposal flow
+                # For now, conversation_id is the peer_id in P2P mode
+                participants = {self.p2p_manager.node_id, conversation_id}
+
+                # Check if peer is connected
+                if conversation_id not in self.p2p_manager.peers:
+                    return {
+                        "status": "error",
+                        "message": "Peer must be online to propose new session"
+                    }
 
             # Initiate proposal via session manager
             result = await self.session_manager.propose_new_session(
@@ -5048,6 +5088,270 @@ Respond in JSON format:
             return {"status": "success"}
         except Exception as e:
             logger.error("Error deleting group: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def send_group_file(self, group_id: str, file_path: str) -> Dict[str, Any]:
+        """Send a file to all group members via fan-out file transfer.
+
+        Args:
+            group_id: Target group ID
+            file_path: Path to file to send
+        """
+        try:
+            group = self.group_manager.get_group(group_id)
+            if not group:
+                return {"status": "error", "message": f"Group {group_id} not found"}
+
+            from pathlib import Path
+            path = Path(file_path)
+            if not path.exists():
+                return {"status": "error", "message": f"File not found: {file_path}"}
+
+            connected_peers = self.p2p_coordinator.get_connected_peers()
+            transfer_ids = []
+
+            for node_id in group.members:
+                if node_id == self.p2p_manager.node_id:
+                    continue
+                if node_id not in connected_peers:
+                    logger.debug("Skipping offline member %s for group file", node_id[:20])
+                    continue
+
+                try:
+                    tid = await self.file_transfer_manager.send_file(
+                        node_id=node_id,
+                        file_path=path,
+                        group_id=group_id
+                    )
+                    transfer_ids.append(tid)
+                except Exception as e:
+                    logger.warning("Failed to send file to %s: %s", node_id[:20], e)
+
+            return {"status": "success", "transfer_ids": transfer_ids}
+        except Exception as e:
+            logger.error("Error sending group file: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def send_group_image(
+        self, group_id: str, image_base64: str, filename: str = None, text: str = ""
+    ) -> Dict[str, Any]:
+        """Send screenshot/image to all group members via fan-out file transfer.
+
+        Decodes and saves the image once, then sends to each connected member.
+
+        Args:
+            group_id: Target group ID
+            image_base64: Base64 data URL (data:image/png;base64,...)
+            filename: Optional filename
+            text: Optional text caption
+        """
+        from datetime import datetime, timezone
+        import base64 as b64
+        import re
+        from pathlib import Path
+        from PIL import Image
+
+        try:
+            group = self.group_manager.get_group(group_id)
+            if not group:
+                return {"status": "error", "message": f"Group {group_id} not found"}
+
+            # Parse and decode image (once)
+            if not image_base64.startswith("data:image/"):
+                return {"status": "error", "message": "Invalid data URL format"}
+
+            match = re.match(r'data:([^;]+);base64,(.+)', image_base64)
+            if not match:
+                return {"status": "error", "message": "Invalid data URL format"}
+
+            mime_type = match.group(1)
+            encoded_data = match.group(2)
+            extension = mime_type.split("/")[1]
+
+            try:
+                image_data = b64.b64decode(encoded_data)
+            except Exception as e:
+                return {"status": "error", "message": f"Failed to decode base64: {e}"}
+
+            # Validate size
+            img_rules = self.firewall.rules.get("image_transfer", {})
+            max_size_mb = img_rules.get("max_size_mb", 100)
+            size_mb = len(image_data) / (1024 * 1024)
+            if size_mb > max_size_mb:
+                return {"status": "error", "message": f"Image too large ({size_mb:.2f} MB > {max_size_mb} MB)"}
+
+            # Generate filename
+            if not filename:
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                filename = f"screenshot_{timestamp}.{extension}"
+
+            # Save image once (use group_id in path)
+            group_files_dir = DPC_HOME_DIR / "conversations" / group_id / "files" / "screenshots"
+            group_files_dir.mkdir(parents=True, exist_ok=True)
+            file_path = group_files_dir / filename
+            if file_path.exists():
+                stem, suffix = file_path.stem, file_path.suffix
+                counter = 1
+                while file_path.exists():
+                    file_path = group_files_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+
+            with open(file_path, "wb") as f:
+                f.write(image_data)
+
+            # Validate and get dimensions
+            with Image.open(file_path) as img:
+                if img.format not in ["PNG", "JPEG", "GIF", "WEBP"]:
+                    file_path.unlink()
+                    return {"status": "error", "message": f"Unsupported format: {img.format}"}
+                width, height = img.size
+
+            # Generate thumbnail
+            from .utils.image_utils import generate_thumbnail
+            try:
+                thumbnail_base64 = generate_thumbnail(file_path)
+            except Exception:
+                thumbnail_base64 = ""
+
+            image_metadata = {
+                "dimensions": {"width": width, "height": height},
+                "thumbnail_base64": thumbnail_base64,
+                "source": "clipboard",
+                "captured_at": datetime.now(timezone.utc).isoformat(),
+                "text": text
+            }
+
+            # Fan-out to connected members
+            connected_peers = self.p2p_coordinator.get_connected_peers()
+            transfer_ids = []
+
+            for node_id in group.members:
+                if node_id == self.p2p_manager.node_id:
+                    continue
+                if node_id not in connected_peers:
+                    continue
+
+                try:
+                    tid = await self.file_transfer_manager.send_file(
+                        node_id=node_id,
+                        file_path=file_path,
+                        image_metadata=image_metadata,
+                        group_id=group_id
+                    )
+                    transfer_ids.append(tid)
+                except Exception as e:
+                    logger.warning("Failed to send group image to %s: %s", node_id[:20], e)
+
+            return {
+                "status": "success",
+                "transfer_ids": transfer_ids,
+                "file_path": str(file_path),
+                "thumbnail_base64": thumbnail_base64,
+                "size_bytes": len(image_data),
+                "width": width,
+                "height": height,
+                "mime_type": mime_type
+            }
+        except Exception as e:
+            logger.error("Error sending group image: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def send_group_voice_message(
+        self, group_id: str, audio_base64: str, duration_seconds: float, mime_type: str = "audio/webm"
+    ) -> Dict[str, Any]:
+        """Send voice message to all group members via fan-out file transfer.
+
+        Decodes and saves the audio once, then sends to each connected member.
+
+        Args:
+            group_id: Target group ID
+            audio_base64: Base64-encoded audio data
+            duration_seconds: Recording duration
+            mime_type: Audio MIME type
+        """
+        from datetime import datetime, timezone
+        import base64 as b64
+
+        try:
+            group = self.group_manager.get_group(group_id)
+            if not group:
+                return {"status": "error", "message": f"Group {group_id} not found"}
+
+            # Decode audio
+            try:
+                audio_data = b64.b64decode(audio_base64)
+            except Exception as e:
+                return {"status": "error", "message": f"Failed to decode audio: {e}"}
+
+            # Validate
+            max_duration = float(self.settings.get("voice_messages", "max_duration_seconds", "300"))
+            max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
+
+            if duration_seconds > max_duration:
+                return {"status": "error", "message": f"Voice too long ({duration_seconds}s > {max_duration}s)"}
+
+            size_mb = len(audio_data) / (1024 * 1024)
+            if size_mb > max_size_mb:
+                return {"status": "error", "message": f"Voice too large ({size_mb:.2f} MB > {max_size_mb} MB)"}
+
+            # Generate filename and save once
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+            extension = mime_type.split("/")[-1].split(";")[0].strip()
+            audio_filename = f"voice_{timestamp}.{extension}"
+
+            group_files_dir = DPC_HOME_DIR / "conversations" / group_id / "files"
+            group_files_dir.mkdir(parents=True, exist_ok=True)
+            file_path = group_files_dir / audio_filename
+            if file_path.exists():
+                stem, suffix = file_path.stem, file_path.suffix
+                counter = 1
+                while file_path.exists():
+                    file_path = group_files_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+
+            with open(file_path, "wb") as f:
+                f.write(audio_data)
+
+            voice_metadata = {
+                "duration_seconds": duration_seconds,
+                "sample_rate": int(self.settings.get("voice_messages", "default_sample_rate", "48000")),
+                "channels": int(self.settings.get("voice_messages", "default_channels", "1")),
+                "codec": self.settings.get("voice_messages", "default_codec", "opus"),
+                "recorded_at": datetime.now(timezone.utc).isoformat()
+            }
+
+            # Fan-out to connected members
+            connected_peers = self.p2p_coordinator.get_connected_peers()
+            transfer_ids = []
+
+            for node_id in group.members:
+                if node_id == self.p2p_manager.node_id:
+                    continue
+                if node_id not in connected_peers:
+                    continue
+
+                try:
+                    tid = await self.file_transfer_manager.send_file(
+                        node_id=node_id,
+                        file_path=file_path,
+                        voice_metadata=voice_metadata,
+                        group_id=group_id
+                    )
+                    transfer_ids.append(tid)
+                except Exception as e:
+                    logger.warning("Failed to send group voice to %s: %s", node_id[:20], e)
+
+            return {
+                "status": "success",
+                "transfer_ids": transfer_ids,
+                "file_path": str(file_path),
+                "size_bytes": len(audio_data),
+                "duration_seconds": duration_seconds,
+                "voice_metadata": voice_metadata,
+                "mime_type": mime_type
+            }
+        except Exception as e:
+            logger.error("Error sending group voice: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
     # Telegram Bot Integration Commands (v0.14.0+)

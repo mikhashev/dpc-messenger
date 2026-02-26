@@ -41,7 +41,7 @@ class FileCompleteHandler(MessageHandler):
         await file_transfer_manager.handle_file_complete(sender_node_id, payload)
 
         # Broadcast completion event to UI
-        await self.service.local_api.broadcast_event("file_transfer_complete", {
+        completion_event = {
             "transfer_id": transfer_id,
             "node_id": sender_node_id,
             "filename": transfer.filename,
@@ -51,7 +51,10 @@ class FileCompleteHandler(MessageHandler):
             "hash": transfer.hash,
             "mime_type": transfer.mime_type,
             "status": "completed"
-        })
+        }
+        if transfer.group_id:
+            completion_event["group_id"] = transfer.group_id
+        await self.service.local_api.broadcast_event("file_transfer_complete", completion_event)
 
         # Add to conversation history and broadcast chat message
         # For sender (upload): Show "You sent file X" now that transfer succeeded
@@ -106,17 +109,26 @@ class FileCompleteHandler(MessageHandler):
             if is_image and transfer.image_metadata:
                 caption_text = transfer.image_metadata.get("text", "")
 
-            await self.service.local_api.broadcast_event("new_p2p_message", {
+            # Route to group chat or P2P chat based on group_id
+            message_event = {
                 "sender_node_id": "user",
                 "sender_name": "You",
                 "text": caption_text,  # User's caption (empty if not provided)
                 "message_id": message_id,
                 "attachments": [attachment]
-            })
+            }
+
+            if transfer.group_id:
+                message_event["group_id"] = transfer.group_id
+                await self.service.local_api.broadcast_event("group_file_received", message_event)
+            else:
+                await self.service.local_api.broadcast_event("new_p2p_message", message_event)
 
             # Add to conversation history (SENDER SIDE)
             # Create monitor if it doesn't exist (in case user sends voice/file before making AI query)
-            conversation_monitor = self.service._get_or_create_conversation_monitor(sender_node_id)
+            # For group transfers, key on group_id; for P2P, key on sender_node_id
+            monitor_key = transfer.group_id if transfer.group_id else sender_node_id
+            conversation_monitor = self.service._get_or_create_conversation_monitor(monitor_key)
             if conversation_monitor:
                 file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
                 message_content = f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
@@ -132,7 +144,8 @@ class FileCompleteHandler(MessageHandler):
                         node_id=sender_node_id,
                         file_path=transfer.file_path,
                         voice_metadata=transfer.voice_metadata,
-                        is_sender=True
+                        is_sender=True,
+                        group_id=transfer.group_id
                     )
                 )
 
@@ -145,7 +158,8 @@ class FileCompleteHandler(MessageHandler):
                     node_id=sender_node_id,
                     file_path=transfer.file_path,
                     voice_metadata=transfer.voice_metadata,
-                    is_sender=False
+                    is_sender=False,
+                    group_id=transfer.group_id
                 )
             )
 
