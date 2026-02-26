@@ -1279,18 +1279,13 @@ export async function deleteGroup(groupId: string): Promise<any> {
 
 export async function loadGroups(): Promise<void> {
     try {
-        console.log("[loadGroups] Fetching groups...");
         const result = await sendCommand('get_groups', {});
-        console.log("[loadGroups] Result:", result);
         if (result && result.status === "success" && result.groups) {
             const groupMap = new Map<string, any>();
             for (const group of result.groups) {
                 groupMap.set(group.group_id, group);
             }
             groupChats.set(groupMap);
-            console.log("[loadGroups] Loaded", groupMap.size, "groups");
-        } else {
-            console.warn("[loadGroups] Unexpected result:", result);
         }
     } catch (e) {
         console.error("Failed to load groups:", e);
