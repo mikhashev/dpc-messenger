@@ -17,7 +17,7 @@ D-PC Messenger follows a three-phase development roadmap:
 
 ## Phase 1: Federated MVP - COMPLETE (v0.8.0)
 
-**Status:** Production Ready
+**Status:** PoC / Experimental
 **Timeline:** Completed November 2025
 **Scope:** Individual users + 1:1 peer collaboration
 
@@ -301,7 +301,7 @@ D-PC has a detailed **Knowledge Architecture** roadmap spanning 14 phases:
 |---------|------|-----------|
 | **v0.18.0** | Feb 2026 | DPC Agent, reasoning models, Telegram agent bridge |
 | **v0.15.0** | Jan 2026 | Cross-platform audio (Rust cpal), VRAM management |
-| **v0.13.0** | Jan 2026 | Voice messages (production-ready) |
+| **v0.13.0** | Jan 2026 | Voice messages (experimental) |
 | **v0.12.0** | Dec 2025 | Vision & image support |
 | **v0.11.0** | Dec 2025 | File transfer, session management, chat history sync |
 | **v0.10.0** | Dec 2025 | 6-tier connection fallback, ConnectionOrchestrator |

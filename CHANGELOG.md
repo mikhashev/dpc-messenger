@@ -230,7 +230,7 @@ REMOTE_INFERENCE_RESPONSE extended:
 
 ### MAJOR FEATURES
 
-#### Voice Messages (Production-Ready)
+#### Voice Messages (Experimental)
 - **Voice Recording** - Record voice messages directly in the chat interface
 - **Voice Playback** - Full audio player with play/pause, seek, volume, and speed control (1x, 1.5x, 2x)
 - **P2P Voice Transfer** - Send voice messages via file transfer infrastructure
@@ -302,7 +302,7 @@ FILE_OFFER payload extended with `voice_metadata`:
 
 ### MAJOR FEATURES
 
-#### Vision & Image Support (Production-Ready)
+#### Vision & Image Support (Experimental)
 - **Screenshot Sharing** - Paste screenshots with Ctrl+V, instant preview
 - **Remote Vision Inference** - Use peer's GPU for image analysis
   - Ollama vision (llava, bakllava, moondream)
@@ -876,7 +876,7 @@ FILE_OFFER payload extended with `voice_metadata`:
   - DTLS 1.2 end-to-end encryption for UDP-based NAT traversal
   - Certificate-based authentication using existing node certificates
   - Comprehensive unit test suite for DTLS implementation
-  - UDP Hole Punching now production-ready (was disabled in v0.10.0)
+  - UDP Hole Punching now experimental (was disabled in v0.10.0)
   - Files: [connection_strategies/udp_hole_punch.py](dpc-client/core/dpc_client_core/connection_strategies/udp_hole_punch.py), [managers/hole_punch_manager.py](dpc-client/core/dpc_client_core/managers/hole_punch_manager.py)
 - **UI Connection Strategy Visibility**
   - Available Features menu shows peer counts per connection strategy

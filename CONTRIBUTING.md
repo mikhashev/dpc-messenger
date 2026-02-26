@@ -6,7 +6,7 @@ We use a two-branch workflow to maintain a stable codebase:
 
 ### Branches
 
-- **`main`** - Stable, production-ready code
+- **`main`** - PoC / Experimental code
   - Always deployable
   - Tested and documented
   - Users run from this branch

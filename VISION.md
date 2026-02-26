@@ -16,7 +16,7 @@ We're building **D-PC Messenger** — a peer-to-peer protocol that enables priva
 - 18-24 month window before Big Tech locks down AI infrastructure
 - Technology ready (WebRTC, cryptographic identity mature)
 
-**Current Status:** v0.18.0 - Production-ready platform with P2P messaging, AI agent, voice messages, 6-tier resilient connectivity, and compute sharing
+**Current Status:** v0.18.0 - PoC platform with P2P messaging, AI agent, voice messages, 6-tier resilient connectivity, and compute sharing
 
 **Business Model:** We're validating multiple sustainable revenue paths aligned with our mission (Red Hat model, managed infrastructure, grants, compute marketplace, hybrid). This is intentional methodology—build the right foundation, then commit to optimal monetization approach.
 
@@ -366,7 +366,7 @@ We're building a movement, not just a customer base.
 - Companies desperate for compliant solutions
 
 **3. P2P Technology Matured**
-- WebRTC production-ready (Zoom, Google Meet use it)
+- WebRTC (mature technology - Zoom, Google Meet use it)
 - Cryptographic identity proven (blockchain wallets, Signal)
 - Developers understand P2P (thanks to Web3 movement)
 
@@ -578,13 +578,13 @@ These are **hypotheses**, not projections. We'll test with community and co-foun
 - Background: Hardware (3D printers, CNC) → Software (PHP, Python) → AI/ML
 - Product Owner at US startup (led 5-person engineering team)
 - Yandex ML/Data Analytics certification (330 hours, Nov 2024)
-- **Shipped:** v0.18.0 — production-ready P2P with 6-tier resilient connectivity, embedded AI agent (40+ tools), voice messages with transcription, file transfer, Telegram integration, reasoning model support, DHT peer discovery, and real-time AI streaming
+- **Shipped:** v0.18.0 — PoC P2P with 6-tier resilient connectivity, embedded AI agent (40+ tools), voice messages with transcription, file transfer, Telegram integration, reasoning model support, DHT peer discovery, and real-time AI streaming
 
 **What I Bring:**
 - Product vision refined through iterative development—from initial concept to differentiated 'transactional communication' paradigm
 - Proven execution—shipped v0.18.0 with 645+ commits, 46K+ lines of production Python, full desktop app
 - Rapid development velocity using modern practices and AI-assisted tooling
-- Technical credibility: 6-tier resilient P2P, embedded AI agent, DHT peer discovery, knowledge commits — all production-ready
+- Technical credibility: 6-tier resilient P2P, embedded AI agent, DHT peer discovery, knowledge commits — in active development
 - Passion for privacy & digital sovereignty
 - **Core Belief:** Privacy is the foundation for a new economics of knowledge and personal data
 

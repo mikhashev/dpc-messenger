@@ -1585,7 +1585,7 @@ The result is a **collaborative knowledge building system** where conversations 
 
 ## Current Status (v0.8.0)
 
-**Production Ready:**
+**PoC / Experimental:**
 - Basic PCM structure with profile, knowledge, preferences
 - Multi-peer consensus voting system
 - Devil's advocate mechanism (anti-groupthink)
