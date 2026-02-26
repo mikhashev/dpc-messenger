@@ -70,7 +70,12 @@ from .message_handlers.session_handler import (
     ProposeNewSessionHandler, VoteNewSessionHandler, NewSessionResultHandler
 )
 from .message_handlers.telegram_handler import TelegramIncomingHandler  # v0.14.0+ Telegram integration
+from .message_handlers.group_handler import (  # v0.19.0+ Group chat
+    GroupCreateHandler, GroupTextHandler, GroupLeaveHandler, GroupDeleteHandler,
+    GroupSyncHandler, GroupHistoryRequestHandler, GroupHistoryResponseHandler,
+)
 from .managers.file_transfer_manager import FileTransferManager
+from .managers.group_manager import GroupManager
 from .managers.prompt_manager import PromptManager
 from .managers.instruction_manager import InstructionManager
 from .session_manager import NewSessionProposalManager
@@ -267,6 +272,10 @@ class CoreService:
                 self.telegram_manager = None
                 self.telegram_bridge = None
 
+        # Group chat manager (v0.19.0)
+        self.group_manager = GroupManager(Path.home() / ".dpc", self.p2p_manager.node_id)
+        self.group_manager.load_from_disk()
+
         # Conversation monitors (per conversation/peer for knowledge extraction)
         # conversation_id -> ConversationMonitor
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
@@ -406,6 +415,15 @@ class CoreService:
         self.message_router.register_handler(ProposeNewSessionHandler(self))
         self.message_router.register_handler(VoteNewSessionHandler(self))
         self.message_router.register_handler(NewSessionResultHandler(self))
+
+        # Group chat (v0.19.0)
+        self.message_router.register_handler(GroupCreateHandler(self))
+        self.message_router.register_handler(GroupTextHandler(self))
+        self.message_router.register_handler(GroupLeaveHandler(self))
+        self.message_router.register_handler(GroupDeleteHandler(self))
+        self.message_router.register_handler(GroupSyncHandler(self))
+        self.message_router.register_handler(GroupHistoryRequestHandler(self))
+        self.message_router.register_handler(GroupHistoryResponseHandler(self))
 
         # Telegram bot integration (v0.14.0+)
         if self.telegram_manager:
@@ -4451,6 +4469,25 @@ Respond in JSON format:
         """
         await self.p2p_coordinator.broadcast_to_peers(message)
 
+    async def _broadcast_to_group(self, group_id: str, message: Dict[str, Any]) -> None:
+        """Broadcast message to all connected members of a group (except self).
+
+        Used for group chat fan-out messaging.
+        """
+        group = self.group_manager.get_group(group_id)
+        if not group:
+            logger.warning("Cannot broadcast: group %s not found", group_id)
+            return
+
+        for node_id in group.members:
+            if node_id == self.p2p_manager.node_id:
+                continue
+            if node_id in self.p2p_manager.peers:
+                try:
+                    await self.p2p_manager.send_message_to_peer(node_id, message)
+                except Exception as e:
+                    logger.error("Failed to send group message to %s: %s", node_id[:20], e)
+
     def _get_or_create_conversation_monitor(self, conversation_id: str, instruction_set_name: str = None) -> ConversationMonitor:
         """Get or create a conversation monitor for a conversation/peer.
 
@@ -4479,6 +4516,26 @@ Respond in JSON format:
                         "context": "ai_agent"
                     }
                 ]
+            elif conversation_id.startswith("group-"):
+                # Group chat: all group members as participants
+                group = self.group_manager.get_group(conversation_id)
+                if group:
+                    for member_id in group.members:
+                        if member_id == self.p2p_manager.node_id:
+                            participants.append({
+                                "node_id": member_id,
+                                "name": "User",
+                                "context": "local"
+                            })
+                        else:
+                            participants.append({
+                                "node_id": member_id,
+                                "name": self.peer_metadata.get(member_id, {}).get("name", member_id),
+                                "context": "peer"
+                            })
+                else:
+                    # Group not found, minimal participant list
+                    participants = [{"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"}]
             else:
                 # Peer chat: user + peer
                 participants = [
@@ -4553,6 +4610,17 @@ Respond in JSON format:
                     await self.consensus_manager.propose_commit(
                         proposal=proposal,
                         broadcast_func=_no_op_broadcast
+                    )
+                elif conversation_id.startswith("group-"):
+                    # Group conversation - broadcast to group members only
+                    logger.info("Group Chat - broadcasting knowledge proposal to group %s for consensus", conversation_id)
+
+                    async def _group_broadcast(message: Dict[str, Any], _gid=conversation_id) -> None:
+                        await self._broadcast_to_group(_gid, message)
+
+                    await self.consensus_manager.propose_commit(
+                        proposal=proposal,
+                        broadcast_func=_group_broadcast
                     )
                 else:
                     # Peer conversation - broadcast for collaborative knowledge building
@@ -4795,6 +4863,192 @@ Respond in JSON format:
                 "status": "error",
                 "message": str(e)
             }
+
+    # =========================================================================
+    # Group Chat Commands (v0.19.0)
+    # =========================================================================
+
+    async def create_group_chat(self, name: str, topic: str = "", member_node_ids: list = None) -> Dict[str, Any]:
+        """Create a new group chat and notify members.
+
+        Args:
+            name: Group display name
+            topic: Group topic/description
+            member_node_ids: List of peer node IDs to invite
+        """
+        try:
+            members = member_node_ids or []
+            group = self.group_manager.create_group(name, topic, members)
+
+            # Send GROUP_CREATE to all members
+            await self._broadcast_to_group(group.group_id, {
+                "command": "GROUP_CREATE",
+                "payload": group.to_dict()
+            })
+
+            return {"status": "success", "group": group.to_dict()}
+        except Exception as e:
+            logger.error("Error creating group: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def get_groups(self) -> Dict[str, Any]:
+        """Get all groups this node belongs to."""
+        groups = [g.to_dict() for g in self.group_manager.get_all_groups()]
+        return {"status": "success", "groups": groups}
+
+    async def send_group_message(self, group_id: str, text: str) -> Dict[str, Any]:
+        """Send a text message to all group members.
+
+        Args:
+            group_id: Target group ID
+            text: Message text
+        """
+        try:
+            group = self.group_manager.get_group(group_id)
+            if not group:
+                return {"status": "error", "message": f"Group {group_id} not found"}
+
+            sender_name = "User"
+
+            # Fan-out GROUP_TEXT to all connected members
+            await self._broadcast_to_group(group_id, {
+                "command": "GROUP_TEXT",
+                "payload": {
+                    "group_id": group_id,
+                    "text": text,
+                    "sender_name": sender_name,
+                }
+            })
+
+            # Track in conversation monitor for knowledge extraction
+            import hashlib, time
+            message_id = hashlib.sha256(
+                f"{group_id}:{self.p2p_manager.node_id}:{text}:{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
+
+            monitor = self._get_or_create_conversation_monitor(group_id)
+            from .conversation_monitor import Message as ConvMessage
+            from datetime import datetime, timezone
+            conv_message = ConvMessage(
+                message_id=message_id,
+                conversation_id=group_id,
+                sender_node_id=self.p2p_manager.node_id,
+                sender_name=sender_name,
+                text=text,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+            await monitor.on_message(conv_message)
+
+            return {"status": "success", "message_id": message_id}
+        except Exception as e:
+            logger.error("Error sending group message: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def add_group_member(self, group_id: str, node_id: str) -> Dict[str, Any]:
+        """Add a member to a group and notify all members.
+
+        Args:
+            group_id: Target group ID
+            node_id: Node ID to add
+        """
+        try:
+            group = self.group_manager.add_member(group_id, node_id)
+            if not group:
+                return {"status": "error", "message": f"Group {group_id} not found"}
+
+            # Notify existing members
+            await self._broadcast_to_group(group_id, {
+                "command": "GROUP_SYNC",
+                "payload": group.to_dict()
+            })
+
+            # Send full group create to the new member (they need the full state)
+            if node_id in self.p2p_manager.peers:
+                await self.p2p_manager.send_message_to_peer(node_id, {
+                    "command": "GROUP_CREATE",
+                    "payload": group.to_dict()
+                })
+
+            return {"status": "success", "group": group.to_dict()}
+        except Exception as e:
+            logger.error("Error adding group member: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def remove_group_member(self, group_id: str, node_id: str) -> Dict[str, Any]:
+        """Remove a member from a group and notify all members.
+
+        Args:
+            group_id: Target group ID
+            node_id: Node ID to remove
+        """
+        try:
+            group = self.group_manager.remove_member(group_id, node_id)
+            if not group:
+                return {"status": "error", "message": f"Group {group_id} not found"}
+
+            # Notify all members (including the removed one)
+            await self._broadcast_to_group(group_id, {
+                "command": "GROUP_SYNC",
+                "payload": group.to_dict()
+            })
+
+            return {"status": "success", "group": group.to_dict()}
+        except Exception as e:
+            logger.error("Error removing group member: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def leave_group(self, group_id: str) -> Dict[str, Any]:
+        """Leave a group and notify remaining members."""
+        try:
+            group = self.group_manager.get_group(group_id)
+            if not group:
+                return {"status": "error", "message": f"Group {group_id} not found"}
+
+            # Notify other members before leaving
+            await self._broadcast_to_group(group_id, {
+                "command": "GROUP_LEAVE",
+                "payload": {"group_id": group_id}
+            })
+
+            # Remove locally
+            self.group_manager.leave_group(group_id)
+
+            # Clean up conversation monitor
+            if group_id in self.conversation_monitors:
+                del self.conversation_monitors[group_id]
+
+            return {"status": "success"}
+        except Exception as e:
+            logger.error("Error leaving group: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def delete_group(self, group_id: str) -> Dict[str, Any]:
+        """Delete a group (creator-only) and notify all members."""
+        try:
+            group = self.group_manager.get_group(group_id)
+            if not group:
+                return {"status": "error", "message": f"Group {group_id} not found"}
+
+            if group.created_by != self.p2p_manager.node_id:
+                return {"status": "error", "message": "Only the group creator can delete a group"}
+
+            # Notify all members
+            await self._broadcast_to_group(group_id, {
+                "command": "GROUP_DELETE",
+                "payload": {"group_id": group_id}
+            })
+
+            # Delete locally
+            self.group_manager.delete_group(group_id, self.p2p_manager.node_id)
+
+            # Clean up conversation monitor
+            if group_id in self.conversation_monitors:
+                del self.conversation_monitors[group_id]
+
+            return {"status": "success"}
+        except Exception as e:
+            logger.error("Error deleting group: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
 
     # Telegram Bot Integration Commands (v0.14.0+)
 
