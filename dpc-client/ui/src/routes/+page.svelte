@@ -887,6 +887,18 @@
         if (restoredCount > 0) {
           console.log(`[AI Chats] Restored ${restoredCount} AI chats from localStorage`);
         }
+
+        // Populate chatProviders from restored aiChats (fixes Agent chat provider reset on refresh)
+        chatProviders.update(map => {
+          const newMap = new Map(map);
+          for (const [id, info] of Object.entries(aiChatsData)) {
+            const chatInfo = info as { name: string; provider: string; instruction_set_name?: string };
+            if (chatInfo.provider && !id.startsWith('telegram-')) {
+              newMap.set(id, chatInfo.provider);
+            }
+          }
+          return newMap;
+        });
       }
     } catch (error) {
       console.error('[AI Chats] Failed to restore chats from localStorage:', error);
