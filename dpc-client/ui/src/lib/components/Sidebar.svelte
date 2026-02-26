@@ -498,19 +498,20 @@
           {/each}
         {/if}
 
-        <!-- + Group Button -->
-        {#if nodeStatus?.p2p_peers && nodeStatus.p2p_peers.length > 0}
-          <li class="add-group-item">
-            <button
-              type="button"
-              class="add-group-btn"
-              onclick={() => onCreateGroup?.()}
-              title="Create new group chat"
-            >
-              + Group
-            </button>
-          </li>
-        {/if}
+        <!-- + Group Button (always visible, disabled when no peers) -->
+        <li class="add-group-item">
+          <button
+            type="button"
+            class="add-group-btn"
+            onclick={() => onCreateGroup?.()}
+            disabled={!nodeStatus?.p2p_peers || nodeStatus.p2p_peers.length === 0}
+            title={nodeStatus?.p2p_peers && nodeStatus.p2p_peers.length > 0
+              ? "Create new group chat"
+              : "Connect to peers first to create a group"}
+          >
+            + Group
+          </button>
+        </li>
       </ul>
     </div>
   {:else if connectionStatus === 'connecting'}
@@ -1020,10 +1021,15 @@
     transition: all 0.15s;
   }
 
-  .add-group-btn:hover {
+  .add-group-btn:hover:not(:disabled) {
     border-color: #89b4fa;
     color: #89b4fa;
     background: rgba(137, 180, 250, 0.05);
+  }
+
+  .add-group-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   .cached-info {

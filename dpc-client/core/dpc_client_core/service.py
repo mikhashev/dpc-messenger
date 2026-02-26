@@ -325,6 +325,7 @@ class CoreService:
         self._processed_message_ids = set()  # Track processed messages
         self._max_processed_ids = 1000  # Limit set size
         self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
+        self._group_history_requested = set()  # Track group IDs we've requested history for (v0.19.0)
 
         # Initialize message router and register handlers
         self.message_router = MessageRouter()
@@ -1058,6 +1059,20 @@ class CoreService:
                     })
                 except Exception as e:
                     logger.debug("Failed to sync group %s with %s: %s", group.group_id, peer_id[:20], e)
+
+                # Request group history if our local history is empty (v0.19.0+)
+                if group.group_id not in self._group_history_requested:
+                    monitor = self.conversation_monitors.get(group.group_id)
+                    if not monitor or len(monitor.get_message_history()) == 0:
+                        try:
+                            await self.p2p_manager.send_message_to_peer(peer_id, {
+                                "command": "GROUP_HISTORY_REQUEST",
+                                "payload": {"group_id": group.group_id}
+                            })
+                            self._group_history_requested.add(group.group_id)
+                            logger.info("Requested group history for %s from %s", group.group_id, peer_id[:20])
+                        except Exception as e:
+                            logger.debug("Failed to request group history for %s: %s", group.group_id, e)
 
         await self.local_api.broadcast_event("status_update", await self.get_status())
 

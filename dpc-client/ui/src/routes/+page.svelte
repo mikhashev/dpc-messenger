@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, leaveGroup, deleteGroup } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -23,6 +23,8 @@
   import FileTransferUI from "$lib/components/FileTransferUI.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
+  import GroupInviteDialog from "$lib/components/GroupInviteDialog.svelte";
+  import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
   import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
   import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
   import VoicePlayer from "$lib/components/VoicePlayer.svelte";
@@ -194,6 +196,9 @@
   let showCommitDialog = $state(false);
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
   let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
+  let showGroupInviteDialog = $state(false);  // v0.19.0: accept/decline group invite
+  let pendingGroupInvite = $state<any>(null);  // v0.19.0: pending group invite data
+  let showGroupSettingsDialog = $state(false);  // v0.19.0: group settings/members panel
   // Initialize from localStorage (browser-safe)
   let autoKnowledgeDetection = $state(
     typeof window !== 'undefined' && localStorage.getItem('autoKnowledgeDetection') === 'true'
@@ -3353,26 +3358,58 @@
     }
   });
 
-  // Group invite notification (v0.19.0)
+  // Group invite accept/decline dialog (v0.19.0)
   $effect(() => {
     if ($groupInviteReceived) {
-      const invite = $groupInviteReceived;
-      const creatorName = invite.creator_name || invite.created_by?.slice(0, 16) || 'Someone';
-      fileOfferToastMessage = `${creatorName} added you to group "${invite.name}"`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-
-      // Ensure chat history entry exists for the new group
-      chatHistories.update(h => {
-        if (!h.has(invite.group_id)) {
-          const newMap = new Map(h);
-          newMap.set(invite.group_id, []);
-          return newMap;
-        }
-        return h;
-      });
+      pendingGroupInvite = $groupInviteReceived;
+      showGroupInviteDialog = true;
     }
   });
+
+  function handleGroupInviteAccept(event: CustomEvent<{ group_id: string }>) {
+    const groupId = event.detail.group_id;
+    // Group is already stored by backend — just init chat history and show in sidebar
+    chatHistories.update(h => {
+      if (!h.has(groupId)) {
+        const newMap = new Map(h);
+        newMap.set(groupId, []);
+        return newMap;
+      }
+      return h;
+    });
+    const name = pendingGroupInvite?.name || 'group';
+    fileOfferToastMessage = `Joined group "${name}"`;
+    showFileOfferToast = true;
+    setTimeout(() => showFileOfferToast = false, 3000);
+    activeChatId = groupId;
+    pendingGroupInvite = null;
+  }
+
+  async function handleGroupInviteDecline(event: CustomEvent<{ group_id: string }>) {
+    const groupId = event.detail.group_id;
+    // Leave the group (backend already stored it, so we need to remove)
+    await leaveGroup(groupId);
+    pendingGroupInvite = null;
+  }
+
+  // Group settings: add/remove member (v0.19.0)
+  async function handleGroupAddMember(event: CustomEvent<{ group_id: string; node_id: string }>) {
+    const { group_id, node_id } = event.detail;
+    try {
+      await addGroupMember(group_id, node_id);
+    } catch (e) {
+      console.error("Failed to add group member:", e);
+    }
+  }
+
+  async function handleGroupRemoveMember(event: CustomEvent<{ group_id: string; node_id: string }>) {
+    const { group_id, node_id } = event.detail;
+    try {
+      await removeGroupMember(group_id, node_id);
+    } catch (e) {
+      console.error("Failed to remove group member:", e);
+    }
+  }
 
   // Group deletion notification (v0.19.0)
   $effect(() => {
@@ -3473,6 +3510,16 @@
                 {$groupChats.get(activeChatId)?.name || 'Group Chat'}
                 <span class="group-header-meta">
                   ({$groupChats.get(activeChatId)?.members?.length || 0} members)
+                  <!-- svelte-ignore a11y_click_events_have_key_events -->
+                  <span
+                    class="group-settings-btn"
+                    role="button"
+                    tabindex="0"
+                    title="Group settings"
+                    onclick={(e: MouseEvent) => { e.stopPropagation(); showGroupSettingsDialog = true; }}
+                  >
+                    settings
+                  </span>
                 </span>
               {:else if isActuallyAIChat}
                 {$aiChats.get(activeChatId)?.name || 'AI Assistant'}
@@ -3804,6 +3851,25 @@
   on:cancel={() => showNewGroupDialog = false}
 />
 
+<!-- Group Invite Accept/Decline Dialog (v0.19.0) -->
+<GroupInviteDialog
+  bind:open={showGroupInviteDialog}
+  invite={pendingGroupInvite}
+  on:accept={handleGroupInviteAccept}
+  on:decline={handleGroupInviteDecline}
+/>
+
+<!-- Group Settings Dialog (v0.19.0) -->
+<GroupSettingsDialog
+  bind:open={showGroupSettingsDialog}
+  group={isGroupChat ? $groupChats.get(activeChatId) ?? null : null}
+  selfNodeId={$nodeStatus?.node_id || ''}
+  connectedPeers={($nodeStatus?.peer_info || []).map((p: any) => ({ node_id: p.node_id, name: p.name || p.node_id }))}
+  peerDisplayNames={peerDisplayNames}
+  on:addMember={handleGroupAddMember}
+  on:removeMember={handleGroupRemoveMember}
+/>
+
 <!-- Model Download Dialog (v0.13.5) -->
 <ModelDownloadDialog
   bind:open={showModelDownloadDialog}
@@ -4133,6 +4199,18 @@
     color: #888;
     font-weight: 400;
     margin-left: 0.3em;
+  }
+
+  .group-settings-btn {
+    cursor: pointer;
+    color: #89b4fa;
+    margin-left: 0.4em;
+    text-decoration: underline;
+    font-size: 0.95em;
+  }
+
+  .group-settings-btn:hover {
+    color: #74c7ec;
   }
 
   .group-topic {
