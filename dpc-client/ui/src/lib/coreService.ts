@@ -975,7 +975,11 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'set_conversation_transcription',  // v0.13.2 - per-conversation transcription control
             'get_conversation_transcription',  // v0.13.2 - per-conversation transcription control
             'prepare_agent',  // Pre-initialize DPC Agent and Telegram bridge
-            'query_remote_providers'  // v0.18.0 - fetch available providers from remote peer
+            'query_remote_providers',  // v0.18.0 - fetch available providers from remote peer
+            'get_groups',  // v0.19.0 - group chat management
+            'create_group_chat',  // v0.19.0 - group chat creation
+            'leave_group',  // v0.19.0 - leave group
+            'delete_group'  // v0.19.0 - delete group
         ].includes(command);
 
         if (expectsResponse) {
