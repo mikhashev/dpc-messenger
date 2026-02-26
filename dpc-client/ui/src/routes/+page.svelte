@@ -2299,6 +2299,12 @@
       if (activeChatId === groupId) {
         activeChatId = 'local_ai';
       }
+      // Remove from groupChats store so it disappears from sidebar
+      groupChats.update(map => {
+        const newMap = new Map(map);
+        newMap.delete(groupId);
+        return newMap;
+      });
       chatHistories.update(h => {
         const newMap = new Map(h);
         newMap.delete(groupId);
@@ -2315,6 +2321,12 @@
       if (activeChatId === groupId) {
         activeChatId = 'local_ai';
       }
+      // Remove from groupChats store so it disappears from sidebar
+      groupChats.update(map => {
+        const newMap = new Map(map);
+        newMap.delete(groupId);
+        return newMap;
+      });
       chatHistories.update(h => {
         const newMap = new Map(h);
         newMap.delete(groupId);
