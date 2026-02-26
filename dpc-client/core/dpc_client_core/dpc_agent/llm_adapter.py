@@ -42,6 +42,10 @@ class DpcLlmAdapter:
         """
         self._llm_manager = llm_manager
         self._default_model: Optional[str] = None
+        # Reuse existing TokenCountManager for accurate token counting
+        self._token_counter = getattr(llm_manager, 'token_count_manager', None)
+        if self._token_counter is None:
+            log.warning("TokenCountManager not available - using character estimation")
 
     def _get_agent_provider_alias(self) -> Optional[str]:
         """
@@ -158,11 +162,20 @@ class DpcLlmAdapter:
                     response_msg["tool_calls"] = tool_calls
                     log.info(f"Found {len(tool_calls)} tool call(s): {[tc['function']['name'] for tc in tool_calls]}")
 
-            # Estimate usage (DPC providers may not return token counts)
+            # Count tokens accurately using TokenCountManager (reuse existing)
+            model_name = self.default_model()
+            if self._token_counter:
+                prompt_tokens = self._token_counter.count_tokens(prompt, model_name)
+                completion_tokens = self._token_counter.count_tokens(response, model_name)
+            else:
+                # Fallback to character estimation
+                prompt_tokens = len(prompt) // 4
+                completion_tokens = len(response) // 4
+
             usage: Dict[str, Any] = {
-                "prompt_tokens": len(prompt) // 4,  # Rough estimate: ~4 chars per token
-                "completion_tokens": len(response) // 4,
-                "total_tokens": (len(prompt) + len(response)) // 4,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
                 "cost": 0.0,  # DPC tracks cost separately in its own system
             }
 
@@ -252,7 +265,7 @@ class DpcLlmAdapter:
                     response_msg["tool_calls"] = tool_calls
                     log.info(f"Found {len(tool_calls)} tool call(s) from remote peer")
 
-            # Use actual token counts from remote if available, otherwise estimate
+            # Use actual token counts from remote if available, otherwise count locally
             if remote_prompt_tokens and remote_response_tokens:
                 usage: Dict[str, Any] = {
                     "prompt_tokens": remote_prompt_tokens,
@@ -260,8 +273,19 @@ class DpcLlmAdapter:
                     "total_tokens": remote_tokens or (remote_prompt_tokens + remote_response_tokens),
                     "cost": 0.0,
                 }
+            elif self._token_counter:
+                # Count locally using TokenCountManager
+                model_name = self.default_model()
+                prompt_tokens = self._token_counter.count_tokens(prompt, model_name)
+                completion_tokens = self._token_counter.count_tokens(response_text, model_name)
+                usage: Dict[str, Any] = {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                    "cost": 0.0,
+                }
             else:
-                # Fallback estimation
+                # Final fallback to character estimation
                 usage: Dict[str, Any] = {
                     "prompt_tokens": len(prompt) // 4,
                     "completion_tokens": len(response_text) // 4,

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import ssl
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
@@ -55,7 +56,9 @@ def _fetch_url(url: str, timeout: int = 30) -> Dict[str, Any]:
             content = response.text
         else:
             req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as response:
+            # Create SSL context with system certificates for proper TLS verification
+            ssl_context = ssl.create_default_context()
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
                 content = response.read().decode("utf-8", errors="replace")
 
         return {

@@ -63,7 +63,11 @@ def _build_user_content(task: Dict[str, Any]) -> Any:
     return parts
 
 
-def _build_runtime_section(agent_root: pathlib.Path, task: Dict[str, Any]) -> str:
+def _build_runtime_section(
+    agent_root: pathlib.Path,
+    task: Dict[str, Any],
+    session_state: Optional[Dict[str, Any]] = None,
+) -> str:
     """Build the runtime context section."""
     runtime_data = {
         "utc_now": utc_now_iso(),
@@ -85,6 +89,16 @@ def _build_runtime_section(agent_root: pathlib.Path, task: Dict[str, Any]) -> st
             }
     except Exception:
         log.debug("Failed to read budget info", exc_info=True)
+
+    # Session state from ConversationMonitor (token usage, context window)
+    if session_state:
+        runtime_data["session"] = {
+            "tokens_used": session_state.get("tokens_used", 0),
+            "tokens_limit": session_state.get("tokens_limit", 128000),
+            "usage_percent": session_state.get("usage_percent", 0),
+            "messages_count": session_state.get("messages_count", 0),
+            "should_extract_knowledge": session_state.get("should_extract_knowledge", False),
+        }
 
     return "## Runtime context\n\n" + json.dumps(runtime_data, ensure_ascii=False, indent=2)
 
@@ -141,6 +155,7 @@ def build_llm_messages(
     task: Dict[str, Any],
     system_prompt: Optional[str] = None,
     dpc_context: Optional[Dict[str, Any]] = None,
+    session_state: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -151,6 +166,8 @@ def build_llm_messages(
         task: Task dict with id, type, text, etc.
         system_prompt: Optional custom system prompt
         dpc_context: Optional DPC context (personal, device)
+        session_state: Optional session state from ConversationMonitor
+                      (tokens_used, tokens_limit, usage_percent, etc.)
 
     Returns:
         (messages, cap_info) tuple:
@@ -182,7 +199,7 @@ def build_llm_messages(
 
     # Dynamic content: changes every request
     dynamic_parts = [
-        _build_runtime_section(agent_root, task),
+        _build_runtime_section(agent_root, task, session_state),
     ]
     dynamic_parts.extend(_build_recent_sections(memory, task_id=task.get("id", "")))
 

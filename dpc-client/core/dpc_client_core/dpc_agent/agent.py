@@ -130,6 +130,9 @@ class DpcAgent:
         self._consciousness: Optional["BackgroundConsciousness"] = None
         self._consciousness_enabled = self.config.background_consciousness
 
+        # Track last usage for session state access by agent_manager
+        self._last_usage: Optional[Dict[str, Any]] = None
+
         log.info(f"DpcAgent initialized with storage at {self.agent_root}")
 
     async def process(
@@ -140,6 +143,8 @@ class DpcAgent:
         system_prompt: Optional[str] = None,
         emit_progress: Optional[Callable[[str], None]] = None,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        session_state: Optional[Dict[str, Any]] = None,
+        conversation_monitor: Optional[Any] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -151,6 +156,9 @@ class DpcAgent:
             system_prompt: Optional custom system prompt
             emit_progress: Optional callback for progress updates
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
+            session_state: Optional session state from ConversationMonitor
+                          (tokens_used, tokens_limit, usage_percent, etc.)
+            conversation_monitor: Optional ConversationMonitor for knowledge extraction
 
         Returns:
             Agent's response text
@@ -168,6 +176,7 @@ class DpcAgent:
             task=task,
             system_prompt=system_prompt,
             dpc_context=dpc_context,
+            session_state=session_state,
         )
 
         # Set tool context with firewall-controlled tool access
@@ -179,6 +188,7 @@ class DpcAgent:
             tool_whitelist=allowed_tools,
             emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None: None),
             firewall=self._firewall,  # For extended sandbox paths
+            conversation_monitor=conversation_monitor,  # For knowledge extraction tool
         )
         ctx._agent = self  # Enable schedule_task and other agent-dependent tools
         self.tools.set_context(ctx)
@@ -204,6 +214,9 @@ class DpcAgent:
             on_stream_chunk=on_stream_chunk,
             conversation_id=conversation_id,
         )
+
+        # Store last usage for session state access by agent_manager
+        self._last_usage = usage
 
         # Log task completion
         append_jsonl(self.agent_root / "logs" / "events.jsonl", {

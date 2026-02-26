@@ -166,7 +166,11 @@ def update_scratchpad(ctx: ToolContext, content: str, mode: str = "append") -> s
     Args:
         ctx: Tool context
         content: Content to add/update
-        mode: Update mode - 'append', 'prepend', 'replace', 'section'
+        mode: Update mode - 'append', 'prepend', 'replace', 'deduplicate'
+              - append: Add content to end
+              - prepend: Add content to beginning
+              - replace: Replace entire scratchpad
+              - deduplicate: Remove duplicate lines/paragraphs without adding content
 
     Returns:
         Result message
@@ -180,14 +184,33 @@ def update_scratchpad(ctx: ToolContext, content: str, mode: str = "append") -> s
             existing = ""
             if scratchpad_path.exists():
                 existing = scratchpad_path.read_text(encoding="utf-8")
-            new_content = existing + "\n\n" + content
+            new_content = existing + "\n\n" + content if existing.strip() else content
         elif mode == "prepend":
             existing = ""
             if scratchpad_path.exists():
                 existing = scratchpad_path.read_text(encoding="utf-8")
-            new_content = content + "\n\n" + existing
+            new_content = content + "\n\n" + existing if existing.strip() else content
+        elif mode == "deduplicate":
+            existing = ""
+            if scratchpad_path.exists():
+                existing = scratchpad_path.read_text(encoding="utf-8")
+            # Remove duplicate paragraphs (blocks separated by blank lines)
+            paragraphs = existing.split("\n\n")
+            seen = set()
+            unique_paragraphs = []
+            duplicates_removed = 0
+            for para in paragraphs:
+                para_normalized = para.strip().lower()
+                if para_normalized and para_normalized not in seen:
+                    seen.add(para_normalized)
+                    unique_paragraphs.append(para)
+                elif para_normalized:
+                    duplicates_removed += 1
+            new_content = "\n\n".join(unique_paragraphs)
+            if duplicates_removed > 0:
+                log.info(f"Scratchpad deduplication removed {duplicates_removed} duplicate paragraphs")
         else:
-            return f"⚠️ Unknown mode: {mode}. Use 'append', 'prepend', or 'replace'"
+            return f"⚠️ Unknown mode: {mode}. Use 'append', 'prepend', 'replace', or 'deduplicate'"
 
         scratchpad_path.parent.mkdir(parents=True, exist_ok=True)
         scratchpad_path.write_text(new_content.strip(), encoding="utf-8")
@@ -198,17 +221,97 @@ def update_scratchpad(ctx: ToolContext, content: str, mode: str = "append") -> s
             "ts": datetime.now(timezone.utc).isoformat(),
             "mode": mode,
             "content_length": len(content),
+            "total_length": len(new_content),
         }
         with open(journal_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(journal_entry) + "\n")
 
-        return f"✓ Updated scratchpad ({mode} mode, {len(new_content)} total chars)"
+        msg = f"✓ Updated scratchpad ({mode} mode, {len(new_content)} total chars)"
+        if mode == "deduplicate" and duplicates_removed > 0:
+            msg += f", removed {duplicates_removed} duplicate(s)"
+
+        return msg
 
     except Exception as e:
         return f"⚠️ Error updating scratchpad: {e}"
 
 
-def update_identity(ctx: ToolContext, section: str, content: str) -> str:
+def deduplicate_identity(ctx: ToolContext) -> str:
+    """
+    Remove duplicate sections from the agent's identity file.
+
+    This tool scans the identity.md file for duplicate section headers
+    and removes all but the first occurrence of each section.
+
+    Args:
+        ctx: Tool context
+
+    Returns:
+        Summary of duplicates removed
+    """
+    try:
+        identity_path = ctx.memory_path("identity.md")
+
+        if not identity_path.exists():
+            return "⚠️ Identity file does not exist"
+
+        existing = identity_path.read_text(encoding="utf-8")
+        original_len = len(existing)
+        lines = existing.split("\n")
+
+        # Find all section headers and their positions
+        sections = {}  # normalized_name -> [(line_idx, original_header), ...]
+        for i, line in enumerate(lines):
+            if line.strip().startswith("## "):
+                header = line.strip()[3:].strip()
+                normalized = header.lower()
+                if normalized not in sections:
+                    sections[normalized] = []
+                sections[normalized].append((i, header))
+
+        # Find sections with duplicates
+        duplicates = {k: v for k, v in sections.items() if len(v) > 1}
+
+        if not duplicates:
+            return "✓ No duplicate sections found in identity"
+
+        # Get section bounds
+        def get_section_bounds(start_idx):
+            end_idx = len(lines)
+            for i in range(start_idx + 1, len(lines)):
+                if lines[i].startswith("## "):
+                    end_idx = i
+                    break
+            return start_idx, end_idx
+
+        # Remove duplicates from end to start to preserve indices
+        total_removed = 0
+        sections_cleaned = []
+        for _normalized_name, occurrences in duplicates.items():
+            # Keep first occurrence, remove rest
+            for start_idx, _original_header in reversed(occurrences[1:]):
+                _, end_idx = get_section_bounds(start_idx)
+                del lines[start_idx:end_idx]
+                total_removed += 1
+            sections_cleaned.append(occurrences[0][1])  # Keep original header name
+
+        # Update timestamp
+        for i, line in enumerate(lines):
+            if line.strip() == "## Last Updated":
+                lines[i] = f"## Last Updated"
+                lines.insert(i + 1, datetime.now(timezone.utc).isoformat())
+                break
+
+        new_content = "\n".join(lines)
+        identity_path.write_text(new_content, encoding="utf-8")
+
+        return f"✓ Deduplicated identity: removed {total_removed} duplicate section(s) from: {', '.join(sections_cleaned)}\nSize reduced: {original_len} → {len(new_content)} chars ({original_len - len(new_content)} chars saved)"
+
+    except Exception as e:
+        return f"⚠️ Error deduplicating identity: {e}"
+
+
+def update_identity(ctx: ToolContext, section: str, content: str, mode: str = "replace") -> str:
     """
     Update a section of the agent's identity file.
 
@@ -216,6 +319,11 @@ def update_identity(ctx: ToolContext, section: str, content: str) -> str:
         ctx: Tool context
         section: Section name (e.g., 'values', 'goals', 'beliefs')
         content: Section content
+        mode: Update mode - 'replace' (default), 'append', 'merge', 'deduplicate'
+              - replace: Replace the first matching section, remove duplicates
+              - append: Add content to existing section (removes duplicates first)
+              - merge: Combine content with existing section (removes duplicates first)
+              - deduplicate: Just remove duplicate sections without adding content
 
     Returns:
         Result message
@@ -240,43 +348,97 @@ This file tracks the agent's self-understanding and evolving identity.
             return f"✓ Created identity with {section} section"
 
         existing = identity_path.read_text(encoding="utf-8")
-
-        # Find and update section
-        section_header = f"## {section.title()}"
         lines = existing.split("\n")
-        section_start = None
-        section_end = None
 
+        # Normalize section name for matching (case-insensitive)
+        section_normalized = section.strip().lower()
+        section_header = f"## {section.title()}"
+
+        # Find ALL occurrences of the section (for deduplication)
+        section_occurrences = []
         for i, line in enumerate(lines):
-            if line.strip() == section_header:
-                section_start = i
-            elif section_start is not None and line.startswith("## ") and i > section_start:
-                section_end = i
-                break
+            # Match section headers case-insensitively
+            if line.strip().lower().startswith("## ") and line.strip().lower()[3:] == section_normalized:
+                section_occurrences.append(i)
 
-        if section_start is not None:
-            # Update existing section
-            if section_end is None:
-                section_end = len(lines)
-            new_lines = (
-                lines[:section_start]
-                + [section_header, content]
-                + lines[section_end:]
-            )
+        # Find section boundaries for each occurrence
+        def get_section_bounds(start_idx):
+            """Get start and end line indices for a section."""
+            end_idx = len(lines)
+            for i in range(start_idx + 1, len(lines)):
+                if lines[i].startswith("## "):
+                    end_idx = i
+                    break
+            return start_idx, end_idx
+
+        # Remove duplicate sections (keep first occurrence)
+        duplicates_removed = 0
+        if len(section_occurrences) > 1:
+            # Remove duplicates from end to start to preserve indices
+            for dup_start in reversed(section_occurrences[1:]):
+                _, dup_end = get_section_bounds(dup_start)
+                del lines[dup_start:dup_end]
+                duplicates_removed += 1
+
+            # Recalculate first section bounds after deletions
+            section_occurrences = [section_occurrences[0]]  # Keep only first
+
+        # Now handle the content update
+        if section_occurrences:
+            # Section exists - update it
+            section_start = section_occurrences[0]
+            _, section_end = get_section_bounds(section_start)
+            existing_content = "\n".join(lines[section_start + 1:section_end]).strip()
+
+            if mode == "replace":
+                new_section_content = content
+            elif mode == "append":
+                new_section_content = existing_content + "\n\n" + content if existing_content else content
+            elif mode == "merge":
+                # Merge without duplicating lines that already exist
+                existing_lines = set(line.strip() for line in existing_content.split("\n") if line.strip())
+                new_lines = [line for line in content.split("\n") if line.strip() and line.strip() not in existing_lines]
+                new_section_content = existing_content + "\n" + "\n".join(new_lines) if new_lines else existing_content
+            elif mode == "deduplicate":
+                new_section_content = existing_content  # Just keep existing, duplicates already removed
+            else:
+                return f"⚠️ Unknown mode: {mode}. Use 'replace', 'append', 'merge', or 'deduplicate'"
+
+            # Replace section content
+            new_lines = lines[:section_start] + [section_header, new_section_content] + lines[section_end:]
         else:
-            # Add new section
-            new_lines = lines + ["", section_header, content]
+            # Section doesn't exist - add it (unless just deduplicating)
+            if mode == "deduplicate":
+                new_lines = lines
+            else:
+                new_lines = lines + ["", section_header, content]
 
         # Update timestamp
+        timestamp_updated = False
         for i, line in enumerate(new_lines):
-            if line.startswith("## Last Updated"):
-                new_lines[i] = f"## Last Updated\n{datetime.now(timezone.utc).isoformat()}"
+            if line.strip() == "## Last Updated":
+                new_lines[i] = f"## Last Updated"
+                new_lines.insert(i + 1, datetime.now(timezone.utc).isoformat())
+                timestamp_updated = True
                 break
+
+        if not timestamp_updated:
+            # Add timestamp section at the beginning after title
+            for i, line in enumerate(new_lines):
+                if line.startswith("# ") and i == 0:
+                    new_lines.insert(i + 2, "")
+                    new_lines.insert(i + 3, f"## Last Updated")
+                    new_lines.insert(i + 4, datetime.now(timezone.utc).isoformat())
+                    break
 
         new_content = "\n".join(new_lines)
         identity_path.write_text(new_content, encoding="utf-8")
 
-        return f"✓ Updated identity section '{section}'"
+        msg = f"✓ Updated identity section '{section}'"
+        if duplicates_removed > 0:
+            msg += f" (removed {duplicates_removed} duplicate(s))"
+
+        return msg
 
     except Exception as e:
         return f"⚠️ Error updating identity: {e}"
@@ -1281,6 +1443,95 @@ def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines
 
 
 # ---------------------------------------------------------------------------
+# Knowledge Extraction (Session Management)
+# ---------------------------------------------------------------------------
+
+def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool = False) -> str:
+    """
+    Extract knowledge from the current conversation and save to knowledge base.
+
+    This tool uses the existing ConversationMonitor's generate_commit_proposal()
+    method to extract structured knowledge from the conversation history.
+
+    Args:
+        ctx: Tool context
+        topic: Optional topic to focus extraction on
+        force: Extract even if knowledge threshold not met
+
+    Returns:
+        Summary of extracted knowledge or error message
+    """
+    try:
+        # Get ConversationMonitor from context
+        monitor = getattr(ctx, 'conversation_monitor', None)
+        if not monitor:
+            return "⚠️ No conversation monitor available for this session"
+
+        # Check message count
+        if len(monitor.message_history) < 2:
+            return "⚠️ Not enough messages in conversation to extract knowledge (need at least 2)"
+
+        # Run async extraction in sync context
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # We're in an async context, but this is a sync tool
+            # Use asyncio.run_coroutine_threadsafe or return a message
+            return "⚠️ Knowledge extraction requires async context. Use force=True to attempt extraction."
+
+        # Run extraction
+        proposal = asyncio.run(monitor.generate_commit_proposal(force=force))
+
+        if not proposal:
+            return "No knowledge extracted from conversation. Try with force=True to extract anyway."
+
+        # Save to agent's knowledge directory
+        knowledge_dir = ctx.agent_root / "knowledge"
+        knowledge_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate filename from topic or timestamp
+        safe_topic = "".join(c if c.isalnum() or c in " _-" else "_" for c in (topic or proposal.topic or "knowledge"))
+        safe_topic = safe_topic[:50].strip() or "knowledge"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_topic}_{timestamp}.json"
+        filepath = knowledge_dir / filename
+
+        # Build knowledge entry
+        knowledge_entry = {
+            "topic": proposal.topic,
+            "summary": proposal.summary,
+            "entries": [
+                {
+                    "content": entry.content if hasattr(entry, 'content') else str(entry),
+                    "tags": entry.tags if hasattr(entry, 'tags') else [],
+                    "confidence": entry.confidence if hasattr(entry, 'confidence') else 1.0,
+                }
+                for entry in (proposal.entries or [])
+            ],
+            "conversation_id": proposal.conversation_id,
+            "participants": proposal.participants if hasattr(proposal, 'participants') else [],
+            "extracted_at": datetime.now(timezone.utc).isoformat(),
+            "extraction_method": "agent_tool",
+        }
+
+        # Write to file
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(knowledge_entry, f, indent=2, ensure_ascii=False)
+
+        log.info(f"Extracted knowledge saved to {filepath}")
+
+        return f"✅ Knowledge extracted successfully!\n\n**Topic:** {proposal.topic}\n**Summary:** {proposal.summary[:200]}...\n**Entries:** {len(proposal.entries)}\n**Saved to:** knowledge/{filename}"
+
+    except Exception as e:
+        log.error(f"Knowledge extraction error: {e}", exc_info=True)
+        return f"⚠️ Knowledge extraction error: {e}"
+
+
+# ---------------------------------------------------------------------------
 # Tool Registry Export
 # ---------------------------------------------------------------------------
 
@@ -1435,22 +1686,22 @@ def get_tools() -> List[ToolEntry]:
             name="update_scratchpad",
             schema={
                 "name": "update_scratchpad",
-                "description": "Update the agent's working memory (scratchpad)",
+                "description": "Update the agent's working memory (scratchpad). Use mode='deduplicate' to clean up duplicate content.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "content": {
                             "type": "string",
-                            "description": "Content to add to scratchpad"
+                            "description": "Content to add to scratchpad (not required for deduplicate mode)"
                         },
                         "mode": {
                             "type": "string",
                             "description": "Update mode",
-                            "enum": ["append", "prepend", "replace"],
+                            "enum": ["append", "prepend", "replace", "deduplicate"],
                             "default": "append"
                         }
                     },
-                    "required": ["content"]
+                    "required": []
                 }
             },
             handler=update_scratchpad,
@@ -1461,23 +1712,44 @@ def get_tools() -> List[ToolEntry]:
             name="update_identity",
             schema={
                 "name": "update_identity",
-                "description": "Update a section of the agent's identity (self-understanding)",
+                "description": "Update a section of the agent's identity (self-understanding). Automatically removes duplicate sections. Use mode='deduplicate' to just clean up duplicates without adding content.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "section": {
                             "type": "string",
-                            "description": "Section name (e.g., 'values', 'goals', 'beliefs')"
+                            "description": "Section name (e.g., 'values', 'goals', 'beliefs', 'Operational Protocols')"
                         },
                         "content": {
                             "type": "string",
                             "description": "Section content"
+                        },
+                        "mode": {
+                            "type": "string",
+                            "description": "Update mode",
+                            "enum": ["replace", "append", "merge", "deduplicate"],
+                            "default": "replace"
                         }
                     },
-                    "required": ["section", "content"]
+                    "required": ["section"]
                 }
             },
             handler=update_identity,
+            timeout_sec=10,
+        ),
+
+        ToolEntry(
+            name="deduplicate_identity",
+            schema={
+                "name": "deduplicate_identity",
+                "description": "Remove duplicate sections from the agent's identity file. Use this to clean up when identity.md has grown too large with repeated content.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            handler=deduplicate_identity,
             timeout_sec=10,
         ),
 
@@ -1562,6 +1834,32 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=knowledge_list,
             timeout_sec=10,
+        ),
+
+        # Knowledge extraction from conversation
+        ToolEntry(
+            name="extract_knowledge",
+            schema={
+                "name": "extract_knowledge",
+                "description": "Extract knowledge from the current conversation and save to knowledge base. Use this when the conversation contains valuable insights worth preserving.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Optional topic to focus extraction on"
+                        },
+                        "force": {
+                            "type": "boolean",
+                            "description": "Extract even if knowledge threshold not met",
+                            "default": False
+                        }
+                    },
+                    "required": []
+                }
+            },
+            handler=extract_knowledge,
+            timeout_sec=60,  # May need time for LLM-based extraction
         ),
 
         # DPC integration
