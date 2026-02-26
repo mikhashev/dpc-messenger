@@ -2261,6 +2261,14 @@
       const result = await createGroupChat(name, topic, member_node_ids);
       if (result && result.status === "success" && result.group) {
         const groupId = result.group.group_id;
+
+        // Update groupChats store so group appears in sidebar
+        groupChats.update(map => {
+          const newMap = new Map(map);
+          newMap.set(groupId, result.group);
+          return newMap;
+        });
+
         // Ensure chatHistories entry exists
         chatHistories.update(h => {
           if (!h.has(groupId)) {
