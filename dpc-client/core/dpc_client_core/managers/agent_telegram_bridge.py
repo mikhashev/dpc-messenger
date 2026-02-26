@@ -140,6 +140,9 @@ class AgentTelegramBridge:
         self._message_handler: Optional[Callable] = None
         self._agent_manager: Optional["DpcAgentManager"] = None
 
+        # Semaphore to limit concurrent Telegram API calls (prevents pool exhaustion)
+        self._send_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent sends
+
         log.info(f"AgentTelegramBridge initialized for {len(allowed_chat_ids)} chat(s), "
                 f"filter={len(self.event_filter)} event types, transcription={transcription_enabled}")
 
@@ -199,10 +202,11 @@ class AgentTelegramBridge:
 
             # Create session with timeout
             request = HTTPXRequest(
-                connection_pool_size=5,
+                connection_pool_size=10,  # Increased from 5 to prevent pool exhaustion
                 read_timeout=30,
                 write_timeout=30,
                 connect_timeout=30,
+                pool_timeout=60,  # Add explicit pool timeout
             )
 
             # Create application for polling (this manages the bot instance)
@@ -212,6 +216,7 @@ class AgentTelegramBridge:
             self._application.add_handler(CommandHandler("start", self._handle_start_command))
             self._application.add_handler(CommandHandler("help", self._handle_help_command))
             self._application.add_handler(CommandHandler("status", self._handle_status_command))
+            self._application.add_handler(CommandHandler("clear", self._handle_clear_command))
 
             # Add handler for regular messages (non-commands)
             self._application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -307,6 +312,7 @@ Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] sectio
 /start - Initialize bot
 /help - Show this help
 /status - Check agent status
+/clear - Clear conversation history and reset context
 
 *Sending Tasks:*
 Just type a message and the agent will process it\\.
@@ -325,6 +331,7 @@ Send a voice message and it will be transcribed and processed\\.
 • Be specific in your requests
 • The agent has access to configured tools
 • Check firewall rules if tools seem unavailable
+• Use /clear to start fresh when context gets full
 """
         await update.message.reply_text(help_text, parse_mode="Markdown")
 
@@ -356,6 +363,35 @@ Send a voice message and it will be transcribed and processed\\.
         status_lines.append(f"💬 Allowed chats: `{len(self.allowed_chat_ids)}`")
 
         await update.message.reply_text("\n".join(status_lines), parse_mode="Markdown")
+
+    async def _handle_clear_command(self, update, context):
+        """Handle /clear command - reset conversation context."""
+        chat_id = str(update.effective_chat.id)
+
+        if chat_id not in self.allowed_chat_ids:
+            return
+
+        conversation_id = f"telegram-{chat_id}"
+
+        # Reset the conversation monitor
+        if self._agent_manager:
+            success = self._agent_manager.reset_conversation(conversation_id)
+            if success:
+                await update.message.reply_text(
+                    "✅ *Conversation Cleared*\n\n"
+                    "Context and history have been reset\\. "
+                    "You can start a fresh conversation now\\.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(
+                    "ℹ️ *No Conversation Found*\n\n"
+                    "No existing conversation to clear\\. "
+                    "Start chatting with the agent first\\.",
+                    parse_mode="Markdown"
+                )
+        else:
+            await update.message.reply_text("⚠️ Agent manager not available\\.")
 
     async def _handle_message(self, update, context):
         """Handle incoming text message."""
@@ -397,8 +433,19 @@ Send a voice message and it will be transcribed and processed\\.
                 await update.message.reply_text(escape_markdown(response), parse_mode="Markdown")
 
         except Exception as e:
+            error_str = str(e)
             log.error(f"Error processing Telegram message: {e}", exc_info=True)
-            await update.message.reply_text(f"❌ Error processing message: {str(e)[:200]}")
+
+            # Check for context limit errors
+            if "too large" in error_str.lower() or "context" in error_str.lower() and "token" in error_str.lower():
+                await update.message.reply_text(
+                    "⚠️ *Context Limit Reached*\n\n"
+                    "The conversation has reached its token limit\\.\n\n"
+                    "Use `/clear` to start a fresh conversation\\.",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(f"❌ Error processing message: {escape_markdown(error_str[:200])}", parse_mode="Markdown")
 
     async def _handle_voice_message(self, update, context):
         """
@@ -670,6 +717,9 @@ Send a voice message and it will be transcribed and processed\\.
                 if len(chunks) > 1:
                     chunk = f"[{i+1}/{len(chunks)}]\n{chunk}"
                 await self._send_single_message(chat_id, chunk)
+                # Add small delay between chunks to avoid rate limiting
+                if i < len(chunks) - 1:
+                    await asyncio.sleep(0.1)  # 100ms between chunks
             return
 
         await self._send_single_message(chat_id, text)
@@ -678,37 +728,40 @@ Send a voice message and it will be transcribed and processed\\.
         """
         Send a single message to a Telegram chat (internal helper).
 
+        Uses semaphore to limit concurrent API calls and prevent connection pool exhaustion.
+
         Args:
             chat_id: Target chat ID
             text: Message text (Markdown format)
         """
-        log.debug(f"[_send_message] Sending to chat_id={chat_id}, text_len={len(text)}")
+        async with self._send_semaphore:
+            log.debug(f"[_send_message] Sending to chat_id={chat_id}, text_len={len(text)}")
 
-        try:
-            result = await self._bot.send_message(
-                chat_id=chat_id,
-                text=text,
-                parse_mode="Markdown",
-                disable_notification=False,
-            )
-            log.debug(f"[_send_message] Success! message_id={result.message_id}")
-            return result
-        except Exception as e:
-            log.error(f"[_send_message] FAILED to send to {chat_id}: {e}", exc_info=True)
-            # Try without Markdown as fallback
             try:
-                log.debug(f"[_send_message] Retrying without Markdown parsing...")
                 result = await self._bot.send_message(
                     chat_id=chat_id,
                     text=text,
-                    parse_mode=None,  # No markdown
+                    parse_mode="Markdown",
                     disable_notification=False,
                 )
-                log.debug(f"[_send_message] Success without Markdown! message_id={result.message_id}")
+                log.debug(f"[_send_message] Success! message_id={result.message_id}")
                 return result
-            except Exception as e2:
-                log.error(f"[_send_message] Failed even without Markdown: {e2}", exc_info=True)
-                raise
+            except Exception as e:
+                log.error(f"[_send_message] FAILED to send to {chat_id}: {e}", exc_info=True)
+                # Try without Markdown as fallback
+                try:
+                    log.debug(f"[_send_message] Retrying without Markdown parsing...")
+                    result = await self._bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode=None,  # No markdown
+                        disable_notification=False,
+                    )
+                    log.debug(f"[_send_message] Success without Markdown! message_id={result.message_id}")
+                    return result
+                except Exception as e2:
+                    log.error(f"[_send_message] Failed even without Markdown: {e2}", exc_info=True)
+                    raise
 
     def _format_event(self, event: AgentEvent) -> str:
         """
