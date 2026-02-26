@@ -79,7 +79,7 @@
         </div>
 
         <div class="field">
-          <label>Add Members ({selectedPeers.size} selected)</label>
+          <span class="field-label">Add Members ({selectedPeers.size} selected)</span>
           {#if connectedPeers.length > 0}
             <div class="peer-list">
               {#each connectedPeers as peer}
@@ -159,7 +159,8 @@
     margin-bottom: 16px;
   }
 
-  .field label {
+  .field label,
+  .field .field-label {
     display: block;
     margin-bottom: 6px;
     font-size: 0.85rem;
