@@ -2257,15 +2257,19 @@
   // Group chat handlers (v0.19.0)
   async function handleCreateGroup(event: CustomEvent) {
     const { name, topic, member_node_ids } = event.detail;
+    console.log("[handleCreateGroup] Called with:", { name, topic, member_node_ids });
     try {
       const result = await createGroupChat(name, topic, member_node_ids);
+      console.log("[handleCreateGroup] Result:", result);
       if (result && result.status === "success" && result.group) {
         const groupId = result.group.group_id;
+        console.log("[handleCreateGroup] Success, groupId:", groupId);
 
         // Update groupChats store so group appears in sidebar
         groupChats.update(map => {
           const newMap = new Map(map);
           newMap.set(groupId, result.group);
+          console.log("[handleCreateGroup] Updated groupChats store, size:", newMap.size);
           return newMap;
         });
 
@@ -2280,6 +2284,8 @@
         });
         // Switch to the new group chat
         activeChatId = groupId;
+      } else {
+        console.warn("[handleCreateGroup] Unexpected result:", result);
       }
       showNewGroupDialog = false;
     } catch (e) {
