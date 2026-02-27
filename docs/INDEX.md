@@ -1,6 +1,6 @@
 # D-PC Messenger Documentation Index
 
-> **Version:** 0.18.0 | **Last Updated:** February 2026
+> **Version:** 0.19.0 | **Last Updated:** February 2026
 
 Welcome to the D-PC Messenger documentation! This index helps you navigate our comprehensive documentation library.
 
@@ -39,6 +39,7 @@ Welcome to the D-PC Messenger documentation! This index helps you navigate our c
 **Using Features:**
 - [Remote Inference](REMOTE_INFERENCE.md) - P2P compute sharing
 - [DPC Agent Guide](DPC_AGENT_GUIDE.md) - Embedded autonomous AI agent
+- [Group Chat](GROUP_CHAT.md) - Group chat architecture and usage (v0.19.0)
 - [Telegram Setup](TELEGRAM_SETUP.md) - Telegram bot integration
 - [Manual Knowledge Save](MANUAL_KNOWLEDGE_SAVE.md) - Knowledge commit procedures
 

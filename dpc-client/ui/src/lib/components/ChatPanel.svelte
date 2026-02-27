@@ -104,7 +104,11 @@
             {:else if msg.sender === 'ai'}
               {msg.model ? `AI (${msg.model})` : 'AI Assistant'}
             {:else}
-              {msg.senderName ? `${msg.senderName} | ${msg.sender.slice(0, 20)}...` : msg.sender}
+              {#if conversationId.startsWith('group-') && msg.senderName}
+                {msg.senderName}
+              {:else}
+                {msg.senderName ? `${msg.senderName} | ${msg.sender.slice(0, 20)}...` : msg.sender}
+              {/if}
             {/if}
           </strong>
           <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>

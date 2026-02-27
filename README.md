@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.18.0
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.19.0
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
@@ -95,7 +95,7 @@ If this vision resonates with you, let's connect:
 - **Knowledge Architecture** - Git-like knowledge commits with cognitive bias mitigation ([architecture doc](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - **Agent Extensibility** - Custom task types, tool registry with firewall integration, sandboxed execution
 - **Easy Integration** - Use any AI provider (Ollama, OpenAI, Claude, Z.AI, DeepSeek)
-- **Production Ready** - Docker deployment, OAuth, rate limiting
+- **PoC / Experimental** - Docker deployment, OAuth, rate limiting
 
 ---
 
@@ -350,13 +350,13 @@ docker-compose -f docker-compose.prod.yml up -d
 ## Roadmap
 
 ### Phase 1: Federated MVP - COMPLETE (v0.10.1)
-**Status:** Production Ready | **Timeline:** Completed
+**Status:** PoC / Experimental | **Timeline:** Completed
 
 **Core Infrastructure:**
 - Direct TLS P2P connections (local network + IPv6 dual-stack)
 - WebRTC with NAT traversal (STUN/TURN)
-- **6-Tier Connection Fallback** (IPv6, IPv4, WebRTC, UDP Hole Punch, Volunteer Relay, Gossip - all production-ready)
-  - **Note:** All 6 connection strategies production-ready as of v0.10.2
+- **6-Tier Connection Fallback** (IPv6, IPv4, WebRTC, UDP Hole Punch, Volunteer Relay, Gossip - all experimental)
+  - **Note:** All 6 connection strategies are experimental (PoC) as of v0.10.2
 - Federation Hub for discovery and OAuth (now optional!)
 - Cryptographic node identity system
 - Token blacklist and logout
@@ -393,7 +393,7 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ **6-Tier Connection Fallback** (v0.10.0) - IPv6, IPv4, WebRTC, UDP hole punch, relay, gossip
 - ✅ **Hub-Optional Architecture** - Fully decentralized operation without Hub dependency
 - ✅ **DTLS Encryption** (v0.10.1) - All 6 connection strategies now encrypted end-to-end
-- ✅ **UDP Hole Punching** (v0.10.1) - DTLS 1.2 encrypted, production-ready, 60-70% NAT success
+- ✅ **UDP Hole Punching** (v0.10.1) - DTLS 1.2 encrypted, experimental, 60-70% NAT success
 - ✅ **Volunteer Relay Nodes** (v0.10.0) - 100% NAT coverage, privacy-preserving
 - ✅ **Gossip Protocol** (v0.10.2) - Enhanced encryption and DHT certificate discovery
   - ✅ Hybrid encryption (AES-GCM + RSA-OAEP) - No payload size limit

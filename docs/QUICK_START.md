@@ -466,7 +466,7 @@ The Hub NEVER sees:
 **Current status: Beta**
 - Core protocol: Stable
 - WebRTC: Working
-- Hub: Production ready
+- Hub: PoC / Experimental
 - Desktop client: Beta
 
 Recommended for:

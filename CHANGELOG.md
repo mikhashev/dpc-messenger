@@ -2,6 +2,50 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
+## [0.19.0] - 2026-02-26
+
+### MAJOR FEATURES
+
+#### Group Chat (Phase 2 - Core Communication)
+- **Group Creation** - Create named group chats with topic and selected peers via "+ Group" button
+- **Group Text Messaging** - Fan-out text messages to all connected group members with sender name display
+- **Group File Transfer** - Send files to all group members via fan-out (each member accepts independently)
+- **Group Voice Messages** - Voice recording and playback in group chats with fan-out delivery
+- **Group Screenshots** - Ctrl+V paste sends screenshots to all group members
+- **Group Voice Transcription** - Transcription shared with all group members via VOICE_TRANSCRIPTION fan-out
+- **End Session & Knowledge Commits** - Multi-party voting with devil's advocate for 3+ members
+- **New Session (Reset)** - Voting-based session reset broadcast to all group members
+- **Group Persistence** - Group metadata saved to `~/.dpc/groups/{group_id}.json`, survives restarts
+- **Group Sync** - Automatic metadata reconciliation (version-based) when peers connect
+- **Group Management** - Leave group, delete group (creator-only with broadcast cleanup)
+- **Sidebar Integration** - Group chats listed with name, member count badge, and unread indicators
+- **Chat Header** - Group name, member count, and topic displayed in chat header
+
+### Protocol
+- **5 new DPTP commands**: GROUP_CREATE, GROUP_TEXT, GROUP_LEAVE, GROUP_DELETE, GROUP_SYNC
+- **GROUP_HISTORY_REQUEST/RESPONSE** for chat history sync on reconnect
+- **FILE_OFFER `group_id` field** - Optional group routing for file/voice/image transfers
+- **Protocol factory functions** - `create_group_create_message()`, `create_group_text_message()`
+
+### New Files
+- `managers/group_manager.py` - GroupManager + GroupMetadata dataclass with CRUD and file persistence
+- `message_handlers/group_handler.py` - 7 handlers: Create, Text, Leave, Delete, Sync, HistoryRequest, HistoryResponse
+- `components/NewGroupDialog.svelte` - Group creation dialog with name, topic, peer checklist
+- `tests/test_group_manager.py` - 33 unit tests for GroupManager
+
+### Modified Files
+- `service.py` - GroupManager init, handler registration, 10+ group API methods, group-aware session/knowledge
+- `file_transfer_manager.py` - `group_id` field on FileTransfer, group routing in send/receive paths
+- `file_offer_handler.py` - Extract and pass `group_id` through file transfer pipeline
+- `file_complete_handler.py` - Group routing for sender-side messages and transcription
+- `coreService.ts` - 8 group stores, event handlers, 10 exported group functions
+- `+page.svelte` - Group routing for text/file/voice/screenshot, header, SessionControls, notifications
+- `Sidebar.svelte` - Group chats section with listing, unread badges, "+ Group" button
+- `ChatPanel.svelte` - Sender name display for group messages
+- `protocol.py` - Factory functions for GROUP_TEXT and GROUP_CREATE
+
+---
+
 ## [0.18.0] - 2026-02-25
 
 ### MAJOR FEATURES
@@ -186,7 +230,7 @@ REMOTE_INFERENCE_RESPONSE extended:
 
 ### MAJOR FEATURES
 
-#### Voice Messages (Production-Ready)
+#### Voice Messages (Experimental)
 - **Voice Recording** - Record voice messages directly in the chat interface
 - **Voice Playback** - Full audio player with play/pause, seek, volume, and speed control (1x, 1.5x, 2x)
 - **P2P Voice Transfer** - Send voice messages via file transfer infrastructure
@@ -258,7 +302,7 @@ FILE_OFFER payload extended with `voice_metadata`:
 
 ### MAJOR FEATURES
 
-#### Vision & Image Support (Production-Ready)
+#### Vision & Image Support (Experimental)
 - **Screenshot Sharing** - Paste screenshots with Ctrl+V, instant preview
 - **Remote Vision Inference** - Use peer's GPU for image analysis
   - Ollama vision (llava, bakllava, moondream)
@@ -832,7 +876,7 @@ FILE_OFFER payload extended with `voice_metadata`:
   - DTLS 1.2 end-to-end encryption for UDP-based NAT traversal
   - Certificate-based authentication using existing node certificates
   - Comprehensive unit test suite for DTLS implementation
-  - UDP Hole Punching now production-ready (was disabled in v0.10.0)
+  - UDP Hole Punching now experimental (was disabled in v0.10.0)
   - Files: [connection_strategies/udp_hole_punch.py](dpc-client/core/dpc_client_core/connection_strategies/udp_hole_punch.py), [managers/hole_punch_manager.py](dpc-client/core/dpc_client_core/managers/hole_punch_manager.py)
 - **UI Connection Strategy Visibility**
   - Available Features menu shows peer counts per connection strategy

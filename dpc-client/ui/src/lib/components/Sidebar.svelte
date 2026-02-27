@@ -52,7 +52,12 @@
     onAddAIChat,
     onAddAgentChat,
     onDeleteAIChat,
-    onDisconnectPeer
+    onDisconnectPeer,
+    groupChats = new Map(),
+    onCreateGroup,
+    onLeaveGroup,
+    onDeleteGroup,
+    selfNodeId = ""
   }: {
     connectionStatus: string;
     nodeStatus: NodeStatus | null;
@@ -79,6 +84,11 @@
     onAddAgentChat?: () => void;
     onDeleteAIChat: (chatId: string) => void;
     onDisconnectPeer: (peerId: string) => void;
+    groupChats?: Map<string, any>;
+    onCreateGroup?: () => void;
+    onLeaveGroup?: (groupId: string) => void;
+    onDeleteGroup?: (groupId: string) => void;
+    selfNodeId?: string;
   } = $props();
 </script>
 
@@ -447,6 +457,61 @@
         {:else}
           <li class="no-peers">No connected peers</li>
         {/if}
+
+        <!-- Group Chats (v0.19.0) -->
+        {#if groupChats.size > 0}
+          <li class="section-divider"><span>Group Chats</span></li>
+          {#each [...groupChats.values()] as group (group.group_id)}
+            <li class="peer-item">
+              <button
+                type="button"
+                class="chat-button"
+                class:active={activeChatId === group.group_id}
+                onclick={() => {
+                  activeChatId = group.group_id;
+                  onResetUnreadCount(group.group_id);
+                }}
+                title="{group.name} ({group.members?.length || 0} members)"
+              >
+                <span class="peer-name">{group.name}</span>
+                <span class="member-count">{group.members?.length || 0}</span>
+                {#if (unreadMessageCounts.get(group.group_id) ?? 0) > 0}
+                  <span class="unread-badge">{unreadMessageCounts.get(group.group_id)}</span>
+                {/if}
+              </button>
+              <button
+                type="button"
+                class="disconnect-btn"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  if (group.created_by === selfNodeId) {
+                    onDeleteGroup?.(group.group_id);
+                  } else {
+                    onLeaveGroup?.(group.group_id);
+                  }
+                }}
+                title={group.created_by === selfNodeId ? "Delete group" : "Leave group"}
+              >
+                ×
+              </button>
+            </li>
+          {/each}
+        {/if}
+
+        <!-- + Group Button (always visible, disabled when no peers) -->
+        <li class="add-group-item">
+          <button
+            type="button"
+            class="add-group-btn"
+            onclick={() => onCreateGroup?.()}
+            disabled={!nodeStatus?.p2p_peers || nodeStatus.p2p_peers.length === 0}
+            title={nodeStatus?.p2p_peers && nodeStatus.p2p_peers.length > 0
+              ? "Create new group chat"
+              : "Connect to peers first to create a group"}
+          >
+            + Group
+          </button>
+        </li>
       </ul>
     </div>
   {:else if connectionStatus === 'connecting'}
@@ -921,6 +986,50 @@
     color: #999;
     font-style: italic;
     padding: 1rem;
+  }
+
+  .section-divider {
+    list-style: none;
+    padding: 8px 12px 4px;
+    font-size: 0.7rem;
+    color: #6c7086;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+  }
+
+  .member-count {
+    font-size: 0.7rem;
+    color: #6c7086;
+    margin-left: 4px;
+  }
+
+  .add-group-item {
+    list-style: none;
+    padding: 2px 8px;
+  }
+
+  .add-group-btn {
+    width: 100%;
+    padding: 6px 12px;
+    border: 1px dashed #45475a;
+    border-radius: 6px;
+    background: transparent;
+    color: #6c7086;
+    cursor: pointer;
+    font-size: 0.8rem;
+    transition: all 0.15s;
+  }
+
+  .add-group-btn:hover:not(:disabled) {
+    border-color: #89b4fa;
+    color: #89b4fa;
+    background: rgba(137, 180, 250, 0.05);
+  }
+
+  .add-group-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 
   .cached-info {

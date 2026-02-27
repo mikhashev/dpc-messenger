@@ -321,6 +321,71 @@ def create_chat_history_response_message(
     }
 
 
+def create_group_create_message(
+    group_id: str,
+    name: str,
+    topic: str,
+    created_by: str,
+    members: list,
+    version: int = 1
+) -> Dict[str, Any]:
+    """Creates a GROUP_CREATE message for inviting members to a new group.
+
+    Args:
+        group_id: Unique group identifier
+        name: Group display name
+        topic: Group topic/description
+        created_by: Node ID of creator
+        members: List of member node IDs
+        version: Group metadata version
+
+    Returns:
+        GROUP_CREATE message dict
+    """
+    return {
+        "command": "GROUP_CREATE",
+        "payload": {
+            "group_id": group_id,
+            "name": name,
+            "topic": topic,
+            "created_by": created_by,
+            "members": members,
+            "version": version
+        }
+    }
+
+
+def create_group_text_message(
+    group_id: str,
+    text: str,
+    sender_node_id: str,
+    sender_name: str = "",
+    message_id: str = ""
+) -> Dict[str, Any]:
+    """Creates a GROUP_TEXT message for group chat.
+
+    Args:
+        group_id: Group ID to send to
+        text: Message text
+        sender_node_id: Sender's node ID
+        sender_name: Sender's display name
+        message_id: Unique message ID for deduplication
+
+    Returns:
+        GROUP_TEXT message dict
+    """
+    return {
+        "command": "GROUP_TEXT",
+        "payload": {
+            "group_id": group_id,
+            "text": text,
+            "sender_node_id": sender_node_id,
+            "sender_name": sender_name,
+            "message_id": message_id
+        }
+    }
+
+
 async def read_message(reader: asyncio.StreamReader) -> dict | None:
     try:
         header = await reader.readexactly(10)

@@ -468,6 +468,24 @@ class DpcAgentManager:
             "should_extract_knowledge": monitor.should_suggest_extraction(),
         }
 
+    def reset_conversation(self, conversation_id: str) -> bool:
+        """
+        Reset conversation history for a specific conversation.
+
+        Args:
+            conversation_id: The conversation to reset (e.g., "telegram-12345")
+
+        Returns:
+            True if reset was successful, False if conversation not found
+        """
+        monitor = self._agent_monitors.get(conversation_id)
+        if monitor:
+            monitor.reset_conversation()
+            log.info(f"Reset conversation: {conversation_id}")
+            return True
+        log.debug(f"Conversation not found for reset: {conversation_id}")
+        return False
+
     def _emit_progress(
         self,
         message: str,

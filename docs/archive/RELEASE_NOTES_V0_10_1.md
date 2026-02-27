@@ -6,7 +6,7 @@
 
 ## Overview
 
-Version 0.10.1 is a **security and reliability update** that adds DTLS encryption to UDP Hole Punching, improves connection reliability for high-latency networks (mobile, CGNAT, satellite), and enhances UI visibility for connection strategies. This release makes the Priority 4 connection strategy (UDP Hole Punching) production-ready with end-to-end encryption.
+Version 0.10.1 is a **security and reliability update** that adds DTLS encryption to UDP Hole Punching, improves connection reliability for high-latency networks (mobile, CGNAT, satellite), and enhances UI visibility for connection strategies. This release makes the Priority 4 connection strategy (UDP Hole Punching) experimental with end-to-end encryption.
 
 **Key Achievement:** All 6 connection strategies now support end-to-end encryption, completing the secure fallback hierarchy introduced in v0.10.0.
 
@@ -16,7 +16,7 @@ Version 0.10.1 is a **security and reliability update** that adds DTLS encryptio
 
 ### 1. DTLS Encryption for UDP Hole Punching
 
-**Status Change:** UDP Hole Punching (Priority 4) is now **production-ready** with DTLS 1.2 encryption.
+**Status Change:** UDP Hole Punching (Priority 4) is now **experimental** with DTLS 1.2 encryption.
 
 **Security Improvements:**
 - **DTLS 1.2 Handshake:** End-to-end encrypted UDP transport

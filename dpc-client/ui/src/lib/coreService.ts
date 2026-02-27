@@ -130,6 +130,16 @@ export const agentProgress = writable<any>(null);  // {conversation_id, message,
 export const agentProgressClear = writable<any>(null);  // {conversation_id} - signal to clear progress
 export const agentTextChunk = writable<any>(null);  // {conversation_id, chunk, ts} - streaming text chunks
 
+// Group chat stores (v0.19.0)
+export const groupChats = writable<Map<string, any>>(new Map());  // group_id -> {group_id, name, topic, created_by, members, version}
+export const groupTextReceived = writable<any>(null);  // {group_id, sender_node_id, sender_name, text, message_id}
+export const groupFileReceived = writable<any>(null);  // {group_id, sender_node_id, sender_name, message_id, attachments}
+export const groupInviteReceived = writable<any>(null);  // {group_id, name, topic, created_by, creator_name, members}
+export const groupUpdated = writable<any>(null);  // {group_id, name, topic, members, version}
+export const groupMemberLeft = writable<any>(null);  // {group_id, node_id, member_name, remaining_members}
+export const groupDeleted = writable<any>(null);  // {group_id, deleted_by}
+export const groupHistorySynced = writable<any>(null);  // {group_id, message_count}
+
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
 
@@ -239,6 +249,7 @@ export function connectToCoreService() {
             sendCommand("get_default_providers");  // Fetch default text/vision providers
             sendCommand("get_providers_list");     // Fetch full provider list with vision flags
             sendCommand("get_telegram_status");    // Fetch Telegram status including conversation links
+            loadGroups();                             // Fetch group chats (v0.19.0)
 
             // Stop polling
             if (pollingInterval) {
@@ -750,6 +761,88 @@ export function connectToCoreService() {
                     // payload: {conversation_id, chunk, ts}
                     agentTextChunk.set(message.payload);
                 }
+                // Group chat events (v0.19.0)
+                else if (message.event === "group_text_received") {
+                    groupTextReceived.set(message.payload);
+
+                    // Track unread messages for group
+                    const groupId = message.payload.group_id;
+                    if (groupId && typeof window !== 'undefined' && groupId !== activeChat) {
+                        const currentCounts = get(unreadMessageCounts);
+                        const currentCount = currentCounts.get(groupId) || 0;
+                        currentCounts.set(groupId, currentCount + 1);
+                        unreadMessageCounts.set(new Map(currentCounts));
+                    }
+                }
+                else if (message.event === "group_file_received") {
+                    groupFileReceived.set(message.payload);
+
+                    // Track unread messages for group
+                    const groupId = message.payload.group_id;
+                    if (groupId && typeof window !== 'undefined' && groupId !== activeChat) {
+                        const currentCounts = get(unreadMessageCounts);
+                        const currentCount = currentCounts.get(groupId) || 0;
+                        currentCounts.set(groupId, currentCount + 1);
+                        unreadMessageCounts.set(new Map(currentCounts));
+                    }
+                }
+                else if (message.event === "group_invite_received") {
+                    console.log("Group invite received:", message.payload);
+                    groupInviteReceived.set(message.payload);
+
+                    // Auto-add to groupChats store (can be refined with accept/decline later)
+                    groupChats.update(map => {
+                        const newMap = new Map(map);
+                        newMap.set(message.payload.group_id, message.payload);
+                        return newMap;
+                    });
+                }
+                else if (message.event === "group_updated") {
+                    console.log("Group updated:", message.payload);
+                    groupUpdated.set(message.payload);
+
+                    // Update groupChats store
+                    groupChats.update(map => {
+                        const newMap = new Map(map);
+                        newMap.set(message.payload.group_id, {
+                            ...newMap.get(message.payload.group_id),
+                            ...message.payload
+                        });
+                        return newMap;
+                    });
+                }
+                else if (message.event === "group_member_left") {
+                    console.log("Group member left:", message.payload);
+                    groupMemberLeft.set(message.payload);
+
+                    // Update members in groupChats store
+                    groupChats.update(map => {
+                        const newMap = new Map(map);
+                        const group = newMap.get(message.payload.group_id);
+                        if (group) {
+                            newMap.set(message.payload.group_id, {
+                                ...group,
+                                members: message.payload.remaining_members
+                            });
+                        }
+                        return newMap;
+                    });
+                }
+                else if (message.event === "group_deleted") {
+                    console.log("Group deleted:", message.payload);
+                    groupDeleted.set(message.payload);
+
+                    // Remove from groupChats store
+                    groupChats.update(map => {
+                        const newMap = new Map(map);
+                        newMap.delete(message.payload.group_id);
+                        return newMap;
+                    });
+                }
+                else if (message.event === "group_history_synced") {
+                    console.log("Group history synced:", message.payload);
+                    groupHistorySynced.set(message.payload);
+                }
                 else if (message.event === "file_preparation_progress") {
                     // Reset timeout on progress (keepalive mechanism for large file hash computation)
                     for (const [cmdId, cmd] of pendingCommands.entries()) {
@@ -882,7 +975,11 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'set_conversation_transcription',  // v0.13.2 - per-conversation transcription control
             'get_conversation_transcription',  // v0.13.2 - per-conversation transcription control
             'prepare_agent',  // Pre-initialize DPC Agent and Telegram bridge
-            'query_remote_providers'  // v0.18.0 - fetch available providers from remote peer
+            'query_remote_providers',  // v0.18.0 - fetch available providers from remote peer
+            'get_groups',  // v0.19.0 - group chat management
+            'create_group_chat',  // v0.19.0 - group chat creation
+            'leave_group',  // v0.19.0 - leave group
+            'delete_group'  // v0.19.0 - delete group
         ].includes(command);
 
         if (expectsResponse) {
@@ -1110,4 +1207,87 @@ export async function linkTelegramChat(conversationId: string, telegramChatId: s
 
 export async function getTelegramStatus(): Promise<any> {
     return sendCommand('get_telegram_status', {});
+}
+
+// Group Chat API functions (v0.19.0)
+
+export async function createGroupChat(name: string, topic: string = "", memberNodeIds: string[] = []): Promise<any> {
+    return sendCommand('create_group_chat', {
+        name,
+        topic,
+        member_node_ids: memberNodeIds
+    });
+}
+
+export async function sendGroupMessage(groupId: string, text: string): Promise<any> {
+    return sendCommand('send_group_message', {
+        group_id: groupId,
+        text
+    });
+}
+
+export async function sendGroupImage(groupId: string, imageBase64: string, filename?: string, text: string = ""): Promise<any> {
+    return sendCommand('send_group_image', {
+        group_id: groupId,
+        image_base64: imageBase64,
+        filename,
+        text
+    });
+}
+
+export async function sendGroupVoiceMessage(groupId: string, audioBase64: string, durationSeconds: number, mimeType: string = "audio/webm"): Promise<any> {
+    return sendCommand('send_group_voice_message', {
+        group_id: groupId,
+        audio_base64: audioBase64,
+        duration_seconds: durationSeconds,
+        mime_type: mimeType
+    });
+}
+
+export async function sendGroupFile(groupId: string, filePath: string): Promise<any> {
+    return sendCommand('send_group_file', {
+        group_id: groupId,
+        file_path: filePath
+    });
+}
+
+export async function addGroupMember(groupId: string, nodeId: string): Promise<any> {
+    return sendCommand('add_group_member', {
+        group_id: groupId,
+        node_id: nodeId
+    });
+}
+
+export async function removeGroupMember(groupId: string, nodeId: string): Promise<any> {
+    return sendCommand('remove_group_member', {
+        group_id: groupId,
+        node_id: nodeId
+    });
+}
+
+export async function leaveGroup(groupId: string): Promise<any> {
+    return sendCommand('leave_group', {
+        group_id: groupId
+    });
+}
+
+export async function deleteGroup(groupId: string): Promise<any> {
+    return sendCommand('delete_group', {
+        group_id: groupId
+    });
+}
+
+export async function loadGroups(): Promise<void> {
+    try {
+        const result = await sendCommand('get_groups', {});
+        if (result && result.status === "success" && result.groups) {
+            const groupMap = new Map<string, any>();
+            for (const group of result.groups) {
+                groupMap.set(group.group_id, group);
+            }
+            groupChats.set(groupMap);
+        }
+    } catch (e) {
+        console.error("Failed to load groups:", e);
+    }
 }

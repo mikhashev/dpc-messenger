@@ -1,7 +1,7 @@
 # DPTP Specification: D-PC Transfer Protocol v1.4
 
 **Version:** 1.4
-**Status:** Stable
+**Status:** Draft / PoC
 **Date:** February 2026
 **License:** CC0 1.0 Universal (Public Domain)
 
@@ -1890,7 +1890,7 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Related Specifications updated**: Added Device Context Schema v1.1 reference
 
 ### v1.0 (November 29, 2025)
-- Initial stable release
+- Initial PoC release
 - Message types: HELLO, SEND_TEXT, GET_CONTEXT, CONTEXT_DATA
 - Remote inference: REMOTE_INFERENCE_REQUEST, REMOTE_INFERENCE_RESPONSE
 - Provider discovery: GET_PROVIDERS, PROVIDERS_RESPONSE

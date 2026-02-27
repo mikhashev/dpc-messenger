@@ -228,7 +228,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
    - NAT type detection (cone vs symmetric)
    - Success rate: 60-70% for cone NAT (fails gracefully for symmetric NAT)
    - Timeout: 15s
-   - **Status**: Production-ready with DTLS encryption (enabled by default in v0.10.1)
+   - **Status**: Experimental (PoC) with DTLS encryption (enabled by default in v0.10.1)
    - Location: `connection_strategies/udp_hole_punch.py`, `managers/hole_punch_manager.py`
    - Testing: See `docs/MANUAL_TESTING_GUIDE.md`
 
@@ -257,7 +257,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
    - Use cases: offline messaging, infrastructure outages, disaster scenarios
    - Not real-time (eventual delivery guarantee)
    - Timeout: 5s (before falling back to gossip)
-   - **Status**: Production-ready (v0.10.2)
+   - **Status**: Experimental (PoC) (v0.10.2)
    - Location: `connection_strategies/gossip_store_forward.py`, `managers/gossip_manager.py`, `transports/gossip_connection.py`
 
 **Key Benefits:**

@@ -112,4 +112,4 @@ Building on the complete infrastructure:
 - **Team compute** - Pools, load balancing, agent team integration
 - **Group collaboration** - Multi-party scenarios (3+ users) with presence and typing
 
-**Our Achievement:** We have successfully built the **"D-PC Messenger,"** a production-ready platform (v0.18.0, 645+ commits) for collaborative intelligence that uniquely combines the sharing of **knowledge (context)**, **computation (inference)**, and **autonomous AI assistance (DPC Agent)** in a private, user-sovereign network. The foundation is mature; now we expand to team scenarios.
+**Our Achievement:** We have successfully built the **"D-PC Messenger,"** a proof-of-concept platform (v0.18.0, 645+ commits) for collaborative intelligence that uniquely combines the sharing of **knowledge (context)**, **computation (inference)**, and **autonomous AI assistance (DPC Agent)** in a private, user-sovereign network. The foundation is mature; now we expand to team scenarios.
