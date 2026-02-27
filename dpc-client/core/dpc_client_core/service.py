@@ -4951,6 +4951,36 @@ Respond in JSON format:
         groups = [g.to_dict() for g in self.group_manager.get_all_groups()]
         return {"status": "success", "groups": groups}
 
+    def parse_mentions(self, text: str, group_members: List[str]) -> List[Dict[str, Any]]:
+        """Parse @mentions in text and return list of mention objects.
+
+        Args:
+            text: Message text to parse
+            group_members: List of node IDs in the group
+
+        Returns:
+            List of mention dicts with node_id, name, start, end
+        """
+        mentions = []
+        # Pattern matches @Name or @Name-With-Dashes
+        pattern = r'@([\w\-]+)'
+
+        for match in re.finditer(pattern, text):
+            name = match.group(1)
+            # Resolve name to node_id from group members
+            for node_id in group_members:
+                peer_name = self.peer_metadata.get(node_id, {}).get("name", "")
+                if peer_name and peer_name.lower() == name.lower():
+                    mentions.append({
+                        "node_id": node_id,
+                        "name": peer_name,
+                        "start": match.start(),
+                        "end": match.end()
+                    })
+                    break
+
+        return mentions
+
     async def send_group_message(self, group_id: str, text: str) -> Dict[str, Any]:
         """Send a text message to all group members.
 
@@ -4965,6 +4995,9 @@ Respond in JSON format:
 
             sender_name = "User"
 
+            # Parse @mentions in the message text
+            mentions = self.parse_mentions(text, group.members)
+
             # Fan-out GROUP_TEXT to all connected members
             await self._broadcast_to_group(group_id, {
                 "command": "GROUP_TEXT",
@@ -4972,6 +5005,7 @@ Respond in JSON format:
                     "group_id": group_id,
                     "text": text,
                     "sender_name": sender_name,
+                    "mentions": mentions,
                 }
             })
 

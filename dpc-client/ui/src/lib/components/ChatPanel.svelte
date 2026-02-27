@@ -8,6 +8,13 @@
   import ThinkingBlock from './ThinkingBlock.svelte';
 
   // Message type definition
+  type Mention = {
+    node_id: string;
+    name: string;
+    start: number;
+    end: number;
+  };
+
   type Message = {
     id: string;
     sender: string;
@@ -19,6 +26,7 @@
     thinking?: string;  // Thinking/reasoning content (v1.4+)
     thinkingTokens?: number;  // Tokens used for thinking (v1.4+)
     streamingRaw?: string;  // v0.16.0+: Raw streaming text (shown in collapsible)
+    mentions?: Mention[];  // @-mentions in group chat messages
     attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
       type: 'file' | 'image' | 'voice';
       filename: string;
@@ -91,6 +99,42 @@
       chatWindowElement.scrollTop = chatWindowElement.scrollHeight;
     }
   });
+
+  // Escape HTML to prevent XSS
+  function escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
+  }
+
+  // Highlight @-mentions in message text
+  function highlightMentions(text: string, mentions: Mention[] | undefined): string {
+    if (!mentions || mentions.length === 0) {
+      return escapeHtml(text);
+    }
+
+    // Sort mentions by start position
+    const sortedMentions = [...mentions].sort((a, b) => a.start - b.start);
+
+    let result = '';
+    let lastEnd = 0;
+
+    for (const mention of sortedMentions) {
+      // Add text before this mention
+      result += escapeHtml(text.slice(lastEnd, mention.start));
+      // Add highlighted mention
+      result += `<span class="mention" data-node-id="${escapeHtml(mention.node_id)}">@${escapeHtml(mention.name)}</span>`;
+      lastEnd = mention.end;
+    }
+
+    // Add remaining text after last mention
+    result += escapeHtml(text.slice(lastEnd));
+
+    return result;
+  }
 </script>
 
 <div class="chat-window" bind:this={chatWindowElement}>
@@ -122,6 +166,9 @@
         {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)}
           {#if msg.sender === 'ai' && enableMarkdown}
             <MarkdownMessage content={msg.text} />
+          {:else if msg.mentions && msg.mentions.length > 0}
+            <!-- Group chat message with @-mentions -->
+            <p>{@html highlightMentions(msg.text, msg.mentions)}</p>
           {:else}
             <p>{msg.text}</p>
           {/if}
@@ -305,6 +352,19 @@
     word-wrap: break-word;
     overflow-wrap: break-word; /* Break long words */
     word-break: break-word; /* Break long unbreakable strings */
+  }
+
+  :global(.mention) {
+    background: rgba(137, 180, 250, 0.2);
+    color: #1e88e5;
+    padding: 0.1em 0.2em;
+    border-radius: 4px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  :global(.mention:hover) {
+    background: rgba(137, 180, 250, 0.35);
   }
 
   .message-attachments {

@@ -100,6 +100,7 @@ class GroupTextHandler(MessageHandler):
             "sender_name": sender_name,
             "text": text,
             "message_id": message_id,
+            "mentions": payload.get("mentions", []),
         })
 
         # Feed to conversation monitor for knowledge extraction

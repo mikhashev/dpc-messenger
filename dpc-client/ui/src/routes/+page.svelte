@@ -28,6 +28,7 @@
   import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
   import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
   import VoicePlayer from "$lib/components/VoicePlayer.svelte";
+  import MentionAutocomplete from "$lib/components/MentionAutocomplete.svelte";
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
 
@@ -38,6 +39,13 @@
   console.log("Full D-PC Messenger loading...");
   
   // --- STATE ---
+  type Mention = {
+    node_id: string;
+    name: string;
+    start: number;
+    end: number;
+  };
+
   type Message = {
     id: string;
     sender: string;
@@ -47,6 +55,7 @@
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
     streamingRaw?: string;  // v0.16.0+: Raw streaming text (shown in collapsible)
+    mentions?: Mention[];  // @-mentions in group chat messages
     attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
       type: 'file' | 'image' | 'voice';
       filename: string;
@@ -90,6 +99,13 @@
   let currentInput = $state("");
   let chatLoadingStates = $state(new Map<string, boolean>());  // Per-chat loading state
   let chatWindow = $state<HTMLElement>();  // Bound to ChatPanel's chatWindowElement
+
+  // Mention autocomplete state (group chats only)
+  let mentionAutocompleteVisible = $state(false);
+  let mentionQuery = $state("");
+  let mentionStartPosition = $state(0);
+  let mentionDropdownPosition = $state({ top: 0, left: 0 });
+  let mentionSelectedIndex = $state(0);
 
   // Helper to check if a specific chat is loading
   function isChatLoading(chatId: string): boolean {
@@ -1738,6 +1754,95 @@
     return peerDisplayNames.get(peerId) || `${peerId.slice(0, 20)}...`;
   }
 
+  // --- MENTION AUTOCOMPLETE (Group Chats) ---
+  // Get mentionable members for the current group chat
+  function getMentionableMembers(): Array<{ node_id: string; name: string }> {
+    if (!activeChatId.startsWith('group-')) return [];
+
+    const group = $groupChats.get(activeChatId);
+    if (!group?.members) return [];
+
+    return group.members.map((nodeId: string) => ({
+      node_id: nodeId,
+      name: peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId.slice(0, 20)
+    }));
+  }
+
+  // Filter mentionable members by query
+  let filteredMentionMembers = $derived.by(() => {
+    const members = getMentionableMembers();
+    if (!mentionQuery) return members;
+
+    const lowerQuery = mentionQuery.toLowerCase();
+    return members.filter(
+      m => m.name.toLowerCase().includes(lowerQuery) || m.node_id.toLowerCase().includes(lowerQuery)
+    );
+  });
+
+  // Handle input changes to detect @ mentions
+  function handleMentionInput(event: Event) {
+    const textarea = event.target as HTMLTextAreaElement;
+    const value = textarea.value;
+    const cursorPos = textarea.selectionStart;
+
+    // Only enable in group chats
+    if (!activeChatId.startsWith('group-')) {
+      mentionAutocompleteVisible = false;
+      return;
+    }
+
+    // Find @ before cursor
+    const lastAtIndex = value.lastIndexOf('@', cursorPos - 1);
+    if (lastAtIndex !== -1) {
+      const textAfterAt = value.slice(lastAtIndex + 1, cursorPos);
+      // Check for space (ends mention) or newline
+      if (!textAfterAt.includes(' ') && !textAfterAt.includes('\n')) {
+        mentionQuery = textAfterAt;
+        mentionStartPosition = lastAtIndex;
+        mentionSelectedIndex = 0;
+
+        // Calculate dropdown position (approximate)
+        const textareaRect = textarea.getBoundingClientRect();
+        mentionDropdownPosition = {
+          top: textareaRect.bottom + 4,
+          left: textareaRect.left + (lastAtIndex * 8) // Approximate char width
+        };
+
+        mentionAutocompleteVisible = true;
+        return;
+      }
+    }
+
+    mentionAutocompleteVisible = false;
+  }
+
+  // Handle mention selection
+  function handleMentionSelect(member: { node_id: string; name: string }) {
+    // Replace @query with @Name
+    const before = currentInput.slice(0, mentionStartPosition);
+    const after = currentInput.slice(mentionStartPosition + mentionQuery.length + 1);
+    currentInput = `${before}@${member.name} ${after}`;
+
+    mentionAutocompleteVisible = false;
+    mentionSelectedIndex = 0;
+  }
+
+  // Handle mention navigation (from keyboard events)
+  function handleMentionNavigate(direction: 'up' | 'down') {
+    const maxIndex = filteredMentionMembers.length - 1;
+    if (direction === 'down') {
+      mentionSelectedIndex = Math.min(mentionSelectedIndex + 1, maxIndex);
+    } else {
+      mentionSelectedIndex = Math.max(mentionSelectedIndex - 1, 0);
+    }
+  }
+
+  // Close mention autocomplete
+  function closeMentionAutocomplete() {
+    mentionAutocompleteVisible = false;
+    mentionSelectedIndex = 0;
+  }
+
   // --- PEER CONTEXT SELECTION ---
   function togglePeerContext(peerId: string) {
     if (selectedPeerContexts.has(peerId)) {
@@ -3333,7 +3438,8 @@
             sender: msg.sender_node_id,
             senderName: msg.sender_name,
             text: msg.text,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            mentions: msg.mentions || []
           }]);
           return newMap;
         });
@@ -3807,7 +3913,12 @@
               ($connectionStatus === 'connected' ? (pendingImage ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
             }
             disabled={$connectionStatus !== 'connected' || isLoading}
+            oninput={handleMentionInput}
             onkeydown={(e) => {
+              // If mention autocomplete is open, let the component handle navigation
+              if (mentionAutocompleteVisible && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Tab')) {
+                return; // Let MentionAutocomplete handle it
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 // Send if: peer connected, OR local AI chat, OR Telegram chat, OR AI_xxx chat AND (has text OR has pending image)
@@ -3979,6 +4090,18 @@
   bind:open={showContextViewer}
   context={$personalContext}
   on:close={() => showContextViewer = false}
+/>
+
+<!-- Mention Autocomplete (Group Chats) -->
+<MentionAutocomplete
+  visible={mentionAutocompleteVisible}
+  query={mentionQuery}
+  members={getMentionableMembers()}
+  position={mentionDropdownPosition}
+  selectedIndex={mentionSelectedIndex}
+  on:select={(e) => handleMentionSelect(e.detail)}
+  on:navigate={(e) => handleMentionNavigate(e.detail.direction)}
+  on:close={closeMentionAutocomplete}
 />
 
 <InstructionsEditor
