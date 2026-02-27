@@ -140,10 +140,19 @@ chore: maintenance tasks (dependencies, config)
 ### Example: Current State
 
 **Current Status (2026-02-25):**
-- `main`: Stable v0.18.0
+- `main`: Stable v0.19.0
 - `dev`: Active development (ready for new features)
 
-**Release v0.18.0 (Latest):**
+**Release v0.19.0 (Latest):**
+- Group Chat - Multi-participant conversations with decentralized fan-out architecture
+- Group text messaging with sender name display and message deduplication
+- Group file/voice/screenshot sharing via fan-out delivery
+- Group management (create, join, leave, delete) with creator-only controls
+- Group history sync and metadata reconciliation (version-based)
+- Knowledge extraction and session voting for groups
+- 7 new DPTP commands: GROUP_CREATE, GROUP_TEXT, GROUP_LEAVE, GROUP_DELETE, GROUP_SYNC, GROUP_HISTORY_REQUEST, GROUP_HISTORY_RESPONSE
+
+**Release v0.18.0 (Previous):**
 - Embedded autonomous AI agent (DPC Agent) with 40+ tools, consciousness, evolution
 - Agent Telegram integration (two-way messaging, voice transcription, event notifications)
 - Reasoning model support (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3)
@@ -154,7 +163,7 @@ chore: maintenance tasks (dependencies, config)
 - DPTP v1.4 protocol (thinking fields)
 - 30+ bug fixes across agent, UI, Telegram, Whisper, LLM providers
 
-**Release v0.15.1 (Previous):**
+**Release v0.15.1:**
 - Telegram long message splitting (4096 char limit with part indicators)
 - Telegram video message support (was missing handler)
 - Fix transcription duplication in UI (hidden in ChatPanel when present)
