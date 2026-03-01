@@ -764,7 +764,14 @@
 
   // Send file confirmation dialog
   let showSendFileDialog = $state(false);
-  let pendingFileSend = $state<{ filePath: string, fileName: string, recipientId: string, recipientName: string } | null>(null);
+  let pendingFileSend = $state<{
+    filePath: string;
+    fileName: string;
+    recipientId: string;
+    recipientName: string;
+    imageData?: { dataUrl: string; filename: string; sizeBytes: number };  // For screenshots
+    caption?: string;  // Optional caption for images
+  } | null>(null);
   let isSendingFile = $state(false);  // Prevent double-click bug
 
   // Image paste state (Phase 2.4: Screenshot + Vision - improved UX)
@@ -2128,16 +2135,19 @@
         }
       } else if (activeChatId.startsWith('group-')) {
         // Group chat: Send screenshot via group fan-out (v0.19.0)
-        try {
-          await sendGroupImage(activeChatId, imageData.dataUrl, imageData.filename, text);
-          console.log("Group screenshot transfer initiated");
-        } catch (error) {
-          console.error('Error sending group screenshot:', error);
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          fileOfferToastMessage = `Failed to send screenshot: ${errorMsg}`;
-          showFileOfferToast = true;
-          setTimeout(() => showFileOfferToast = false, 5000);
-        }
+        // Use custom Svelte dialog for confirmation (fixes Tauri auto-accept bug)
+        const group = $groupChats.get(activeChatId);
+        const groupName = group?.name || 'group';
+        pendingFileSend = {
+          filePath: '',
+          fileName: imageData.filename,
+          recipientId: activeChatId,
+          recipientName: `group "${groupName}"`,
+          imageData: imageData,
+          caption: text
+        };
+        showSendFileDialog = true;
+        return;  // Exit early - actual send happens in handleConfirmSendFile
       } else {
         // P2P chat: Send screenshot via file transfer
         try {
@@ -2846,19 +2856,16 @@
         });
       } else if (activeChatId.startsWith('group-')) {
         // Group chat: Send file via group fan-out (v0.19.0)
+        // Use custom Svelte dialog instead of native confirm() (fixes Tauri auto-accept bug)
         const group = $groupChats.get(activeChatId);
         const groupName = group?.name || 'group';
-        if (confirm(`Send "${fileName}" to group "${groupName}"?`)) {
-          try {
-            await sendGroupFile(activeChatId, filePath);
-            console.log(`[Group] File transfer initiated: ${fileName}`);
-          } catch (error) {
-            console.error('Error sending group file:', error);
-            fileOfferToastMessage = `Failed to send file to group: ${error}`;
-            showFileOfferToast = true;
-            setTimeout(() => showFileOfferToast = false, 5000);
-          }
-        }
+        pendingFileSend = {
+          filePath,
+          fileName,
+          recipientId: activeChatId,
+          recipientName: `group "${groupName}"`
+        };
+        showSendFileDialog = true;
       } else {
         // P2P file transfer with confirmation dialog (existing behavior)
         // Get recipient name from peer info
@@ -3027,18 +3034,43 @@
     isSendingFile = true;  // Set flag immediately to block subsequent clicks
 
     try {
-      console.log(`Sending file: ${pendingFileSend.filePath} to ${pendingFileSend.recipientId}`);
-      await sendFile(pendingFileSend.recipientId, pendingFileSend.filePath);
+      // Check if this is image data (screenshot) or file path
+      if (pendingFileSend.imageData) {
+        // Screenshot/image paste
+        console.log(`Sending screenshot: ${pendingFileSend.fileName} to ${pendingFileSend.recipientId}`);
+        if (pendingFileSend.recipientId.startsWith('group-')) {
+          await sendGroupImage(pendingFileSend.recipientId, pendingFileSend.imageData.dataUrl, pendingFileSend.imageData.filename, pendingFileSend.caption || '');
+          console.log(`[Group] Screenshot transfer initiated: ${pendingFileSend.fileName}`);
+        } else {
+          // P2P screenshot
+          await sendCommand("send_p2p_image", {
+            node_id: pendingFileSend.recipientId,
+            image_base64: pendingFileSend.imageData.dataUrl,
+            filename: pendingFileSend.imageData.filename,
+            text: pendingFileSend.caption || ''
+          });
+          console.log(`Screenshot transfer initiated: ${pendingFileSend.fileName}`);
+        }
+      } else {
+        // Regular file
+        console.log(`Sending file: ${pendingFileSend.filePath} to ${pendingFileSend.recipientId}`);
+        if (pendingFileSend.recipientId.startsWith('group-')) {
+          await sendGroupFile(pendingFileSend.recipientId, pendingFileSend.filePath);
+          console.log(`[Group] File transfer initiated: ${pendingFileSend.fileName}`);
+        } else {
+          await sendFile(pendingFileSend.recipientId, pendingFileSend.filePath);
+        }
+      }
 
       showSendFileDialog = false;
       pendingFileSend = null;
 
-      fileOfferToastMessage = `Sending file...`;
+      fileOfferToastMessage = `Sending...`;
       showFileOfferToast = true;
       setTimeout(() => showFileOfferToast = false, 3000);
     } catch (error) {
       console.error('Error sending file:', error);
-      fileOfferToastMessage = `Failed to send file: ${error}`;
+      fileOfferToastMessage = `Failed to send: ${error}`;
       showFileOfferToast = true;
       setTimeout(() => showFileOfferToast = false, 5000);
     } finally {

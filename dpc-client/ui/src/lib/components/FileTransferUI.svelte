@@ -55,7 +55,14 @@
     onAcceptFile: () => void;
     onRejectFile: () => void;
     showSendFileDialog?: boolean;
-    pendingFileSend?: { filePath: string; fileName: string; recipientId: string; recipientName: string } | null;
+    pendingFileSend?: {
+      filePath: string;
+      fileName: string;
+      recipientId: string;
+      recipientName: string;
+      imageData?: { dataUrl: string; filename: string; sizeBytes: number };
+      caption?: string;
+    } | null;
     isSendingFile?: boolean;
     filePreparationStarted?: any;
     filePreparationProgress?: any;
@@ -140,11 +147,23 @@
 {#if showSendFileDialog && pendingFileSend}
   <div class="modal-overlay" role="presentation" onclick={onCancelSendFile} onkeydown={(e) => e.key === 'Escape' && onCancelSendFile()}>
     <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
-      <h3>Send File</h3>
-      <p><strong>File:</strong> {pendingFileSend.fileName}</p>
+      <h3>{pendingFileSend.imageData ? 'Send Screenshot' : 'Send File'}</h3>
+      <p><strong>{pendingFileSend.imageData ? 'Image' : 'File'}:</strong> {pendingFileSend.fileName}</p>
       <p><strong>To:</strong> {pendingFileSend.recipientName}</p>
 
-      {#if filePreparationStarted && isSendingFile}
+      {#if pendingFileSend.imageData}
+        <p style="margin-top: 10px; font-size: 13px;">
+          <strong>Size:</strong> {(pendingFileSend.imageData.sizeBytes / (1024 * 1024)).toFixed(2)} MB
+        </p>
+        <!-- Show thumbnail for screenshots -->
+        <div style="margin-top: 10px; text-align: center;">
+          <img
+            src={pendingFileSend.imageData.dataUrl}
+            alt="Screenshot preview"
+            style="max-width: 100%; max-height: 150px; border-radius: 4px; border: 1px solid #ddd;"
+          />
+        </div>
+      {:else if filePreparationStarted && isSendingFile}
         <p style="margin-top: 10px; font-size: 13px;">
           <strong>Size:</strong> {filePreparationStarted.size_mb} MB
         </p>
