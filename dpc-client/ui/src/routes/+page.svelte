@@ -3691,6 +3691,11 @@
             </h2>
           </button>
 
+          <!-- Group topic display (v0.19.0) - inside title section for proper positioning -->
+          {#if !chatHeaderCollapsed && isGroupChat && $groupChats.get(activeChatId)?.topic}
+            <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
+          {/if}
+
           <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI chats) -->
           {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai'}
             <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
@@ -3717,11 +3722,6 @@
         </div>
 
         {#if !chatHeaderCollapsed}
-          <!-- Group topic display (v0.19.0) -->
-          {#if isGroupChat && $groupChats.get(activeChatId)?.topic}
-            <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
-          {/if}
-
           <!-- ProviderSelector: AI chats only (not Telegram) -->
           {#if isActuallyAIChat}
           <ProviderSelector
