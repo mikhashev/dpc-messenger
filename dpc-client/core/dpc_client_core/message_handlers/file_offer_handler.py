@@ -218,6 +218,8 @@ class FileOfferHandler(MessageHandler):
                 "command": "FILE_ACCEPT",
                 "payload": {"transfer_id": transfer_id}
             })
+            # Update status to TRANSFERRING so UI refresh doesn't show acceptance dialog
+            transfer.status = TransferStatus.TRANSFERRING
             if is_voice:
                 transfer_type = 'Voice'
             elif is_image:
