@@ -1,4 +1,4 @@
-# D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
+# D-PC Messenger: Privacy-First Infrastructure for Human-AI-Team Collaboration
 
 > **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.19.0
 > **Platforms:** Windows | Linux | macOS
@@ -29,20 +29,9 @@ We're racing against a closing window: the infrastructure being built TODAY will
 
 ---
 
-## Join the Mission: Seeking a Business Co-Founder
-
-The core technology is built, but the mission to build a world-changing company has just begun.
-
-I am a product-focused technical founder looking for a business-focused co-founder to be my partner. If you have a passion for privacy, a deep understanding of go-to-market strategy, and the drive to build a global community, I want to talk to you.
-
-If this vision resonates with you, let's connect:
-[legoogmiha@gmail.com](mailto:legoogmiha@gmail.com) | [LinkedIn](https://www.linkedin.com/in/mikemikhashev) | [X/Twitter](https://x.com/mikeshev4enko)
-
----
-
 ## What is D-PC Messenger?
 
-**D-PC Messenger** (Decentralized Personal Context) is a **privacy-first, peer-to-peer platform for human-AI collaboration**.
+**D-PC Messenger** (Decentralized Personal Context) is **privacy-first infrastructure for human-AI-agent collaboration** — enabling teams of humans and AI assistants to work together with end-to-end encryption, P2P context sharing, and decentralized compute sharing.
 
 **The Core Idea:** Imagine you're working with your personal AI assistant (ChatGPT, Claude, or local Ollama). Now imagine securely sharing relevant context with a trusted friend so *their* AI assistant can help too - without compromising privacy or relying on centralized servers.
 
@@ -56,6 +45,20 @@ If this vision resonates with you, let's connect:
 **Real-world example:** You're researching a technical topic with your AI assistant. You share your conversation history with a colleague. Their AI can now see your research and provide complementary insights, creating a **collective intelligence** between humans and their AI assistants.
 
 **Philosophy:** [Digital Self-Sovereignty](./docs/USER_SOVEREIGNTY.md) - Your data, your keys, your control. No backdoors, no data mining, no compromises.
+
+---
+
+### How D-PC Differs from AI Desktop Agents
+
+| Feature | D-PC Messenger | Claude Cowork | OpenClaw |
+|---------|----------------|---------------|----------|
+| **Multi-user collaboration** | ✅ P2P + Group chat | ❌ Single-user | ❌ Single-user |
+| **Team knowledge sharing** | ✅ Consensus voting | ❌ | ❌ |
+| **Background agent consciousness** | ✅ Proactive thinking | ❌ | ❌ |
+| **Privacy architecture** | ✅ P2P, E2E encrypted | ❌ Cloud-based | ⚠️ Self-hosted |
+| **Desktop automation** | ❌ (planned) | ✅ | ✅ |
+
+**D-PC is complementary to desktop agents** — use Cowork/OpenClaw for personal automation, use D-PC when humans and agents need to collaborate.
 
 ---
 
@@ -560,6 +563,10 @@ Your support helps cover AI-assisted development costs and enables faster delive
 - **GitHub Discussions:** [Ask questions](https://github.com/mikhashev/dpc-messenger/discussions)
 - **Email:** legoogmiha@gmail.com
 - **Documentation:** [docs/](./docs/)
+
+### Business Inquiries
+
+Building privacy infrastructure for human-AI collaboration. Interested in partnerships, investment, or joining the mission? 📧 [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com)
 
 ---
 
