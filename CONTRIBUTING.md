@@ -139,11 +139,17 @@ chore: maintenance tasks (dependencies, config)
 
 ### Example: Current State
 
-**Current Status (2026-02-25):**
-- `main`: Stable v0.19.0
+**Current Status (2026-03-02):**
+- `main`: Stable v0.19.1
 - `dev`: Active development (ready for new features)
 
-**Release v0.19.0 (Latest):**
+**Release v0.19.1 (Latest):**
+- Group Chat history persistence with hash-based sync and offline deletion
+- @-mention support with autocomplete in group chats
+- Temperature parameter for model creativity control
+- Multiple group chat bug fixes and UI improvements
+
+**Release v0.19.0 (Previous):**
 - Group Chat - Multi-participant conversations with decentralized fan-out architecture
 - Group text messaging with sender name display and message deduplication
 - Group file/voice/screenshot sharing via fan-out delivery
