@@ -80,14 +80,14 @@ You retain:
 
 ---
 
-## 7. Governing Law
+## 7. Dispute Resolution
 
-This CLA is governed by the laws of the **State of Delaware, United States** (pending formal entity establishment).
-
-Disputes shall be resolved through:
+In case of disputes, parties agree to resolve them through:
 1. Good-faith negotiation
 2. Mediation (if needed)
 3. Arbitration (as last resort)
+
+A specific governing law and jurisdiction will be designated upon formal entity establishment.
 
 ---
 
