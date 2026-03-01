@@ -1961,6 +1961,14 @@ class CoreService:
                 except (ValueError, TypeError):
                     errors.append(f"{prefix}: context_window must be an integer")
 
+            # Optional temperature validation (v0.19.0+)
+            if "temperature" in provider:
+                temp = provider["temperature"]
+                if not isinstance(temp, (int, float)):
+                    errors.append(f"{prefix}: temperature must be a number")
+                elif temp < 0 or temp > 2:
+                    errors.append(f"{prefix}: temperature must be between 0 and 2 (got {temp})")
+
         # Check default_provider exists
         default = config_dict.get("default_provider")
         if default and default not in provider_aliases:

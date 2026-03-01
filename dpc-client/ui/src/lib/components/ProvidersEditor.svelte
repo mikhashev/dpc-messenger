@@ -20,6 +20,7 @@
     api_key?: string;        // Plaintext (local providers only)
     api_key_env?: string;    // Environment variable (cloud providers)
     context_window?: number; // Optional override
+    temperature?: number;    // Model creativity (0.0-2.0, default 0.7)
     // Local Whisper specific (v0.13.1+)
     device?: string;         // 'cuda', 'cpu', or 'auto'
     compile_model?: boolean; // torch.compile optimization
@@ -81,6 +82,15 @@
     { label: '64K tokens', value: 65536 },
     { label: '128K tokens', value: 131072 },
     { label: '256K tokens', value: 262144 },
+  ];
+
+  // Temperature presets for model creativity
+  const TEMPERATURE_PRESETS = [
+    { label: 'Precise (0.2)', value: 0.2, description: 'Deterministic, factual' },
+    { label: 'Balanced (0.5)', value: 0.5, description: 'Consistent, focused' },
+    { label: 'Default (0.7)', value: 0.7, description: 'Balanced creativity' },
+    { label: 'Creative (1.0)', value: 1.0, description: 'More varied output' },
+    { label: 'Random (1.5)', value: 1.5, description: 'High variation' },
   ];
 
   // New provider form
@@ -926,6 +936,45 @@
                       {/if}
                     </div>
 
+                    <!-- Temperature Setting -->
+                    <div class="form-group">
+                      <label for="temperature-{i}">Temperature (optional)</label>
+                      <select
+                        id="temperature-select-{i}"
+                        value={editedConfig.providers[i].temperature ?? ''}
+                        on:change={(e) => {
+                          if (!editedConfig) return;
+                          const val = (e.target as HTMLSelectElement).value;
+                          if (val === '' || val === 'custom') {
+                            editedConfig.providers[i].temperature = undefined;
+                          } else {
+                            editedConfig.providers[i].temperature = parseFloat(val);
+                          }
+                          editedConfig = editedConfig;
+                        }}
+                      >
+                        <option value="">Default (0.7)</option>
+                        {#each TEMPERATURE_PRESETS as preset}
+                          <option value={preset.value}>{preset.label} - {preset.description}</option>
+                        {/each}
+                        <option value="custom">Custom...</option>
+                      </select>
+                      <p class="help-text">Controls creativity: 0.2 = deterministic, 1.5 = creative</p>
+
+                      {#if editedConfig.providers[i].temperature !== undefined && !TEMPERATURE_PRESETS.some(p => p.value === editedConfig?.providers[i].temperature)}
+                        <input
+                          id="temperature-custom-{i}"
+                          type="number"
+                          bind:value={editedConfig.providers[i].temperature}
+                          placeholder="0.0 - 2.0"
+                          min="0"
+                          max="2"
+                          step="0.1"
+                          class="custom-context-input"
+                        />
+                      {/if}
+                    </div>
+
                     <div class="default-buttons">
                       <button
                         class="btn-set-default"
@@ -1013,6 +1062,10 @@
 
                     {#if provider.context_window}
                       <p><strong>Context Window:</strong> {provider.context_window.toLocaleString()} tokens</p>
+                    {/if}
+
+                    {#if provider.temperature !== undefined}
+                      <p><strong>Temperature:</strong> {provider.temperature}</p>
                     {/if}
 
                     {#if provider.type === 'ollama'}
