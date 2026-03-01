@@ -109,9 +109,14 @@ Authorized Representative Signature: ______________________________
 
 ---
 
-## Governing Law
+## Dispute Resolution
 
-This Corporate CLA is governed by the laws of the **State of Delaware, United States**.
+In case of disputes, parties agree to resolve them through:
+1. Good-faith negotiation
+2. Mediation (if needed)
+3. Arbitration (as last resort)
+
+A specific governing law and jurisdiction will be designated upon formal entity establishment.
 
 ---
 
