@@ -73,7 +73,10 @@
     agentProgressMessage = null,  // v0.15.0+: Agent progress message
     agentProgressTool = null,  // v0.15.0+: Current tool being executed
     agentProgressRound = 0,  // v0.15.0+: Current round number
-    agentStreamingText = ""  // v0.16.0+: Streaming text from agent
+    agentStreamingText = "",  // v0.16.0+: Streaming text from agent
+    peerDisplayNames = new Map<string, string>(),  // v0.19.1+: Map of node_id -> display name
+    selfNodeId = "",  // v0.19.1+: Current user's node ID
+    selfName = ""  // v0.19.1+: Current user's display name
   }: {
     messages: Message[];
     conversationId: string;
@@ -84,6 +87,9 @@
     agentProgressTool?: string | null;
     agentProgressRound?: number;
     agentStreamingText?: string;
+    peerDisplayNames?: Map<string, string>;
+    selfNodeId?: string;
+    selfName?: string;
   } = $props();
 
   // Debug: Log when progress props change
@@ -144,12 +150,18 @@
         <div class="message-header">
           <strong>
             {#if msg.sender === 'user'}
-              You
+              {#if conversationId.startsWith('group-') && selfName}
+                <!-- Group chat: Show own name instead of "You" -->
+                {selfName} | {selfNodeId.slice(0, 20)}...
+              {:else}
+                You
+              {/if}
             {:else if msg.sender === 'ai'}
               {msg.model ? `AI (${msg.model})` : 'AI Assistant'}
             {:else}
-              {#if conversationId.startsWith('group-') && msg.senderName}
-                {msg.senderName}
+              {#if conversationId.startsWith('group-')}
+                <!-- Group chat: Use peerDisplayNames or senderName -->
+                {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender.slice(0, 20)}... | {msg.sender.slice(0, 20)}...
               {:else}
                 {msg.senderName ? `${msg.senderName} | ${msg.sender.slice(0, 20)}...` : msg.sender}
               {/if}

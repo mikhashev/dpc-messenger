@@ -1736,12 +1736,23 @@
   // Reactive derived value that maps peer IDs to display names
   // This ensures Svelte tracks changes to peer_info properly
   let peerDisplayNames = $derived.by(() => {
+    const names = new Map<string, string>();
+
+    // Add current user's own name first (from personal context)
+    const selfId = $nodeStatus?.node_id;
+    const selfName = $personalContext?.profile?.name;
+    if (selfId && selfName) {
+      const displayName = `${selfName} | ${selfId.slice(0, 20)}...`;
+      console.log(`[PeerNames] SELF ${selfId.slice(0, 16)}... -> ${displayName}`);
+      names.set(selfId, displayName);
+    }
+
+    // Add connected peers
     if (!$nodeStatus || !$nodeStatus.peer_info) {
-      console.log('[PeerNames] No nodeStatus or peer_info');
-      return new Map();
+      console.log('[PeerNames] No peer_info, returning self only');
+      return names;
     }
     console.log('[PeerNames] Building display names map from peer_info:', $nodeStatus.peer_info);
-    const names = new Map<string, string>();
     for (const peer of $nodeStatus.peer_info) {
       if (peer.name) {
         const displayName = `${peer.name} | ${peer.node_id.slice(0, 20)}...`;
@@ -3749,6 +3760,9 @@
         agentProgressTool={agentProgressTool}
         agentProgressRound={agentProgressRound}
         agentStreamingText={agentStreamingText}
+        peerDisplayNames={peerDisplayNames}
+        selfNodeId={$nodeStatus?.node_id || ''}
+        selfName={$personalContext?.profile?.name || ''}
       />
 
       <div class="chat-input">
