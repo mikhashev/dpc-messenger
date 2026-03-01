@@ -546,6 +546,7 @@ D-PC Messenger builds on the shoulders of giants:
 - **[Tauri](https://tauri.app/)** - Desktop app framework
 - **[FastAPI](https://fastapi.tiangolo.com/)** - Hub server framework
 - **[Ollama](https://ollama.ai/)** - Local AI inference
+- **[Ouroboros](https://github.com/razzant/ouroboros)** - Self-modifying AI agent (adapted for DPC Agent)
 
 Special thanks to all contributors and early testers!
 
