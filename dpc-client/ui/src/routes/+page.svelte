@@ -1653,6 +1653,59 @@
     }
   });
 
+  // Reactive: Handle group history synced (v0.20.0) - reload when P2P sync completes
+  $effect(() => {
+    if ($groupHistorySynced && $groupHistorySynced.group_id) {
+      const syncedGroupId = $groupHistorySynced.group_id;
+      const messageCount = $groupHistorySynced.message_count || 0;
+      console.log(`[GroupHistorySync] Group ${syncedGroupId} synced with ${messageCount} messages`);
+
+      // Only reload if this is the active chat
+      if (activeChatId === syncedGroupId && messageCount > 0) {
+        console.log(`[GroupHistorySync] Reloading history for active group ${syncedGroupId}`);
+
+        // Load history from backend (async IIFE to allow await in reactive statement)
+        (async () => {
+          try {
+            const response = await sendCommand('get_conversation_history', { conversation_id: syncedGroupId });
+            if (response.status === 'success' && response.messages?.length > 0) {
+              console.log(`[GroupHistorySync] Loaded ${response.messages.length} messages from backend`);
+
+              // Update chatHistories store
+              chatHistories.update(map => {
+                const newMap = new Map(map);
+                const syncedMessages = response.messages.map((msg: any, index: number) => ({
+                  id: msg.id || `synced-${index}-${Date.now()}`,
+                  sender: msg.node_id || (msg.role === 'user' ? 'user' : syncedGroupId),
+                  senderName: msg.display_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(msg.node_id || syncedGroupId)),
+                  text: msg.content || msg.text,
+                  timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
+                  attachments: msg.attachments || []
+                }));
+                newMap.set(syncedGroupId, syncedMessages);
+                return newMap;
+              });
+
+              // Show success toast
+              fileOfferToastMessage = `✓ Group history synced: ${response.messages.length} messages`;
+              showFileOfferToast = true;
+              setTimeout(() => showFileOfferToast = false, 3000);
+
+              // Scroll to bottom
+              setTimeout(() => {
+                if (chatWindow) {
+                  chatWindow.scrollTop = chatWindow.scrollHeight;
+                }
+              }, 100);
+            }
+          } catch (err: any) {
+            console.error('[GroupHistorySync] Error loading synced history:', err);
+          }
+        })();
+      }
+    }
+  });
+
   // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)
   let localContextUpdated = $derived(currentContextHash && lastSentContextHash.get(activeChatId) !== currentContextHash);
 
