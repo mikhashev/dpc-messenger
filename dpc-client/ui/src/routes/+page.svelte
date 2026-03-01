@@ -1842,10 +1842,10 @@
 
   // Handle mention selection
   function handleMentionSelect(member: { node_id: string; name: string }) {
-    // Replace @query with @Name
+    // Replace @query with @Name | node_id (full format)
     const before = currentInput.slice(0, mentionStartPosition);
     const after = currentInput.slice(mentionStartPosition + mentionQuery.length + 1);
-    currentInput = `${before}@${member.name} ${after}`;
+    currentInput = `${before}@${member.name} | ${member.node_id} ${after}`;
 
     mentionAutocompleteVisible = false;
     mentionSelectedIndex = 0;
