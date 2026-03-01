@@ -74,9 +74,9 @@
         aria-selected={index === selectedIndex}
       >
         <span class="mention-icon">@</span>
-        <span class="mention-name">{member.name || member.node_id.slice(0, 20)}</span>
+        <span class="mention-name">{member.name || member.node_id}</span>
         {#if member.name}
-          <span class="mention-node-id">{member.node_id.slice(0, 12)}...</span>
+          <span class="mention-node-id">{member.node_id}</span>
         {/if}
       </button>
     {/each}

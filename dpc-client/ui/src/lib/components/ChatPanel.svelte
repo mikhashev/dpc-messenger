@@ -152,7 +152,7 @@
             {#if msg.sender === 'user'}
               {#if conversationId.startsWith('group-') && selfName}
                 <!-- Group chat: Show own name instead of "You" -->
-                {selfName} | {selfNodeId.slice(0, 20)}...
+                {selfName} | {selfNodeId}
               {:else}
                 You
               {/if}
@@ -160,10 +160,10 @@
               {msg.model ? `AI (${msg.model})` : 'AI Assistant'}
             {:else}
               {#if conversationId.startsWith('group-')}
-                <!-- Group chat: Use peerDisplayNames or senderName -->
-                {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender.slice(0, 20)}... | {msg.sender.slice(0, 20)}...
+                <!-- Group chat: Use peerDisplayNames or senderName (no truncation) -->
+                {peerDisplayNames.get(msg.sender)?.split(' | ')[0] || msg.senderName || msg.sender} | {msg.sender}
               {:else}
-                {msg.senderName ? `${msg.senderName} | ${msg.sender.slice(0, 20)}...` : msg.sender}
+                {msg.senderName ? `${msg.senderName} | ${msg.sender}` : msg.sender}
               {/if}
             {/if}
           </strong>

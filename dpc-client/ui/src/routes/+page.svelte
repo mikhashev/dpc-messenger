@@ -1742,8 +1742,8 @@
     const selfId = $nodeStatus?.node_id;
     const selfName = $personalContext?.profile?.name;
     if (selfId && selfName) {
-      const displayName = `${selfName} | ${selfId.slice(0, 20)}...`;
-      console.log(`[PeerNames] SELF ${selfId.slice(0, 16)}... -> ${displayName}`);
+      const displayName = `${selfName} | ${selfId}`;
+      console.log(`[PeerNames] SELF ${selfId} -> ${displayName}`);
       names.set(selfId, displayName);
     }
 
@@ -1755,12 +1755,12 @@
     console.log('[PeerNames] Building display names map from peer_info:', $nodeStatus.peer_info);
     for (const peer of $nodeStatus.peer_info) {
       if (peer.name) {
-        const displayName = `${peer.name} | ${peer.node_id.slice(0, 20)}...`;
-        console.log(`[PeerNames] ${peer.node_id.slice(0, 16)}... -> ${displayName}`);
+        const displayName = `${peer.name} | ${peer.node_id}`;
+        console.log(`[PeerNames] ${peer.node_id} -> ${displayName}`);
         names.set(peer.node_id, displayName);
       } else {
-        const displayName = `${peer.node_id.slice(0, 20)}...`;
-        console.log(`[PeerNames] ${peer.node_id.slice(0, 16)}... -> ${displayName} (no name)`);
+        const displayName = peer.node_id;
+        console.log(`[PeerNames] ${peer.node_id} -> ${displayName} (no name)`);
         names.set(peer.node_id, displayName);
       }
     }
@@ -1770,21 +1770,26 @@
 
   function getPeerDisplayName(peerId: string): string {
     // Use the reactive map, with fallback for peers not in peer_info yet
-    return peerDisplayNames.get(peerId) || `${peerId.slice(0, 20)}...`;
+    return peerDisplayNames.get(peerId) || peerId;
   }
 
   // --- MENTION AUTOCOMPLETE (Group Chats) ---
-  // Get mentionable members for the current group chat
+  // Get mentionable members for the current group chat (excludes self)
   function getMentionableMembers(): Array<{ node_id: string; name: string }> {
     if (!activeChatId.startsWith('group-')) return [];
 
     const group = $groupChats.get(activeChatId);
     if (!group?.members) return [];
 
-    return group.members.map((nodeId: string) => ({
-      node_id: nodeId,
-      name: peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId.slice(0, 20)
-    }));
+    const selfId = $nodeStatus?.node_id || '';
+
+    // Filter out self and map to display names (full name, no truncation)
+    return group.members
+      .filter((nodeId: string) => nodeId !== selfId)
+      .map((nodeId: string) => ({
+        node_id: nodeId,
+        name: peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId
+      }));
   }
 
   // Filter mentionable members by query
@@ -3937,8 +3942,11 @@
             disabled={$connectionStatus !== 'connected' || isLoading}
             oninput={handleMentionInput}
             onkeydown={(e) => {
-              // If mention autocomplete is open, let the component handle navigation
-              if (mentionAutocompleteVisible && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Tab')) {
+              // If mention autocomplete is open, let the component handle all navigation
+              if (mentionAutocompleteVisible && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Tab' || e.key === 'Enter' || e.key === 'Escape')) {
+                if (e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape') {
+                  e.preventDefault(); // Prevent sending message when autocomplete is open
+                }
                 return; // Let MentionAutocomplete handle it
               }
               if (e.key === 'Enter' && !e.shiftKey) {
