@@ -1439,7 +1439,18 @@
   // File transfer event handlers (Week 1)
   $effect(() => {
     if ($fileTransferOffer) {
-      const { node_id, filename, size_bytes, transfer_id, sender_name } = $fileTransferOffer;
+      const { node_id, filename, size_bytes, transfer_id, sender_name, group_id } = $fileTransferOffer;
+
+      // Skip acceptance dialog for group files (auto-accepted by backend v0.19.1+)
+      if (group_id) {
+        console.log(`Group file offer received (auto-accepted): ${filename} from ${sender_name || node_id.slice(0, 15)}...`);
+        // Show toast notification instead of dialog
+        fileOfferToastMessage = `Receiving file: ${filename} from ${sender_name || 'group member'}`;
+        showFileOfferToast = true;
+        setTimeout(() => showFileOfferToast = false, 3000);
+        return;
+      }
+
       currentFileOffer = $fileTransferOffer;
       showFileOfferDialog = true;
       console.log(`File offer received: ${filename} (${(size_bytes / 1024).toFixed(1)} KB) from ${node_id.slice(0, 15)}...`);
