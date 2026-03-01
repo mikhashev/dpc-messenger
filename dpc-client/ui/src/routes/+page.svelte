@@ -1014,8 +1014,10 @@
   // Reactive: Clear frontend state when new session approved (v0.11.3)
   $effect(() => {
     if ($newSessionResult && $newSessionResult.result === "approved") {
-      // Use sender_node_id if present (received from peer), else conversation_id (initiator)
-      const conversationId = $newSessionResult.sender_node_id || $newSessionResult.conversation_id;
+      // v0.20.0 FIX: Prioritize conversation_id over sender_node_id
+      // For group chats, conversation_id is the group_id (correct)
+      // sender_node_id is only used as fallback for legacy peer chats
+      const conversationId = $newSessionResult.conversation_id || $newSessionResult.sender_node_id;
 
       // Send notification for new session result
       (async () => {
