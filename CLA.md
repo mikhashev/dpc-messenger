@@ -1,262 +1,88 @@
-# D-PC Messenger - Contributor License Agreement (CLA)
+# D-PC Messenger - Contributor License Agreement
 
-**Version:** 2.0 (Updated for D-PC Messenger)  
-**Effective Date:** November 2, 2025
-
----
-
-## Purpose
-
-Thank you for your interest in contributing to **D-PC Messenger**!
-
-This Contributor License Agreement ("**CLA**") is necessary because D-PC Messenger uses **Progressive Copyleft** licensing:
-- **GPL v3** (Messenger Client)
-- **LGPL v3** (Protocol Libraries)
-- **AGPL v3** (Federation Hub)
-- **Commercial License** (Optional, for enterprises)
-
-To offer all these licenses, we need explicit permission from contributors to license their code under multiple licenses.
-
-**What this CLA does:**
-- ✅ Protects you (the contributor)
-- ✅ Protects the project
-- ✅ Enables sustainable open-source development
-- ✅ Allows dual licensing business model
-
-**What this CLA is NOT:**
-- ❌ A transfer of copyright (you keep your copyright!)
-- ❌ An exclusive agreement (you can use your code elsewhere)
-- ❌ A restriction on your rights
+**Version:** 3.0 | **Effective:** March 1, 2026
 
 ---
 
-## Individual Contributor License Agreement
+## Quick Summary
 
-By signing this CLA, you agree to the following terms:
+By contributing to D-PC Messenger, you grant us permission to license your code under:
+- **Open Source:** GPL v3, LGPL v3, AGPL v3
+- **Commercial:** Enterprise licenses for paying customers
 
-### 1. Definitions
-
-- **"You"** or **"Your"** means the individual copyright owner.
-- **"Contribution"** means any original work you submit to the project.
-- **"Submit"** means any communication sent to the project (pull request, issue, email, etc.).
+**You keep your copyright.** You can use your code elsewhere. This enables our dual-licensing model (like Qt, MongoDB, GitLab).
 
 ---
 
-### 2. Grant of Copyright License
+## 1. Definitions
 
-**You grant** the D-PC Project a perpetual, worldwide, non-exclusive, royalty-free, irrevocable copyright license to:
+- **"You"** means the individual contributor submitting code.
+- **"Contribution"** means any original work you submit (code, documentation with code samples, etc.).
+- **"Project"** means D-PC Messenger and its maintainers.
+- **"Submit"** means any communication to the project (pull request, issue, patch, email, etc.).
 
-- ✅ Reproduce your Contribution
-- ✅ Prepare derivative works
-- ✅ Publicly display and perform
-- ✅ **Distribute under multiple licenses**, including:
+---
+
+## 2. Copyright License Grant
+
+You grant the Project a **perpetual, worldwide, non-exclusive, royalty-free, irrevocable** license to:
+
+- Reproduce your Contribution
+- Prepare derivative works based on your Contribution
+- Publicly display and perform your Contribution
+- **Distribute under multiple licenses**, including:
   - GNU General Public License v3 (GPL-3.0)
   - GNU Lesser General Public License v3 (LGPL-3.0)
   - GNU Affero General Public License v3 (AGPL-3.0)
-  - Commercial/proprietary licenses for paying customers
-  - Any future open-source license chosen by the project
+  - Commercial/proprietary licenses for enterprise customers
+  - Any future open-source license chosen by the Project
 
 **Important:** You retain full copyright ownership. This is a license grant, not a copyright transfer.
 
 ---
 
-### 3. Grant of Patent License
+## 3. Patent License Grant
 
-**You grant** the D-PC Project a perpetual, worldwide, non-exclusive, royalty-free, irrevocable patent license to:
+You grant the Project a **perpetual, worldwide, non-exclusive, royalty-free, irrevocable** patent license to:
 
-- ✅ Make, use, offer to sell, sell, import your Contribution
-- ✅ Where such license applies only to patent claims licensable by You
+- Make, use, sell, offer to sell, and import your Contribution
+- This applies only to patent claims licensable by You that would be infringed by your Contribution
 
 This ensures users won't face patent claims from contributors.
 
 ---
 
-### 4. Your Representations
+## 4. Your Representations
 
-By signing this CLA, you represent that:
+By agreeing to this CLA, you represent that:
 
-1. ✅ **You are legally entitled** to grant the above licenses
-2. ✅ **You wrote the Contribution** yourself OR have permission from copyright owner
-3. ✅ **Your Contribution does not violate** third party rights
-4. ✅ **You are 18+ years old** or have parental/guardian consent
-5. ✅ If contributing on behalf of employer:
-   - You have employer permission
-   - Employer waives rights to the Contribution
-   - Employer will sign Corporate CLA if required
+1. You have the legal right to grant the licenses above
+2. You wrote the Contribution yourself, OR you have permission from the copyright owner
+3. Your Contribution does not violate any third party's rights
+4. You are at least 18 years old (or have parental/guardian consent)
+5. If contributing on behalf of an employer, you have written permission
 
 ---
 
-### 5. What You're NOT Giving Up
+## 5. No Warranty
+
+Unless required by law, your Contribution is provided **"AS IS"** without warranties of any kind, either express or implied.
+
+---
+
+## 6. What You Keep
 
 You retain:
-- ✅ Copyright ownership
-- ✅ Right to use your code elsewhere
-- ✅ Right to license your code to others
-- ✅ Right to fork D-PC Messenger (under GPL terms)
-- ✅ Recognition as a contributor
+- Copyright ownership of your Contribution
+- Right to use your code in other projects
+- Right to license your code to others
+- Right to fork D-PC Messenger (under GPL terms)
 
 ---
 
-### 6. Support and Warranties
+## 7. Governing Law
 
-**No Support Obligation:**
-- You are not obligated to provide support
-- You may offer support separately if you choose
-
-**No Warranties:**
-- Unless required by law, Contributions are provided **"AS IS"**
-- No warranties (express or implied)
-
-**Exception:** You warrant that you have legal right to grant the licenses above.
-
----
-
-### 7. Notification of Changes
-
-If you become aware that any representations are inaccurate:
-- Notify the project immediately
-- Email: legoogmiha@gmail.com
-
----
-
-## How to Sign
-
-### For Pull Requests:
-**Note:** CLA Assistant bot integration is coming soon. For now, please use manual signing below.
-
-### Manual Signing (Current Method):
-1. Download this CLA
-2. Fill in your information below
-3. Sign and date
-4. Email to: legoogmiha@gmail.com
-
----
-
-## Individual Contributor Information
-
-```
-Full Legal Name: _________________________________________________
-
-GitHub Username: _________________________________________________
-
-Email Address:   _________________________________________________
-
-Mailing Address: _________________________________________________
-                 _________________________________________________
-                 _________________________________________________
-
-Phone (optional):_________________________________________________
-
-Company (if applicable): _________________________________________
-
-Date:            _________________________________________________
-
-Signature:       _________________________________________________
-```
-
----
-
-## Corporate Contributor License Agreement
-
-If you're contributing on behalf of a company, your employer must sign a **Corporate CLA**.
-
-### Corporate CLA Includes:
-- Authorization for employees to contribute
-- Patent grant from the corporation
-- List of authorized contributors
-- Corporate point of contact
-
-**To request Corporate CLA:**
-Email: legoogmiha@gmail.com
-
-**Subject:** "Corporate CLA Request - [Company Name]"
-
-**Include:**
-- Company name and legal entity
-- Contact person (name, title, email)
-- Expected number of contributors
-- Brief description of contribution plans
-
----
-
-## Frequently Asked Questions
-
-### Q: Why do you need a CLA?
-
-**A:** To enable multiple licensing (GPL/LGPL/AGPL + Commercial). Without your permission, we cannot offer commercial licenses that include your code.
-
-### Q: Does this mean you'll close-source my code?
-
-**A:** No! Your code will ALWAYS be available under GPL/LGPL/AGPL. The commercial license is an **additional** option for customers who need it.
-
-### Q: Can I still use my code elsewhere?
-
-**A:** Yes! You retain copyright and can use your code anywhere.
-
-### Q: What if my employer owns my work?
-
-**A:** You need:
-1. Written permission from your employer, OR
-2. Your employer signs a Corporate CLA
-
-### Q: Can I revoke the CLA later?
-
-**A:** No. The license grants are irrevocable. However:
-- Your code remains under open-source license forever
-- You can stop contributing at any time
-- Your copyright remains yours
-
-### Q: What about past contributions (before CLA)?
-
-**A:** 
-- For major contributors: we'll ask you to sign retroactively
-- For minor contributions (typo fixes, docs): covered under implied license
-- Uncertain cases: we'll contact you individually
-
-### Q: Do project maintainers sign the CLA?
-
-**A:** Yes! Everyone who contributes code signs the CLA, including core team.
-
-### Q: What if I disagree with a commercial license sale?
-
-**A:** The CLA gives the project right to make that decision. However:
-- Core software remains open source (always GPL/LGPL/AGPL)
-- Commercial licenses enable sustainable development
-- Community governance decides major licensing changes
-
-### Q: Is this similar to other projects?
-
-**A:** Yes! Similar CLAs are used by:
-- Apache Software Foundation
-- Google (Chromium, Android, etc.)
-- Microsoft (VS Code, TypeScript, etc.)
-- Linux Foundation projects
-- Qt (dual licensing model)
-
-### Q: What about documentation contributions?
-
-**A:** Documentation contributions generally don't require a CLA (they're under CC BY 4.0). However, if documentation includes code samples, CLA may be needed.
-
----
-
-## Changes to This CLA
-
-The D-PC Project may update this CLA to:
-- Fix ambiguities
-- Comply with legal changes
-- Improve clarity
-
-**Changes will:**
-- Be versioned (this is v2.0)
-- Not affect existing signed CLAs retroactively
-- Be announced via mailing list and GitHub
-- Require re-signing only for substantial changes
-
----
-
-## Governing Law
-
-This CLA is governed by the laws of the **State of Delaware, United States** (upon company incorporation; jurisdiction pending until formal entity establishment).
+This CLA is governed by the laws of the **State of Delaware, United States** (pending formal entity establishment).
 
 Disputes shall be resolved through:
 1. Good-faith negotiation
@@ -265,71 +91,81 @@ Disputes shall be resolved through:
 
 ---
 
-## Acceptance
+## How to Sign
 
-By clicking "I agree" via CLA Assistant or signing below, you acknowledge that:
+### For Pull Requests (Recommended)
 
-1. ✅ You have read and understood this CLA
-2. ✅ You agree to all terms
-3. ✅ You have authority to enter this agreement
-4. ✅ You understand this is legally binding
+When you open your first pull request, the **CLA Assistant bot** will prompt you to agree. Click "I agree" and you're done. The bot will remember for all future contributions.
 
----
+### Manual Signing
 
-## Contact Information
+If CLA Assistant is unavailable or you prefer manual signing:
 
-**Questions about the CLA:**
-- Email: legoogmiha@gmail.com
-- GitHub: https://github.com/mikhashev/dpc-messenger/discussions
-- Legal inquiries: legoogmiha@gmail.com
+1. Copy the template below
+2. Fill in your information
+3. Email to: [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com)
+4. Subject: "CLA - [Your GitHub Username]"
 
-**For corporate CLAs:**
-- Email: legoogmiha@gmail.com
-- Subject: "Corporate CLA Request - [Company Name]"
+```
+I, [Full Legal Name], agree to the D-PC Messenger Contributor License Agreement (v3.0).
 
----
-
-## Full Text Location
-
-This CLA is available at:
-- GitHub: https://github.com/mikhashev/dpc-messenger/blob/main/CLA.md
-
-Signed CLAs are stored securely and are not publicly disclosed.
+GitHub Username: ___________________
+Email: ____________________________
+Date: _____________________________
+```
 
 ---
 
-## Specific Terms for D-PC Messenger
+## Corporate Contributions
 
-### Component-Specific Licensing
+If you're contributing on behalf of a company, your employer must sign a **Corporate CLA**.
+
+**Request Corporate CLA:** Email [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com) with subject "Corporate CLA Request - [Company Name]"
+
+---
+
+## Questions?
+
+- **FAQ:** [docs/cla-faq.md](docs/cla-faq.md)
+- **Email:** [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com)
+- **GitHub Discussions:** [github.com/mikhashev/dpc-messenger/discussions](https://github.com/mikhashev/dpc-messenger/discussions)
+
+---
+
+## Component-Specific Licensing
 
 Your contributions will be licensed based on which component they modify:
 
-| Component | Your Contribution Licensed As |
-|-----------|-------------------------------|
+| Component | License |
+|-----------|---------|
 | **Messenger Client** (`dpc-client/`) | GPL v3 + Commercial |
 | **Protocol Libraries** (`dpc-protocol/`) | LGPL v3 + Commercial |
 | **Federation Hub** (`dpc-hub/`) | AGPL v3 + Commercial |
-| **Protocol Specs** (`specs/`) | CC0 (Public Domain) |
-| **Documentation** (`docs/`) | CC BY 4.0 (no CLA needed) |
-
-**Note:** Signing the CLA grants rights for ALL these licenses.
+| **Protocol Specs** (`specs/`) | CC0 (no CLA needed) |
+| **Documentation** (`docs/`) | CC BY 4.0 (no CLA needed for text) |
 
 ---
 
-## Thank you for contributing to D-PC Messenger!
+## Changes to This CLA
 
-Your contributions help build the future of collaborative intelligence.
+The Project may update this CLA to:
+- Fix ambiguities
+- Comply with legal changes
+- Improve clarity
 
-Every contribution, whether code, documentation, or ideas, makes D-PC Messenger better for everyone.
-
----
-
-**Document Version:** 2.0  
-**Last Updated:** November 29, 2025  
-**Effective Date:** November 2, 2025
-
-© 2025 D-PC Project
+Changes will be:
+- Versioned (this is v3.0)
+- Announced via GitHub Discussions
+- Not applied retroactively to existing signed CLAs
 
 ---
 
-**To sign this CLA, use the manual signing process above (email to legoogmiha@gmail.com). Automated CLA Assistant integration coming soon.**
+**Thank you for contributing to D-PC Messenger!**
+
+Your contributions help build privacy-first infrastructure for human-AI collaboration.
+
+---
+
+*Document Version: 3.0 | Last Updated: March 1, 2026*
+
+© 2025-2026 D-PC Project

@@ -360,7 +360,8 @@ def create_group_text_message(
     text: str,
     sender_node_id: str,
     sender_name: str = "",
-    message_id: str = ""
+    message_id: str = "",
+    mentions: list = None
 ) -> Dict[str, Any]:
     """Creates a GROUP_TEXT message for group chat.
 
@@ -370,20 +371,21 @@ def create_group_text_message(
         sender_node_id: Sender's node ID
         sender_name: Sender's display name
         message_id: Unique message ID for deduplication
+        mentions: List of mention objects {"node_id", "name", "start", "end"}
 
     Returns:
         GROUP_TEXT message dict
     """
-    return {
-        "command": "GROUP_TEXT",
-        "payload": {
-            "group_id": group_id,
-            "text": text,
-            "sender_node_id": sender_node_id,
-            "sender_name": sender_name,
-            "message_id": message_id
-        }
+    payload = {
+        "group_id": group_id,
+        "text": text,
+        "sender_node_id": sender_node_id,
+        "sender_name": sender_name,
+        "message_id": message_id
     }
+    if mentions:
+        payload["mentions"] = mentions
+    return {"command": "GROUP_TEXT", "payload": payload}
 
 
 async def read_message(reader: asyncio.StreamReader) -> dict | None:

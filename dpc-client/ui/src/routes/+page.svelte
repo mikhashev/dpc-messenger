@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -28,6 +28,7 @@
   import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
   import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
   import VoicePlayer from "$lib/components/VoicePlayer.svelte";
+  import MentionAutocomplete from "$lib/components/MentionAutocomplete.svelte";
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
 
@@ -38,6 +39,13 @@
   console.log("Full D-PC Messenger loading...");
   
   // --- STATE ---
+  type Mention = {
+    node_id: string;
+    name: string;
+    start: number;
+    end: number;
+  };
+
   type Message = {
     id: string;
     sender: string;
@@ -47,6 +55,7 @@
     commandId?: string;
     model?: string;  // AI model name (for AI responses)
     streamingRaw?: string;  // v0.16.0+: Raw streaming text (shown in collapsible)
+    mentions?: Mention[];  // @-mentions in group chat messages
     attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
       type: 'file' | 'image' | 'voice';
       filename: string;
@@ -90,6 +99,13 @@
   let currentInput = $state("");
   let chatLoadingStates = $state(new Map<string, boolean>());  // Per-chat loading state
   let chatWindow = $state<HTMLElement>();  // Bound to ChatPanel's chatWindowElement
+
+  // Mention autocomplete state (group chats only)
+  let mentionAutocompleteVisible = $state(false);
+  let mentionQuery = $state("");
+  let mentionStartPosition = $state(0);
+  let mentionDropdownPosition = $state({ top: 0, left: 0 });
+  let mentionSelectedIndex = $state(0);
 
   // Helper to check if a specific chat is loading
   function isChatLoading(chatId: string): boolean {
@@ -748,7 +764,14 @@
 
   // Send file confirmation dialog
   let showSendFileDialog = $state(false);
-  let pendingFileSend = $state<{ filePath: string, fileName: string, recipientId: string, recipientName: string } | null>(null);
+  let pendingFileSend = $state<{
+    filePath: string;
+    fileName: string;
+    recipientId: string;
+    recipientName: string;
+    imageData?: { dataUrl: string; filename: string; sizeBytes: number };  // For screenshots
+    caption?: string;  // Optional caption for images
+  } | null>(null);
   let isSendingFile = $state(false);  // Prevent double-click bug
 
   // Image paste state (Phase 2.4: Screenshot + Vision - improved UX)
@@ -930,6 +953,14 @@
     } catch (error) {
       console.error('[AI Chats] Failed to restore chat histories from localStorage:', error);
     }
+
+    // Load group chats from backend (v0.19.0)
+    try {
+      await loadGroups();
+      console.log('[Groups] Loaded group chats from backend');
+    } catch (error) {
+      console.error('[Groups] Failed to load group chats:', error);
+    }
   });
 
   // Cleanup focus listener on component destroy
@@ -990,8 +1021,10 @@
   // Reactive: Clear frontend state when new session approved (v0.11.3)
   $effect(() => {
     if ($newSessionResult && $newSessionResult.result === "approved") {
-      // Use sender_node_id if present (received from peer), else conversation_id (initiator)
-      const conversationId = $newSessionResult.sender_node_id || $newSessionResult.conversation_id;
+      // v0.20.0 FIX: Prioritize conversation_id over sender_node_id
+      // For group chats, conversation_id is the group_id (correct)
+      // sender_node_id is only used as fallback for legacy peer chats
+      const conversationId = $newSessionResult.conversation_id || $newSessionResult.sender_node_id;
 
       // Send notification for new session result
       (async () => {
@@ -1415,7 +1448,18 @@
   // File transfer event handlers (Week 1)
   $effect(() => {
     if ($fileTransferOffer) {
-      const { node_id, filename, size_bytes, transfer_id, sender_name } = $fileTransferOffer;
+      const { node_id, filename, size_bytes, transfer_id, sender_name, group_id } = $fileTransferOffer;
+
+      // Skip acceptance dialog for group files (auto-accepted by backend v0.19.1+)
+      if (group_id) {
+        console.log(`Group file offer received (auto-accepted): ${filename} from ${sender_name || node_id.slice(0, 15)}...`);
+        // Show toast notification instead of dialog
+        fileOfferToastMessage = `Receiving file: ${filename} from ${sender_name || 'group member'}`;
+        showFileOfferToast = true;
+        setTimeout(() => showFileOfferToast = false, 3000);
+        return;
+      }
+
       currentFileOffer = $fileTransferOffer;
       showFileOfferDialog = true;
       console.log(`File offer received: ${filename} (${(size_bytes / 1024).toFixed(1)} KB) from ${node_id.slice(0, 15)}...`);
@@ -1616,6 +1660,59 @@
     }
   });
 
+  // Reactive: Handle group history synced (v0.20.0) - reload when P2P sync completes
+  $effect(() => {
+    if ($groupHistorySynced && $groupHistorySynced.group_id) {
+      const syncedGroupId = $groupHistorySynced.group_id;
+      const messageCount = $groupHistorySynced.message_count || 0;
+      console.log(`[GroupHistorySync] Group ${syncedGroupId} synced with ${messageCount} messages`);
+
+      // Only reload if this is the active chat
+      if (activeChatId === syncedGroupId && messageCount > 0) {
+        console.log(`[GroupHistorySync] Reloading history for active group ${syncedGroupId}`);
+
+        // Load history from backend (async IIFE to allow await in reactive statement)
+        (async () => {
+          try {
+            const response = await sendCommand('get_conversation_history', { conversation_id: syncedGroupId });
+            if (response.status === 'success' && response.messages?.length > 0) {
+              console.log(`[GroupHistorySync] Loaded ${response.messages.length} messages from backend`);
+
+              // Update chatHistories store
+              chatHistories.update(map => {
+                const newMap = new Map(map);
+                const syncedMessages = response.messages.map((msg: any, index: number) => ({
+                  id: msg.id || `synced-${index}-${Date.now()}`,
+                  sender: msg.node_id || (msg.role === 'user' ? 'user' : syncedGroupId),
+                  senderName: msg.display_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(msg.node_id || syncedGroupId)),
+                  text: msg.content || msg.text,
+                  timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
+                  attachments: msg.attachments || []
+                }));
+                newMap.set(syncedGroupId, syncedMessages);
+                return newMap;
+              });
+
+              // Show success toast
+              fileOfferToastMessage = `✓ Group history synced: ${response.messages.length} messages`;
+              showFileOfferToast = true;
+              setTimeout(() => showFileOfferToast = false, 3000);
+
+              // Scroll to bottom
+              setTimeout(() => {
+                if (chatWindow) {
+                  chatWindow.scrollTop = chatWindow.scrollHeight;
+                }
+              }, 100);
+            }
+          } catch (err: any) {
+            console.error('[GroupHistorySync] Error loading synced history:', err);
+          }
+        })();
+      }
+    }
+  });
+
   // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)
   let localContextUpdated = $derived(currentContextHash && lastSentContextHash.get(activeChatId) !== currentContextHash);
 
@@ -1712,20 +1809,31 @@
   // Reactive derived value that maps peer IDs to display names
   // This ensures Svelte tracks changes to peer_info properly
   let peerDisplayNames = $derived.by(() => {
+    const names = new Map<string, string>();
+
+    // Add current user's own name first (from personal context)
+    const selfId = $nodeStatus?.node_id;
+    const selfName = $personalContext?.profile?.name;
+    if (selfId && selfName) {
+      const displayName = `${selfName} | ${selfId}`;
+      console.log(`[PeerNames] SELF ${selfId} -> ${displayName}`);
+      names.set(selfId, displayName);
+    }
+
+    // Add connected peers
     if (!$nodeStatus || !$nodeStatus.peer_info) {
-      console.log('[PeerNames] No nodeStatus or peer_info');
-      return new Map();
+      console.log('[PeerNames] No peer_info, returning self only');
+      return names;
     }
     console.log('[PeerNames] Building display names map from peer_info:', $nodeStatus.peer_info);
-    const names = new Map<string, string>();
     for (const peer of $nodeStatus.peer_info) {
       if (peer.name) {
-        const displayName = `${peer.name} | ${peer.node_id.slice(0, 20)}...`;
-        console.log(`[PeerNames] ${peer.node_id.slice(0, 16)}... -> ${displayName}`);
+        const displayName = `${peer.name} | ${peer.node_id}`;
+        console.log(`[PeerNames] ${peer.node_id} -> ${displayName}`);
         names.set(peer.node_id, displayName);
       } else {
-        const displayName = `${peer.node_id.slice(0, 20)}...`;
-        console.log(`[PeerNames] ${peer.node_id.slice(0, 16)}... -> ${displayName} (no name)`);
+        const displayName = peer.node_id;
+        console.log(`[PeerNames] ${peer.node_id} -> ${displayName} (no name)`);
         names.set(peer.node_id, displayName);
       }
     }
@@ -1735,7 +1843,101 @@
 
   function getPeerDisplayName(peerId: string): string {
     // Use the reactive map, with fallback for peers not in peer_info yet
-    return peerDisplayNames.get(peerId) || `${peerId.slice(0, 20)}...`;
+    return peerDisplayNames.get(peerId) || peerId;
+  }
+
+  // --- MENTION AUTOCOMPLETE (Group Chats) ---
+  // Get mentionable members for the current group chat (excludes self)
+  function getMentionableMembers(): Array<{ node_id: string; name: string }> {
+    if (!activeChatId.startsWith('group-')) return [];
+
+    const group = $groupChats.get(activeChatId);
+    if (!group?.members) return [];
+
+    const selfId = $nodeStatus?.node_id || '';
+
+    // Filter out self and map to display names (full name, no truncation)
+    return group.members
+      .filter((nodeId: string) => nodeId !== selfId)
+      .map((nodeId: string) => ({
+        node_id: nodeId,
+        name: peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId
+      }));
+  }
+
+  // Filter mentionable members by query
+  let filteredMentionMembers = $derived.by(() => {
+    const members = getMentionableMembers();
+    if (!mentionQuery) return members;
+
+    const lowerQuery = mentionQuery.toLowerCase();
+    return members.filter(
+      m => m.name.toLowerCase().includes(lowerQuery) || m.node_id.toLowerCase().includes(lowerQuery)
+    );
+  });
+
+  // Handle input changes to detect @ mentions
+  function handleMentionInput(event: Event) {
+    const textarea = event.target as HTMLTextAreaElement;
+    const value = textarea.value;
+    const cursorPos = textarea.selectionStart;
+
+    // Only enable in group chats
+    if (!activeChatId.startsWith('group-')) {
+      mentionAutocompleteVisible = false;
+      return;
+    }
+
+    // Find @ before cursor
+    const lastAtIndex = value.lastIndexOf('@', cursorPos - 1);
+    if (lastAtIndex !== -1) {
+      const textAfterAt = value.slice(lastAtIndex + 1, cursorPos);
+      // Check for space (ends mention) or newline
+      if (!textAfterAt.includes(' ') && !textAfterAt.includes('\n')) {
+        mentionQuery = textAfterAt;
+        mentionStartPosition = lastAtIndex;
+        mentionSelectedIndex = 0;
+
+        // Calculate dropdown position (approximate)
+        const textareaRect = textarea.getBoundingClientRect();
+        mentionDropdownPosition = {
+          top: textareaRect.bottom + 4,
+          left: textareaRect.left + (lastAtIndex * 8) // Approximate char width
+        };
+
+        mentionAutocompleteVisible = true;
+        return;
+      }
+    }
+
+    mentionAutocompleteVisible = false;
+  }
+
+  // Handle mention selection
+  function handleMentionSelect(member: { node_id: string; name: string }) {
+    // Replace @query with @Name | node_id (full format)
+    const before = currentInput.slice(0, mentionStartPosition);
+    const after = currentInput.slice(mentionStartPosition + mentionQuery.length + 1);
+    currentInput = `${before}@${member.name} | ${member.node_id} ${after}`;
+
+    mentionAutocompleteVisible = false;
+    mentionSelectedIndex = 0;
+  }
+
+  // Handle mention navigation (from keyboard events)
+  function handleMentionNavigate(direction: 'up' | 'down') {
+    const maxIndex = filteredMentionMembers.length - 1;
+    if (direction === 'down') {
+      mentionSelectedIndex = Math.min(mentionSelectedIndex + 1, maxIndex);
+    } else {
+      mentionSelectedIndex = Math.max(mentionSelectedIndex - 1, 0);
+    }
+  }
+
+  // Close mention autocomplete
+  function closeMentionAutocomplete() {
+    mentionAutocompleteVisible = false;
+    mentionSelectedIndex = 0;
   }
 
   // --- PEER CONTEXT SELECTION ---
@@ -1933,16 +2135,19 @@
         }
       } else if (activeChatId.startsWith('group-')) {
         // Group chat: Send screenshot via group fan-out (v0.19.0)
-        try {
-          await sendGroupImage(activeChatId, imageData.dataUrl, imageData.filename, text);
-          console.log("Group screenshot transfer initiated");
-        } catch (error) {
-          console.error('Error sending group screenshot:', error);
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          fileOfferToastMessage = `Failed to send screenshot: ${errorMsg}`;
-          showFileOfferToast = true;
-          setTimeout(() => showFileOfferToast = false, 5000);
-        }
+        // Use custom Svelte dialog for confirmation (fixes Tauri auto-accept bug)
+        const group = $groupChats.get(activeChatId);
+        const groupName = group?.name || 'group';
+        pendingFileSend = {
+          filePath: '',
+          fileName: imageData.filename,
+          recipientId: activeChatId,
+          recipientName: `group "${groupName}"`,
+          imageData: imageData,
+          caption: text
+        };
+        showSendFileDialog = true;
+        return;  // Exit early - actual send happens in handleConfirmSendFile
       } else {
         // P2P chat: Send screenshot via file transfer
         try {
@@ -2651,19 +2856,16 @@
         });
       } else if (activeChatId.startsWith('group-')) {
         // Group chat: Send file via group fan-out (v0.19.0)
+        // Use custom Svelte dialog instead of native confirm() (fixes Tauri auto-accept bug)
         const group = $groupChats.get(activeChatId);
         const groupName = group?.name || 'group';
-        if (confirm(`Send "${fileName}" to group "${groupName}"?`)) {
-          try {
-            await sendGroupFile(activeChatId, filePath);
-            console.log(`[Group] File transfer initiated: ${fileName}`);
-          } catch (error) {
-            console.error('Error sending group file:', error);
-            fileOfferToastMessage = `Failed to send file to group: ${error}`;
-            showFileOfferToast = true;
-            setTimeout(() => showFileOfferToast = false, 5000);
-          }
-        }
+        pendingFileSend = {
+          filePath,
+          fileName,
+          recipientId: activeChatId,
+          recipientName: `group "${groupName}"`
+        };
+        showSendFileDialog = true;
       } else {
         // P2P file transfer with confirmation dialog (existing behavior)
         // Get recipient name from peer info
@@ -2832,18 +3034,43 @@
     isSendingFile = true;  // Set flag immediately to block subsequent clicks
 
     try {
-      console.log(`Sending file: ${pendingFileSend.filePath} to ${pendingFileSend.recipientId}`);
-      await sendFile(pendingFileSend.recipientId, pendingFileSend.filePath);
+      // Check if this is image data (screenshot) or file path
+      if (pendingFileSend.imageData) {
+        // Screenshot/image paste
+        console.log(`Sending screenshot: ${pendingFileSend.fileName} to ${pendingFileSend.recipientId}`);
+        if (pendingFileSend.recipientId.startsWith('group-')) {
+          await sendGroupImage(pendingFileSend.recipientId, pendingFileSend.imageData.dataUrl, pendingFileSend.imageData.filename, pendingFileSend.caption || '');
+          console.log(`[Group] Screenshot transfer initiated: ${pendingFileSend.fileName}`);
+        } else {
+          // P2P screenshot
+          await sendCommand("send_p2p_image", {
+            node_id: pendingFileSend.recipientId,
+            image_base64: pendingFileSend.imageData.dataUrl,
+            filename: pendingFileSend.imageData.filename,
+            text: pendingFileSend.caption || ''
+          });
+          console.log(`Screenshot transfer initiated: ${pendingFileSend.fileName}`);
+        }
+      } else {
+        // Regular file
+        console.log(`Sending file: ${pendingFileSend.filePath} to ${pendingFileSend.recipientId}`);
+        if (pendingFileSend.recipientId.startsWith('group-')) {
+          await sendGroupFile(pendingFileSend.recipientId, pendingFileSend.filePath);
+          console.log(`[Group] File transfer initiated: ${pendingFileSend.fileName}`);
+        } else {
+          await sendFile(pendingFileSend.recipientId, pendingFileSend.filePath);
+        }
+      }
 
       showSendFileDialog = false;
       pendingFileSend = null;
 
-      fileOfferToastMessage = `Sending file...`;
+      fileOfferToastMessage = `Sending...`;
       showFileOfferToast = true;
       setTimeout(() => showFileOfferToast = false, 3000);
     } catch (error) {
       console.error('Error sending file:', error);
-      fileOfferToastMessage = `Failed to send file: ${error}`;
+      fileOfferToastMessage = `Failed to send: ${error}`;
       showFileOfferToast = true;
       setTimeout(() => showFileOfferToast = false, 5000);
     } finally {
@@ -3333,7 +3560,8 @@
             sender: msg.sender_node_id,
             senderName: msg.sender_name,
             text: msg.text,
-            timestamp: Date.now()
+            timestamp: Date.now(),
+            mentions: msg.mentions || []
           }]);
           return newMap;
         });
@@ -3561,6 +3789,11 @@
             </h2>
           </button>
 
+          <!-- Group topic display (v0.19.0) - inside title section for proper positioning -->
+          {#if !chatHeaderCollapsed && isGroupChat && $groupChats.get(activeChatId)?.topic}
+            <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
+          {/if}
+
           <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI chats) -->
           {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai'}
             <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
@@ -3587,11 +3820,6 @@
         </div>
 
         {#if !chatHeaderCollapsed}
-          <!-- Group topic display (v0.19.0) -->
-          {#if isGroupChat && $groupChats.get(activeChatId)?.topic}
-            <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
-          {/if}
-
           <!-- ProviderSelector: AI chats only (not Telegram) -->
           {#if isActuallyAIChat}
           <ProviderSelector
@@ -3635,6 +3863,9 @@
         agentProgressTool={agentProgressTool}
         agentProgressRound={agentProgressRound}
         agentStreamingText={agentStreamingText}
+        peerDisplayNames={peerDisplayNames}
+        selfNodeId={$nodeStatus?.node_id || ''}
+        selfName={$personalContext?.profile?.name || ''}
       />
 
       <div class="chat-input">
@@ -3807,7 +4038,15 @@
               ($connectionStatus === 'connected' ? (pendingImage ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
             }
             disabled={$connectionStatus !== 'connected' || isLoading}
+            oninput={handleMentionInput}
             onkeydown={(e) => {
+              // If mention autocomplete is open, let the component handle all navigation
+              if (mentionAutocompleteVisible && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Tab' || e.key === 'Enter' || e.key === 'Escape')) {
+                if (e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape') {
+                  e.preventDefault(); // Prevent sending message when autocomplete is open
+                }
+                return; // Let MentionAutocomplete handle it
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 // Send if: peer connected, OR local AI chat, OR Telegram chat, OR AI_xxx chat AND (has text OR has pending image)
@@ -3979,6 +4218,18 @@
   bind:open={showContextViewer}
   context={$personalContext}
   on:close={() => showContextViewer = false}
+/>
+
+<!-- Mention Autocomplete (Group Chats) -->
+<MentionAutocomplete
+  visible={mentionAutocompleteVisible}
+  query={mentionQuery}
+  members={getMentionableMembers()}
+  position={mentionDropdownPosition}
+  selectedIndex={mentionSelectedIndex}
+  on:select={(e) => handleMentionSelect(e.detail)}
+  on:navigate={(e) => handleMentionNavigate(e.detail.direction)}
+  on:close={closeMentionAutocomplete}
 />
 
 <InstructionsEditor

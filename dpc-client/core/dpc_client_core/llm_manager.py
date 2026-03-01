@@ -45,6 +45,7 @@ class AIProvider:
         self.alias = alias
         self.config = config
         self.model = config.get("model")
+        self.temperature = config.get("temperature", 0.7)  # Default temperature for creativity
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
         """
@@ -197,6 +198,11 @@ class OllamaProvider(AIProvider):
             options = {}
             if self.config.get("context_window"):
                 options["num_ctx"] = self.config["context_window"]
+
+            # Add temperature if specified (use kwargs override or config default)
+            temp = kwargs.get("temperature", self.temperature)
+            if temp != 0.7:  # Only pass if non-default to avoid unnecessary API params
+                options["temperature"] = temp
 
             # Add a timeout to the request
             response = await asyncio.wait_for(
@@ -364,9 +370,12 @@ class OpenAICompatibleProvider(AIProvider):
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
         try:
+            # Use kwargs override or config default for temperature
+            temperature = kwargs.get("temperature", self.temperature)
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": prompt}],
+                temperature=temperature,
             )
             return response.choices[0].message.content
         except Exception as e:
@@ -405,7 +414,7 @@ class OpenAICompatibleProvider(AIProvider):
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[{"role": "user", "content": content}],
-                temperature=kwargs.get("temperature", 0.7),
+                temperature=kwargs.get("temperature", self.temperature),
                 max_tokens=kwargs.get("max_tokens", 4000)
             )
             return response.choices[0].message.content
@@ -466,6 +475,7 @@ class AnthropicProvider(AIProvider):
                 "model": self.model,
                 "max_tokens": effective_max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
+                "temperature": kwargs.get("temperature", self.temperature),
             }
 
             # Add extended thinking if enabled and supported
@@ -564,7 +574,7 @@ class AnthropicProvider(AIProvider):
             response = await self.client.messages.create(
                 model=self.model,
                 messages=[{"role": "user", "content": content}],
-                temperature=kwargs.get("temperature", 0.7),
+                temperature=kwargs.get("temperature", self.temperature),
                 max_tokens=kwargs.get("max_tokens", self.max_tokens or 4096)
             )
             return response.content[0].text
@@ -645,6 +655,7 @@ class ZaiProvider(AIProvider):
                 "model": self.model,
                 "max_tokens": effective_max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
+                "temperature": kwargs.get("temperature", self.temperature),
             }
 
             # Add extended thinking if enabled (all GLM models support it)
@@ -726,6 +737,7 @@ class ZaiProvider(AIProvider):
                 "model": self.model,
                 "max_tokens": effective_max_tokens,
                 "messages": [{"role": "user", "content": prompt}],
+                "temperature": self.temperature,
             }
 
             # Add extended thinking if enabled (all GLM models support it)

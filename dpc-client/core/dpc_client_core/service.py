@@ -73,6 +73,8 @@ from .message_handlers.telegram_handler import TelegramIncomingHandler  # v0.14.
 from .message_handlers.group_handler import (  # v0.19.0+ Group chat
     GroupCreateHandler, GroupTextHandler, GroupLeaveHandler, GroupDeleteHandler,
     GroupSyncHandler, GroupHistoryRequestHandler, GroupHistoryResponseHandler,
+    GroupHistoryStatusHandler,  # v0.20.0 hash-based sync
+    GroupDeletedStatusHandler,  # v0.20.0 offline deletion notification
 )
 from .managers.file_transfer_manager import FileTransferManager
 from .managers.group_manager import GroupManager
@@ -325,7 +327,7 @@ class CoreService:
         self._processed_message_ids = set()  # Track processed messages
         self._max_processed_ids = 1000  # Limit set size
         self._history_requested_peers = set()  # Track peers we've requested history from (prevents infinite loops)
-        self._group_history_requested = set()  # Track group IDs we've requested history for (v0.19.0)
+        # Note: _group_history_requested removed in v0.20.0 - now using hash-based sync
 
         # Initialize message router and register handlers
         self.message_router = MessageRouter()
@@ -425,6 +427,8 @@ class CoreService:
         self.message_router.register_handler(GroupSyncHandler(self))
         self.message_router.register_handler(GroupHistoryRequestHandler(self))
         self.message_router.register_handler(GroupHistoryResponseHandler(self))
+        self.message_router.register_handler(GroupHistoryStatusHandler(self))  # v0.20.0 hash-based sync
+        self.message_router.register_handler(GroupDeletedStatusHandler(self))  # v0.20.0 offline deletion notification
 
         # Telegram bot integration (v0.14.0+)
         if self.telegram_manager:
@@ -765,6 +769,15 @@ class CoreService:
             await asyncio.gather(*self._background_tasks, return_exceptions=True)
         self._background_tasks.clear()
 
+        # Save all group chat histories to disk (v0.20.0)
+        saved_count = 0
+        for conversation_id, monitor in self.conversation_monitors.items():
+            if conversation_id.startswith("group-") and monitor._history_dirty:
+                if monitor.save_history():
+                    saved_count += 1
+        if saved_count > 0:
+            logger.info("Saved %d group chat histories to disk", saved_count)
+
         # Shutdown Phase 6 managers
         if hasattr(self, 'dht_manager'):
             logger.info("Stopping DHT Manager...")
@@ -1060,19 +1073,39 @@ class CoreService:
                 except Exception as e:
                     logger.debug("Failed to sync group %s with %s: %s", group.group_id, peer_id[:20], e)
 
-                # Request group history if our local history is empty (v0.19.0+)
-                if group.group_id not in self._group_history_requested:
-                    monitor = self.conversation_monitors.get(group.group_id)
-                    if not monitor or len(monitor.get_message_history()) == 0:
-                        try:
-                            await self.p2p_manager.send_message_to_peer(peer_id, {
-                                "command": "GROUP_HISTORY_REQUEST",
-                                "payload": {"group_id": group.group_id}
-                            })
-                            self._group_history_requested.add(group.group_id)
-                            logger.info("Requested group history for %s from %s", group.group_id, peer_id[:20])
-                        except Exception as e:
-                            logger.debug("Failed to request group history for %s: %s", group.group_id, e)
+                # v0.20.0: Send GROUP_HISTORY_STATUS for hash-based sync
+                # This replaces the old "request if empty" logic with intelligent sync
+                monitor = self.conversation_monitors.get(group.group_id)
+                local_hash = monitor.compute_history_hash() if monitor and hasattr(monitor, "compute_history_hash") else "sha256:empty"
+                local_count = len(monitor.message_history) if monitor else 0
+
+                try:
+                    await self.p2p_manager.send_message_to_peer(peer_id, {
+                        "command": "GROUP_HISTORY_STATUS",
+                        "payload": {
+                            "group_id": group.group_id,
+                            "history_hash": local_hash,
+                            "message_count": local_count
+                        }
+                    })
+                    logger.debug("Sent GROUP_HISTORY_STATUS for %s to %s (hash=%s, count=%d)",
+                               group.group_id, peer_id[:20], local_hash[:16], local_count)
+                except Exception as e:
+                    logger.debug("Failed to send history status for %s: %s", group.group_id, e)
+
+        # v0.20.0: Exchange deleted group IDs for offline deletion notification
+        deleted_groups = self.group_manager.get_deleted_group_ids()
+        if deleted_groups:
+            for peer_id in self.p2p_manager.peers:
+                try:
+                    await self.p2p_manager.send_message_to_peer(peer_id, {
+                        "command": "GROUP_DELETED_STATUS",
+                        "payload": {"deleted_groups": deleted_groups}
+                    })
+                    logger.debug("Sent GROUP_DELETED_STATUS to %s (%d groups)",
+                               peer_id[:20], len(deleted_groups))
+                except Exception as e:
+                    logger.debug("Failed to send deleted status to %s: %s", peer_id[:20], e)
 
         await self.local_api.broadcast_event("status_update", await self.get_status())
 
@@ -1927,6 +1960,14 @@ class CoreService:
                         errors.append(f"{prefix}: context_window must be positive")
                 except (ValueError, TypeError):
                     errors.append(f"{prefix}: context_window must be an integer")
+
+            # Optional temperature validation (v0.19.0+)
+            if "temperature" in provider:
+                temp = provider["temperature"]
+                if not isinstance(temp, (int, float)):
+                    errors.append(f"{prefix}: temperature must be a number")
+                elif temp < 0 or temp > 2:
+                    errors.append(f"{prefix}: temperature must be between 0 and 2 (got {temp})")
 
         # Check default_provider exists
         default = config_dict.get("default_provider")
@@ -4604,6 +4645,15 @@ Respond in JSON format:
                 auto_detect=self.auto_knowledge_detection_enabled,  # Pass auto-detection setting
                 instruction_set_name=instruction_set_name or self.instruction_set.default  # Use provided or default instruction set
             )
+
+            # Load persisted history from disk (v0.20.0)
+            # Only for group chats - peer chats sync via CHAT_HISTORY_REQUEST
+            if conversation_id.startswith("group-"):
+                if self.conversation_monitors[conversation_id].load_history():
+                    logger.info("Loaded persisted history for group %s (%d messages)",
+                               conversation_id,
+                               len(self.conversation_monitors[conversation_id].message_history))
+
             logger.info("Created conversation monitor for %s with %d participant(s) (auto_detect=%s, instruction_set=%s)", conversation_id, len(participants), self.auto_knowledge_detection_enabled, instruction_set_name or self.instruction_set.default)
 
         return self.conversation_monitors[conversation_id]
@@ -4951,6 +5001,36 @@ Respond in JSON format:
         groups = [g.to_dict() for g in self.group_manager.get_all_groups()]
         return {"status": "success", "groups": groups}
 
+    def parse_mentions(self, text: str, group_members: List[str]) -> List[Dict[str, Any]]:
+        """Parse @mentions in text and return list of mention objects.
+
+        Args:
+            text: Message text to parse
+            group_members: List of node IDs in the group
+
+        Returns:
+            List of mention dicts with node_id, name, start, end
+        """
+        mentions = []
+        # Pattern matches @Name or @Name-With-Dashes
+        pattern = r'@([\w\-]+)'
+
+        for match in re.finditer(pattern, text):
+            name = match.group(1)
+            # Resolve name to node_id from group members
+            for node_id in group_members:
+                peer_name = self.peer_metadata.get(node_id, {}).get("name", "")
+                if peer_name and peer_name.lower() == name.lower():
+                    mentions.append({
+                        "node_id": node_id,
+                        "name": peer_name,
+                        "start": match.start(),
+                        "end": match.end()
+                    })
+                    break
+
+        return mentions
+
     async def send_group_message(self, group_id: str, text: str) -> Dict[str, Any]:
         """Send a text message to all group members.
 
@@ -4965,6 +5045,14 @@ Respond in JSON format:
 
             sender_name = "User"
 
+            # Parse @mentions in the message text
+            mentions = self.parse_mentions(text, group.members)
+
+            # v0.20.0: Generate unique message ID on sender side
+            import uuid
+            message_id = str(uuid.uuid4())
+            timestamp = datetime.now(timezone.utc).isoformat()
+
             # Fan-out GROUP_TEXT to all connected members
             await self._broadcast_to_group(group_id, {
                 "command": "GROUP_TEXT",
@@ -4972,25 +5060,22 @@ Respond in JSON format:
                     "group_id": group_id,
                     "text": text,
                     "sender_name": sender_name,
+                    "mentions": mentions,
+                    "message_id": message_id,  # v0.20.0: Include sender-generated ID
+                    "timestamp": timestamp,
                 }
             })
 
             # Track in conversation monitor for knowledge extraction
-            import hashlib, time
-            message_id = hashlib.sha256(
-                f"{group_id}:{self.p2p_manager.node_id}:{text}:{int(time.time() * 1000)}".encode()
-            ).hexdigest()[:16]
-
             monitor = self._get_or_create_conversation_monitor(group_id)
             from .conversation_monitor import Message as ConvMessage
-            from datetime import datetime, timezone
             conv_message = ConvMessage(
                 message_id=message_id,
                 conversation_id=group_id,
                 sender_node_id=self.p2p_manager.node_id,
                 sender_name=sender_name,
                 text=text,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=timestamp,
             )
             await monitor.on_message(conv_message)
 

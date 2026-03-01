@@ -248,21 +248,24 @@ class NewSessionProposalManager:
             }
         }
 
-        # Extract peer's node_id (conversations are keyed by peer's node_id)
-        peer_node_id = next((p for p in proposal.participants if p != self.core_service.p2p_manager.node_id), None)
+        # v0.20.0 FIX: Use conversation_id directly for both peer chats and group chats
+        # Previously, this code extracted a single peer_node_id which was wrong for groups
+        # (would pick one random member instead of the group conversation)
+        conversation_id = proposal.conversation_id
 
         # If approved: clear local history (for all participants)
         if is_approved:
-            self.logger.info("Proposal approved, clearing local conversation history for %s", peer_node_id[:20] if peer_node_id else "unknown")
-            monitor = self.core_service._get_or_create_conversation_monitor(peer_node_id)
+            self.logger.info("Proposal approved, clearing local conversation history for %s", conversation_id[:20] if conversation_id else "unknown")
+            monitor = self.core_service._get_or_create_conversation_monitor(conversation_id)
             monitor.reset_conversation()
 
         # Broadcast result to all participants
         if self.on_result_broadcast:
             await self.on_result_broadcast(result_payload, list(proposal.participants))
 
-        # Emit event to UI for initiator (add peer's node_id for frontend lookup)
-        ui_payload = {**result_payload, "sender_node_id": peer_node_id}
+        # Emit event to UI for initiator
+        # v0.20.0 FIX: Include conversation_id (not just sender_node_id) for proper frontend handling
+        ui_payload = {**result_payload, "conversation_id": conversation_id}
         await self.core_service.local_api.broadcast_event(
             "new_session_result",
             ui_payload

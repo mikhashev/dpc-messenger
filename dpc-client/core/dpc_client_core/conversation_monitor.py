@@ -8,7 +8,10 @@ detect consensus signals.
 
 import asyncio
 import logging
-from typing import List, Dict, Any, Optional
+import json
+import hashlib
+from pathlib import Path
+from typing import List, Dict, Any, Optional, Set
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -91,6 +94,8 @@ class ConversationMonitor:
 
         # Conversation history tracking (Phase 7: Conversation History)
         self.message_history: List[Dict[str, str]] = []  # List of {"role": "user/assistant", "content": "..."}
+        self.message_ids: Set[str] = set()  # Track unique message IDs for deduplication
+        self._history_dirty: bool = False  # Track unsaved changes
         self.peer_context_hashes: Dict[str, str] = {}  # {node_id: context_hash} for peer cache invalidation
 
         # Phase 7: Peer context caching (to avoid re-fetching unchanged contexts)
@@ -1159,7 +1164,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
     def add_message(self, role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None,
                     timestamp: Optional[str] = None, sender_node_id: Optional[str] = None,
-                    sender_name: Optional[str] = None):
+                    sender_name: Optional[str] = None, message_id: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1170,11 +1175,18 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             timestamp: Optional ISO format timestamp (e.g., "2026-01-19T12:34:56Z")
             sender_node_id: Optional sender node ID (for proper attribution in chat history)
             sender_name: Optional sender display name
+            message_id: Optional unique message ID (auto-generated if not provided)
 
         Note: This also adds to message_buffer and full_conversation for knowledge extraction.
         """
+        import uuid
+
+        # Generate unique message ID if not provided (v0.20.0)
+        if not message_id:
+            message_id = str(uuid.uuid4())
+
         # Add to message_history (for chat history sync)
-        message_dict = {"role": role, "content": content}
+        message_dict = {"id": message_id, "role": role, "content": content}
         if attachments:
             message_dict["attachments"] = attachments
         if timestamp:
@@ -1183,29 +1195,32 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["sender_node_id"] = sender_node_id
         if sender_name:
             message_dict["sender_name"] = sender_name
+
+        # Track message ID for deduplication (v0.20.0)
+        self.message_ids.add(message_id)
+        self._history_dirty = True
+
         self.message_history.append(message_dict)
 
         # Also add to knowledge extraction buffers (v0.13.2 fix for voice messages)
-        # Map role to sender info
+        # Map role to sender info (use different variable names to avoid shadowing)
         if role == "user":
             # User is the local node (first participant is always self)
-            sender_node_id = self.participants[0]["node_id"] if self.participants else "local"
-            sender_name = self.participants[0]["name"] if self.participants else "You"
+            km_sender_node_id = self.participants[0]["node_id"] if self.participants else "local"
+            km_sender_name = self.participants[0]["name"] if self.participants else "You"
         else:  # role == "assistant" or "peer"
             # Assistant/peer is the conversation partner (second participant)
-            sender_node_id = self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
-            sender_name = self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
+            km_sender_node_id = self.participants[1]["node_id"] if len(self.participants) > 1 else "peer"
+            km_sender_name = self.participants[1]["name"] if len(self.participants) > 1 else "Peer"
 
-        # Create Message object for knowledge extraction
-        from datetime import datetime, timezone
-        import uuid
+        # Create Message object for knowledge extraction (reuse the same message_id)
         message_obj = Message(
-            message_id=str(uuid.uuid4()),
+            message_id=message_id,
             conversation_id=self.conversation_id,
-            sender_node_id=sender_node_id,
-            sender_name=sender_name,
+            sender_node_id=km_sender_node_id,
+            sender_name=km_sender_name,
             text=content,
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=timestamp or datetime.now(timezone.utc).isoformat(),
             attachment_transfer_id=attachments[0].get("transfer_id") if attachments else None  # v0.14.0
         )
 
@@ -1245,6 +1260,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
     def reset_conversation(self):
         """Reset conversation history and context tracking (for "New Chat" button)"""
         self.message_history = []
+        self.message_ids = set()
+        self._history_dirty = False
         self.peer_context_hashes = {}
         self.current_token_count = 0
         self.message_buffer = []
@@ -1252,6 +1269,15 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         # Clear peer context caches
         self.peer_context_cache = {}
         self.peer_device_context_cache = {}
+
+        # Delete persisted history file (v0.20.0)
+        path = self._get_history_path()
+        if path.exists():
+            try:
+                path.unlink()
+                logger.info(f"Deleted history file on reset: {path}")
+            except Exception as e:
+                logger.error(f"Failed to delete history file {path}: {e}")
 
     def _remap_attachment_paths(self, attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Remap file paths in attachments from peer's filesystem to local filesystem.
@@ -1436,6 +1462,181 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         # Also clear the hash so context will be re-included on next query
         if node_id in self.peer_context_hashes:
             del self.peer_context_hashes[node_id]
+
+    # --- Group Chat History Persistence (v0.20.0) ---
+
+    def _get_history_path(self) -> Path:
+        """Get path to history file for this conversation
+
+        Returns:
+            Path to ~/.dpc/groups/{conversation_id}_history.json
+        """
+        return Path.home() / ".dpc" / "groups" / f"{self.conversation_id}_history.json"
+
+    def compute_history_hash(self) -> str:
+        """Compute SHA256 hash of current message history
+
+        Uses sorted message IDs + timestamps for deterministic hashing.
+
+        Returns:
+            Hash string like "sha256:abc123..." or "sha256:empty" if no messages
+        """
+        if not self.message_history:
+            return "sha256:empty"
+
+        # Sort by timestamp, then by message ID for determinism
+        sorted_msgs = sorted(
+            self.message_history,
+            key=lambda m: (m.get("timestamp", ""), m.get("id", ""))
+        )
+
+        # Hash the concatenated IDs and timestamps
+        data = "|".join(
+            f"{m.get('id', '?')}:{m.get('timestamp', '?')}"
+            for m in sorted_msgs
+        )
+        return "sha256:" + hashlib.sha256(data.encode()).hexdigest()[:16]
+
+    def save_history(self) -> bool:
+        """Persist message history to disk
+
+        Saves to ~/.dpc/groups/{conversation_id}_history.json
+
+        Returns:
+            True if saved successfully, False on error
+        """
+        path = self._get_history_path()
+        try:
+            # Ensure directory exists
+            path.parent.mkdir(parents=True, exist_ok=True)
+
+            data = {
+                "conversation_id": self.conversation_id,
+                "version": 1,
+                "last_updated": datetime.now(timezone.utc).isoformat(),
+                "message_count": len(self.message_history),
+                "history_hash": self.compute_history_hash(),
+                "messages": self.message_history
+            }
+
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            self._history_dirty = False
+            logger.info(f"Saved {len(self.message_history)} messages to {path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to save history to {path}: {e}")
+            return False
+
+    def load_history(self) -> bool:
+        """Load message history from disk
+
+        Loads from ~/.dpc/groups/{conversation_id}_history.json
+
+        Returns:
+            True if loaded successfully, False if file doesn't exist or on error
+        """
+        path = self._get_history_path()
+        if not path.exists():
+            logger.debug(f"No history file found at {path}")
+            return False
+
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+
+            messages = data.get("messages", [])
+            self.message_history = messages
+
+            # Rebuild message_ids set for deduplication
+            self.message_ids = {
+                m.get("id") for m in messages
+                if m.get("id")
+            }
+
+            self._history_dirty = False
+            logger.info(f"Loaded {len(messages)} messages from {path}")
+            return True
+
+        except Exception as e:
+            logger.error(f"Failed to load history from {path}: {e}")
+            return False
+
+    def add_message_with_id(self, message: Dict[str, Any]) -> bool:
+        """Add a message to history with duplicate detection
+
+        Unlike add_message(), this method:
+        - Checks for duplicate message IDs
+        - Sets the dirty flag for auto-save
+        - Returns whether the message was actually added
+
+        Args:
+            message: Message dict with 'id', 'role', 'content', etc.
+
+        Returns:
+            True if message was added, False if duplicate
+        """
+        msg_id = message.get("id")
+
+        # Check for duplicate
+        if msg_id and msg_id in self.message_ids:
+            logger.debug(f"Skipping duplicate message: {msg_id}")
+            return False
+
+        # Track ID
+        if msg_id:
+            self.message_ids.add(msg_id)
+
+        # Add to history
+        self.message_history.append(message)
+        self._history_dirty = True
+
+        return True
+
+    def merge_history(self, remote_messages: List[Dict[str, Any]]) -> int:
+        """Merge remote messages with local history
+
+        Unlike import_history(), this method:
+        - Keeps existing local messages
+        - Only adds new messages (by ID)
+        - Saves to disk if any messages were added
+
+        Args:
+            remote_messages: List of message dicts from peer
+
+        Returns:
+            Count of new messages added
+        """
+        added = 0
+        for msg in remote_messages:
+            if self.add_message_with_id(msg):
+                added += 1
+
+        if added > 0:
+            self.save_history()
+            logger.info(f"Merged {added} new messages into conversation history")
+
+        return added
+
+    def clear_history(self):
+        """Clear all message history and delete persisted file
+
+        Called when a new session is approved.
+        """
+        self.message_history = []
+        self.message_ids = set()
+        self._history_dirty = False
+
+        # Delete persisted file
+        path = self._get_history_path()
+        if path.exists():
+            try:
+                path.unlink()
+                logger.info(f"Deleted history file: {path}")
+            except Exception as e:
+                logger.error(f"Failed to delete history file {path}: {e}")
 
 
 # Example usage

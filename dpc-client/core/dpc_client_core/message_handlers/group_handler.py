@@ -68,16 +68,19 @@ class GroupTextHandler(MessageHandler):
 
         Args:
             sender_node_id: Node ID of message sender
-            payload: Contains group_id, text, sender_name
+            payload: Contains group_id, text, sender_name, message_id (v0.20.0+)
         """
         group_id = payload.get("group_id")
         text = payload.get("text")
         sender_name = payload.get("sender_name", sender_node_id)
 
-        # Create dedup key scoped to group
-        message_id = hashlib.sha256(
-            f"{group_id}:{sender_node_id}:{text}:{int(time.time() * 1000)}".encode()
-        ).hexdigest()[:16]
+        # v0.20.0: Use sender-provided message_id if available, else generate for backwards compat
+        message_id = payload.get("message_id")
+        if not message_id:
+            # Fallback for older clients
+            message_id = hashlib.sha256(
+                f"{group_id}:{sender_node_id}:{text}:{int(time.time() * 1000)}".encode()
+            ).hexdigest()[:16]
 
         # Deduplication
         dedup_key = f"{group_id}:{message_id}"
@@ -93,6 +96,9 @@ class GroupTextHandler(MessageHandler):
             for mid in to_remove:
                 self.service._processed_message_ids.discard(mid)
 
+        # Use sender-provided timestamp if available (v0.20.0)
+        timestamp = payload.get("timestamp", datetime.now(timezone.utc).isoformat())
+
         # Broadcast to UI
         await self.service.local_api.broadcast_event("group_text_received", {
             "group_id": group_id,
@@ -100,6 +106,8 @@ class GroupTextHandler(MessageHandler):
             "sender_name": sender_name,
             "text": text,
             "message_id": message_id,
+            "timestamp": timestamp,
+            "mentions": payload.get("mentions", []),
         })
 
         # Feed to conversation monitor for knowledge extraction
@@ -112,7 +120,7 @@ class GroupTextHandler(MessageHandler):
                 sender_node_id=sender_node_id,
                 sender_name=sender_name,
                 text=text,
-                timestamp=datetime.now(timezone.utc).isoformat(),
+                timestamp=timestamp,  # v0.20.0: Use sender-provided timestamp
             )
 
             proposal = await monitor.on_message(conv_message)
@@ -335,7 +343,14 @@ class GroupHistoryResponseHandler(MessageHandler):
             return None
 
         monitor = self.service._get_or_create_conversation_monitor(group_id)
-        if hasattr(monitor, "import_history"):
+
+        # v0.20.0: Use merge_history instead of import_history
+        # This handles duplicates and saves to disk
+        if hasattr(monitor, "merge_history"):
+            added = monitor.merge_history(history)
+            self.logger.info("Merged %d new messages into group %s history", added, group_id)
+        elif hasattr(monitor, "import_history"):
+            # Fallback for older monitors
             monitor.import_history(history)
 
         # Notify UI to refresh chat
@@ -343,5 +358,137 @@ class GroupHistoryResponseHandler(MessageHandler):
             "group_id": group_id,
             "message_count": len(history),
         })
+
+        return None
+
+
+class GroupHistoryStatusHandler(MessageHandler):
+    """Handles GROUP_HISTORY_STATUS messages (v0.20.0 hash-based sync).
+
+    Exchange history hashes to determine if sync is needed.
+    """
+
+    @property
+    def command_name(self) -> str:
+        return "GROUP_HISTORY_STATUS"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        """
+        Handle GROUP_HISTORY_STATUS message.
+
+        Compare hashes and request history if peer has newer/different messages.
+
+        Args:
+            sender_node_id: Node ID of peer
+            payload: Contains group_id, history_hash, message_count
+        """
+        group_id = payload.get("group_id")
+        remote_hash = payload.get("history_hash", "")
+        remote_count = payload.get("message_count", 0)
+
+        self.logger.debug(
+            "Received GROUP_HISTORY_STATUS from %s for group %s (hash=%s, count=%d)",
+            sender_node_id[:20], group_id, remote_hash[:16], remote_count
+        )
+
+        # Get local monitor
+        monitor = self.service.conversation_monitors.get(group_id)
+
+        # Compute local hash
+        local_hash = monitor.compute_history_hash() if monitor and hasattr(monitor, "compute_history_hash") else "sha256:empty"
+        local_count = len(monitor.message_history) if monitor else 0
+
+        # Send our status back
+        await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+            "command": "GROUP_HISTORY_STATUS",
+            "payload": {
+                "group_id": group_id,
+                "history_hash": local_hash,
+                "message_count": local_count,
+            }
+        })
+
+        # If hashes differ and peer has more messages, request history
+        if remote_hash != local_hash and remote_count > local_count:
+            self.logger.info(
+                "Requesting history sync for group %s (local: %d, remote: %d)",
+                group_id, local_count, remote_count
+            )
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                "command": "GROUP_HISTORY_REQUEST",
+                "payload": {"group_id": group_id}
+            })
+
+        return None
+
+
+class GroupDeletedStatusHandler(MessageHandler):
+    """Handles GROUP_DELETED_STATUS messages (v0.20.0 offline deletion notification).
+
+    Exchange deleted group IDs to ensure eventually consistent deletion.
+    """
+
+    @property
+    def command_name(self) -> str:
+        return "GROUP_DELETED_STATUS"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        """
+        Handle GROUP_DELETED_STATUS message.
+
+        Check if we have any groups that were deleted by the peer and remove them.
+
+        Args:
+            sender_node_id: Node ID of peer
+            payload: Contains deleted_groups list
+        """
+        deleted_groups = payload.get("deleted_groups", [])
+
+        if not deleted_groups:
+            return None
+
+        self.logger.debug(
+            "Received GROUP_DELETED_STATUS from %s with %d deleted groups",
+            sender_node_id[:20], len(deleted_groups)
+        )
+
+        # Send our deleted groups back
+        our_deleted = self.service.group_manager.get_deleted_group_ids()
+        if our_deleted:
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                "command": "GROUP_DELETED_STATUS",
+                "payload": {"deleted_groups": our_deleted}
+            })
+
+        # Check if we have any of the deleted groups
+        removed_count = 0
+        for group_id in deleted_groups:
+            group = self.service.group_manager.get_group(group_id)
+            if group:
+                # Verify the deleter was the creator
+                if group.created_by == sender_node_id:
+                    self.logger.info(
+                        "Removing locally deleted group %s (deleted by creator %s)",
+                        group_id, sender_node_id[:20]
+                    )
+                    group_name = group.name
+
+                    # Remove local group data
+                    self.service.group_manager.handle_group_deleted(group_id)
+
+                    # Clean up conversation monitor
+                    if group_id in self.service.conversation_monitors:
+                        del self.service.conversation_monitors[group_id]
+
+                    # Notify UI
+                    await self.service.local_api.broadcast_event("group_deleted", {
+                        "group_id": group_id,
+                        "deleted_by": sender_node_id,
+                        "group_name": group_name,
+                    })
+                    removed_count += 1
+
+        if removed_count > 0:
+            self.logger.info("Removed %d groups based on deleted status from %s", removed_count, sender_node_id[:20])
 
         return None

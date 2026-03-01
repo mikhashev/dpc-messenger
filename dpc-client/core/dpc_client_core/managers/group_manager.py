@@ -48,6 +48,7 @@ class GroupManager:
     Manages group chat metadata: create, join, leave, delete, sync, persist.
 
     Storage: ~/.dpc/groups/{group_id}.json (one file per group)
+    Deleted groups registry: ~/.dpc/groups/deleted_registry.json
     """
 
     MAX_MEMBERS = 20
@@ -57,6 +58,8 @@ class GroupManager:
         self.node_id = node_id
         self.groups_dir = dpc_home / "groups"
         self._groups: Dict[str, GroupMetadata] = {}
+        self._deleted_groups: Dict[str, Dict[str, str]] = {}  # group_id -> {deleted_at, deleted_by}
+        self._deleted_registry_path = self.groups_dir / "deleted_registry.json"
 
     def load_from_disk(self):
         """Load all group metadata files from disk."""
@@ -66,6 +69,9 @@ class GroupManager:
 
         loaded = 0
         for group_file in self.groups_dir.glob("*.json"):
+            # Skip the deleted registry file
+            if group_file.name == "deleted_registry.json":
+                continue
             try:
                 with open(group_file, "r") as f:
                     data = json.load(f)
@@ -77,6 +83,9 @@ class GroupManager:
 
         if loaded:
             logger.info("Loaded %d groups from disk", loaded)
+
+        # Load deleted groups registry (v0.20.0)
+        self._load_deleted_registry()
 
     def _save_group(self, group_id: str):
         """Save a single group metadata file to disk."""
@@ -102,6 +111,68 @@ class GroupManager:
                 logger.debug("Deleted group file for %s", group_id)
         except Exception as e:
             logger.error("Error deleting group file %s: %s", group_id, e)
+
+    # --- Deleted Groups Registry (v0.20.0) ---
+
+    def _load_deleted_registry(self):
+        """Load deleted groups registry from disk."""
+        if not self._deleted_registry_path.exists():
+            return
+
+        try:
+            with open(self._deleted_registry_path, "r") as f:
+                data = json.load(f)
+            self._deleted_groups = data.get("deleted_groups", {})
+            if self._deleted_groups:
+                logger.info("Loaded %d deleted group IDs from registry", len(self._deleted_groups))
+        except Exception as e:
+            logger.error("Error loading deleted registry: %s", e)
+
+    def _save_deleted_registry(self):
+        """Save deleted groups registry to disk."""
+        try:
+            self.groups_dir.mkdir(parents=True, exist_ok=True)
+            with open(self._deleted_registry_path, "w") as f:
+                json.dump({
+                    "version": 1,
+                    "deleted_groups": self._deleted_groups
+                }, f, indent=2)
+            logger.debug("Saved deleted groups registry (%d entries)", len(self._deleted_groups))
+        except Exception as e:
+            logger.error("Error saving deleted registry: %s", e)
+
+    def mark_group_deleted(self, group_id: str, deleted_by: str):
+        """Add a group to the deleted registry.
+
+        Args:
+            group_id: Group that was deleted
+            deleted_by: Node ID of the user who deleted it
+        """
+        self._deleted_groups[group_id] = {
+            "deleted_at": datetime.now(timezone.utc).isoformat(),
+            "deleted_by": deleted_by
+        }
+        self._save_deleted_registry()
+        logger.info("Marked group %s as deleted by %s", group_id, deleted_by)
+
+    def is_group_deleted(self, group_id: str) -> bool:
+        """Check if a group has been deleted.
+
+        Args:
+            group_id: Group ID to check
+
+        Returns:
+            True if group is in deleted registry
+        """
+        return group_id in self._deleted_groups
+
+    def get_deleted_group_ids(self) -> List[str]:
+        """Get list of all deleted group IDs.
+
+        Returns:
+            List of group IDs that have been deleted
+        """
+        return list(self._deleted_groups.keys())
 
     def create_group(self, name: str, topic: str, member_node_ids: List[str]) -> GroupMetadata:
         """
@@ -224,6 +295,10 @@ class GroupManager:
 
         del self._groups[group_id]
         self._delete_group_file(group_id)
+
+        # v0.20.0: Add to deleted registry for offline member sync
+        self.mark_group_deleted(group_id, requester_node_id)
+
         logger.info("Deleted group %s by creator %s", group_id, requester_node_id)
         return True
 
@@ -277,9 +352,23 @@ class GroupManager:
         )
         return remote
 
-    def handle_group_deleted(self, group_id: str):
-        """Handle GROUP_DELETE from creator — remove local copy."""
+    def handle_group_deleted(self, group_id: str, deleted_by: str = None):
+        """Handle GROUP_DELETE from creator — remove local copy.
+
+        Args:
+            group_id: Group that was deleted
+            deleted_by: Node ID of the creator who deleted it (optional, for registry)
+        """
         if group_id in self._groups:
+            # Get creator info before deleting
+            if not deleted_by:
+                deleted_by = self._groups[group_id].created_by
+
             del self._groups[group_id]
             self._delete_group_file(group_id)
+
+            # v0.20.0: Add to deleted registry
+            if deleted_by:
+                self.mark_group_deleted(group_id, deleted_by)
+
             logger.info("Removed group %s (deleted by creator)", group_id)

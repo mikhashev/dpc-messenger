@@ -207,17 +207,25 @@ class FileOfferHandler(MessageHandler):
         )
         file_transfer_manager.active_transfers[transfer_id] = transfer
 
-        # Auto-accept voice messages and images (v0.13.0+) - these are automatically accepted
-        # without showing a dialog, similar to how text messages work.
+        # Auto-accept voice messages, images, and group files (v0.19.1+) - these are
+        # automatically accepted without showing a dialog, similar to how text messages work.
         # Voice messages: Typically small (< 10MB), personal communication
         # Images (screenshots): Pasted from clipboard, shared in conversation context
-        if is_voice or is_image:
+        # Group files: Shared in group chat context, should flow like messages
+        if is_voice or is_image or group_id:
             # Send FILE_ACCEPT to peer immediately to start the download
             await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
                 "command": "FILE_ACCEPT",
                 "payload": {"transfer_id": transfer_id}
             })
-            transfer_type = 'Voice' if is_voice else 'Image'
+            # Update status to TRANSFERRING so UI refresh doesn't show acceptance dialog
+            transfer.status = TransferStatus.TRANSFERRING
+            if is_voice:
+                transfer_type = 'Voice'
+            elif is_image:
+                transfer_type = 'Image'
+            else:
+                transfer_type = 'Group file'
             self.logger.info(f"{transfer_type} transfer auto-accepted: {transfer_id}")
         else:
             transfer_type = 'File'

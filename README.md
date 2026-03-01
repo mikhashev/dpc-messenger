@@ -1,6 +1,6 @@
-# D-PC Messenger: Privacy-First Platform for Human-AI Collaboration
+# D-PC Messenger: Privacy-First Infrastructure for Human-AI-Team Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.19.0
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.19.1
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
@@ -29,20 +29,9 @@ We're racing against a closing window: the infrastructure being built TODAY will
 
 ---
 
-## Join the Mission: Seeking a Business Co-Founder
-
-The core technology is built, but the mission to build a world-changing company has just begun.
-
-I am a product-focused technical founder looking for a business-focused co-founder to be my partner. If you have a passion for privacy, a deep understanding of go-to-market strategy, and the drive to build a global community, I want to talk to you.
-
-If this vision resonates with you, let's connect:
-[legoogmiha@gmail.com](mailto:legoogmiha@gmail.com) | [LinkedIn](https://www.linkedin.com/in/mikemikhashev) | [X/Twitter](https://x.com/mikeshev4enko)
-
----
-
 ## What is D-PC Messenger?
 
-**D-PC Messenger** (Decentralized Personal Context) is a **privacy-first, peer-to-peer platform for human-AI collaboration**.
+**D-PC Messenger** (Decentralized Personal Context) is **privacy-first infrastructure for human-AI-agent collaboration** — enabling teams of humans and AI assistants to work together with end-to-end encryption, P2P context sharing, and decentralized compute sharing.
 
 **The Core Idea:** Imagine you're working with your personal AI assistant (ChatGPT, Claude, or local Ollama). Now imagine securely sharing relevant context with a trusted friend so *their* AI assistant can help too - without compromising privacy or relying on centralized servers.
 
@@ -56,6 +45,20 @@ If this vision resonates with you, let's connect:
 **Real-world example:** You're researching a technical topic with your AI assistant. You share your conversation history with a colleague. Their AI can now see your research and provide complementary insights, creating a **collective intelligence** between humans and their AI assistants.
 
 **Philosophy:** [Digital Self-Sovereignty](./docs/USER_SOVEREIGNTY.md) - Your data, your keys, your control. No backdoors, no data mining, no compromises.
+
+---
+
+### How D-PC Differs from AI Desktop Agents
+
+| Feature | D-PC Messenger | Claude Cowork | OpenClaw |
+|---------|----------------|---------------|----------|
+| **Multi-user collaboration** | ✅ P2P + Group chat | ❌ Single-user | ❌ Single-user |
+| **Team knowledge sharing** | ✅ Consensus voting | ❌ | ❌ |
+| **Background agent consciousness** | ✅ Proactive thinking | ❌ | ❌ |
+| **Privacy architecture** | ✅ P2P, E2E encrypted | ❌ Cloud-based | ⚠️ Self-hosted |
+| **Desktop automation** | ❌ (planned) | ✅ | ✅ |
+
+**D-PC is complementary to desktop agents** — use Cowork/OpenClaw for personal automation, use D-PC when humans and agents need to collaborate.
 
 ---
 
@@ -74,11 +77,13 @@ If this vision resonates with you, let's connect:
 - **Voice Messages** - Cross-platform voice recording with local Whisper transcription (v0.13.0)
 - **Telegram Integration** - Bot integration for voice transcription and messaging bridge (v0.14.0)
 - **Linux Support** - Native audio recording via Rust, ALSA/PipeWire support (v0.15.0)
-- **DPC Agent** - Embedded autonomous AI agent with 40+ tools, background consciousness, evolution system, and persistent memory ([guide](./docs/DPC_AGENT_GUIDE.md)) (v0.18.0)
+- **DPC Agent** - Embedded autonomous AI agent with 45+ tools, background consciousness, evolution system, and persistent memory ([guide](./docs/DPC_AGENT_GUIDE.md)) (v0.18.0)
 - **Reasoning Models** - Native support for DeepSeek R1, Claude Extended Thinking, and OpenAI o1/o3 with visible thinking process (v0.18.0)
 - **Real-time AI Streaming** - Token-by-token response display with tool execution progress indicators (v0.18.0)
 - **Agent Telegram Bridge** - Two-way messaging with DPC Agent via Telegram, voice transcription, event notifications ([guide](./docs/DPC_AGENT_TELEGRAM.md)) (v0.18.0)
 - **Remote Peer Discovery** - Dynamic provider dropdown with configurable inference timeout up to 600s (v0.18.0)
+- **Group Chat** - Multi-peer messaging with @-mentions, file/voice support, and history sync (v0.19.0)
+- **Temperature Control** - Per-provider temperature setting for AI response creativity (v0.19.0)
 - **Token Usage Tracking** - Real-time estimation with progressive warnings (v0.12.0+)
 - **Z.AI Provider** - GLM model support via Anthropic-compatible endpoint with extended thinking (v0.14.0+)
 - **Local-First** - Your data stays on your device
@@ -414,10 +419,15 @@ docker-compose -f docker-compose.prod.yml up -d
 - ✅ **Real-time Streaming** - Token-by-token AI response display with progress indicators
 - ✅ **Agent Firewall** - Granular per-tool permissions, sandboxed execution, extended paths
 
-**Team Collaboration Features - PLANNED (Q1-Q3 2026):**
+**Team Collaboration Features - COMPLETE ✅ (v0.19.0)**
+- ✅ **Group Chat** - Multi-peer messaging with @-mentions, invite dialog, settings panel
+- ✅ **Group File Transfer** - Auto-accept in groups, progress tracking
+- ✅ **Group Voice Messages** - Recording and transcription support
+- ✅ **History Sync** - Hash-based synchronization, offline deletion
+
+**Team Collaboration Features - PLANNED (Q2-Q3 2026):**
 - Persistent team management with roles
-- Group chat UI with presence indicators
-- Team knowledge repositories (shared, synchronized knowledge)fect
+- Team knowledge repositories (shared, synchronized knowledge)
 - Team AI assistants (access to collective team knowledge)
 - Collaborative context editing (PR-like approval workflow)
 - Team compute pools (auto-discovery and load balancing)
@@ -560,6 +570,10 @@ Your support helps cover AI-assisted development costs and enables faster delive
 - **GitHub Discussions:** [Ask questions](https://github.com/mikhashev/dpc-messenger/discussions)
 - **Email:** legoogmiha@gmail.com
 - **Documentation:** [docs/](./docs/)
+
+### Business Inquiries
+
+Building privacy infrastructure for human-AI collaboration. Interested in partnerships, investment, or joining the mission? 📧 [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com)
 
 ---
 

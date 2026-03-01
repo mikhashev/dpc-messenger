@@ -12,7 +12,8 @@
       "type": "ollama",
       "model": "llama3.1:8b",
       "host": "http://127.0.0.1:11434",
-      "context_window": 131072
+      "context_window": 131072,
+      "temperature": 0.7
     },
     {
       "_comment": "Local Ollama vision provider - For image analysis queries",
@@ -72,7 +73,30 @@
       "model": "claude-3-5-sonnet-20240620",
       "api_key_env": "ANTHROPIC_API_KEY",
       "context_window": 200000,
+      "temperature": 0.7,
       "_setup": "Set environment variable: export ANTHROPIC_API_KEY='sk-ant-...'"
+    },
+
+    "anthropic_creative": {
+      "_comment": "High-temperature Claude for creative writing tasks",
+      "alias": "claude_creative",
+      "type": "anthropic",
+      "model": "claude-sonnet-4",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "context_window": 200000,
+      "temperature": 0.9,
+      "_note": "Higher temperature (0.9) for more creative/varied responses"
+    },
+
+    "anthropic_code": {
+      "_comment": "Low-temperature Claude for precise code generation",
+      "alias": "claude_code",
+      "type": "anthropic",
+      "model": "claude-sonnet-4",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "context_window": 200000,
+      "temperature": 0.2,
+      "_note": "Lower temperature (0.2) for deterministic, precise code output"
     },
 
     "anthropic_thinking": {
@@ -210,7 +234,8 @@
       "alias": "User-friendly name for the provider (must be unique)",
       "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', or 'local_whisper'",
       "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7', 'openai/whisper-large-v3')",
-      "context_window": "Optional: Override default context window size in tokens"
+      "context_window": "Optional: Override default context window size in tokens",
+      "temperature": "Optional: Model creativity/randomness (0.0-2.0, default: 0.7). Lower = deterministic, higher = creative"
     },
     "ollama_fields": {
       "host": "Ollama API endpoint (default: http://127.0.0.1:11434)"

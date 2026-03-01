@@ -2,12 +2,14 @@
   import { createEventDispatcher } from 'svelte';
 
   // Props
-  export let proposal: any | null = null;
-  export let open: boolean = false;
+  let { proposal = null, open = $bindable(false) }: { proposal: any | null; open: boolean } = $props();
 
   const dispatch = createEventDispatcher();
 
-  let voteComment = '';
+  let voteComment = $state('');
+
+  // v0.20.0: Compute participant count for dynamic text
+  let participantCount = $derived(proposal?.participants?.length || 2);
 
   function handleVote(vote: boolean) {
     dispatch('vote', {
@@ -42,7 +44,11 @@
             <strong>{proposal.initiator_node_id}</strong> wants to start a new session.
           </p>
           <p class="proposal-details">
-            This will clear the conversation history for both participants if approved.
+            {#if participantCount === 2}
+              This will clear the conversation history for both participants if approved.
+            {:else}
+              This will clear the conversation history for all {participantCount} participants if approved.
+            {/if}
           </p>
         </div>
 
@@ -70,10 +76,10 @@
       </div>
 
       <div class="modal-footer">
-        <button class="btn-reject" on:click={() => handleVote(false)}>
+        <button class="btn-reject" onclick={() => handleVote(false)}>
           ❌ Reject
         </button>
-        <button class="btn-approve" on:click={() => handleVote(true)}>
+        <button class="btn-approve" onclick={() => handleVote(true)}>
           ✅ Approve
         </button>
       </div>
