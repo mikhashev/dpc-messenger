@@ -345,6 +345,12 @@ class OllamaProvider(AIProvider):
         match = re.search(r'PARAMETER\s+num_ctx\s+(\d+)', modelfile, re.IGNORECASE)
         return int(match.group(1)) if match else None
 
+    async def close(self) -> None:
+        """Close the Ollama async client connection."""
+        if hasattr(self.client, 'close'):
+            await self.client.close()
+            logger.debug(f"OllamaProvider '{self.alias}': Client closed")
+
 class OpenAICompatibleProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
@@ -420,6 +426,12 @@ class OpenAICompatibleProvider(AIProvider):
             return response.choices[0].message.content
         except Exception as e:
             raise RuntimeError(f"OpenAI vision API failed for '{self.alias}': {e}") from e
+
+    async def close(self) -> None:
+        """Close the AsyncOpenAI client connection."""
+        if hasattr(self.client, 'close'):
+            await self.client.close()
+            logger.debug(f"OpenAICompatibleProvider '{self.alias}': Client closed")
 
 class AnthropicProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
@@ -580,6 +592,12 @@ class AnthropicProvider(AIProvider):
             return response.content[0].text
         except Exception as e:
             raise RuntimeError(f"Anthropic vision API failed for '{self.alias}': {e}") from e
+
+    async def close(self) -> None:
+        """Close the AsyncAnthropic client connection."""
+        if hasattr(self.client, 'close'):
+            await self.client.close()
+            logger.debug(f"AnthropicProvider '{self.alias}': Client closed")
 
 class ZaiProvider(AIProvider):
     """
@@ -839,6 +857,12 @@ class ZaiProvider(AIProvider):
             return response.content[0].text
         except Exception as e:
             raise RuntimeError(f"Z.AI vision API failed for '{self.alias}': {e}") from e
+
+    async def close(self) -> None:
+        """Close the AsyncAnthropic client connection."""
+        if hasattr(self.client, 'close'):
+            await self.client.close()
+            logger.debug(f"ZaiProvider '{self.alias}': Client closed")
 
 
 class LocalWhisperProvider(AIProvider):
@@ -2456,6 +2480,27 @@ class LLMManager:
                 "thinking_tokens": thinking_tokens,  # Tokens used for thinking
             }
         return response
+
+    async def shutdown(self) -> None:
+        """
+        Shutdown all providers gracefully.
+
+        Closes async HTTP clients to prevent 'Event loop is closed' errors
+        during application shutdown.
+        """
+        logger.info("Shutting down LLMManager...")
+        for alias, provider in self.providers.items():
+            if hasattr(provider, 'close'):
+                try:
+                    await provider.close()
+                except Exception as e:
+                    logger.warning(f"Error closing provider '{alias}': {e}")
+            if hasattr(provider, 'shutdown'):
+                try:
+                    await provider.shutdown()
+                except Exception as e:
+                    logger.warning(f"Error shutting down provider '{alias}': {e}")
+        logger.info("LLMManager shutdown complete")
 
 # --- Self-testing block ---
 async def main_test():
