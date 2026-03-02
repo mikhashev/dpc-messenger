@@ -211,8 +211,10 @@ class DpcAgentManager:
             self._telegram_bridge = None
 
         if self._agent is not None:
-            # Stop consciousness first
+            # Stop all background loops in proper order
             self._agent.stop_consciousness()
+            self._agent.stop_task_processor()
+            self._agent.stop_evolution()
             self._agent = None
         log.info("DpcAgent stopped")
 

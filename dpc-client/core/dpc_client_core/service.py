@@ -806,6 +806,9 @@ class CoreService:
         except Exception as e:
             logger.error(f"Error unloading Whisper model during shutdown: {e}", exc_info=True)
 
+        # Shutdown LLMManager (close async HTTP clients to prevent event loop errors)
+        await self.llm_manager.shutdown()
+
         # Shutdown core components
         await self.p2p_manager.shutdown_all()
         await self.local_api.stop()
