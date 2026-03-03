@@ -954,6 +954,7 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'toggle_auto_knowledge_detection',
             'send_file',
             'send_p2p_image',  // Screenshot sending
+            'send_image',  // Vision analysis (clipboard paste)
             'accept_file_transfer',
             'cancel_file_transfer',
             'get_conversation_history',  // v0.11.2 - backend→frontend sync

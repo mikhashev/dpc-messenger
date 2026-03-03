@@ -90,6 +90,7 @@
         remote_provider_node_id?: string;
       };
     }>;
+    isError?: boolean;  // Error message styling (v0.19.2+)
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
     ['local_ai', []]
@@ -2063,10 +2064,54 @@
           // The ai_response_with_image event handler will clear it when the vision response arrives
         } catch (error) {
           console.error('Error sending image:', error);
-          fileOfferToastMessage = `Failed to send image: ${error}`;
-          showFileOfferToast = true;
-          setTimeout(() => showFileOfferToast = false, 5000);
-          setChatLoading(activeChatId, false);  // Only clear loading on error
+
+          // Parse error into user-friendly message
+          let userMessage = 'Failed to analyze image';
+          let errorDetails = '';
+
+          const errorStr = String(error);
+
+          if (errorStr.includes('Failed to connect to Ollama') || errorStr.includes('Ollama vision API failed')) {
+            userMessage = 'Ollama Connection Failed';
+            errorDetails = 'Ollama is not running. Please start Ollama and try again.\n\nDownload from: https://ollama.com/download';
+          } else if (errorStr.includes('connection refused') || errorStr.includes('Connection refused')) {
+            userMessage = 'Connection Refused';
+            errorDetails = 'The AI service is not accepting connections. Please check if it\'s running.';
+          } else if (errorStr.includes('timeout') || errorStr.includes('Timeout')) {
+            userMessage = 'Request Timeout';
+            errorDetails = 'The AI service took too long to respond. Try again or use a smaller model.';
+          } else if (errorStr.includes('out of memory') || errorStr.includes('OOM') || errorStr.includes('VRAM')) {
+            userMessage = 'Out of Memory';
+            errorDetails = 'Not enough GPU memory for vision analysis. Try closing other GPU-intensive apps.';
+          } else {
+            // Extract meaningful part of generic errors
+            const match = errorStr.match(/RuntimeError:\s*(.+)/);
+            if (match) {
+              errorDetails = match[1];
+            } else {
+              errorDetails = errorStr.slice(0, 200); // Truncate long errors
+            }
+          }
+
+          // Add error message to chat history (like AI response but with error styling)
+          chatHistories.update(h => {
+            const newMap = new Map(h);
+            const hist = newMap.get(activeChatId) || [];
+            newMap.set(activeChatId, [
+              ...hist,
+              {
+                id: crypto.randomUUID(),
+                sender: 'ai',
+                text: `⚠️ **${userMessage}**\n\n${errorDetails}`,
+                timestamp: Date.now(),
+                isError: true
+              }
+            ]);
+            return newMap;
+          });
+
+          autoScroll();
+          setChatLoading(activeChatId, false);
         }
       } else if (activeChatId.startsWith('telegram-')) {
         // Telegram chat: Save image to temp file and send via Telegram

@@ -61,6 +61,7 @@
         remote_provider_node_id?: string;
       };
     }>;
+    isError?: boolean;  // Error message styling (v0.19.2+)
   };
 
   // Props (Svelte 5 runes mode)
@@ -146,7 +147,7 @@
 <div class="chat-window" bind:this={chatWindowElement}>
   {#if messages.length > 0}
     {#each messages as msg (msg.id)}
-      <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'}>
+      <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'} class:error={msg.isError}>
         <div class="message-header">
           <strong>
             {#if msg.sender === 'user'}
@@ -340,6 +341,17 @@
     font-style: italic;
     margin-left: auto;
     margin-right: auto;
+  }
+
+  .message.error {
+    background: #fff5f5;
+    border: 1px solid #fc8181;
+    border-left: 4px solid #e53e3e;
+    margin-left: 0.5rem;
+  }
+
+  .message.error :global(strong) {
+    color: #c53030;
   }
 
   .message-header {
