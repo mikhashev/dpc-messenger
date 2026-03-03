@@ -638,9 +638,8 @@ class ZaiProvider(AIProvider):
         self._last_thinking: Optional[str] = None
 
     def supports_vision(self) -> bool:
-        """GLM vision models: models with 'v' suffix (glm-4.6v-flash, glm-4.5v, glm-4.0v)"""
-        vision_models = ["glm-4.6v", "glm-4.5v", "glm-4.0v", "glm-4v"]
-        return any(vm in self.model.lower() for vm in vision_models)
+        """All GLM models support vision via Z.AI's Anthropic-compatible endpoint."""
+        return True
 
     def supports_thinking(self) -> bool:
         """All GLM models support extended thinking."""

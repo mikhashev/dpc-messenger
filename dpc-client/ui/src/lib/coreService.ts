@@ -999,6 +999,10 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // First use: model download (~3GB, 1-2min) + load (~20s) + compile (~30s) + transcribe (~5s)
                     // Subsequent uses: ~5-10s
                     timeout = 240000;
+                } else if (command === 'send_image') {
+                    // Image vision analysis timeout: 240s (v0.20.0+)
+                    // Local vision models can be slow, especially on first load or with large images
+                    timeout = 240000;
                 } else if (command === 'send_file') {
                     // Dynamic timeout based on file size (v0.11.2+)
                     const fileSizeBytes = payload.file_size_bytes || 0;

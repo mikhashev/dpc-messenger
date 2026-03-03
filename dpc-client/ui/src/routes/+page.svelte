@@ -2050,7 +2050,8 @@
             image_base64: imageData.dataUrl,
             filename: imageData.filename,
             caption: text,
-            provider_alias: visionProvider.alias
+            provider_alias: visionProvider.alias,
+            chat_provider: $chatProviders.get(activeChatId) || null
           };
 
           // Add compute_host if using remote vision provider
