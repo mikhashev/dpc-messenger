@@ -145,6 +145,10 @@ class DpcAgent:
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         session_state: Optional[Dict[str, Any]] = None,
         conversation_monitor: Optional[Any] = None,
+        # Image parameters for vision queries
+        image_base64: Optional[str] = None,
+        image_mime: str = "image/png",
+        image_caption: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -159,6 +163,9 @@ class DpcAgent:
             session_state: Optional session state from ConversationMonitor
                           (tokens_used, tokens_limit, usage_percent, etc.)
             conversation_monitor: Optional ConversationMonitor for knowledge extraction
+            image_base64: Optional base64-encoded image data for vision queries
+            image_mime: MIME type of the image (default: image/png)
+            image_caption: Optional caption for the image
 
         Returns:
             Agent's response text
@@ -167,6 +174,10 @@ class DpcAgent:
             "id": conversation_id,
             "type": "chat",
             "text": message,
+            # Image fields for context.py:_build_user_content()
+            "image_base64": image_base64,
+            "image_mime": image_mime,
+            "image_caption": image_caption,
         }
 
         # Build LLM context

@@ -108,6 +108,14 @@ class DpcLlmAdapter:
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
         """
+        # Check if user message contains images (vision query)
+        user_images = self._extract_images_from_messages(messages)
+        if user_images:
+            log.debug(f"Vision query with {len(user_images)} images")
+            return await self._chat_with_images(
+                messages, user_images, tools, on_stream_chunk, conversation_id
+            )
+
         # Check if dpc_agent provider has peer_id (remote inference) - KISS approach
         dpc_agent_provider = self._llm_manager.providers.get("dpc_agent")
         if dpc_agent_provider and hasattr(dpc_agent_provider, 'peer_id') and dpc_agent_provider.peer_id:
@@ -192,6 +200,7 @@ class DpcLlmAdapter:
         tools: Optional[List[Dict[str, Any]]] = None,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Route inference to remote peer when dpc_agent.peer_id is set.
@@ -205,6 +214,7 @@ class DpcLlmAdapter:
             tools: Optional list of tool schemas
             on_stream_chunk: Optional streaming callback
             conversation_id: Optional conversation ID
+            images: Optional list of image dicts for vision queries
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -297,6 +307,116 @@ class DpcLlmAdapter:
 
         except Exception as e:
             log.error(f"Remote peer inference error: {e}")
+            raise
+
+    def _extract_images_from_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Extract image data from user messages.
+
+        Parses multipart content to find image_url blocks and extracts
+        base64-encoded image data.
+
+        Args:
+            messages: List of message dicts with role/content
+
+        Returns:
+            List of image dicts with base64 and mime_type keys
+        """
+        images = []
+        for msg in messages:
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "image_url":
+                            # Parse data URL
+                            image_url = block.get("image_url", {}).get("url", "")
+                            if image_url.startswith("data:"):
+                                try:
+                                    header, data = image_url.split(",", 1)
+                                    # Extract mime type from header like "data:image/png;base64"
+                                    mime_type = header.split(";")[0].split(":")[1]
+                                    images.append({
+                                        "base64": data,
+                                        "mime_type": mime_type,
+                                    })
+                                except (ValueError, IndexError) as e:
+                                    log.warning(f"Failed to parse image data URL: {e}")
+        return images
+
+    async def _chat_with_images(
+        self,
+        messages: List[Dict[str, Any]],
+        images: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Handle vision queries using LLMManager's vision support.
+
+        When images are present, we bypass the text-only conversion and use
+        LLMManager.query() directly with the images parameter. This triggers
+        auto-selection of a vision-capable provider.
+
+        Args:
+            messages: List of message dicts with role/content
+            images: List of image dicts with base64 and mime_type keys
+            tools: Optional list of tool schemas
+            on_stream_chunk: Optional streaming callback
+            conversation_id: Optional conversation ID
+
+        Returns:
+            (response_message, usage_dict) tuple in Ouroboros format
+        """
+        # Build text prompt from messages
+        prompt = self._messages_to_prompt(messages)
+
+        # Inject tools if provided
+        if tools:
+            log.debug(f"Injecting {len(tools)} tool descriptions into vision prompt")
+            tool_descriptions = self._format_tools_for_prompt(tools)
+            prompt = f"{tool_descriptions}\n\n{prompt}"
+
+        try:
+            # Use LLMManager.query() with images - pass provider_alias=None to trigger
+            # auto-selection (uses vision_provider or first vision-capable provider)
+            log.info(f"Routing vision query to LLMManager (auto-select vision provider)")
+            response_metadata = await self._llm_manager.query(
+                prompt=prompt,
+                provider_alias=None,  # Auto-select vision provider
+                images=images,
+                return_metadata=True,
+            )
+
+            response = response_metadata.get("response", "")
+
+            # Build response message in Ouroboros format
+            response_msg: Dict[str, Any] = {
+                "role": "assistant",
+                "content": response,
+            }
+
+            # Parse for tool calls if tools were provided
+            if tools:
+                log.debug(f"Parsing tool calls from vision response (len={len(response)})")
+                tool_calls = self._parse_tool_calls(response)
+                if tool_calls:
+                    response_msg["tool_calls"] = tool_calls
+                    log.info(f"Found {len(tool_calls)} tool call(s) in vision response")
+
+            # Build usage dict from response metadata
+            usage: Dict[str, Any] = {
+                "prompt_tokens": response_metadata.get("prompt_tokens", 0),
+                "completion_tokens": response_metadata.get("completion_tokens", 0),
+                "total_tokens": response_metadata.get("total_tokens", 0),
+                "cost": 0.0,  # DPC tracks cost separately
+            }
+
+            return response_msg, usage
+
+        except Exception as e:
+            log.error(f"Vision query error: {e}")
             raise
 
     def _messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:

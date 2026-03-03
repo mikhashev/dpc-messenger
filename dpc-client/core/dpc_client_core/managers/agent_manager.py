@@ -224,6 +224,10 @@ class DpcAgentManager:
         conversation_id: str,
         include_context: bool = True,
         on_stream_chunk=None,
+        # Image parameters for vision queries
+        image_base64: Optional[str] = None,
+        image_mime: str = "image/png",
+        image_caption: Optional[str] = None,
     ) -> str:
         """
         Process a user message through the agent.
@@ -233,6 +237,9 @@ class DpcAgentManager:
             conversation_id: Unique ID for this conversation
             include_context: Whether to include DPC personal/device context
             on_stream_chunk: Optional async callback for streaming text chunks: await on_stream_chunk(chunk, conversation_id)
+            image_base64: Optional base64-encoded image data for vision queries
+            image_mime: MIME type of the image (default: image/png)
+            image_caption: Optional caption for the image
 
         Returns:
             Agent's response text
@@ -302,6 +309,10 @@ class DpcAgentManager:
                 on_stream_chunk=emit_stream_chunk,
                 session_state=session_state,
                 conversation_monitor=monitor,  # For knowledge extraction tool
+                # Pass image parameters for vision queries
+                image_base64=image_base64,
+                image_mime=image_mime,
+                image_caption=image_caption,
             )
 
             # Track agent response in monitor (reuse existing method)

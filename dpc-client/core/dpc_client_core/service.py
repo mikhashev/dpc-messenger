@@ -315,6 +315,9 @@ class CoreService:
         self._voice_transcription_settings: Dict[str, bool] = {}  # node_id -> enabled (per-conversation setting)
         self._load_voice_transcription_settings()  # Load from disk
 
+        # Per-conversation chat provider selection (v0.20.0+)
+        self._chat_providers: Dict[str, str] = {}  # conversation_id -> provider_alias
+
         # Hub reconnection settings
         self._hub_reconnect_attempts = 0
         self._max_hub_reconnect_attempts = 5
@@ -6005,6 +6008,42 @@ Respond in JSON format:
 
             # Extract dimensions
             dimensions = get_image_dimensions(tmp_path)
+
+            # Get the provider for this conversation
+            chat_provider = self._chat_providers.get(conversation_id)
+
+            # Check if this is a Dpc_agent conversation
+            if chat_provider == 'dpc_agent' and hasattr(self, 'agent_manager') and self.agent_manager:
+                # Route to DPC Agent for vision analysis
+                logger.info(f"Agent vision analysis: {filename}")
+
+                response = await self.agent_manager.process_message(
+                    message=caption or "Analyze this screenshot",
+                    conversation_id=conversation_id,
+                    include_context=True,
+                    image_base64=data,  # Raw base64 without data URL prefix
+                    image_mime=mime_type,
+                    image_caption=caption,
+                )
+
+                # Broadcast result
+                await self.local_api.broadcast_event("ai_response_with_image", {
+                    "conversation_id": conversation_id,
+                    "query": caption or "Analyze this screenshot",
+                    "response": response,
+                    "provider": "dpc_agent",
+                    "model": "agent",
+                    "image_filename": filename,
+                    "image_dimensions": dimensions,
+                    "vision_used": True
+                })
+
+                return {
+                    "status": "analyzed",
+                    "conversation_id": conversation_id,
+                    "filename": filename,
+                    "dimensions": dimensions
+                }
 
             if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
                 # AI Chat: Run vision analysis (supports local_ai and ai_chat_xxx conversations)
