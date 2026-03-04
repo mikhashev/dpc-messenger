@@ -314,7 +314,7 @@ class ContextFirewall:
         Returns:
             List of profile names (e.g., ['default', 'coding_assistant', 'restricted'])
         """
-        return list(self._rules.get('agent_profiles', {}).keys())
+        return list(self.rules.get('agent_profiles', {}).keys())
 
     def get_agent_profile_settings(self, profile_name: str) -> Optional[Dict[str, Any]]:
         """
@@ -326,7 +326,7 @@ class ContextFirewall:
         Returns:
             Dict with profile settings, or None if profile not found
         """
-        profiles = self._rules.get('agent_profiles', {})
+        profiles = self.rules.get('agent_profiles', {})
         if profile_name in profiles:
             return profiles[profile_name].copy()
         return None

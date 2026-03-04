@@ -1029,7 +1029,13 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'delete_group',  // v0.19.0 - delete group
             'get_conversation_settings',  // v0.21.0 - per-conversation settings
             'set_conversation_persist_history',  // v0.21.0 - toggle history persistence
-            'delete_conversation'  // v0.21.0 - delete entire conversation
+            'delete_conversation',  // v0.21.0 - delete entire conversation
+            'create_agent',  // DPC Agent isolation - create agent with isolated storage
+            'list_agents',  // DPC Agent isolation - list all agents
+            'get_agent_config',  // DPC Agent isolation - get agent configuration
+            'update_agent_config',  // DPC Agent isolation - update agent configuration
+            'delete_agent',  // DPC Agent isolation - delete agent
+            'list_agent_profiles'  // DPC Agent isolation - list permission profiles
         ].includes(command);
 
         if (expectsResponse) {
