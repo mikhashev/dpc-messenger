@@ -196,7 +196,7 @@
   const chatProviders = writable<Map<string, string>>(new Map());
 
   // Store AI chat metadata (chatId -> {name: string, provider: string, instruction_set_name?: string})
-  const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string, profile_name?: string}>>(
+  const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string, profile_name?: string, llm_provider?: string}>>(
     new Map([['local_ai', {name: 'Local AI Chat', provider: '', instruction_set_name: 'general'}]])
   );
 
@@ -250,6 +250,8 @@
   let selectedProviderForNewChat = $state("");
   let selectedInstructionSetForNewChat = $state("general");
   let selectedProfileForNewAgent = $state("default");  // Agent permission profile
+  let newAgentName = $state("");  // Agent name input
+  let selectedAgentLLMProvider = $state("");  // LLM provider for agent
 
   // Agent profiles state (v0.19.0+ - per-agent isolation)
   let availableAgentProfiles = $state<string[]>(["default"]);
@@ -2716,18 +2718,24 @@
 
     // Create new AI chat ID
     const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
-    const chatName = provider.alias === 'dpc_agent'
-      ? `Agent (${selectedProfileForNewAgent})`
-      : `${provider.alias} (${provider.model})`;
+
+    // Determine chat name
+    let chatName: string;
+    if (selectedProviderForNewChat === 'dpc_agent') {
+      // Use agent name if provided, otherwise use default
+      chatName = newAgentName.trim() || `Agent (${selectedProfileForNewAgent})`;
+    } else {
+      chatName = `${provider.alias} (${provider.model})`;
+    }
 
     // If creating a DPC Agent, also create backend agent storage (v0.19.0+)
     if (selectedProviderForNewChat === 'dpc_agent') {
       try {
         const result = await createAgent(
           chatName,
-          $availableProviders?.agent_provider || $availableProviders?.default_provider || 'dpc_agent',
+          selectedAgentLLMProvider || $availableProviders?.default_provider || 'dpc_agent',
           selectedProfileForNewAgent,
-          selectedInstructionSetForNewChat
+          'general'  // Default instruction set for agents
         );
         if (result?.status === 'success') {
           console.log('[DPC Agent] Created agent storage:', result.agent_id);
@@ -2748,8 +2756,9 @@
       newMap.set(chatId, {
         name: chatName,
         provider: selectedProviderForNewChat,
-        instruction_set_name: selectedInstructionSetForNewChat,
-        profile_name: selectedProviderForNewChat === 'dpc_agent' ? selectedProfileForNewAgent : undefined
+        instruction_set_name: selectedProviderForNewChat === 'dpc_agent' ? 'general' : selectedInstructionSetForNewChat,
+        profile_name: selectedProviderForNewChat === 'dpc_agent' ? selectedProfileForNewAgent : undefined,
+        llm_provider: selectedProviderForNewChat === 'dpc_agent' ? selectedAgentLLMProvider : undefined
       });
       return newMap;
     });
@@ -2779,6 +2788,8 @@
     showAddAIChatDialog = false;
     selectedProviderForNewChat = "";
     selectedProfileForNewAgent = "default";
+    newAgentName = "";
+    selectedAgentLLMProvider = "";
   }
 
   async function handleAddAgentChat() {
@@ -4465,23 +4476,29 @@
         </select>
       </div>
 
-      <div class="dialog-provider-selector">
-        <label for="new-chat-instruction-set">Instruction Set:</label>
-        <select id="new-chat-instruction-set" bind:value={selectedInstructionSetForNewChat}>
-          <option value="none">None (No Instructions)</option>
-          {#if availableInstructionSets}
-            {#each Object.entries(availableInstructionSets.sets) as [key, set]}
-              <option value={key}>
-                {set.name} {availableInstructionSets.default === key ? '⭐' : ''}
-              </option>
-            {/each}
-          {:else}
-            <option value="general">General Purpose</option>
-          {/if}
-        </select>
-      </div>
-
       {#if selectedProviderForNewChat === 'dpc_agent'}
+        <!-- Agent-specific fields -->
+        <div class="dialog-provider-selector">
+          <label for="new-agent-name">Agent Name:</label>
+          <input type="text" id="new-agent-name" bind:value={newAgentName} placeholder="Enter a name for this agent..." style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
+        </div>
+
+        <div class="dialog-provider-selector">
+          <label for="new-chat-llm-provider">LLM Provider:</label>
+          <select id="new-chat-llm-provider" bind:value={selectedAgentLLMProvider}>
+            {#each $availableProviders.providers as provider}
+              {#if provider.alias !== 'dpc_agent'}
+                <option value={provider.alias}>
+                  {provider.alias} - {provider.model}
+                </option>
+              {/if}
+            {/each}
+          </select>
+          <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+            Select the underlying LLM provider that this agent will use for queries.
+          </p>
+        </div>
+
         <div class="dialog-provider-selector">
           <label for="new-chat-profile">Permission Profile:</label>
           <select id="new-chat-profile" bind:value={selectedProfileForNewAgent}>
@@ -4494,6 +4511,23 @@
           <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
             Permission profiles control agent access to tools and context. Configure in Firewall Rules.
           </p>
+        </div>
+      {:else}
+        <!-- Non-agent fields: Instruction Set -->
+        <div class="dialog-provider-selector">
+          <label for="new-chat-instruction-set">Instruction Set:</label>
+          <select id="new-chat-instruction-set" bind:value={selectedInstructionSetForNewChat}>
+            <option value="none">None (No Instructions)</option>
+            {#if availableInstructionSets}
+              {#each Object.entries(availableInstructionSets.sets) as [key, set]}
+                <option value={key}>
+                  {set.name} {availableInstructionSets.default === key ? '⭐' : ''}
+                </option>
+              {/each}
+            {:else}
+              <option value="general">General Purpose</option>
+            {/if}
+          </select>
         </div>
       {/if}
 
