@@ -245,6 +245,11 @@
   let modelDownloadToastMessage = $state("");
   let modelDownloadToastType = $state<"info" | "error" | "warning">("info");
 
+  // Agent operation toast state (v0.19.0+)
+  let showAgentToast = $state(false);
+  let agentToastMessage = $state("");
+  let agentToastType = $state<"info" | "error" | "warning">("info");
+
   // Add AI Chat dialog state
   let showAddAIChatDialog = $state(false);
   let selectedProviderForNewChat = $state("");
@@ -970,6 +975,17 @@
       console.log('[Groups] Loaded group chats from backend');
     } catch (error) {
       console.error('[Groups] Failed to load group chats:', error);
+    }
+
+    // Load agents from backend (v0.19.0+)
+    try {
+      const agentsResult = await listAgents();
+      if (agentsResult?.status === 'success' && agentsResult.agents) {
+        agentsList.set(agentsResult.agents);
+        console.log(`[Agents] Loaded ${agentsResult.agents.length} agents from backend`);
+      }
+    } catch (error) {
+      console.error('[Agents] Failed to load agents:', error);
     }
   });
 
@@ -2746,8 +2762,18 @@
           console.log('[DPC Agent] Created agent storage:', result.agent_id);
           // Store agent_id in chat metadata for later reference
           agentChatToAgentId.set(chatId, result.agent_id);
+
+          // Show success toast
+          agentToastMessage = `Agent "${chatName}" created successfully`;
+          agentToastType = 'info';
+          showAgentToast = true;
+          setTimeout(() => { showAgentToast = false; }, 3000);
         } else {
           console.warn('[DPC Agent] Failed to create agent storage:', result?.message);
+          agentToastMessage = `Warning: Agent chat created but storage failed: ${result?.message}`;
+          agentToastType = 'warning';
+          showAgentToast = true;
+          setTimeout(() => { showAgentToast = false; }, 5000);
         }
       } catch (e) {
         console.warn('[DPC Agent] Error creating agent storage:', e);
@@ -2975,7 +3001,10 @@
       const result = await deleteAgent(agentId);
       if (result.status === 'error') {
         console.error('Failed to delete agent:', result.message);
-        alert(`Failed to delete agent: ${result.message}`);
+        agentToastMessage = `Failed to delete agent: ${result.message}`;
+        agentToastType = 'error';
+        showAgentToast = true;
+        setTimeout(() => { showAgentToast = false; }, 5000);
         return;
       }
 
@@ -3005,10 +3034,19 @@
         }
       }
 
+      // Show success toast
+      agentToastMessage = 'Agent deleted successfully';
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
       console.log('Agent deleted successfully');
     } catch (error) {
       console.error('Error deleting agent:', error);
-      alert(`Error deleting agent: ${error}`);
+      agentToastMessage = `Error deleting agent: ${error}`;
+      agentToastType = 'error';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 5000);
     }
   }
 
@@ -4540,6 +4578,15 @@
   />
 {/if}
 
+<!-- Agent Operation Toast (v0.19.0+) -->
+{#if showAgentToast}
+  <Toast
+    message={agentToastMessage}
+    type={agentToastType}
+    duration={agentToastType === 'error' ? 5000 : 3000}
+  />
+{/if}
+
 <!-- Vote Result Details Dialog -->
 <VoteResultDialog
   result={currentVoteResult}
@@ -4573,29 +4620,36 @@
       <p>Select an AI provider for the new chat:</p>
 
       <div class="dialog-provider-selector">
-        <label for="new-chat-provider">Provider:</label>
+        <label for="new-chat-provider">Chat Type:</label>
         <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
           {#each $availableProviders.providers as provider}
             <option value={provider.alias}>
               {#if provider.alias === 'dpc_agent'}
-                Agent (uses {$availableProviders?.agent_provider || $availableProviders?.default_provider || 'default'})
+                🤖 DPC Agent (Autonomous AI with tools)
               {:else}
                 {provider.alias} - {provider.model}
               {/if}
             </option>
           {/each}
         </select>
+        <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+          {#if selectedProviderForNewChat === 'dpc_agent'}
+            Agents are autonomous AI assistants with tool access (file system, web search, etc.)
+          {:else}
+            Standard AI chat using the selected provider
+          {/if}
+        </p>
       </div>
 
       {#if selectedProviderForNewChat === 'dpc_agent'}
         <!-- Agent-specific fields -->
         <div class="dialog-provider-selector">
           <label for="new-agent-name">Agent Name:</label>
-          <input type="text" id="new-agent-name" bind:value={newAgentName} placeholder="Enter a name for this agent..." style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
+          <input type="text" id="new-agent-name" bind:value={newAgentName} placeholder="e.g., Coding Assistant, Research Bot..." style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
         </div>
 
         <div class="dialog-provider-selector">
-          <label for="new-chat-llm-provider">LLM Provider:</label>
+          <label for="new-chat-llm-provider">AI Model (LLM):</label>
           <select id="new-chat-llm-provider" bind:value={selectedAgentLLMProvider}>
             {#each $availableProviders.providers as provider}
               {#if provider.alias !== 'dpc_agent'}
@@ -4606,7 +4660,7 @@
             {/each}
           </select>
           <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
-            Select the underlying LLM provider that this agent will use for queries.
+            The underlying AI model this agent will use for reasoning.
           </p>
         </div>
 
@@ -4620,7 +4674,7 @@
             {/each}
           </select>
           <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
-            Permission profiles control agent access to tools and context. Configure in Firewall Rules.
+            Controls what tools and data this agent can access. Configure in Firewall → Agent Profiles.
           </p>
         </div>
       {:else}
