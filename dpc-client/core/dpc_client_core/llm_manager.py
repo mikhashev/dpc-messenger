@@ -815,6 +815,12 @@ class ZaiProvider(AIProvider):
             logger.info(f"GLM streaming completed: {len(full_text)} chars")
             return full_text
 
+        except RuntimeError as e:
+            # Handle "Event loop is closed" during shutdown gracefully
+            if "Event loop is closed" in str(e):
+                logger.debug(f"Z.AI streaming cleanup skipped (event loop closed)")
+                return full_text  # Return what we have
+            raise
         except Exception as e:
             logger.error(f"Z.AI streaming failed: {e}", exc_info=True)
             raise RuntimeError(f"Z.AI streaming provider '{self.alias}' failed: {e}") from e
