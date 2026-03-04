@@ -164,6 +164,10 @@ class ContextFirewall:
             'reject_evolution_change': True,  # Safe, just removes pending change
             # Messaging tools (v0.18.0+)
             'send_user_message': True,  # Agent-initiated Telegram messages
+            # Task type management tools (v0.18.0+)
+            'register_task_type': True,  # Register custom task types
+            'list_task_types': True,  # List registered task types (safe, read-only)
+            'unregister_task_type': True,  # Unregister custom task types
         }
 
         # Parse tool permissions from config, using defaults for missing tools
@@ -1320,6 +1324,10 @@ class ContextFirewall:
                                 'list_extended_sandbox_paths',
                                 # Messaging tools (v0.18.0+)
                                 'send_user_message',
+                                # Knowledge extraction tools (v0.18.0+)
+                                'extract_knowledge', 'deduplicate_identity',
+                                # Task type management tools (v0.18.0+)
+                                'register_task_type', 'list_task_types', 'unregister_task_type',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):
