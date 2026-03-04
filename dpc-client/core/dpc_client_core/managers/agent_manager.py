@@ -61,7 +61,10 @@ class DpcAgentManager:
         self.agent_root = get_agent_root()
         ensure_agent_dirs()
 
-        # Agent instance (lazy initialization)
+        # Agent instances (Phase 3: per-provider agents)
+        # Key: provider_alias, Value: DpcAgent instance
+        self._agents: Dict[str, DpcAgent] = {}
+        # Default agent for backward compatibility
         self._agent: Optional[DpcAgent] = None
 
         # Telegram bridge for notifications
@@ -75,10 +78,72 @@ class DpcAgentManager:
 
     @property
     def agent(self) -> DpcAgent:
-        """Get the agent instance, initializing if needed."""
+        """Get the default agent instance, initializing if needed."""
         if self._agent is None:
             raise RuntimeError("Agent not initialized. Call start() first.")
         return self._agent
+
+    def _get_or_create_agent_for_provider(self, provider_alias: str) -> DpcAgent:
+        """
+        Get or create an agent configured with a specific LLM provider.
+
+        Phase 3: Per-agent provider selection - allows different agents to use
+        different underlying LLM providers.
+
+        Args:
+            provider_alias: The LLM provider alias to configure the agent with
+
+        Returns:
+            DpcAgent instance configured with the specified provider
+        """
+        # Check if we already have an agent for this provider
+        if provider_alias in self._agents:
+            return self._agents[provider_alias]
+
+        # If no provider specified or same as default, use default agent
+        if not provider_alias or (self._agent and provider_alias == "dpc_agent"):
+            if self._agent is None:
+                raise RuntimeError("Default agent not initialized. Call start() first.")
+            return self._agent
+
+        # Create a new agent with the specified provider
+        log.info(f"Creating new agent with provider: {provider_alias}")
+
+        # Get LLMManager from CoreService
+        llm_manager = getattr(self.service, "llm_manager", None)
+        if llm_manager is None:
+            raise RuntimeError("CoreService does not have llm_manager")
+
+        # Build agent config (same as default but with different provider)
+        evolution_enabled = self.firewall.evolution_enabled if self.firewall else False
+        evolution_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
+        evolution_auto = self.firewall.evolution_auto_apply if self.firewall else False
+
+        agent_config = AgentConfig(
+            budget_usd=self.config.get("budget_usd", 50.0),
+            max_rounds=self.config.get("max_rounds", 200),
+            background_consciousness=False,  # Per-provider agents don't run background tasks
+            enable_task_queue=False,  # Per-provider agents don't run task queue
+            evolution_enabled=evolution_enabled,
+            evolution_interval_minutes=evolution_interval,
+            evolution_auto_apply=evolution_auto,
+            billing_model=self.config.get("billing_model", "subscription"),
+        )
+
+        # Create agent with specific provider
+        new_agent = DpcAgent(
+            llm_manager=llm_manager,
+            config=agent_config,
+            agent_root=self.agent_root,
+            firewall=self.firewall,
+            provider_alias=provider_alias,  # Phase 3: Use specific provider
+        )
+
+        # Cache for reuse
+        self._agents[provider_alias] = new_agent
+        log.info(f"Created and cached agent for provider: {provider_alias}")
+
+        return new_agent
 
     async def start(self) -> None:
         """Initialize the agent and Telegram bridge."""
@@ -228,6 +293,8 @@ class DpcAgentManager:
         image_base64: Optional[str] = None,
         image_mime: str = "image/png",
         image_caption: Optional[str] = None,
+        # Phase 3: Per-agent provider selection
+        agent_llm_provider: Optional[str] = None,
     ) -> str:
         """
         Process a user message through the agent.
@@ -240,6 +307,7 @@ class DpcAgentManager:
             image_base64: Optional base64-encoded image data for vision queries
             image_mime: MIME type of the image (default: image/png)
             image_caption: Optional caption for the image
+            agent_llm_provider: Optional underlying LLM provider for this agent (Phase 3: per-agent provider selection)
 
         Returns:
             Agent's response text
@@ -301,7 +369,10 @@ class DpcAgentManager:
             # Get session state for agent context (token usage, context window)
             session_state = self.get_session_state(conversation_id)
 
-            response = await self.agent.process(
+            # Phase 3: Get provider-specific agent if agent_llm_provider is specified
+            agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
+
+            response = await agent.process(
                 message=message,
                 conversation_id=conversation_id,
                 dpc_context=dpc_context,
@@ -326,8 +397,8 @@ class DpcAgentManager:
 
             # Update token count in monitor after agent response
             # Get token usage from agent's last response
-            if hasattr(self._agent, '_last_usage') and self._agent._last_usage:
-                usage = self._agent._last_usage
+            if hasattr(agent, '_last_usage') and agent._last_usage:
+                usage = agent._last_usage
                 if usage.get("prompt_tokens"):
                     # Get context window from LLMManager (reuse existing)
                     llm_manager = getattr(self.service, "llm_manager", None)

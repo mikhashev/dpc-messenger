@@ -80,6 +80,8 @@ class DpcAgent:
         config: Optional[AgentConfig] = None,
         agent_root: Optional[pathlib.Path] = None,
         firewall: Optional[Any] = None,  # ContextFirewall for tool control
+        provider_alias: Optional[str] = None,  # Per-agent provider override (Phase 3)
+        firewall_profile: Optional[str] = None,  # Per-agent permission profile (Phase 2)
     ):
         """
         Initialize the agent.
@@ -89,14 +91,18 @@ class DpcAgent:
             config: Agent configuration
             agent_root: Storage root (defaults to ~/.dpc/agent/)
             firewall: ContextFirewall instance for tool permissions
+            provider_alias: Specific LLM provider to use (overrides agent_provider)
+            firewall_profile: Permission profile name from privacy_rules.json
         """
         self.config = config or AgentConfig()
         self.agent_root = agent_root or get_agent_root()
         self._firewall = firewall  # Firewall controls tool access
+        self._provider_alias = provider_alias  # Store for LLM adapter
+        self._firewall_profile = firewall_profile  # Store for tool permission lookups
         ensure_agent_dirs()
 
         # Initialize components
-        self.llm = DpcLlmAdapter(llm_manager)
+        self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias)
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
 

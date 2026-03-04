@@ -6404,7 +6404,7 @@ Respond in JSON format:
             "reason": reason
         }
 
-    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None):
+    async def send_ai_query(self, prompt: str, compute_host: str = None, model: str = None, provider: str = None, conversation_id: str = None, agent_llm_provider: str = None):
         """
         Send an AI query, either to local LLM or to a remote peer for inference.
 
@@ -6416,6 +6416,7 @@ Respond in JSON format:
             model: Optional model name to use
             provider: Optional provider alias to use
             conversation_id: Optional conversation ID for progress tracking (DPC Agent)
+            agent_llm_provider: Optional underlying LLM provider for DPC Agent (Phase 3)
 
         Returns:
             Dict with 'response', 'model', 'provider', and 'compute_host' keys
@@ -6429,7 +6430,8 @@ Respond in JSON format:
             compute_host=compute_host,
             model=model,
             provider=provider,
-            conversation_id=conversation_id
+            conversation_id=conversation_id,
+            agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
         )
 
     # --- Context Request Methods ---
@@ -7210,7 +7212,7 @@ Respond in JSON format:
 
     # --- AI Query Methods ---
 
-    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, **kwargs):
+    async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
 
@@ -7224,6 +7226,7 @@ Respond in JSON format:
             include_context: If True, includes personal context, device context, and AI instructions (default: True)
             ai_scope: Optional AI scope name for filtering what the AI can access (None = no filtering)
             instruction_set_name: Optional instruction set key to use for this query (None = use conversation's default or global default)
+            agent_llm_provider: Optional underlying LLM provider for DPC Agent (Phase 3: per-agent provider selection)
             **kwargs: Additional arguments (including conversation_id)
         """
         logger.info("Orchestrating AI query for command_id %s: '%s...'", command_id, prompt[:50])
@@ -7415,7 +7418,8 @@ Respond in JSON format:
                 compute_host=compute_host,
                 model=model,
                 provider=provider,
-                conversation_id=conversation_id
+                conversation_id=conversation_id,
+                agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
             )
             # result is a dict with 'response', 'model', 'provider', 'compute_host'
             # and potentially 'tokens_used', 'model_max_tokens' for local inference

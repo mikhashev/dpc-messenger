@@ -2311,6 +2311,11 @@
       if (chatSpecificProvider) {
         // Use chat-specific provider (e.g., dpc_agent for agent chats)
         payload.provider = chatSpecificProvider;
+
+        // For DPC Agent, pass the underlying LLM provider (Phase 3: per-agent provider selection)
+        if (chatSpecificProvider === 'dpc_agent' && chatMetadata?.llm_provider) {
+          payload.agent_llm_provider = chatMetadata.llm_provider;
+        }
       } else {
         // Fall back to dropdown selection (supports remote inference)
         const textProvider = parseProviderSelection(selectedTextProvider);

@@ -1708,13 +1708,14 @@ class DpcAgentProvider(AIProvider):
 
         return self._manager
 
-    async def generate_response(self, prompt: str, conversation_id: str = None, **kwargs) -> str:
+    async def generate_response(self, prompt: str, conversation_id: str = None, agent_llm_provider: str = None, **kwargs) -> str:
         """
         Process a message through the autonomous agent.
 
         Args:
             prompt: User message text
             conversation_id: Optional conversation ID for progress tracking
+            agent_llm_provider: Optional underlying LLM provider for this agent (Phase 3)
             **kwargs: Additional arguments (ignored)
 
         Returns:
@@ -1736,6 +1737,7 @@ class DpcAgentProvider(AIProvider):
                 message=prompt,
                 conversation_id=conversation_id,
                 include_context=True,
+                agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
             )
 
             logger.info(f"DpcAgentProvider '{self.alias}': Generated response ({len(response)} chars)")
@@ -1750,6 +1752,7 @@ class DpcAgentProvider(AIProvider):
         prompt: str,
         on_chunk: callable,
         conversation_id: str = None,
+        agent_llm_provider: str = None,
         **kwargs
     ) -> str:
         """
@@ -1759,6 +1762,7 @@ class DpcAgentProvider(AIProvider):
             prompt: User message text
             on_chunk: Async callback for each text chunk: await on_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for progress tracking
+            agent_llm_provider: Optional underlying LLM provider for this agent (Phase 3)
             **kwargs: Additional arguments (ignored)
 
         Returns:
@@ -1779,6 +1783,7 @@ class DpcAgentProvider(AIProvider):
                 conversation_id=conversation_id,
                 include_context=True,
                 on_stream_chunk=None,  # Manager handles broadcast directly
+                agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
             )
 
             logger.info(f"DpcAgentProvider '{self.alias}': Generated streaming response ({len(response)} chars)")

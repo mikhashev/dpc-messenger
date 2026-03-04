@@ -33,14 +33,20 @@ class DpcLlmAdapter:
     the embedded agent to use DPC's configured AI providers.
     """
 
-    def __init__(self, llm_manager: "LLMManager"):
+    def __init__(
+        self,
+        llm_manager: "LLMManager",
+        provider_alias: Optional[str] = None,
+    ):
         """
         Initialize the adapter.
 
         Args:
             llm_manager: DPC's LLMManager instance (injected from CoreService)
+            provider_alias: Specific provider to use (overrides agent_provider/default_provider)
         """
         self._llm_manager = llm_manager
+        self._provider_alias = provider_alias  # Per-agent provider override
         self._default_model: Optional[str] = None
         # Reuse existing TokenCountManager for accurate token counting
         self._token_counter = getattr(llm_manager, 'token_count_manager', None)
@@ -52,12 +58,18 @@ class DpcLlmAdapter:
         Get the provider alias to use for agent inference.
 
         Priority:
-        1. agent_provider (if configured)
-        2. default_provider (fallback)
+        1. Per-agent provider_alias (if set via constructor)
+        2. agent_provider (if configured in LLMManager)
+        3. default_provider (fallback)
 
         Returns:
             Provider alias string, or None if no provider configured
         """
+        # v0.19.0+: Per-agent provider override (Phase 3)
+        if self._provider_alias and self._provider_alias in self._llm_manager.providers:
+            log.debug(f"Using per-agent provider: {self._provider_alias}")
+            return self._provider_alias
+
         # v0.18.0+: Use agent_provider if configured
         agent_provider = getattr(self._llm_manager, 'agent_provider', None)
         if agent_provider and agent_provider in self._llm_manager.providers:
