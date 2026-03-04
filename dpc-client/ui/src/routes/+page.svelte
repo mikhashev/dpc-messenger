@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, agentCreated, agentsList } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -196,7 +196,7 @@
   const chatProviders = writable<Map<string, string>>(new Map());
 
   // Store AI chat metadata (chatId -> {name: string, provider: string, instruction_set_name?: string})
-  const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string}>>(
+  const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string, profile_name?: string}>>(
     new Map([['local_ai', {name: 'Local AI Chat', provider: '', instruction_set_name: 'general'}]])
   );
 
@@ -249,6 +249,13 @@
   let showAddAIChatDialog = $state(false);
   let selectedProviderForNewChat = $state("");
   let selectedInstructionSetForNewChat = $state("general");
+  let selectedProfileForNewAgent = $state("default");  // Agent permission profile
+
+  // Agent profiles state (v0.19.0+ - per-agent isolation)
+  let availableAgentProfiles = $state<string[]>(["default"]);
+
+  // Map: AI chat ID -> backend agent_id (for agent chats)
+  let agentChatToAgentId = $state<Map<string, string>>(new Map());
 
   // Instruction Sets state
   type InstructionSets = {
@@ -2673,19 +2680,31 @@
     proposeNewSession(chatId);
   }
 
-  function handleAddAIChat() {
+  async function handleAddAIChat() {
     if (!$availableProviders || !$availableProviders.providers || $availableProviders.providers.length === 0) {
       alert("No AI providers available. Please configure providers in ~/.dpc/providers.toml");
       return;
     }
 
+    // Load agent profiles from backend (v0.19.0+)
+    try {
+      const profilesResult = await listAgentProfiles();
+      if (profilesResult?.status === 'success' && profilesResult.profiles) {
+        availableAgentProfiles = profilesResult.profiles;
+      }
+    } catch (e) {
+      console.warn('Failed to load agent profiles:', e);
+      availableAgentProfiles = ["default"];
+    }
+
     // Set default selections and show dialog
     selectedProviderForNewChat = $availableProviders.default_provider;
     selectedInstructionSetForNewChat = availableInstructionSets?.default || "general";
+    selectedProfileForNewAgent = "default";
     showAddAIChatDialog = true;
   }
 
-  function confirmAddAIChat() {
+  async function confirmAddAIChat() {
     if (!selectedProviderForNewChat) return;
 
     // Find the selected provider
@@ -2697,7 +2716,31 @@
 
     // Create new AI chat ID
     const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
-    const chatName = `${provider.alias} (${provider.model})`;
+    const chatName = provider.alias === 'dpc_agent'
+      ? `Agent (${selectedProfileForNewAgent})`
+      : `${provider.alias} (${provider.model})`;
+
+    // If creating a DPC Agent, also create backend agent storage (v0.19.0+)
+    if (selectedProviderForNewChat === 'dpc_agent') {
+      try {
+        const result = await createAgent(
+          chatName,
+          $availableProviders?.agent_provider || $availableProviders?.default_provider || 'dpc_agent',
+          selectedProfileForNewAgent,
+          selectedInstructionSetForNewChat
+        );
+        if (result?.status === 'success') {
+          console.log('[DPC Agent] Created agent storage:', result.agent_id);
+          // Store agent_id in chat metadata for later reference
+          agentChatToAgentId.set(chatId, result.agent_id);
+        } else {
+          console.warn('[DPC Agent] Failed to create agent storage:', result?.message);
+        }
+      } catch (e) {
+        console.warn('[DPC Agent] Error creating agent storage:', e);
+        // Continue anyway - non-blocking
+      }
+    }
 
     // Add to aiChats
     aiChats.update(chats => {
@@ -2705,7 +2748,8 @@
       newMap.set(chatId, {
         name: chatName,
         provider: selectedProviderForNewChat,
-        instruction_set_name: selectedInstructionSetForNewChat
+        instruction_set_name: selectedInstructionSetForNewChat,
+        profile_name: selectedProviderForNewChat === 'dpc_agent' ? selectedProfileForNewAgent : undefined
       });
       return newMap;
     });
@@ -2734,6 +2778,7 @@
   function cancelAddAIChat() {
     showAddAIChatDialog = false;
     selectedProviderForNewChat = "";
+    selectedProfileForNewAgent = "default";
   }
 
   async function handleAddAgentChat() {
@@ -4476,6 +4521,22 @@
           {/if}
         </select>
       </div>
+
+      {#if selectedProviderForNewChat === 'dpc_agent'}
+        <div class="dialog-provider-selector">
+          <label for="new-chat-profile">Permission Profile:</label>
+          <select id="new-chat-profile" bind:value={selectedProfileForNewAgent}>
+            {#each availableAgentProfiles as profile}
+              <option value={profile}>
+                {profile}
+              </option>
+            {/each}
+          </select>
+          <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+            Permission profiles control agent access to tools and context. Configure in Firewall Rules.
+          </p>
+        </div>
+      {/if}
 
       <div class="dialog-actions">
         <button class="btn-cancel" onclick={cancelAddAIChat}>Cancel</button>

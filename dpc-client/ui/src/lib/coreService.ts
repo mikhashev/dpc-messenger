@@ -883,6 +883,37 @@ export function connectToCoreService() {
                     historyRestored.set(message.payload);
                     console.log(`Chat history restored: ${message.payload.message_count} messages from ${message.payload.conversation_id}`);
                 }
+                // DPC Agent events (v0.19.0+ - per-agent isolation)
+                else if (message.event === "agent_created") {
+                    console.log("Agent created:", message.payload);
+                    agentCreated.set(message.payload);
+                    // Refresh agents list
+                    listAgents().then(result => {
+                        if (result.status === 'success') {
+                            agentsList.set(result.agents || []);
+                        }
+                    });
+                }
+                else if (message.event === "agent_updated") {
+                    console.log("Agent updated:", message.payload);
+                    agentUpdated.set(message.payload);
+                    // Refresh agents list
+                    listAgents().then(result => {
+                        if (result.status === 'success') {
+                            agentsList.set(result.agents || []);
+                        }
+                    });
+                }
+                else if (message.event === "agent_deleted") {
+                    console.log("Agent deleted:", message.payload);
+                    agentDeleted.set(message.payload);
+                    // Refresh agents list
+                    listAgents().then(result => {
+                        if (result.status === 'success') {
+                            agentsList.set(result.agents || []);
+                        }
+                    });
+                }
             } catch (error) {
                 console.error("Error parsing message:", error);
             }
@@ -1333,4 +1364,98 @@ export async function deleteConversation(conversationId: string): Promise<any> {
     return sendCommand('delete_conversation', {
         conversation_id: conversationId
     });
+}
+
+// --- DPC Agent Management (v0.19.0+) ---
+
+export interface AgentInfo {
+    agent_id: string;
+    name: string;
+    provider_alias: string;
+    profile_name: string;
+    instruction_set_name: string;
+    created_at: string;
+    updated_at?: string;
+}
+
+export interface AgentConfig {
+    agent_id: string;
+    name: string;
+    provider_alias: string;
+    profile_name: string;
+    instruction_set_name: string;
+    created_at: string;
+    updated_at?: string;
+    budget_usd?: number;
+    max_rounds?: number;
+}
+
+// Agent stores
+export const agentsList = writable<AgentInfo[]>([]);
+export const agentCreated = writable<any>(null);
+export const agentUpdated = writable<any>(null);
+export const agentDeleted = writable<any>(null);
+export const agentProfiles = writable<string[]>([]);
+
+/**
+ * Create a new DPC Agent with isolated storage.
+ */
+export async function createAgent(
+    name: string,
+    providerAlias: string = "dpc_agent",
+    profileName: string = "default",
+    instructionSetName: string = "general",
+    budgetUsd: number = 50.0,
+    maxRounds: number = 200
+): Promise<any> {
+    return sendCommand('create_agent', {
+        name,
+        provider_alias: providerAlias,
+        profile_name: profileName,
+        instruction_set_name: instructionSetName,
+        budget_usd: budgetUsd,
+        max_rounds: maxRounds
+    });
+}
+
+/**
+ * List all registered DPC Agents.
+ */
+export async function listAgents(): Promise<any> {
+    return sendCommand('list_agents', {});
+}
+
+/**
+ * Get configuration for a specific agent.
+ */
+export async function getAgentConfig(agentId: string): Promise<any> {
+    return sendCommand('get_agent_config', {
+        agent_id: agentId
+    });
+}
+
+/**
+ * Update configuration for a specific agent.
+ */
+export async function updateAgentConfig(agentId: string, updates: Record<string, any>): Promise<any> {
+    return sendCommand('update_agent_config', {
+        agent_id: agentId,
+        updates
+    });
+}
+
+/**
+ * Delete a DPC Agent and its storage.
+ */
+export async function deleteAgent(agentId: string): Promise<any> {
+    return sendCommand('delete_agent', {
+        agent_id: agentId
+    });
+}
+
+/**
+ * List available agent permission profiles.
+ */
+export async function listAgentProfiles(): Promise<any> {
+    return sendCommand('list_agent_profiles', {});
 }
