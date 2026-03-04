@@ -91,8 +91,9 @@
     device_sharing?: Record<string, Record<string, string>>;
   };
 
-  // Agent profile management state
-  let selectedProfileName: string = 'default';
+  // Agent management state
+  let agents: Array<{ agent_id: string; name: string; provider_alias?: string; profile_name?: string }> = [];
+  let selectedAgentId: string = 'default';
   let newProfileName: string = '';
 
   let rules: FirewallRules | null = null;
@@ -116,6 +117,24 @@
   // Load rules when modal opens
   $: if (open && !rules) {
     loadRules();
+  }
+
+  // Load agents when modal opens and dpc-agent tab is selected
+  $: if (open && selectedTab === 'dpc-agent') {
+    loadAgents();
+  }
+
+  async function loadAgents() {
+    try {
+      const result = await sendCommand('list_agents', {});
+      if (result.status === 'success' && result.agents) {
+        agents = result.agents;
+      } else {
+        console.error('Failed to load agents:', result.message);
+      }
+    } catch (error) {
+      console.error('Error loading agents:', error);
+    }
   }
 
   // Sync string variables with arrays when entering edit mode
@@ -454,11 +473,21 @@
 
     if (confirm(`Are you sure you want to delete the profile "${profileName}"?`)) {
       delete editedRules.agent_profiles[profileName];
-      // Switch to default profile
-      selectedProfileName = 'default';
+      // Switch to default
+      selectedAgentId = 'default';
       editedRules = editedRules;  // Trigger Svelte reactivity
     }
   }
+
+  // Get the profile name for the currently selected agent
+  function getSelectedAgentProfile(): string {
+    if (selectedAgentId === 'default') return 'default';
+    const agent = agents.find(a => a.agent_id === selectedAgentId);
+    return agent?.profile_name || 'default';
+  }
+
+  // Get computed profile name based on selection
+  $: selectedProfileName = getSelectedAgentProfile();
 
   // File Groups Management Functions
   function addFileGroup() {
@@ -1618,51 +1647,30 @@
             <h3>DPC Agent Permissions</h3>
             <p class="help-text">Control what the embedded AI agent can access and which tools it can use.</p>
 
-            <!-- Profile Selector -->
+            <!-- Agent Selector -->
             <div class="profile-selector" style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">
-              <label for="agent-profile-select" style="font-weight: 600;">Edit Profile:</label>
+              <label for="agent-select" style="font-weight: 600;">Select Agent:</label>
               <select
-                id="agent-profile-select"
-                bind:value={selectedProfileName}
+                id="agent-select"
+                bind:value={selectedAgentId}
                 style="flex: 1; min-width: 200px; padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border-color);"
               >
-                <option value="default">default (global settings)</option>
-                {#if displayRules?.agent_profiles}
-                  {#each Object.keys(displayRules.agent_profiles).filter(name => name !== 'default') as profileName}
-                    <option value={profileName}>{profileName}</option>
+                <option value="default">Global Settings (default)</option>
+                {#if agents && agents.length > 0}
+                  {#each agents as agent}
+                    <option value={agent.agent_id}>{agent.name} ({agent.agent_id})</option>
                   {/each}
                 {/if}
               </select>
 
-              {#if editMode}
-                <div style="display: flex; gap: 0.5rem; align-items: center;">
-                  <input
-                    type="text"
-                    placeholder="New profile name"
-                    bind:value={newProfileName}
-                    style="padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border-color); width: 150px;"
-                  />
-                  <button
-                    class="btn btn-add"
-                    on:click={addAgentProfile}
-                    disabled={!newProfileName.trim() || (editedRules?.agent_profiles && newProfileName.trim() in editedRules.agent_profiles)}
-                  >
-                    + Add
-                  </button>
-                  {#if selectedProfileName !== 'default'}
-                    <button
-                      class="btn btn-danger"
-                      on:click={() => deleteAgentProfile(selectedProfileName)}
-                      title="Delete current profile"
-                    >
-                      🗑️
-                    </button>
-                  {/if}
-                </div>
+              {#if selectedAgentId !== 'default' && getSelectedAgentProfile() !== 'default'}
+                <span style="color: var(--text-secondary); font-size: 0.9rem;">
+                  Uses profile: <strong>{getSelectedAgentProfile()}</strong>
+                </span>
               {/if}
             </div>
 
-            {#if selectedProfileName === 'default'}
+            {#if selectedAgentId === 'default'}
               <!-- Default Profile: Edit dpc_agent section -->
               {#if displayRules?.dpc_agent}
               <div class="compute-settings">
