@@ -30,27 +30,342 @@ log = logging.getLogger(__name__)
 # Agent Storage
 # ---------------------------------------------------------------------------
 
-def get_agent_root() -> pathlib.Path:
+def get_agent_root(agent_id: Optional[str] = None) -> pathlib.Path:
     """
     Get the agent's storage root directory.
+
+    Args:
+        agent_id: Optional agent ID. If provided, returns path to ~/.dpc/agents/{agent_id}/
+                  If None, returns path to ~/.dpc/agent/ (legacy/default location)
 
     All agent files (memory, logs, state, knowledge) are stored here.
     This is sandboxed to prevent the agent from accessing other DPC files.
     """
-    agent_root = pathlib.Path.home() / ".dpc" / "agent"
+    if agent_id:
+        # Per-agent isolation: ~/.dpc/agents/{agent_id}/
+        agent_root = pathlib.Path.home() / ".dpc" / "agents" / agent_id
+    else:
+        # Legacy/default location: ~/.dpc/agent/
+        agent_root = pathlib.Path.home() / ".dpc" / "agent"
     agent_root.mkdir(parents=True, exist_ok=True)
     return agent_root
 
 
-def ensure_agent_dirs() -> None:
-    """Ensure all agent subdirectories exist."""
-    root = get_agent_root()
+def get_agents_base_dir() -> pathlib.Path:
+    """Get the base directory for all agents (~/.dpc/agents/)."""
+    base_dir = pathlib.Path.home() / ".dpc" / "agents"
+    base_dir.mkdir(parents=True, exist_ok=True)
+    return base_dir
+
+
+def ensure_agent_dirs(agent_id: Optional[str] = None) -> None:
+    """
+    Ensure all agent subdirectories exist.
+
+    Args:
+        agent_id: Optional agent ID for per-agent storage
+    """
+    root = get_agent_root(agent_id)
     (root / "memory").mkdir(exist_ok=True)
     (root / "logs").mkdir(exist_ok=True)
     (root / "state").mkdir(exist_ok=True)
     (root / "knowledge").mkdir(exist_ok=True)
     (root / "task_results").mkdir(exist_ok=True)
     (root / "logs" / "tasks").mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Agent Registry
+# ---------------------------------------------------------------------------
+
+class AgentRegistry:
+    """
+    Manages the agent registry stored in ~/.dpc/agents/_registry.json.
+
+    The registry tracks all created agents with their metadata,
+    provider selections, and permission profiles.
+    """
+
+    REGISTRY_VERSION = 1
+    REGISTRY_FILE = "_registry.json"
+
+    def __init__(self):
+        self._registry_path = get_agents_base_dir() / self.REGISTRY_FILE
+        self._registry = self._load_registry()
+
+    def _load_registry(self) -> Dict[str, Any]:
+        """Load registry from disk or create default."""
+        if self._registry_path.exists():
+            try:
+                return json.loads(self._registry_path.read_text(encoding="utf-8"))
+            except Exception as e:
+                log.warning(f"Failed to load agent registry: {e}, creating new")
+
+        return {
+            "version": self.REGISTRY_VERSION,
+            "agents": {}
+        }
+
+    def _save_registry(self) -> None:
+        """Save registry to disk."""
+        self._registry_path.parent.mkdir(parents=True, exist_ok=True)
+        self._registry_path.write_text(
+            json.dumps(self._registry, indent=2, ensure_ascii=False),
+            encoding="utf-8"
+        )
+
+    def list_agents(self) -> List[Dict[str, Any]]:
+        """List all registered agents."""
+        return list(self._registry.get("agents", {}).values())
+
+    def get_agent(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """Get agent metadata by ID."""
+        return self._registry.get("agents", {}).get(agent_id)
+
+    def register_agent(
+        self,
+        agent_id: str,
+        name: str,
+        provider_alias: str = "dpc_agent",
+        profile_name: str = "default",
+        instruction_set_name: str = "general",
+    ) -> Dict[str, Any]:
+        """
+        Register a new agent.
+
+        Args:
+            agent_id: Unique agent identifier
+            name: Human-readable agent name
+            provider_alias: AI provider to use
+            profile_name: Permission profile name
+            instruction_set_name: Instruction set for the agent
+
+        Returns:
+            Agent metadata dict
+        """
+        agent_meta = {
+            "agent_id": agent_id,
+            "name": name,
+            "provider_alias": provider_alias,
+            "profile_name": profile_name,
+            "created_at": utc_now_iso(),
+            "instruction_set_name": instruction_set_name,
+        }
+        self._registry["agents"][agent_id] = agent_meta
+        self._save_registry()
+        log.info(f"Registered agent: {agent_id} ({name})")
+        return agent_meta
+
+    def unregister_agent(self, agent_id: str) -> bool:
+        """
+        Remove agent from registry.
+
+        Args:
+            agent_id: Agent to remove
+
+        Returns:
+            True if agent was removed, False if not found
+        """
+        if agent_id in self._registry.get("agents", {}):
+            del self._registry["agents"][agent_id]
+            self._save_registry()
+            log.info(f"Unregistered agent: {agent_id}")
+            return True
+        return False
+
+    def update_agent(self, agent_id: str, updates: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Update agent metadata.
+
+        Args:
+            agent_id: Agent to update
+            updates: Fields to update
+
+        Returns:
+            Updated agent metadata or None if not found
+        """
+        if agent_id not in self._registry.get("agents", {}):
+            return None
+
+        self._registry["agents"][agent_id].update(updates)
+        self._registry["agents"][agent_id]["updated_at"] = utc_now_iso()
+        self._save_registry()
+        return self._registry["agents"][agent_id]
+
+
+def generate_agent_id() -> str:
+    """Generate a unique agent ID."""
+    import uuid
+    return f"agent_{uuid.uuid4().hex[:12]}"
+
+
+def migrate_legacy_agent() -> bool:
+    """
+    Migrate legacy ~/.dpc/agent/ folder to ~/.dpc/agents/default/.
+
+    Returns:
+        True if migration was performed, False if not needed
+    """
+    legacy_path = pathlib.Path.home() / ".dpc" / "agent"
+    new_path = get_agent_root("default")
+
+    # Check if migration is needed
+    if not legacy_path.exists():
+        return False
+
+    # Check if already migrated
+    if new_path.exists():
+        log.debug("Legacy agent already migrated")
+        return False
+
+    # Perform migration
+    try:
+        import shutil
+        shutil.move(str(legacy_path), str(new_path))
+        log.info(f"Migrated legacy agent from {legacy_path} to {new_path}")
+
+        # Register default agent in registry
+        registry = AgentRegistry()
+        if not registry.get_agent("default"):
+            registry.register_agent(
+                agent_id="default",
+                name="Default Agent",
+                provider_alias="dpc_agent",
+                profile_name="default",
+            )
+
+        return True
+    except Exception as e:
+        log.error(f"Failed to migrate legacy agent: {e}")
+        return False
+
+
+def get_agent_config_path(agent_id: str) -> pathlib.Path:
+    """Get the path to an agent's config.json file."""
+    return get_agent_root(agent_id) / "config.json"
+
+
+def load_agent_config(agent_id: str) -> Dict[str, Any]:
+    """
+    Load agent-specific configuration from ~/.dpc/agents/{agent_id}/config.json.
+
+    Returns empty dict if config doesn't exist.
+    """
+    config_path = get_agent_config_path(agent_id)
+    if config_path.exists():
+        try:
+            return json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.warning(f"Failed to load agent config for {agent_id}: {e}")
+    return {}
+
+
+def save_agent_config(agent_id: str, config: Dict[str, Any]) -> None:
+    """
+    Save agent configuration to ~/.dpc/agents/{agent_id}/config.json.
+    """
+    config_path = get_agent_config_path(agent_id)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(config, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
+    log.debug(f"Saved config for agent {agent_id}")
+
+
+def create_agent_storage(
+    agent_id: str,
+    name: str,
+    provider_alias: str = "dpc_agent",
+    profile_name: str = "default",
+    instruction_set_name: str = "general",
+    budget_usd: float = 50.0,
+    max_rounds: int = 200,
+    **extra_config
+) -> Dict[str, Any]:
+    """
+    Create a new agent with isolated storage and configuration.
+
+    Args:
+        agent_id: Unique agent identifier
+        name: Human-readable agent name
+        provider_alias: AI provider to use
+        profile_name: Permission profile name
+        instruction_set_name: Instruction set for the agent
+        budget_usd: Budget limit in USD
+        max_rounds: Maximum LLM rounds per task
+        **extra_config: Additional config fields
+
+    Returns:
+        Agent configuration dict
+    """
+    # Ensure agent directories exist
+    ensure_agent_dirs(agent_id)
+
+    # Create config
+    config = {
+        "agent_id": agent_id,
+        "name": name,
+        "provider_alias": provider_alias,
+        "profile_name": profile_name,
+        "instruction_set_name": instruction_set_name,
+        "created_at": utc_now_iso(),
+        "budget_usd": budget_usd,
+        "max_rounds": max_rounds,
+        **extra_config
+    }
+
+    # Save config
+    save_agent_config(agent_id, config)
+
+    # Register in global registry
+    registry = AgentRegistry()
+    registry.register_agent(
+        agent_id=agent_id,
+        name=name,
+        provider_alias=provider_alias,
+        profile_name=profile_name,
+        instruction_set_name=instruction_set_name,
+    )
+
+    log.info(f"Created agent storage for {agent_id} ({name})")
+    return config
+
+
+def delete_agent_storage(agent_id: str) -> bool:
+    """
+    Delete an agent's storage folder and unregister it.
+
+    Args:
+        agent_id: Agent to delete
+
+    Returns:
+        True if deleted, False if not found
+    """
+    import shutil
+
+    agent_path = get_agent_root(agent_id)
+
+    if not agent_path.exists():
+        return False
+
+    # Don't allow deleting the default agent's folder
+    if agent_id == "default":
+        log.warning("Cannot delete default agent storage")
+        return False
+
+    try:
+        shutil.rmtree(agent_path)
+
+        # Unregister from registry
+        registry = AgentRegistry()
+        registry.unregister_agent(agent_id)
+
+        log.info(f"Deleted agent storage for {agent_id}")
+        return True
+    except Exception as e:
+        log.error(f"Failed to delete agent storage for {agent_id}: {e}")
+        return False
 
 
 # ---------------------------------------------------------------------------

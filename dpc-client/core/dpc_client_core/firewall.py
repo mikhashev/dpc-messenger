@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Optional, Set
 import fnmatch
 from copy import deepcopy
 
@@ -304,6 +304,57 @@ class ContextFirewall:
         # Override: knowledge_write requires read_write access
         if self.dpc_agent_knowledge_access != 'read_write':
             allowed.discard('knowledge_write')
+
+        return allowed
+
+    def list_agent_profiles(self) -> List[str]:
+        """
+        List available agent permission profiles.
+
+        Returns:
+            List of profile names (e.g., ['default', 'coding_assistant', 'restricted'])
+        """
+        return list(self._rules.get('agent_profiles', {}).keys())
+
+    def get_agent_profile_settings(self, profile_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get settings for a specific agent profile.
+
+        Args:
+            profile_name: Name of the profile to load
+
+        Returns:
+            Dict with profile settings, or None if profile not found
+        """
+        profiles = self._rules.get('agent_profiles', {})
+        if profile_name in profiles:
+            return profiles[profile_name].copy()
+        return None
+
+    def get_allowed_agent_tools_for_profile(self, profile_name: str) -> Set[str]:
+        """
+        Get allowed tools for a specific agent profile.
+
+        Args:
+            profile_name: Name of the profile to get tools for
+
+        Returns:
+            Set of allowed tool names based on profile configuration
+        """
+        profile = self.get_agent_profile_settings(profile_name)
+        if not profile:
+            # Fallback to global settings
+            return self.get_allowed_agent_tools()
+
+        if not profile.get('enabled', True):
+            return set()
+
+        tools_config = profile.get('tools', {})
+        allowed = set()
+
+        for tool_name, is_enabled in tools_config.items():
+            if is_enabled:
+                allowed.add(tool_name)
 
         return allowed
 
@@ -1352,6 +1403,65 @@ class ContextFirewall:
                                     errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
                             if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
                                 errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
+
+            # Validate agent_profiles section (v0.19.0+)
+            if 'agent_profiles' in config_dict:
+                agent_profiles = config_dict['agent_profiles']
+                if not isinstance(agent_profiles, dict):
+                    errors.append("'agent_profiles' section must be a dictionary")
+                else:
+                    for profile_name, profile_config in agent_profiles.items():
+                        if profile_name.startswith('_'):
+                            continue  # Skip comments
+                        if not isinstance(profile_config, dict):
+                            errors.append(f"Agent profile '{profile_name}' must be a dictionary")
+                        else:
+                            # Validate profile fields (inherit from dpc_agent structure)
+                            if 'enabled' in profile_config and not isinstance(profile_config['enabled'], bool):
+                                errors.append(f"'agent_profiles.{profile_name}.enabled' must be a boolean")
+                            if 'personal_context_access' in profile_config and not isinstance(profile_config['personal_context_access'], bool):
+                                errors.append(f"'agent_profiles.{profile_name}.personal_context_access' must be a boolean")
+                            if 'device_context_access' in profile_config and not isinstance(profile_config['device_context_access'], bool):
+                                errors.append(f"'agent_profiles.{profile_name}.device_context_access' must be a boolean")
+                            if 'knowledge_access' in profile_config:
+                                valid_access = ['none', 'read_only', 'read_write']
+                                if profile_config['knowledge_access'] not in valid_access:
+                                    errors.append(f"'agent_profiles.{profile_name}.knowledge_access' must be one of: {valid_access}")
+                            # Validate tools
+                            if 'tools' in profile_config:
+                                tools = profile_config['tools']
+                                if not isinstance(tools, dict):
+                                    errors.append(f"'agent_profiles.{profile_name}.tools' must be a dictionary")
+                                else:
+                                    # Use the same valid tools as dpc_agent
+                                    valid_tools = {
+                                        'repo_read', 'repo_list', 'repo_write_commit',
+                                        'drive_read', 'drive_list', 'drive_write',
+                                        'update_scratchpad', 'update_identity', 'chat_history',
+                                        'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                        'get_dpc_context',
+                                        'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
+                                        'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
+                                        'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
+                                        'repo_commit_push',
+                                        'run_shell', 'claude_code_edit',
+                                        'schedule_task', 'get_task_status',
+                                        'pause_evolution', 'resume_evolution', 'get_evolution_stats',
+                                        'approve_evolution_change', 'reject_evolution_change',
+                                        'search_files', 'search_in_file',
+                                        'extended_path_read', 'extended_path_list', 'extended_path_write',
+                                        'list_extended_sandbox_paths',
+                                        'send_user_message',
+                                        'extract_knowledge', 'deduplicate_identity',
+                                        'register_task_type', 'list_task_types', 'unregister_task_type',
+                                    }
+                                    for tool_name, tool_enabled in tools.items():
+                                        if tool_name.startswith('_'):
+                                            continue  # Skip comments
+                                        if tool_name not in valid_tools:
+                                            errors.append(f"Unknown tool in agent_profiles.{profile_name}.tools: '{tool_name}'")
+                                        if not isinstance(tool_enabled, bool):
+                                            errors.append(f"'agent_profiles.{profile_name}.tools.{tool_name}' must be a boolean")
 
             # Validate image_transfer section
             if 'image_transfer' in config_dict:

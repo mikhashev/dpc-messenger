@@ -7612,6 +7612,295 @@ Respond in JSON format:
         context_json = json.dumps(context_dict, sort_keys=True)
         return hashlib.sha256(context_json.encode('utf-8')).hexdigest()
 
+    # --- DPC Agent Management Methods ---
+
+    async def create_agent(
+        self,
+        name: str,
+        provider_alias: str = "dpc_agent",
+        profile_name: str = "default",
+        instruction_set_name: str = "general",
+        budget_usd: float = 50.0,
+        max_rounds: int = 200,
+    ) -> Dict[str, Any]:
+        """
+        Create a new DPC Agent with isolated storage.
+
+        Args:
+            name: Human-readable agent name
+            provider_alias: AI provider to use (from providers.json)
+            profile_name: Permission profile name (from agent_profiles in privacy_rules.json)
+            instruction_set_name: Instruction set for the agent
+            budget_usd: Budget limit in USD
+            max_rounds: Maximum LLM rounds per task
+
+        Returns:
+            Dict with status and agent info
+        """
+        from .dpc_agent.utils import (
+            generate_agent_id,
+            create_agent_storage,
+            AgentRegistry,
+            migrate_legacy_agent,
+        )
+
+        try:
+            # Perform migration if needed (legacy ~/.dpc/agent/ -> ~/.dpc/agents/default/)
+            migrate_legacy_agent()
+
+            # Generate unique agent ID
+            agent_id = generate_agent_id()
+
+            # Create agent storage and config
+            config = create_agent_storage(
+                agent_id=agent_id,
+                name=name,
+                provider_alias=provider_alias,
+                profile_name=profile_name,
+                instruction_set_name=instruction_set_name,
+                budget_usd=budget_usd,
+                max_rounds=max_rounds,
+            )
+
+            # Broadcast event to UI
+            await self.local_api.broadcast_event("agent_created", {
+                "agent_id": agent_id,
+                "name": name,
+                "provider_alias": provider_alias,
+                "profile_name": profile_name,
+            })
+
+            return {
+                "status": "success",
+                "agent_id": agent_id,
+                "config": config,
+            }
+
+        except Exception as e:
+            logger.error("Error creating agent: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    async def list_agents(self) -> Dict[str, Any]:
+        """
+        List all registered DPC Agents.
+
+        Returns:
+            Dict with status and list of agents
+        """
+        from .dpc_agent.utils import AgentRegistry, migrate_legacy_agent
+
+        try:
+            # Ensure migration has occurred
+            migrate_legacy_agent()
+
+            registry = AgentRegistry()
+            agents = registry.list_agents()
+
+            return {
+                "status": "success",
+                "agents": agents,
+            }
+
+        except Exception as e:
+            logger.error("Error listing agents: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    async def get_agent_config(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Get configuration for a specific agent.
+
+        Args:
+            agent_id: The agent ID to get config for
+
+        Returns:
+            Dict with status and agent config
+        """
+        from .dpc_agent.utils import load_agent_config, AgentRegistry
+
+        try:
+            registry = AgentRegistry()
+
+            # Check if agent exists in registry
+            agent_meta = registry.get_agent(agent_id)
+            if not agent_meta:
+                return {
+                    "status": "error",
+                    "message": f"Agent not found: {agent_id}",
+                }
+
+            # Load full config from agent's config.json
+            config = load_agent_config(agent_id)
+
+            return {
+                "status": "success",
+                "config": config,
+                "metadata": agent_meta,
+            }
+
+        except Exception as e:
+            logger.error("Error getting agent config: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    async def update_agent_config(
+        self,
+        agent_id: str,
+        updates: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Update configuration for a specific agent.
+
+        Args:
+            agent_id: The agent ID to update
+            updates: Fields to update in the config
+
+        Returns:
+            Dict with status and updated config
+        """
+        from .dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
+
+        try:
+            registry = AgentRegistry()
+
+            # Check if agent exists
+            if not registry.get_agent(agent_id):
+                return {
+                    "status": "error",
+                    "message": f"Agent not found: {agent_id}",
+                }
+
+            # Load existing config
+            config = load_agent_config(agent_id)
+
+            # Apply updates
+            config.update(updates)
+            config["updated_at"] = self._get_iso_timestamp()
+
+            # Save updated config
+            save_agent_config(agent_id, config)
+
+            # Update registry if name/provider/profile changed
+            registry_updates = {}
+            if "name" in updates:
+                registry_updates["name"] = updates["name"]
+            if "provider_alias" in updates:
+                registry_updates["provider_alias"] = updates["provider_alias"]
+            if "profile_name" in updates:
+                registry_updates["profile_name"] = updates["profile_name"]
+            if registry_updates:
+                registry.update_agent(agent_id, registry_updates)
+
+            # Broadcast event to UI
+            await self.local_api.broadcast_event("agent_updated", {
+                "agent_id": agent_id,
+                "updates": updates,
+            })
+
+            return {
+                "status": "success",
+                "config": config,
+            }
+
+        except Exception as e:
+            logger.error("Error updating agent config: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    async def delete_agent(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Delete a DPC Agent and its storage.
+
+        Args:
+            agent_id: The agent ID to delete
+
+        Returns:
+            Dict with status
+        """
+        from .dpc_agent.utils import delete_agent_storage, AgentRegistry
+
+        try:
+            # Don't allow deleting default agent
+            if agent_id == "default":
+                return {
+                    "status": "error",
+                    "message": "Cannot delete default agent",
+                }
+
+            registry = AgentRegistry()
+
+            # Check if agent exists
+            if not registry.get_agent(agent_id):
+                return {
+                    "status": "error",
+                    "message": f"Agent not found: {agent_id}",
+                }
+
+            # Delete storage and unregister
+            success = delete_agent_storage(agent_id)
+
+            if success:
+                # Broadcast event to UI
+                await self.local_api.broadcast_event("agent_deleted", {
+                    "agent_id": agent_id,
+                })
+
+                return {
+                    "status": "success",
+                    "message": f"Agent {agent_id} deleted",
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to delete agent storage",
+                }
+
+        except Exception as e:
+            logger.error("Error deleting agent: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    async def list_agent_profiles(self) -> Dict[str, Any]:
+        """
+        List available agent permission profiles.
+
+        Returns:
+            Dict with status and list of profile names
+        """
+        try:
+            profiles = self.firewall.list_agent_profiles() if hasattr(self.firewall, "list_agent_profiles") else ["default"]
+
+            return {
+                "status": "success",
+                "profiles": profiles,
+            }
+
+        except Exception as e:
+            logger.error("Error listing agent profiles: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e),
+            }
+
+    def _get_iso_timestamp(self) -> str:
+        """Get current timestamp in ISO format."""
+        from datetime import datetime, timezone
+        from datetime import datetime, timezone
+        return datetime.now(timezone.utc).isoformat()
+
+    # --- Hub Methods ---
+
     # --- Hub Methods ---
 
     async def login_to_hub(self, provider: str = "google"):
