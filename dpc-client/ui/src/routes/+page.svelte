@@ -425,11 +425,11 @@
     // Debounce save by 500ms
     aiChatsSaveTimeout = setTimeout(() => {
       try {
-        // Only save AI chats (excluding Telegram and local_ai)
+        // Only save AI chats and agent chats (excluding Telegram and local_ai)
         const aiChatsToSave = Object.fromEntries(
           Array.from($aiChats.entries())
             .filter(([id, info]) =>
-              id.startsWith('ai_') &&
+              (id.startsWith('ai_') || id.startsWith('agent_')) &&
               !id.startsWith('telegram-') &&
               info.provider !== 'telegram'
             )
@@ -2938,15 +2938,6 @@
   // Agent handlers (Phase 4)
   function handleSelectAgent(agentId: string) {
     console.log('Selected agent:', agentId);
-    // Create or find the agent chat
-    const chatId = `agent_${agentId}`;
-
-    // Check if we already have a chat for this agent
-    if ($aiChats.has(chatId)) {
-      activeChatId = chatId;
-      resetUnreadCount(chatId);
-      return;
-    }
 
     // Find the agent in the agents list
     const agent = $agentsList.find(a => a.agent_id === agentId);
@@ -2955,10 +2946,36 @@
       return;
     }
 
-    // Create a new chat for this agent
+    // Check if there's already a chat associated with this agent
+    // by looking through agentChatToAgentId map
+    let existingChatId: string | null = null;
+    for (const [chatId, mappedAgentId] of agentChatToAgentId) {
+      if (mappedAgentId === agentId) {
+        existingChatId = chatId;
+        break;
+      }
+    }
+
+    if (existingChatId && $aiChats.has(existingChatId)) {
+      // Switch to existing chat for this agent
+      activeChatId = existingChatId;
+      resetUnreadCount(existingChatId);
+      console.log('Switched to existing agent chat:', existingChatId);
+      return;
+    }
+
+    // Also check if there's a chat with the agent ID as key (legacy format)
+    if ($aiChats.has(agentId)) {
+      activeChatId = agentId;
+      resetUnreadCount(agentId);
+      console.log('Switched to existing agent chat (legacy):', agentId);
+      return;
+    }
+
+    // Create a new chat for this agent using agentId directly as chatId
     aiChats.update(chats => {
       const newMap = new Map(chats);
-      newMap.set(chatId, {
+      newMap.set(agentId, {
         name: agent.name,
         provider: 'dpc_agent',
         profile_name: agent.profile_name,
@@ -2970,13 +2987,16 @@
     // Set the chat provider
     chatProviders.update(map => {
       const newMap = new Map(map);
-      newMap.set(chatId, 'dpc_agent');
+      newMap.set(agentId, 'dpc_agent');
       return newMap;
     });
 
+    // Store the mapping
+    agentChatToAgentId.set(agentId, agentId);
+
     // Switch to the new chat
-    activeChatId = chatId;
-    console.log('Created agent chat:', chatId);
+    activeChatId = agentId;
+    console.log('Created new agent chat:', agentId);
   }
 
   async function handleDeleteAgent(agentId: string) {

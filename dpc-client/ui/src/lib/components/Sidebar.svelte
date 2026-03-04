@@ -420,7 +420,7 @@
               <button
                 type="button"
                 class="chat-button agent-button"
-                class:active={activeChatId === `agent_${agent.agent_id}`}
+                class:active={activeChatId === agent.agent_id}
                 onclick={() => {
                   if (onSelectAgent) {
                     onSelectAgent(agent.agent_id);
