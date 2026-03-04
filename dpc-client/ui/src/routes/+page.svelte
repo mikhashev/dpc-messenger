@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, agentCreated, agentsList } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, deleteAgent, agentCreated, agentsList } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -2909,6 +2909,109 @@
     console.log('AI chat deleted successfully');
   }
 
+  // Agent handlers (Phase 4)
+  function handleSelectAgent(agentId: string) {
+    console.log('Selected agent:', agentId);
+    // Create or find the agent chat
+    const chatId = `agent_${agentId}`;
+
+    // Check if we already have a chat for this agent
+    if ($aiChats.has(chatId)) {
+      activeChatId = chatId;
+      resetUnreadCount(chatId);
+      return;
+    }
+
+    // Find the agent in the agents list
+    const agent = $agentsList.find(a => a.agent_id === agentId);
+    if (!agent) {
+      console.error('Agent not found:', agentId);
+      return;
+    }
+
+    // Create a new chat for this agent
+    aiChats.update(chats => {
+      const newMap = new Map(chats);
+      newMap.set(chatId, {
+        name: agent.name,
+        provider: 'dpc_agent',
+        profile_name: agent.profile_name,
+        llm_provider: agent.provider_alias,
+      });
+      return newMap;
+    });
+
+    // Set the chat provider
+    chatProviders.update(map => {
+      const newMap = new Map(map);
+      newMap.set(chatId, 'dpc_agent');
+      return newMap;
+    });
+
+    // Switch to the new chat
+    activeChatId = chatId;
+    console.log('Created agent chat:', chatId);
+  }
+
+  async function handleDeleteAgent(agentId: string) {
+    console.log('Delete agent:', agentId);
+
+    let shouldDelete = false;
+    if (ask) {
+      shouldDelete = await ask(
+        "Delete this agent? This will permanently remove the agent's memory, knowledge, and all associated data.",
+        { title: "Confirm Agent Deletion", kind: "warning" }
+      );
+    } else {
+      shouldDelete = confirm("Delete this agent? This will permanently remove the agent's memory, knowledge, and all associated data.");
+    }
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    try {
+      // Delete from backend
+      const result = await deleteAgent(agentId);
+      if (result.status === 'error') {
+        console.error('Failed to delete agent:', result.message);
+        alert(`Failed to delete agent: ${result.message}`);
+        return;
+      }
+
+      // Remove agent chat if exists
+      const chatId = `agent_${agentId}`;
+      if ($aiChats.has(chatId)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.delete(chatId);
+          return newMap;
+        });
+
+        chatProviders.update(map => {
+          const newMap = new Map(map);
+          newMap.delete(chatId);
+          return newMap;
+        });
+
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          newMap.delete(chatId);
+          return newMap;
+        });
+
+        if (activeChatId === chatId) {
+          activeChatId = 'local_ai';
+        }
+      }
+
+      console.log('Agent deleted successfully');
+    } catch (error) {
+      console.error('Error deleting agent:', error);
+      alert(`Error deleting agent: ${error}`);
+    }
+  }
+
   // File transfer handlers (Week 1)
   async function handleSendFile() {
     // Only allow file transfer to P2P chats and Telegram chats (not local_ai or ai_xxx chats)
@@ -3865,6 +3968,9 @@
       onLeaveGroup={handleLeaveGroup}
       onDeleteGroup={handleDeleteGroup}
       selfNodeId={$nodeStatus?.node_id || ""}
+      agents={$agentsList}
+      onSelectAgent={handleSelectAgent}
+      onDeleteAgent={handleDeleteAgent}
     />
 
 

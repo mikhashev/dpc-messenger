@@ -49,6 +49,25 @@
         auto_apply: boolean;
       };
     };
+    agent_profiles?: Record<string, {
+      _comment?: string;
+      enabled: boolean;
+      personal_context_access: boolean;
+      device_context_access: boolean;
+      knowledge_access: 'none' | 'read_only' | 'read_write';
+      tools?: {
+        [key: string]: boolean | undefined;
+      };
+      sandbox_extensions?: {
+        read_only?: string[];
+        read_write?: string[];
+      };
+      evolution?: {
+        enabled: boolean;
+        interval_minutes: number;
+        auto_apply: boolean;
+      };
+    }>;
     file_transfer?: {
       _comment?: string;
       groups?: Record<string, any>;
@@ -72,8 +91,12 @@
     device_sharing?: Record<string, Record<string, string>>;
   };
 
+  // Agent profile management state
+  let selectedProfileName: string = 'default';
+  let newProfileName: string = '';
+
   let rules: FirewallRules | null = null;
-  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'dpc-agent' | 'peers' = 'hub';
+  let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'dpc-agent' | 'agent-profiles' | 'peers' = 'hub';
   let editMode: boolean = false;
   let editedRules: FirewallRules | null = null;
   let isSaving: boolean = false;
@@ -135,6 +158,30 @@
         enabled: false,
         interval_minutes: 60,
         auto_apply: false
+      };
+    }
+
+    // Initialize agent_profiles if missing (Phase 4)
+    if (editedRules && !editedRules.agent_profiles) {
+      editedRules.agent_profiles = {
+        default: {
+          enabled: true,
+          personal_context_access: true,
+          device_context_access: true,
+          knowledge_access: 'read_only',
+          tools: {
+            repo_read: true,
+            repo_list: true,
+            update_scratchpad: true,
+            browse_page: true,
+            search_web: true,
+          },
+          evolution: {
+            enabled: false,
+            interval_minutes: 60,
+            auto_apply: false,
+          },
+        },
       };
     }
   }
@@ -343,6 +390,74 @@
     if (!editedRules || !editedRules.groups) return;
     delete editedRules.groups[groupName][path];
     editedRules = editedRules;  // Trigger Svelte reactivity
+  }
+
+  // Agent Profiles Management Functions
+  function addAgentProfile() {
+    if (!editedRules) return;
+    const profileName = newProfileName.trim();
+    if (!profileName) return;
+
+    // Check for duplicates
+    if (editedRules.agent_profiles && profileName in editedRules.agent_profiles) {
+      alert('A profile with this name already exists');
+      return;
+    }
+
+    // Initialize agent_profiles if needed
+    if (!editedRules.agent_profiles) {
+      editedRules.agent_profiles = {};
+    }
+
+    // Create new profile with default settings (copy from dpc_agent defaults)
+    const defaultSettings = editedRules.dpc_agent || {
+      enabled: true,
+      personal_context_access: true,
+      device_context_access: true,
+      knowledge_access: 'read_only',
+      tools: {
+        repo_read: true,
+        repo_list: true,
+        update_scratchpad: true,
+      },
+    };
+
+    editedRules.agent_profiles[profileName] = {
+      enabled: true,
+      personal_context_access: defaultSettings.personal_context_access,
+      device_context_access: defaultSettings.device_context_access,
+      knowledge_access: defaultSettings.knowledge_access || 'read_only',
+      tools: { ...(defaultSettings.tools || {}) },
+      sandbox_extensions: {
+        read_only: [],
+        read_write: [],
+      },
+      evolution: {
+        enabled: false,
+        interval_minutes: 60,
+        auto_apply: false,
+      },
+    };
+
+    // Select the new profile
+    selectedProfileName = profileName;
+    newProfileName = '';
+    editedRules = editedRules;  // Trigger Svelte reactivity
+  }
+
+  function deleteAgentProfile(profileName: string) {
+    if (!editedRules || !editedRules.agent_profiles) return;
+    if (profileName === 'default') {
+      alert('Cannot delete the default profile');
+      return;
+    }
+
+    if (confirm(`Are you sure you want to delete the profile "${profileName}"?`)) {
+      delete editedRules.agent_profiles[profileName];
+      // Switch to default profile
+      selectedProfileName = 'default';
+      editedRules = editedRules;  // Trigger Svelte reactivity
+    }
   }
 
   // File Groups Management Functions
@@ -618,6 +733,13 @@
           on:click={() => selectedTab = 'dpc-agent'}
         >
           Agent Permissions
+        </button>
+        <button
+          class="tab"
+          class:active={selectedTab === 'agent-profiles'}
+          on:click={() => selectedTab = 'agent-profiles'}
+        >
+          Agent Profiles
         </button>
         <button
           class="tab"
@@ -2287,6 +2409,232 @@
                 These settings control what data it can access and which tools it can use.
                 File operations are always sandboxed to ~/.dpc/agent/.
                 Shell access and code editing are disabled by default for security.
+              </div>
+            {/if}
+          </div>
+
+        {:else if selectedTab === 'agent-profiles'}
+          <div class="section">
+            <h3>Agent Profiles</h3>
+            <p class="help-text">Permission profiles for DPC Agents. Each agent can be assigned a profile with specific tool and context access.</p>
+
+            <!-- Profile Selector -->
+            <div class="profile-selector" style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap;">
+              <label for="profile-select" style="font-weight: 600;">Select Profile:</label>
+              <select
+                id="profile-select"
+                bind:value={selectedProfileName}
+                style="flex: 1; min-width: 200px; padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border-color);"
+              >
+                {#if displayRules?.agent_profiles}
+                  {#each Object.keys(displayRules.agent_profiles) as profileName}
+                    <option value={profileName}>{profileName}</option>
+                  {/each}
+                {:else}
+                  <option value="default">default</option>
+                {/if}
+              </select>
+
+              {#if editMode}
+                <div style="display: flex; gap: 0.5rem; align-items: center;">
+                  <input
+                    type="text"
+                    placeholder="New profile name"
+                    bind:value={newProfileName}
+                    style="padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border-color); width: 150px;"
+                  />
+                  <button
+                    class="btn btn-add"
+                    on:click={addAgentProfile}
+                    disabled={!newProfileName.trim() || (editedRules?.agent_profiles && newProfileName in editedRules.agent_profiles)}
+                  >
+                    + Add Profile
+                  </button>
+                  <button
+                    class="btn btn-danger"
+                    on:click={() => deleteAgentProfile(selectedProfileName)}
+                    disabled={selectedProfileName === 'default'}
+                    title="Delete current profile"
+                  >
+                    🗑️ Delete
+                  </button>
+                </div>
+              {/if}
+            </div>
+
+            <!-- Profile Settings -->
+            {#if (editMode ? editedRules?.agent_profiles?.[selectedProfileName] : displayRules?.agent_profiles?.[selectedProfileName])}
+              {@const profile = editMode ? editedRules?.agent_profiles?.[selectedProfileName] : displayRules?.agent_profiles?.[selectedProfileName]}
+              <div class="profile-settings">
+                <!-- Enable Profile -->
+                <div class="setting-item">
+                  <label>
+                    {#if editMode && editedRules?.agent_profiles?.[selectedProfileName]}
+                      <input
+                        type="checkbox"
+                        bind:checked={editedRules.agent_profiles[selectedProfileName].enabled}
+                      />
+                    {:else}
+                      <input type="checkbox" checked={profile.enabled} disabled />
+                    {/if}
+                    <strong>Enable Profile</strong>
+                  </label>
+                  <p class="help-text-small">When disabled, agents using this profile will not run.</p>
+                </div>
+
+                <!-- Context Access -->
+                <h4 style="margin-top: 1.5rem; margin-bottom: 0.75rem; color: var(--text-secondary);">Context Access</h4>
+                <div class="setting-item">
+                  <label>
+                    {#if editMode && editedRules?.agent_profiles?.[selectedProfileName]}
+                      <input
+                        type="checkbox"
+                        bind:checked={editedRules.agent_profiles[selectedProfileName].personal_context_access}
+                      />
+                    {:else}
+                      <input type="checkbox" checked={profile.personal_context_access} disabled />
+                    {/if}
+                    <span>Personal Context Access</span>
+                  </label>
+                  <p class="help-text-small">Allow agent to read personal context (personal.json)</p>
+                </div>
+                <div class="setting-item">
+                  <label>
+                    {#if editMode && editedRules?.agent_profiles?.[selectedProfileName]}
+                      <input
+                        type="checkbox"
+                        bind:checked={editedRules.agent_profiles[selectedProfileName].device_context_access}
+                      />
+                    {:else}
+                      <input type="checkbox" checked={profile.device_context_access} disabled />
+                    {/if}
+                    <span>Device Context Access</span>
+                  </label>
+                  <p class="help-text-small">Allow agent to read device context (hardware, software info)</p>
+                </div>
+
+                <!-- Knowledge Access -->
+                <h4 style="margin-top: 1.5rem; margin-bottom: 0.75rem; color: var(--text-secondary);">Knowledge Access</h4>
+                <div class="setting-item">
+                  {#if editMode && editedRules?.agent_profiles?.[selectedProfileName]}
+                    <select
+                      bind:value={editedRules.agent_profiles[selectedProfileName].knowledge_access}
+                      style="padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border-color);"
+                    >
+                      <option value="none">None (No access)</option>
+                      <option value="read_only">Read Only</option>
+                      <option value="read_write">Read & Write</option>
+                    </select>
+                  {:else}
+                    <code style="background: var(--bg-secondary); padding: 0.25rem 0.5rem; border-radius: 4px;">
+                      {profile.knowledge_access || 'none'}
+                    </code>
+                  {/if}
+                  <p class="help-text-small" style="margin-top: 0.5rem;">
+                    Controls agent access to knowledge base (stored facts and learnings)
+                  </p>
+                </div>
+
+                <!-- Tools -->
+                <h4 style="margin-top: 1.5rem; margin-bottom: 0.75rem; color: var(--text-secondary);">Allowed Tools</h4>
+                <div class="notification-events">
+                  {#each [
+                    { key: 'repo_read', label: 'Read Files', desc: 'Read file contents' },
+                    { key: 'repo_list', label: 'List Files', desc: 'List directory contents' },
+                    { key: 'update_scratchpad', label: 'Update Scratchpad', desc: 'Write to agent memory' },
+                    { key: 'browse_page', label: 'Browse Page', desc: 'Fetch and parse web pages' },
+                    { key: 'search_web', label: 'Web Search', desc: 'Search the web' },
+                    { key: 'repo_write_commit', label: 'Write Files', desc: 'Write/modify files (requires sandbox)' },
+                    { key: 'git_status', label: 'Git Status', desc: 'Check git repository status' },
+                    { key: 'git_commit', label: 'Git Commit', desc: 'Create git commits' },
+                    { key: 'search_files', label: 'Search Files', desc: 'Search for files by pattern' },
+                    { key: 'search_in_file', label: 'Search in File', desc: 'Search content within files' },
+                  ] as tool}
+                    <div class="notification-event-item">
+                      {#if editMode && editedRules?.agent_profiles?.[selectedProfileName]?.tools}
+                        <label for="profile-tool-{tool.key}">
+                          <input
+                            type="checkbox"
+                            id="profile-tool-{tool.key}"
+                            bind:checked={editedRules.agent_profiles[selectedProfileName].tools[tool.key]}
+                          />
+                          <div>
+                            <span class="event-name">{tool.label}</span>
+                            <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                          </div>
+                        </label>
+                      {:else}
+                        <label for="profile-tool-{tool.key}">
+                          <input
+                            type="checkbox"
+                            id="profile-tool-{tool.key}"
+                            checked={profile.tools?.[tool.key]}
+                            disabled
+                          />
+                          <div>
+                            <span class="event-name">{tool.label}</span>
+                            <p class="help-text-small" style="margin: 0;">{tool.desc}</p>
+                          </div>
+                        </label>
+                      {/if}
+                    </div>
+                  {/each}
+                </div>
+
+                <!-- Evolution Settings -->
+                <h4 style="margin-top: 1.5rem; margin-bottom: 0.75rem; color: var(--text-secondary);">Evolution Settings</h4>
+                <div class="setting-item">
+                  <label>
+                    {#if editMode && editedRules?.agent_profiles?.[selectedProfileName]?.evolution}
+                      <input
+                        type="checkbox"
+                        bind:checked={editedRules.agent_profiles[selectedProfileName].evolution.enabled}
+                      />
+                    {:else}
+                      <input type="checkbox" checked={profile.evolution?.enabled || false} disabled />
+                    {/if}
+                    <span>Enable Evolution</span>
+                  </label>
+                  <p class="help-text-small">Allow agent to autonomously improve its own prompts and behavior</p>
+                </div>
+
+                {#if editMode && editedRules?.agent_profiles?.[selectedProfileName]?.evolution}
+                  <div class="setting-item" style="margin-top: 0.75rem;">
+                    <span><strong>Interval (minutes):</strong></span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="1440"
+                      bind:value={editedRules.agent_profiles[selectedProfileName].evolution.interval_minutes}
+                      style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid var(--border-color); border-radius: 4px; margin-left: 0.5rem;"
+                    />
+                  </div>
+                  <div class="setting-item" style="margin-top: 0.5rem;">
+                    <label>
+                      <input
+                        type="checkbox"
+                        bind:checked={editedRules.agent_profiles[selectedProfileName].evolution.auto_apply}
+                      />
+                      <span>Auto-Apply Changes</span>
+                    </label>
+                    <p class="help-text-small">Automatically apply evolution changes without approval</p>
+                  </div>
+                {:else if profile.evolution}
+                  <div class="setting-item" style="margin-top: 0.75rem;">
+                    <span><strong>Interval:</strong> {profile.evolution.interval_minutes} minutes</span>
+                    <span style="margin-left: 1rem;"><strong>Auto-Apply:</strong> {profile.evolution.auto_apply ? 'Yes' : 'No'}</span>
+                  </div>
+                {/if}
+              </div>
+            {:else}
+              <p class="empty">No profile selected or profile not found.</p>
+            {/if}
+
+            {#if !editMode}
+              <div class="info-box" style="margin-top: 1.5rem;">
+                <strong>Info:</strong> Agent profiles allow you to create different permission sets for different agents.
+                When creating a new agent in the UI, you can select which profile it should use.
+                The "default" profile is used as a fallback when no profile is specified.
               </div>
             {/if}
           </div>

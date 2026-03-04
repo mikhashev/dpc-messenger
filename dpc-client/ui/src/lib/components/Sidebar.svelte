@@ -22,6 +22,17 @@
     name: string;
     provider?: string;
     instruction_set_name?: string;
+    profile_name?: string;
+    llm_provider?: string;
+  };
+
+  type AgentInfo = {
+    agent_id: string;
+    name: string;
+    provider_alias: string;
+    profile_name: string;
+    instruction_set_name?: string;
+    created_at: string;
   };
 
   // Props (Svelte 5 runes mode)
@@ -57,7 +68,11 @@
     onCreateGroup,
     onLeaveGroup,
     onDeleteGroup,
-    selfNodeId = ""
+    selfNodeId = "",
+    // Agent list (Phase 4)
+    agents = [],
+    onSelectAgent,
+    onDeleteAgent,
   }: {
     connectionStatus: string;
     nodeStatus: NodeStatus | null;
@@ -89,6 +104,10 @@
     onLeaveGroup?: (groupId: string) => void;
     onDeleteGroup?: (groupId: string) => void;
     selfNodeId?: string;
+    // Agent list (Phase 4)
+    agents?: AgentInfo[];
+    onSelectAgent?: (agentId: string) => void;
+    onDeleteAgent?: (agentId: string) => void;
   } = $props();
 </script>
 
@@ -393,6 +412,40 @@
         </div>
       </div>
       <ul>
+        <!-- Agent List (Phase 4) -->
+        {#if agents && agents.length > 0}
+          <li class="section-divider"><span>Agents</span></li>
+          {#each agents as agent (agent.agent_id)}
+            <li class="peer-item">
+              <button
+                type="button"
+                class="chat-button agent-button"
+                class:active={activeChatId === `agent_${agent.agent_id}`}
+                onclick={() => {
+                  if (onSelectAgent) {
+                    onSelectAgent(agent.agent_id);
+                  }
+                }}
+                title="{agent.name} (Profile: {agent.profile_name}, LLM: {agent.provider_alias})"
+              >
+                <span class="agent-icon">🤖</span>
+                <span class="agent-name">{agent.name}</span>
+                <span class="agent-provider">{agent.provider_alias}</span>
+              </button>
+              {#if onDeleteAgent}
+                <button
+                  type="button"
+                  class="disconnect-btn"
+                  onclick={(e) => { e.stopPropagation(); onDeleteAgent(agent.agent_id); }}
+                  title="Delete agent"
+                >
+                  ×
+                </button>
+              {/if}
+            </li>
+          {/each}
+        {/if}
+
         <!-- AI Chats -->
         {#each Array.from(aiChats.entries()) as [chatId, chatInfo] (chatId)}
           <li class="peer-item">
@@ -979,6 +1032,34 @@
   .disconnect-btn:hover {
     background: #ffebee;
     color: #dc3545;
+  }
+
+  /* Agent button styles (Phase 4) */
+  .agent-button {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+  }
+
+  .agent-button .agent-icon {
+    font-size: 1rem;
+  }
+
+  .agent-button .agent-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .agent-button .agent-provider {
+    font-size: 0.65rem;
+    color: #6c7086;
+    background: #313244;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    margin-left: 0.25rem;
   }
 
   .no-peers {
