@@ -103,14 +103,21 @@ class GroupManager:
             logger.error("Error saving group %s: %s", group_id, e)
 
     def _delete_group_file(self, group_id: str):
-        """Delete a group metadata file from disk."""
+        """Delete a group metadata file and history file from disk."""
         try:
+            # Delete group metadata file
             group_file = self.groups_dir / f"{group_id}.json"
             if group_file.exists():
                 group_file.unlink()
                 logger.debug("Deleted group file for %s", group_id)
+
+            # Delete conversation history file
+            history_file = self.groups_dir / f"{group_id}_history.json"
+            if history_file.exists():
+                history_file.unlink()
+                logger.debug("Deleted history file for group %s", group_id)
         except Exception as e:
-            logger.error("Error deleting group file %s: %s", group_id, e)
+            logger.error("Error deleting group files for %s: %s", group_id, e)
 
     # --- Deleted Groups Registry (v0.20.0) ---
 

@@ -2565,6 +2565,21 @@
   }
 
   async function handleDeleteGroup(groupId: string) {
+    // Show confirmation dialog before deletion
+    let shouldDelete = false;
+    if (ask) {
+      shouldDelete = await ask(
+        "Delete this group chat? This will permanently remove all messages and data for all members.",
+        { title: "Confirm Group Deletion", kind: "warning" }
+      );
+    } else {
+      shouldDelete = confirm("Delete this group chat? This will permanently remove all messages and data for all members.");
+    }
+
+    if (!shouldDelete) {
+      return;
+    }
+
     try {
       await deleteGroup(groupId);
       if (activeChatId === groupId) {
