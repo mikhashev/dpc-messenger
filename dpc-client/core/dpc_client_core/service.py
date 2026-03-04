@@ -4975,6 +4975,129 @@ Respond in JSON format:
                 "message": str(e)
             }
 
+    async def get_conversation_settings(self, conversation_id: str) -> Dict[str, Any]:
+        """Get per-conversation settings including history persistence.
+
+        Args:
+            conversation_id: The conversation/chat ID
+
+        Returns:
+            Dict with conversation settings
+        """
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            settings = monitor._load_conversation_settings()
+            return {
+                "status": "success",
+                "settings": settings
+            }
+        except Exception as e:
+            logger.error("Error getting conversation settings: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def set_conversation_persist_history(self, conversation_id: str, persist: bool) -> Dict[str, Any]:
+        """Set whether to persist history for a conversation.
+
+        Args:
+            conversation_id: The conversation/chat ID
+            persist: True to persist history, False for ephemeral
+
+        Returns:
+            Dict with status
+        """
+        try:
+            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            success = monitor.set_persist_history(persist)
+
+            if success:
+                # If enabling persistence and there's existing history, save it
+                if persist and monitor.message_history:
+                    monitor.save_history()
+                    logger.info("Enabled history persistence for %s and saved %d messages",
+                               conversation_id, len(monitor.message_history))
+                elif not persist:
+                    # If disabling persistence, delete any existing history file
+                    monitor.clear_history()
+                    logger.info("Disabled history persistence for %s and cleared history", conversation_id)
+
+                # Broadcast to UI
+                await self.local_api.broadcast_event(
+                    "conversation_settings_changed",
+                    {"conversation_id": conversation_id, "persist_history": persist}
+                )
+
+                return {
+                    "status": "success",
+                    "persist_history": persist
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": "Failed to save settings"
+                }
+        except Exception as e:
+            logger.error("Error setting conversation persistence: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def delete_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """Delete an entire conversation including history, settings, and files.
+
+        This is a complete deletion - removes the conversation folder.
+
+        Args:
+            conversation_id: The conversation/chat ID to delete
+
+        Returns:
+            Dict with status
+        """
+        try:
+            # For groups, use the group manager
+            if conversation_id.startswith("group-"):
+                success = self.group_manager.leave_group(conversation_id)
+                if not success:
+                    return {
+                        "status": "error",
+                        "message": "Group not found or could not be deleted"
+                    }
+            else:
+                # For P2P conversations, delete via conversation monitor
+                if conversation_id in self.conversation_monitors:
+                    monitor = self.conversation_monitors[conversation_id]
+                    monitor.delete_conversation_folder()
+                    del self.conversation_monitors[conversation_id]
+                else:
+                    # Even if no monitor exists, try to delete the folder
+                    from pathlib import Path
+                    import shutil
+                    conv_dir = Path.home() / ".dpc" / "conversations" / conversation_id
+                    if conv_dir.exists():
+                        shutil.rmtree(conv_dir)
+
+            logger.info("Deleted conversation: %s", conversation_id)
+
+            # Broadcast to UI
+            await self.local_api.broadcast_event(
+                "conversation_deleted",
+                {"conversation_id": conversation_id}
+            )
+
+            return {
+                "status": "success",
+                "message": "Conversation deleted successfully"
+            }
+        except Exception as e:
+            logger.error("Error deleting conversation: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
     # =========================================================================
     # Group Chat Commands (v0.19.0)
     # =========================================================================
@@ -5722,11 +5845,14 @@ Respond in JSON format:
 
     async def delete_telegram_conversation_link(self, conversation_id: str) -> Dict[str, Any]:
         """
-        Delete a Telegram conversation link from the backend.
+        Delete a Telegram conversation link and all associated data from the backend.
 
-        Called by UI when user deletes a Telegram chat. This removes the
-        conversation link from config.ini to prevent the chat from reappearing
-        on restart.
+        Called by UI when user deletes a Telegram chat. This removes:
+        1. The conversation link from config.ini
+        2. The conversation folder (~/.dpc/conversations/{conversation_id}/)
+        3. Any message history files
+
+        This ensures the chat doesn't reappear on restart and cleans up disk space.
 
         Args:
             conversation_id: DPC conversation ID (format: telegram-{chat_id})
@@ -5754,11 +5880,29 @@ Respond in JSON format:
             # Remove from conversation_map and persist
             removed = self.telegram_bridge.remove_conversation_link(telegram_chat_id)
 
+            # Delete conversation folder and all its contents
+            # Path: ~/.dpc/conversations/{conversation_id}/
+            import shutil
+            from pathlib import Path
+
+            conversation_folder = Path.home() / ".dpc" / "conversations" / conversation_id
+            if conversation_folder.exists():
+                shutil.rmtree(conversation_folder)
+                logger.info(f"Deleted conversation folder: {conversation_folder}")
+            else:
+                logger.debug(f"Conversation folder not found (already clean): {conversation_folder}")
+
+            # Also check for history file in groups folder (used by some conversation types)
+            history_file = Path.home() / ".dpc" / "groups" / f"{conversation_id}_history.json"
+            if history_file.exists():
+                history_file.unlink()
+                logger.info(f"Deleted conversation history file: {history_file}")
+
             if removed:
                 logger.info(f"Deleted Telegram conversation link: {conversation_id}")
                 return {
                     "status": "success",
-                    "message": f"Conversation link {conversation_id} deleted"
+                    "message": f"Conversation {conversation_id} deleted"
                 }
             else:
                 return {

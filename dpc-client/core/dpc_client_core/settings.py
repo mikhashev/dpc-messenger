@@ -175,6 +175,13 @@ class Settings:
             'preparation_progress_interval_chunks': '10000'  # Emit progress every N chunks during CRC32
         }
 
+        self._config['conversations'] = {
+            # Per-conversation storage settings (v0.21.0)
+            'default_persist_p2p_history': 'false',  # Persist P2P chat history by default (false = ephemeral, synced from peer)
+            'default_persist_telegram_history': 'true',  # Persist Telegram chat history by default
+            'storage_version': '2'  # Storage schema version (1 = legacy groups/, 2 = unified conversations/)
+        }
+
         self._config['voice_messages'] = {
             'enabled': 'true',  # Enable voice message recording and playback (v0.13.0+)
             'max_duration_seconds': '300',  # Maximum recording duration in seconds (5 minutes)

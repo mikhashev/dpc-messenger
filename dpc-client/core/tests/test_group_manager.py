@@ -152,7 +152,8 @@ class TestGroupManagerDelete:
 
     def test_delete_removes_file(self, manager):
         group = manager.create_group("Test", "", [])
-        group_file = manager.groups_dir / f"{group.group_id}.json"
+        # v0.21.0: Files now stored in conversations/{group_id}/metadata.json
+        group_file = manager.conversations_dir / group.group_id / "metadata.json"
         assert group_file.exists()
         manager.delete_group(group.group_id, "dpc-node-self-abc")
         assert not group_file.exists()
@@ -169,7 +170,8 @@ class TestGroupManagerLeave:
 
     def test_leave_removes_file(self, manager):
         group = manager.create_group("Test", "", [])
-        group_file = manager.groups_dir / f"{group.group_id}.json"
+        # v0.21.0: Files now stored in conversations/{group_id}/metadata.json
+        group_file = manager.conversations_dir / group.group_id / "metadata.json"
         assert group_file.exists()
         manager.leave_group(group.group_id)
         assert not group_file.exists()

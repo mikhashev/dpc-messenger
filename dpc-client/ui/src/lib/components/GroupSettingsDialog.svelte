@@ -2,6 +2,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import { getConversationSettings, setConversationPersistHistory } from '$lib/coreService';
 
   export let open: boolean = false;
   export let group: {
@@ -18,6 +19,8 @@
   const dispatch = createEventDispatcher();
 
   let showAddMember = false;
+  let persistHistory: boolean = true;  // Groups default to persisting history
+  let settingsLoaded: boolean = false;
 
   // Peers that are connected but not yet in the group
   $: availablePeers = connectedPeers.filter(
@@ -25,6 +28,38 @@
   );
 
   $: isCreator = group?.created_by === selfNodeId;
+
+  // Load settings when group changes
+  $: if (group?.group_id && open) {
+    loadSettings();
+  }
+
+  async function loadSettings() {
+    if (!group?.group_id) return;
+    try {
+      const result = await getConversationSettings(group.group_id);
+      if (result?.status === 'success' && result.settings) {
+        persistHistory = result.settings.persist_history ?? true;
+        settingsLoaded = true;
+      }
+    } catch (e) {
+      console.error('Failed to load conversation settings:', e);
+    }
+  }
+
+  async function togglePersistHistory() {
+    if (!group?.group_id) return;
+    try {
+      const newValue = !persistHistory;
+      const result = await setConversationPersistHistory(group.group_id, newValue);
+      if (result?.status === 'success') {
+        persistHistory = newValue;
+        dispatch('settingsChanged', { group_id: group.group_id, persist_history: newValue });
+      }
+    } catch (e) {
+      console.error('Failed to update persistence setting:', e);
+    }
+  }
 
   function getMemberName(nodeId: string): string {
     if (nodeId === selfNodeId) return 'You';
@@ -67,6 +102,28 @@
               <span class="value">{group.topic}</span>
             </div>
           {/if}
+        </div>
+
+        <!-- History Settings (v0.21.0) -->
+        <div class="section">
+          <div class="section-header">
+            <h3>History</h3>
+          </div>
+          <div class="toggle-row">
+            <label class="toggle-label">
+              <input
+                type="checkbox"
+                checked={persistHistory}
+                on:change={togglePersistHistory}
+              />
+              <span class="toggle-text">
+                Save conversation history
+                {#if !persistHistory}
+                  <span class="toggle-hint">(ephemeral - cleared on restart)</span>
+                {/if}
+              </span>
+            </label>
+          </div>
         </div>
 
         <!-- Members -->
@@ -321,5 +378,41 @@
 
   .btn-remove:hover {
     color: #f38ba8;
+  }
+
+  .toggle-row {
+    padding: 8px 10px;
+    background: #313244;
+    border-radius: 6px;
+    border: 1px solid #45475a;
+  }
+
+  .toggle-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    cursor: pointer;
+  }
+
+  .toggle-label input[type="checkbox"] {
+    margin-top: 3px;
+    width: 16px;
+    height: 16px;
+    cursor: pointer;
+    accent-color: #89b4fa;
+  }
+
+  .toggle-text {
+    font-size: 0.85rem;
+    color: #cdd6f4;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .toggle-hint {
+    font-size: 0.75rem;
+    color: #6c7086;
+    font-style: italic;
   }
 </style>

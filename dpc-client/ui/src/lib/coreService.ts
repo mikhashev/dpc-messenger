@@ -94,6 +94,11 @@ export const newSessionResult = writable<any>(null);  // {proposal_id, result, c
 // Conversation reset store (v0.11.3 - for AI chats and approved P2P session resets)
 export const conversationReset = writable<any>(null);  // {conversation_id}
 
+// Conversation settings store (v0.21.0 - per-conversation persistence settings)
+export const conversationSettings = writable<any>(null);  // {conversation_id, persist_history, ...}
+export const conversationSettingsChanged = writable<any>(null);  // {conversation_id, persist_history}
+export const conversationDeleted = writable<any>(null);  // {conversation_id}
+
 // Voice message stores (v0.13.0 - voice recording and playback)
 export const voiceOfferReceived = writable<any>(null);  // {transfer_id, node_id, sender_name, filename, size_bytes, duration_seconds, ...voice_metadata}
 
@@ -357,6 +362,16 @@ export function connectToCoreService() {
                 else if (message.event === "conversation_reset") {
                     console.log("Conversation reset received:", message.payload);
                     conversationReset.set(message.payload);
+                }
+                // Conversation settings changed handler (v0.21.0 - persistence toggle)
+                else if (message.event === "conversation_settings_changed") {
+                    console.log("Conversation settings changed:", message.payload);
+                    conversationSettingsChanged.set(message.payload);
+                }
+                // Conversation deleted handler (v0.21.0 - full conversation deletion)
+                else if (message.event === "conversation_deleted") {
+                    console.log("Conversation deleted:", message.payload);
+                    conversationDeleted.set(message.payload);
                 }
                 // Handle token limit warning (Phase 2)
                 else if (message.event === "token_limit_warning") {
@@ -980,7 +995,10 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_groups',  // v0.19.0 - group chat management
             'create_group_chat',  // v0.19.0 - group chat creation
             'leave_group',  // v0.19.0 - leave group
-            'delete_group'  // v0.19.0 - delete group
+            'delete_group',  // v0.19.0 - delete group
+            'get_conversation_settings',  // v0.21.0 - per-conversation settings
+            'set_conversation_persist_history',  // v0.21.0 - toggle history persistence
+            'delete_conversation'  // v0.21.0 - delete entire conversation
         ].includes(command);
 
         if (expectsResponse) {
@@ -1295,4 +1313,24 @@ export async function loadGroups(): Promise<void> {
     } catch (e) {
         console.error("Failed to load groups:", e);
     }
+}
+
+// Conversation settings (v0.21.0 - per-conversation persistence)
+export async function getConversationSettings(conversationId: string): Promise<any> {
+    return sendCommand('get_conversation_settings', {
+        conversation_id: conversationId
+    });
+}
+
+export async function setConversationPersistHistory(conversationId: string, persist: boolean): Promise<any> {
+    return sendCommand('set_conversation_persist_history', {
+        conversation_id: conversationId,
+        persist: persist
+    });
+}
+
+export async function deleteConversation(conversationId: string): Promise<any> {
+    return sendCommand('delete_conversation', {
+        conversation_id: conversationId
+    });
 }
