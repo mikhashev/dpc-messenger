@@ -2789,63 +2789,22 @@
       return;
     }
 
-    // Pre-initialize the agent and Telegram bridge
+    // Load agent profiles from backend (v0.19.0+)
     try {
-      const result = await sendCommand("prepare_agent", {});
-      if (result?.status === 'success') {
-        console.log('DPC Agent prepared:', result.message);
-      } else {
-        console.warn('Failed to prepare DPC Agent:', result?.message);
+      const profilesResult = await listAgentProfiles();
+      if (profilesResult?.status === 'success' && profilesResult.profiles) {
+        availableAgentProfiles = profilesResult.profiles;
       }
     } catch (e) {
-      console.warn('Error preparing DPC Agent:', e);
-      // Continue anyway - agent will initialize lazily on first query
+      console.warn('Failed to load agent profiles:', e);
+      availableAgentProfiles = ["default"];
     }
 
-    // Create new Agent chat ID
-    const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
-
-    // Determine display name based on whether using remote inference
-    let displayName: string;
-    if (agentProvider?.peer_id) {
-      // Remote inference - show remote model/provider info
-      const remoteModel = agentProvider.remote_model || 'unknown';
-      const remoteProvider = agentProvider.remote_provider ? `/${agentProvider.remote_provider}` : '';
-      displayName = `Agent (remote: ${remoteModel}${remoteProvider})`;
-    } else {
-      // Local inference - show the agent_provider or default_provider
-      const underlyingProvider = $availableProviders?.agent_provider || $availableProviders?.default_provider || 'unknown';
-      displayName = `Agent (${underlyingProvider})`;
-    }
-    const chatName = displayName;
-
-    // Add to aiChats
-    aiChats.update(chats => {
-      const newMap = new Map(chats);
-      newMap.set(chatId, {
-        name: chatName,
-        provider: 'dpc_agent',
-        instruction_set_name: 'none'
-      });
-      return newMap;
-    });
-
-    // Set provider for this chat
-    chatProviders.update(map => {
-      const newMap = new Map(map);
-      newMap.set(chatId, 'dpc_agent');
-      return newMap;
-    });
-
-    // Initialize chat history
-    chatHistories.update(h => {
-      const newMap = new Map(h);
-      newMap.set(chatId, []);
-      return newMap;
-    });
-
-    // Switch to the new chat
-    activeChatId = chatId;
+    // Show dialog with dpc_agent pre-selected
+    selectedProviderForNewChat = 'dpc_agent';
+    selectedInstructionSetForNewChat = availableInstructionSets?.default || "general";
+    selectedProfileForNewAgent = "default";
+    showAddAIChatDialog = true;
   }
 
   async function handleDeleteAIChat(chatId: string) {
