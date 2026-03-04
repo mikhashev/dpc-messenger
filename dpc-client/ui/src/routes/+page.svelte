@@ -2816,19 +2816,48 @@
     }
 
     // Use Tauri's ask dialog (works on all platforms including macOS)
+    // Show Telegram-specific message for Telegram chats
     let shouldDelete = false;
     if (ask) {
-      shouldDelete = await ask(
-        "Delete this AI chat? This will permanently remove the chat history.",
-        { title: "Confirm Deletion", kind: "warning" }
-      );
+      if (chatId.startsWith('telegram-')) {
+        shouldDelete = await ask(
+          "Delete this Telegram chat? This will remove the chat history and unlink the Telegram conversation. You can still receive new messages from this contact.",
+          { title: "Confirm Telegram Chat Deletion", kind: "warning" }
+        );
+      } else {
+        shouldDelete = await ask(
+          "Delete this AI chat? This will permanently remove the chat history.",
+          { title: "Confirm Deletion", kind: "warning" }
+        );
+      }
     } else {
-      shouldDelete = confirm("Delete this AI chat? This will permanently remove the chat history.");
+      if (chatId.startsWith('telegram-')) {
+        shouldDelete = confirm("Delete this Telegram chat? This will remove the chat history and unlink the Telegram conversation. You can still receive new messages from this contact.");
+      } else {
+        shouldDelete = confirm("Delete this AI chat? This will permanently remove the chat history.");
+      }
     }
     console.log('User confirmed deletion:', shouldDelete);
 
     if (!shouldDelete) {
       return;
+    }
+
+    // If this is a Telegram chat, tell backend to remove the conversation link
+    // This prevents the chat from reappearing on restart
+    if (chatId.startsWith('telegram-')) {
+      try {
+        const result = await sendCommand('delete_telegram_conversation_link', {
+          conversation_id: chatId
+        });
+        if (result.status === 'error') {
+          console.error('Failed to delete Telegram conversation link:', result.message);
+        } else {
+          console.log('Telegram conversation link deleted from backend');
+        }
+      } catch (error) {
+        console.error('Error deleting Telegram conversation link:', error);
+      }
     }
 
     // Remove from aiChats

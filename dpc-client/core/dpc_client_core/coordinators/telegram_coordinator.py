@@ -163,6 +163,29 @@ class TelegramBridge:
 
         return None
 
+    def remove_conversation_link(self, telegram_chat_id: str) -> bool:
+        """
+        Remove a conversation link from the backend conversation_map.
+
+        Called when user deletes a Telegram chat in the UI to prevent
+        the chat from reappearing on restart.
+
+        Args:
+            telegram_chat_id: Telegram chat ID to remove
+
+        Returns:
+            True if removed, False if not found
+        """
+        if telegram_chat_id not in self.conversation_map:
+            logger.warning(f"Conversation link {telegram_chat_id} not found, cannot remove")
+            return False
+
+        del self.conversation_map[telegram_chat_id]
+        self._save_conversation_links()
+
+        logger.info(f"Removed conversation link: {telegram_chat_id}")
+        return True
+
     async def _send_unknown_user_info(self, chat_id: str, from_user):
         """Send helpful message to unknown user with their chat_id (v0.15.0)."""
         sender_name = from_user.full_name or from_user.username or f"User_{chat_id}"

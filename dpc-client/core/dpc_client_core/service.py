@@ -5720,6 +5720,59 @@ Respond in JSON format:
                 "message": str(e)
             }
 
+    async def delete_telegram_conversation_link(self, conversation_id: str) -> Dict[str, Any]:
+        """
+        Delete a Telegram conversation link from the backend.
+
+        Called by UI when user deletes a Telegram chat. This removes the
+        conversation link from config.ini to prevent the chat from reappearing
+        on restart.
+
+        Args:
+            conversation_id: DPC conversation ID (format: telegram-{chat_id})
+
+        Returns:
+            Dict with status
+        """
+        try:
+            if not self.telegram_bridge:
+                return {
+                    "status": "error",
+                    "message": "Telegram bridge not initialized"
+                }
+
+            # Extract telegram_chat_id from conversation_id
+            # Format: telegram-{chat_id}
+            if not conversation_id.startswith("telegram-"):
+                return {
+                    "status": "error",
+                    "message": f"Invalid Telegram conversation ID format: {conversation_id}"
+                }
+
+            telegram_chat_id = conversation_id.replace("telegram-", "")
+
+            # Remove from conversation_map and persist
+            removed = self.telegram_bridge.remove_conversation_link(telegram_chat_id)
+
+            if removed:
+                logger.info(f"Deleted Telegram conversation link: {conversation_id}")
+                return {
+                    "status": "success",
+                    "message": f"Conversation link {conversation_id} deleted"
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Conversation link not found: {conversation_id}"
+                }
+
+        except Exception as e:
+            logger.error("Failed to delete Telegram conversation link: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
     async def vote_new_session(self, proposal_id: str, vote: bool) -> Dict[str, Any]:
         """Cast vote on a new session proposal.
 
