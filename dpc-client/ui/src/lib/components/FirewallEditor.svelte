@@ -490,17 +490,19 @@
   // Get computed profile name based on selection
   $: selectedProfileName = getSelectedAgentProfile();
 
-  // Reactive computed profile settings (falls back to dpc_agent for 'default' profile)
+  // Reactive computed profile settings
+  // For Global Settings: use dpc_agent
+  // For individual agents: use agent_profiles[agent_id] (per-agent profile)
   $: effectiveDisplayProfile = displayRules
-    ? (selectedProfileName === 'default'
-        ? (displayRules.agent_profiles?.default || displayRules.dpc_agent || null)
-        : displayRules.agent_profiles?.[selectedProfileName] || null)
+    ? (selectedAgentId === 'default'
+        ? displayRules.dpc_agent || null
+        : displayRules.agent_profiles?.[selectedAgentId] || displayRules.dpc_agent || null)
     : null;
 
   $: effectiveEditProfile = editedRules
-    ? (selectedProfileName === 'default'
+    ? (selectedAgentId === 'default'
         ? editedRules.dpc_agent || null
-        : editedRules.agent_profiles?.[selectedProfileName] || null)
+        : editedRules.agent_profiles?.[selectedAgentId] || null)
     : null;
 
   // File Groups Management Functions
@@ -1686,8 +1688,8 @@
 
             <!-- Unified panel for all agents (global and individual) -->
             <AgentPermissionsPanel
-              displaySettings={selectedAgentId === 'default' ? displayRules?.dpc_agent : effectiveDisplayProfile}
-              editSettings={selectedAgentId === 'default' ? editedRules?.dpc_agent : effectiveEditProfile}
+              displaySettings={effectiveDisplayProfile}
+              editSettings={effectiveEditProfile}
               {editMode}
               isGlobal={selectedAgentId === 'default'}
               agentName={selectedAgentId === 'default' ? '' : (agents.find(a => a.agent_id === selectedAgentId)?.name || selectedAgentId)}

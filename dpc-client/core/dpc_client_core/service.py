@@ -7622,7 +7622,7 @@ Respond in JSON format:
         self,
         name: str,
         provider_alias: str = "dpc_agent",
-        profile_name: str = "default",
+        profile_name: str = "",  # Empty = use agent_id as profile name
         instruction_set_name: str = "general",
         budget_usd: float = 50.0,
         max_rounds: int = 200,
@@ -7633,7 +7633,7 @@ Respond in JSON format:
         Args:
             name: Human-readable agent name
             provider_alias: AI provider to use (from providers.json)
-            profile_name: Permission profile name (from agent_profiles in privacy_rules.json)
+            profile_name: Permission profile name (defaults to agent_id for per-agent profiles)
             instruction_set_name: Instruction set for the agent
             budget_usd: Budget limit in USD
             max_rounds: Maximum LLM rounds per task
@@ -7655,23 +7655,29 @@ Respond in JSON format:
             # Generate unique agent ID
             agent_id = generate_agent_id()
 
+            # Use agent_id as profile name for per-agent profiles
+            actual_profile_name = profile_name if profile_name else agent_id
+
             # Create agent storage and config
             config = create_agent_storage(
                 agent_id=agent_id,
                 name=name,
                 provider_alias=provider_alias,
-                profile_name=profile_name,
+                profile_name=actual_profile_name,
                 instruction_set_name=instruction_set_name,
                 budget_usd=budget_usd,
                 max_rounds=max_rounds,
             )
+
+            # Create per-agent profile in firewall (copies from dpc_agent defaults)
+            self.firewall.create_agent_profile(actual_profile_name, copy_from_global=True)
 
             # Broadcast event to UI
             await self.local_api.broadcast_event("agent_created", {
                 "agent_id": agent_id,
                 "name": name,
                 "provider_alias": provider_alias,
-                "profile_name": profile_name,
+                "profile_name": actual_profile_name,
             })
 
             return {

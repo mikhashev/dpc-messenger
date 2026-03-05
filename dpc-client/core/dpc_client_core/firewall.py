@@ -358,6 +358,59 @@ class ContextFirewall:
 
         return allowed
 
+    def create_agent_profile(self, profile_name: str, copy_from_global: bool = True) -> bool:
+        """
+        Create a new agent profile with default settings.
+
+        Args:
+            profile_name: Name for the new profile (typically agent_id)
+            copy_from_global: If True, copy settings from dpc_agent; otherwise use safe defaults
+
+        Returns:
+            True if profile was created, False if it already exists
+        """
+        import json
+
+        # Check if profile already exists
+        if 'agent_profiles' not in self.rules:
+            self.rules['agent_profiles'] = {}
+        if profile_name in self.rules['agent_profiles']:
+            return False  # Already exists
+
+        if copy_from_global and 'dpc_agent' in self.rules:
+            # Copy from global dpc_agent settings
+            import copy
+            self.rules['agent_profiles'][profile_name] = copy.deepcopy(self.rules['dpc_agent'])
+        else:
+            # Create with safe defaults
+            self.rules['agent_profiles'][profile_name] = {
+                'enabled': True,
+                'personal_context_access': True,
+                'device_context_access': True,
+                'knowledge_access': 'read_only',
+                'tools': {
+                    'repo_read': True,
+                    'repo_list': True,
+                    'repo_write_commit': False,
+                    'update_scratchpad': True,
+                    'browse_page': True,
+                    'search_web': True,
+                    'search_files': True,
+                    'search_in_file': True,
+                },
+                'evolution': {
+                    'enabled': False,
+                    'interval_minutes': 60,
+                    'auto_apply': False,
+                },
+            }
+
+        # Save to file
+        rules_text = json.dumps(self.rules, indent=2)
+        self.access_file_path.write_text(rules_text)
+        logger.info("Created agent profile: %s", profile_name)
+        return True
+
     def _ensure_file_exists(self):
         """Creates a default, secure privacy_rules.json file if one doesn't exist."""
         if not self.access_file_path.exists():
