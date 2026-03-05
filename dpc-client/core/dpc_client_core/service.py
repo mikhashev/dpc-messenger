@@ -7652,8 +7652,8 @@ Respond in JSON format:
             # Perform migration if needed (legacy ~/.dpc/agent/ -> ~/.dpc/agents/default/)
             migrate_legacy_agent()
 
-            # Generate unique agent ID
-            agent_id = generate_agent_id()
+            # Generate unique agent ID with name slug
+            agent_id = generate_agent_id(name)
 
             # Use agent_id as profile name for per-agent profiles
             actual_profile_name = profile_name if profile_name else agent_id

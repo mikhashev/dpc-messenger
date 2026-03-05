@@ -446,8 +446,8 @@
           {/each}
         {/if}
 
-        <!-- AI Chats -->
-        {#each Array.from(aiChats.entries()) as [chatId, chatInfo] (chatId)}
+        <!-- AI Chats (excludes DPC Agents which appear in Agents section above) -->
+        {#each Array.from(aiChats.entries()).filter(([_, chatInfo]) => chatInfo.provider !== 'dpc_agent') as [chatId, chatInfo] (chatId)}
           <li class="peer-item">
             <button
               type="button"

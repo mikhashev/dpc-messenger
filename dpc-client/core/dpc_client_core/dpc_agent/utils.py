@@ -193,10 +193,53 @@ class AgentRegistry:
         return self._registry["agents"][agent_id]
 
 
-def generate_agent_id() -> str:
-    """Generate a unique agent ID."""
+def create_name_slug(name: str, max_length: int = 20) -> str:
+    """
+    Create a filesystem-safe slug from an agent name.
+
+    Args:
+        name: Human-readable agent name
+        max_length: Maximum slug length (default 20 chars)
+
+    Returns:
+        Lowercase slug with only alphanumeric and underscores.
+        Example: "My Cool Agent!" -> "my_cool_agent"
+    """
+    # Convert to lowercase
+    slug = name.lower()
+    # Replace spaces and special chars with underscores
+    slug = re.sub(r'[^a-z0-9]+', '_', slug)
+    # Remove leading/trailing underscores
+    slug = slug.strip('_')
+    # Collapse multiple underscores
+    slug = re.sub(r'_+', '_', slug)
+    # Truncate to max length
+    if len(slug) > max_length:
+        slug = slug[:max_length].rstrip('_')
+    # Fallback if empty
+    return slug or 'agent'
+
+
+def generate_agent_id(name: str = "") -> str:
+    """
+    Generate a unique agent ID with an optional name slug.
+
+    Args:
+        name: Optional human-readable name to include in the ID
+
+    Returns:
+        Agent ID in format: agent_{name_slug}_{uuid_short}
+        Example: agent_my_agent_abc12345
+        Falls back to agent_{uuid_short} if no name provided
+    """
     import uuid
-    return f"agent_{uuid.uuid4().hex[:12]}"
+    uuid_short = uuid.uuid4().hex[:8]
+
+    if name:
+        slug = create_name_slug(name)
+        return f"agent_{slug}_{uuid_short}"
+    else:
+        return f"agent_{uuid_short}"
 
 
 def migrate_legacy_agent() -> bool:
