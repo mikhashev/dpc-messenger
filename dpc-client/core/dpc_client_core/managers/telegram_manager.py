@@ -759,8 +759,18 @@ class TelegramBotManager:
 
         logger.info(f"Fetching messages newer than {cutoff_time.isoformat()} (max_age: {self.history_max_age_hours}h)")
 
-        # Process each whitelisted chat
-        for chat_id in self.allowed_chat_ids:
+        # Process only chats with active conversation links (not all whitelisted chats)
+        # This respects user's deletion of conversation links from UI
+        if not hasattr(self.service, 'telegram_bridge') or self.service.telegram_bridge is None:
+            logger.warning("TelegramBridge not initialized, skipping history fetch")
+            return
+
+        linked_chat_ids = self.service.telegram_bridge.conversation_map.keys()
+        if not linked_chat_ids:
+            logger.info("No active conversation links, skipping history fetch")
+            return
+
+        for chat_id in linked_chat_ids:
             try:
                 await self._fetch_chat_history(bot, chat_id, cutoff_time)
                 await asyncio.sleep(0.5)  # Rate limiting delay between chats
