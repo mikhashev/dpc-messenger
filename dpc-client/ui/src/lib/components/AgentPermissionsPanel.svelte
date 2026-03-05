@@ -8,6 +8,7 @@
   export let editSettings: any = null;     // Settings for edit mode (bindable)
   export let editMode: boolean = false;
   export let isGlobal: boolean = false;    // True if editing global dpc_agent settings
+  export let agentName: string = '';       // Name of the selected agent (for info text)
 
   // Tool definitions by category
   const toolCategories = [
@@ -474,24 +475,30 @@
 
 {#if !editMode}
   <div class="info-box" style="margin-top: 1.5rem;">
-    <strong>Info:</strong> The DPC Agent is an embedded autonomous AI that can perform tasks on your behalf.
-    These settings control what data it can access and which tools it can use.
-    File operations are always sandboxed to ~/.dpc/agent/.
-    Shell access and code editing are disabled by default for security.
+    {#if isGlobal}
+      <strong>Info:</strong> These are the <strong>global default settings</strong> for all DPC agents.
+      Individual agents can override these settings with their own profiles.
+      File operations are always sandboxed to ~/.dpc/agent/.
+      Shell access and code editing are disabled by default for security.
+    {:else}
+      <strong>Info:</strong> These settings apply to agent <strong>{agentName || 'this agent'}</strong>.
+      Changes here override the global defaults.
+      File operations are always sandboxed to ~/.dpc/agent/.
+    {/if}
   </div>
 {/if}
 
 <style>
   .compute-settings {
-    background: var(--bg-secondary);
-    padding: 1rem;
-    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
   }
 
   .subsection {
-    margin-top: 1.5rem;
-    padding-top: 1rem;
-    border-top: 1px solid var(--border-color);
+    margin-top: 1rem;
+    padding-left: 1rem;
+    border-left: 3px solid var(--border-color);
   }
 
   .subsection h4 {

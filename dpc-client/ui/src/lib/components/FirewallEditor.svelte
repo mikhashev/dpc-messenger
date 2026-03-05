@@ -1689,7 +1689,8 @@
               displaySettings={selectedAgentId === 'default' ? displayRules?.dpc_agent : effectiveDisplayProfile}
               editSettings={selectedAgentId === 'default' ? editedRules?.dpc_agent : effectiveEditProfile}
               {editMode}
-              isGlobal={true}
+              isGlobal={selectedAgentId === 'default'}
+              agentName={selectedAgentId === 'default' ? '' : (agents.find(a => a.agent_id === selectedAgentId)?.name || selectedAgentId)}
             />
           </div>
         {:else if selectedTab === 'peers'}
