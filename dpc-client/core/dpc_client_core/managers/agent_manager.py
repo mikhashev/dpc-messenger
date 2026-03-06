@@ -207,53 +207,82 @@ class DpcAgentManager:
         log.info("DpcAgent started successfully")
 
     async def _start_telegram_bridge(self) -> None:
-        """Initialize and start the Telegram notification bridge.
+        """Initialize and start the Telegram notification bridge from per-agent configuration.
 
-        DEPRECATED: The [dpc_agent_telegram] system is deprecated in favor of
-        per-agent Telegram linking. Use telegram_enabled, telegram_chat_id in
-        agent's config.json instead. This will be removed in v0.20.0.
+        Reads Telegram config from agent registry (_registry.json) with fallback
+        to global [dpc_agent_telegram] config for backwards compatibility.
         """
-        # Get Telegram config from settings
-        settings = getattr(self.service, "settings", None)
-        if settings is None:
-            log.debug("No settings available, skipping Telegram bridge")
+        from ..dpc_agent.utils import AgentRegistry
+
+        # First try to get per-agent Telegram config from registry
+        registry = AgentRegistry()
+        agent_meta = registry.get_agent(self.agent_id)
+
+        if not agent_meta or not agent_meta.get("telegram_enabled", False):
+            log.debug(f"Telegram not enabled for agent {self.agent_id}")
             return
 
-        telegram_config = settings.get_dpc_agent_telegram_config()
+        # Read per-agent Telegram config
+        bot_token = agent_meta.get("telegram_bot_token", "")
+        chat_ids = agent_meta.get("telegram_allowed_chat_ids", [])
+        event_filter = agent_meta.get("telegram_event_filter")
+        max_events_per_minute = agent_meta.get("telegram_max_events_per_minute", 20)
+        cooldown_seconds = agent_meta.get("telegram_cooldown_seconds", 3.0)
+        transcription_enabled = agent_meta.get("telegram_transcription_enabled", True)
 
-        if not telegram_config.get("enabled", False):
-            log.debug("Telegram notifications for agent disabled")
-            return
-
-        # DEPRECATION WARNING
-        log.warning(
-            "DEPRECATED: [dpc_agent_telegram] config section is deprecated. "
-            "Use per-agent Telegram linking instead (telegram_enabled in agent config.json). "
-            "See docs/DPC_AGENT_TELEGRAM.md for migration guide. "
-            "This will be removed in v0.20.0."
-        )
-
-        bot_token = telegram_config.get("bot_token", "")
-        chat_ids = telegram_config.get("allowed_chat_ids", [])
-
+        # Backwards compatibility: fall back to global config if per-agent config is incomplete
         if not bot_token or not chat_ids:
-            log.warning("Telegram bridge enabled but missing bot_token or allowed_chat_ids")
+            log.info(f"Agent {self.agent_id} has incomplete per-agent Telegram config, checking global config")
+
+            settings = getattr(self.service, "settings", None)
+            if settings is None:
+                log.debug(f"No settings available, skipping Telegram bridge for agent {self.agent_id}")
+                return
+
+            global_config = settings.get_dpc_agent_telegram_config()
+
+            if not global_config.get("enabled", False):
+                log.debug(f"Global Telegram config not enabled, skipping Telegram bridge for agent {self.agent_id}")
+                return
+
+            # Use global config as fallback
+            if not bot_token:
+                bot_token = global_config.get("bot_token", "")
+            if not chat_ids:
+                chat_ids = global_config.get("allowed_chat_ids", [])
+            if not event_filter:
+                event_filter = global_config.get("event_filter")
+            if transcription_enabled is True:  # Only use global default if not set
+                transcription_enabled = global_config.get("transcription_enabled", True)
+
+            # Log deprecation warning if using global config
+            log.warning(
+                f"DEPRECATED: Agent {self.agent_id} is using global [dpc_agent_telegram] config. "
+                f"Please migrate to per-agent Telegram configuration. "
+                f"See docs/DPC_AGENT_TELEGRAM.md for migration guide. "
+                f"Global config will be removed in v0.20.0."
+            )
+
+        # Validate required fields
+        if not bot_token or not chat_ids:
+            log.warning(f"Agent {self.agent_id} has telegram_enabled=true but missing bot_token or allowed_chat_ids")
             return
 
         try:
-            from .agent_telegram_bridge import AgentTelegramBridge, create_telegram_bridge_callback
+            from .agent_telegram_bridge import AgentTelegramBridge, RateLimitConfig, create_telegram_bridge_callback
 
-            # Get event filter
-            event_filter = telegram_config.get("event_filter")
+            # Create rate limit config
+            rate_limit = RateLimitConfig(
+                max_events_per_minute=max_events_per_minute,
+                cooldown_seconds=cooldown_seconds
+            )
 
-            # Get transcription setting
-            transcription_enabled = telegram_config.get("transcription_enabled", True)
-
-            # Create bridge
+            # Create bridge with per-agent config
             self._telegram_bridge = AgentTelegramBridge(
                 bot_token=bot_token,
                 allowed_chat_ids=chat_ids,
                 event_filter=event_filter,
+                rate_limit=rate_limit,
                 transcription_enabled=transcription_enabled,
             )
 
@@ -266,7 +295,7 @@ class DpcAgentManager:
             # Start bridge
             success = await self._telegram_bridge.start()
             if not success:
-                log.warning("Failed to start Telegram bridge")
+                log.warning(f"Failed to start Telegram bridge for agent {self.agent_id}")
                 self._telegram_bridge = None
                 return
 
@@ -274,12 +303,16 @@ class DpcAgentManager:
             emitter = get_event_emitter()
             emitter.add_listener(create_telegram_bridge_callback(self._telegram_bridge))
 
-            log.info(f"Telegram bridge started, connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events)")
+            log.info(
+                f"Telegram bridge started for agent {self.agent_id}, "
+                f"connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events, "
+                f"chat_ids={chat_ids})"
+            )
 
         except ImportError as e:
             log.warning(f"Telegram bridge not available: {e}")
         except Exception as e:
-            log.error(f"Failed to initialize Telegram bridge: {e}", exc_info=True)
+            log.error(f"Failed to initialize Telegram bridge for agent {self.agent_id}: {e}", exc_info=True)
 
     async def stop(self) -> None:
         """Shutdown the agent and Telegram bridge."""

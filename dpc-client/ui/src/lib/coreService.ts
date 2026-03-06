@@ -1395,6 +1395,17 @@ export interface AgentInfo {
     instruction_set_name: string;
     created_at: string;
     updated_at?: string;
+    // Telegram integration fields (v0.22.0+)
+    telegram_enabled?: boolean;
+    telegram_bot_token?: string;
+    telegram_allowed_chat_ids?: string[];
+    telegram_event_filter?: string[];
+    telegram_max_events_per_minute?: number;
+    telegram_cooldown_seconds?: number;
+    telegram_transcription_enabled?: boolean;
+    telegram_linked_at?: string;
+    // Legacy field (deprecated in favor of telegram_allowed_chat_ids)
+    telegram_chat_id?: string;
 }
 
 export interface AgentConfig {

@@ -5917,41 +5917,73 @@ Respond in JSON format:
                 "message": str(e)
             }
 
-    async def link_agent_telegram(self, agent_id: str, chat_id: str) -> Dict[str, Any]:
+    async def link_agent_telegram(
+        self,
+        agent_id: str,
+        bot_token: str,
+        chat_ids: List[str],
+        event_filter: Optional[List[str]] = None,
+        max_events_per_minute: int = 20,
+        cooldown_seconds: float = 3.0,
+        transcription_enabled: bool = True,
+    ) -> Dict[str, Any]:
         """
-        Link an agent to a Telegram chat.
+        Link an agent to Telegram with full configuration.
 
         UI Integration: Called when user clicks "Link Telegram" button for an agent.
 
         Args:
             agent_id: Agent ID to link
-            chat_id: Telegram chat ID (numeric string)
+            bot_token: Telegram bot token
+            chat_ids: List of Telegram chat IDs (numeric strings)
+            event_filter: Optional list of event types to forward
+            max_events_per_minute: Maximum events to send per minute
+            cooldown_seconds: Minimum time between same-type events
+            transcription_enabled: Enable voice message transcription
 
         Returns:
             Dict with status and message
         """
         try:
-            if not self.telegram_manager:
+            from .dpc_agent.utils import AgentRegistry
+
+            registry = AgentRegistry()
+
+            # Check if agent exists
+            agent = registry.get_agent(agent_id)
+            if not agent:
                 return {
                     "status": "error",
-                    "message": "Telegram integration not enabled"
+                    "message": f"Agent not found: {agent_id}"
                 }
 
-            # Delegate to TelegramBotManager
-            result = await self.telegram_manager.link_agent_to_chat(agent_id, chat_id)
-
-            if result.get("success"):
-                return {
-                    "status": "success",
-                    "message": result.get("message"),
-                    "agent_id": result.get("agent_id"),
-                    "chat_id": result.get("chat_id")
-                }
-            else:
+            # Update registry with full Telegram config
+            try:
+                registry.link_agent_to_telegram(
+                    agent_id=agent_id,
+                    bot_token=bot_token,
+                    chat_ids=chat_ids,
+                    event_filter=event_filter,
+                    max_events_per_minute=max_events_per_minute,
+                    cooldown_seconds=cooldown_seconds,
+                    transcription_enabled=transcription_enabled,
+                )
+            except ValueError as e:
                 return {
                     "status": "error",
-                    "message": result.get("error", "Failed to link agent")
+                    "message": str(e)
                 }
+
+            # Restart agent's Telegram bridge if it's currently running
+            if agent_id in self._agent_managers:
+                await self._restart_agent_telegram_bridge(agent_id)
+
+            return {
+                "status": "success",
+                "message": f"Agent {agent_id} linked to Telegram successfully",
+                "agent_id": agent_id,
+                "chat_ids": chat_ids
+            }
 
         except Exception as e:
             logger.error("Failed to link agent to Telegram: %s", e, exc_info=True)
@@ -5960,9 +5992,36 @@ Respond in JSON format:
                 "message": str(e)
             }
 
+    async def _restart_agent_telegram_bridge(self, agent_id: str) -> None:
+        """
+        Restart Telegram bridge for a running agent with new configuration.
+
+        Args:
+            agent_id: Agent ID whose Telegram bridge should be restarted
+        """
+        if agent_id not in self._agent_managers:
+            return
+
+        agent_manager = self._agent_managers[agent_id]
+
+        # Stop existing bridge if running
+        if hasattr(agent_manager, "_telegram_bridge") and agent_manager._telegram_bridge:
+            try:
+                await agent_manager._telegram_bridge.stop()
+                logger.info(f"Stopped Telegram bridge for agent {agent_id}")
+            except Exception as e:
+                logger.error(f"Error stopping Telegram bridge for agent {agent_id}: {e}", exc_info=True)
+
+        # Start bridge with new configuration
+        try:
+            await agent_manager._start_telegram_bridge()
+            logger.info(f"Restarted Telegram bridge for agent {agent_id}")
+        except Exception as e:
+            logger.error(f"Error restarting Telegram bridge for agent {agent_id}: {e}", exc_info=True)
+
     async def unlink_agent_telegram(self, agent_id: str) -> Dict[str, Any]:
         """
-        Unlink an agent from its Telegram chat.
+        Unlink an agent from Telegram (removes all Telegram configuration).
 
         UI Integration: Called when user clicks "Unlink Telegram" button for an agent.
 
@@ -5973,29 +6032,70 @@ Respond in JSON format:
             Dict with status and message
         """
         try:
-            if not self.telegram_manager:
+            from .dpc_agent.utils import AgentRegistry
+
+            registry = AgentRegistry()
+
+            # Check if agent exists
+            agent = registry.get_agent(agent_id)
+            if not agent:
                 return {
                     "status": "error",
-                    "message": "Telegram integration not enabled"
+                    "message": f"Agent not found: {agent_id}"
                 }
 
-            # Delegate to TelegramBotManager
-            result = await self.telegram_manager.unlink_agent_from_chat(agent_id)
+            # Remove Telegram configuration from registry
+            registry.unlink_agent_from_telegram(agent_id)
 
-            if result.get("success"):
-                return {
-                    "status": "success",
-                    "message": result.get("message"),
-                    "agent_id": result.get("agent_id")
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": result.get("error", "Failed to unlink agent")
-                }
+            # Stop agent's Telegram bridge if it's currently running
+            if agent_id in self._agent_managers:
+                agent_manager = self._agent_managers[agent_id]
+                if hasattr(agent_manager, "_telegram_bridge") and agent_manager._telegram_bridge:
+                    try:
+                        await agent_manager._telegram_bridge.stop()
+                        agent_manager._telegram_bridge = None
+                        logger.info(f"Stopped Telegram bridge for agent {agent_id}")
+                    except Exception as e:
+                        logger.error(f"Error stopping Telegram bridge for agent {agent_id}: {e}", exc_info=True)
+
+            return {
+                "status": "success",
+                "message": f"Agent {agent_id} unlinked from Telegram successfully",
+                "agent_id": agent_id
+            }
 
         except Exception as e:
             logger.error("Failed to unlink agent from Telegram: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def migrate_telegram_config(self) -> Dict[str, Any]:
+        """
+        Migrate global [dpc_agent_telegram] config to per-agent config.
+
+        Reads from ~/.dpc/config.ini [dpc_agent_telegram] section
+        and copies to each agent in _registry.json.
+
+        Returns:
+            Dict with migration status and details
+        """
+        try:
+            from .dpc_agent.utils import migrate_global_telegram_to_agents
+
+            result = migrate_global_telegram_to_agents()
+
+            # Restart Telegram bridges for any agents that were migrated
+            if result.get("status") == "success" and result.get("migrated_count", 0) > 0:
+                for agent_id in result.get("migrated_agents", []):
+                    if agent_id in self._agent_managers:
+                        await self._restart_agent_telegram_bridge(agent_id)
+
+            return result
+
+        except Exception as e:
+            logger.error("Failed to migrate Telegram config: %s", e, exc_info=True)
             return {
                 "status": "error",
                 "message": str(e)

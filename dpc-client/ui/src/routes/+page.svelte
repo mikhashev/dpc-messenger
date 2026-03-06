@@ -3154,11 +3154,26 @@
     }
   }
 
-  async function handleLinkAgentTelegram(agentId: string, chatId: string) {
-    console.log('Link agent to Telegram:', agentId, 'chatId:', chatId);
+  async function handleLinkAgentTelegram(agentId: string, config: {
+    bot_token: string;
+    chat_ids: string[];
+    event_filter?: string[];
+    max_events_per_minute?: number;
+    cooldown_seconds?: number;
+    transcription_enabled?: boolean;
+  }) {
+    console.log('Link agent to Telegram:', agentId, 'config:', { ...config, bot_token: '***' });
 
     try {
-      const result = await sendCommand('link_agent_telegram', { agent_id: agentId, chat_id: chatId });
+      const result = await sendCommand('link_agent_telegram', {
+        agent_id: agentId,
+        bot_token: config.bot_token,
+        chat_ids: config.chat_ids,
+        event_filter: config.event_filter,
+        max_events_per_minute: config.max_events_per_minute || 20,
+        cooldown_seconds: config.cooldown_seconds || 3.0,
+        transcription_enabled: config.transcription_enabled !== false,
+      });
 
       if (result.status === 'error') {
         console.error('Failed to link agent to Telegram:', result.message);
@@ -3170,7 +3185,7 @@
       }
 
       // Show success toast
-      agentToastMessage = 'Agent linked to Telegram successfully';
+      agentToastMessage = 'Agent Telegram configuration updated successfully';
       agentToastType = 'info';
       showAgentToast = true;
       setTimeout(() => { showAgentToast = false; }, 3000);
@@ -3185,7 +3200,7 @@
         console.error('Failed to refresh agents list:', error);
       }
 
-      console.log('Agent linked to Telegram successfully');
+      console.log('Agent Telegram configuration updated successfully');
     } catch (error) {
       console.error('Error linking agent to Telegram:', error);
       agentToastMessage = `Error linking agent: ${error}`;

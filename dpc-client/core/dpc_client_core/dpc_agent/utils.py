@@ -211,35 +211,102 @@ class AgentRegistry:
         self._save_registry()
         return self._registry["agents"][agent_id]
 
-    def link_agent_to_telegram(self, agent_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
+    def link_agent_to_telegram(
+        self,
+        agent_id: str,
+        bot_token: str,
+        chat_ids: List[str],
+        event_filter: Optional[List[str]] = None,
+        max_events_per_minute: int = 20,
+        cooldown_seconds: float = 3.0,
+        transcription_enabled: bool = True,
+    ) -> Optional[Dict[str, Any]]:
         """
-        Link an agent to a Telegram chat.
+        Link an agent to Telegram with full configuration.
 
         Args:
             agent_id: Agent to link
-            chat_id: Telegram chat ID (numeric string)
+            bot_token: Telegram bot token
+            chat_ids: List of Telegram chat IDs (numeric strings)
+            event_filter: List of event types to forward (None = default filter)
+            max_events_per_minute: Maximum events to send per minute
+            cooldown_seconds: Minimum time between same-type events
+            transcription_enabled: Enable voice message transcription
 
         Returns:
             Updated agent metadata or None if not found
 
         Raises:
-            ValueError: If chat_id format is invalid
+            ValueError: If bot_token or chat_ids format is invalid
         """
-        # Validate chat_id format
-        if not isinstance(chat_id, str):
-            raise ValueError("telegram_chat_id must be a string")
-        if not chat_id.lstrip('-').isdigit():
-            raise ValueError("telegram_chat_id must be a numeric string")
+        # Validate bot_token format
+        if not isinstance(bot_token, str):
+            raise ValueError("bot_token must be a string")
+        if not bot_token:
+            raise ValueError("bot_token cannot be empty")
 
-        return self.update_agent(agent_id, {
-            "telegram_chat_id": chat_id,
+        # Validate chat_ids format
+        if not isinstance(chat_ids, list) or not chat_ids:
+            raise ValueError("chat_ids must be a non-empty list")
+        for chat_id in chat_ids:
+            if not isinstance(chat_id, str):
+                raise ValueError("chat_ids must contain only strings")
+            if not chat_id.lstrip('-').isdigit():
+                raise ValueError(f"chat_id '{chat_id}' must be a numeric string")
+
+        # Validate event_filter if provided
+        if event_filter is not None:
+            if not isinstance(event_filter, list):
+                raise ValueError("event_filter must be a list")
+            # Validate event types are strings
+            for event_type in event_filter:
+                if not isinstance(event_type, str):
+                    raise ValueError("event_filter must contain only strings")
+
+        # Build Telegram config
+        telegram_config = {
             "telegram_enabled": True,
+            "telegram_bot_token": bot_token,
+            "telegram_allowed_chat_ids": chat_ids,
+            "telegram_max_events_per_minute": max_events_per_minute,
+            "telegram_cooldown_seconds": cooldown_seconds,
+            "telegram_transcription_enabled": transcription_enabled,
             "telegram_linked_at": utc_now_iso()
-        })
+        }
+
+        # Add event_filter if provided, otherwise use default
+        if event_filter is not None:
+            telegram_config["telegram_event_filter"] = event_filter
+        else:
+            telegram_config["telegram_event_filter"] = self._default_telegram_event_filter()
+
+        return self.update_agent(agent_id, telegram_config)
+
+    def _default_telegram_event_filter(self) -> List[str]:
+        """
+        Get default Telegram event filter - important events only.
+
+        Returns:
+            List of event type names to forward to Telegram
+        """
+        return [
+            # Tasks
+            "task_started",
+            "task_completed",
+            "task_failed",
+            # Evolution
+            "evolution_cycle_completed",
+            "code_modified",
+            # Budget warnings
+            "budget_warning",
+            "rate_limit_hit",
+            # Agent-initiated messages
+            "agent_message",
+        ]
 
     def unlink_agent_from_telegram(self, agent_id: str) -> Optional[Dict[str, Any]]:
         """
-        Remove Telegram chat linkage for an agent.
+        Remove Telegram linkage for an agent (removes all Telegram config).
 
         Args:
             agent_id: Agent to unlink
@@ -251,15 +318,18 @@ class AgentRegistry:
         if not agent:
             return None
 
+        # Set telegram_enabled to False and remove all telegram_* fields
         updates = {
-            "telegram_enabled": False
+            "telegram_enabled": False,
+            "telegram_bot_token": None,
+            "telegram_allowed_chat_ids": None,
+            "telegram_event_filter": None,
+            "telegram_max_events_per_minute": None,
+            "telegram_cooldown_seconds": None,
+            "telegram_transcription_enabled": None,
+            "telegram_chat_id": None,  # Legacy field
+            "telegram_linked_at": None,
         }
-
-        # Remove telegram_chat_id and telegram_linked_at if present
-        if "telegram_chat_id" in agent:
-            updates["telegram_chat_id"] = None
-        if "telegram_linked_at" in agent:
-            updates["telegram_linked_at"] = None
 
         return self.update_agent(agent_id, updates)
 
@@ -378,6 +448,131 @@ def migrate_legacy_agent() -> bool:
     except Exception as e:
         log.error(f"Failed to migrate legacy agent: {e}")
         return False
+
+
+def migrate_global_telegram_to_agents() -> Dict[str, Any]:
+    """
+    Migrate global [dpc_agent_telegram] config to per-agent config.
+
+    Reads from ~/.dpc/config.ini [dpc_agent_telegram] section
+    and copies to each agent in _registry.json.
+
+    Returns:
+        Dict with migration status and details:
+        {
+            "status": "success" | "skipped" | "error",
+            "migrated_count": int,
+            "migrated_agents": List[str],
+            "failed_count": int,
+            "failed": List[Dict],
+            "reason": str (if skipped)
+        }
+    """
+    try:
+        # Import Settings here to avoid circular import
+        from ..settings import Settings
+        from pathlib import Path
+
+        settings = Settings(Path.home() / ".dpc")
+        global_config = settings.get_dpc_agent_telegram_config()
+
+        # Check if global config is enabled
+        if not global_config.get("enabled", False):
+            return {
+                "status": "skipped",
+                "reason": "Global Telegram config not enabled",
+                "migrated_count": 0,
+                "migrated_agents": [],
+                "failed_count": 0,
+                "failed": [],
+            }
+
+        # Get all agents from registry
+        registry = AgentRegistry()
+        agents = registry.list_agents()
+
+        if not agents:
+            return {
+                "status": "skipped",
+                "reason": "No agents found in registry",
+                "migrated_count": 0,
+                "migrated_agents": [],
+                "failed_count": 0,
+                "failed": [],
+            }
+
+        # Extract global config values
+        bot_token = global_config.get("bot_token", "")
+        allowed_chat_ids = global_config.get("allowed_chat_ids", [])
+        event_filter = global_config.get("event_filter")
+        max_events_per_minute = global_config.get("max_events_per_minute", 20)
+        cooldown_seconds = global_config.get("cooldown_seconds", 3.0)
+        transcription_enabled = global_config.get("transcription_enabled", True)
+
+        # Validate required fields
+        if not bot_token:
+            return {
+                "status": "error",
+                "reason": "Global config missing bot_token",
+                "migrated_count": 0,
+                "migrated_agents": [],
+                "failed_count": 0,
+                "failed": [],
+            }
+
+        if not allowed_chat_ids:
+            return {
+                "status": "error",
+                "reason": "Global config missing allowed_chat_ids",
+                "migrated_count": 0,
+                "migrated_agents": [],
+                "failed_count": 0,
+                "failed": [],
+            }
+
+        # Migrate each agent
+        migrated = []
+        failed = []
+
+        for agent in agents:
+            try:
+                agent_id = agent["agent_id"]
+                registry.link_agent_to_telegram(
+                    agent_id=agent_id,
+                    bot_token=bot_token,
+                    chat_ids=allowed_chat_ids,
+                    event_filter=event_filter,
+                    max_events_per_minute=max_events_per_minute,
+                    cooldown_seconds=cooldown_seconds,
+                    transcription_enabled=transcription_enabled,
+                )
+                migrated.append(agent_id)
+                log.info(f"Migrated Telegram config to agent: {agent_id}")
+            except Exception as e:
+                failed.append({
+                    "agent_id": agent["agent_id"],
+                    "error": str(e)
+                })
+                log.error(f"Failed to migrate Telegram config for agent {agent['agent_id']}: {e}")
+
+        return {
+            "status": "success",
+            "migrated_count": len(migrated),
+            "migrated_agents": migrated,
+            "failed_count": len(failed),
+            "failed": failed,
+        }
+
+    except Exception as e:
+        log.error(f"Error migrating global Telegram config: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "reason": str(e),
+            "migrated_count": 0,
+            "migrated_agents": [],
+            "failed_count": 0,
+            "failed": [],
+        }
 
 
 def get_agent_config_path(agent_id: str) -> pathlib.Path:
