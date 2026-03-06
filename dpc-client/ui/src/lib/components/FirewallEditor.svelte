@@ -506,9 +506,10 @@
     : null;
 
   // Track whether current agent uses inherited (global) settings
+  // Agent inherits if: (1) No custom profile in privacy_rules.json OR (2) profile_name is "default"
   $: agentUsesInheritedSettings = selectedAgentId !== 'default'
     && editedRules
-    && !editedRules.agent_profiles?.[selectedAgentId];
+    && (!editedRules.agent_profiles?.[selectedAgentId] || getSelectedAgentProfile() === 'default');
 
   // Create agent profile as copy of global settings (copy-on-write)
   function ensureAgentProfileExists(): void {
