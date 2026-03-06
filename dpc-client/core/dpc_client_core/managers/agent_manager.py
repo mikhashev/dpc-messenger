@@ -207,7 +207,12 @@ class DpcAgentManager:
         log.info("DpcAgent started successfully")
 
     async def _start_telegram_bridge(self) -> None:
-        """Initialize and start the Telegram notification bridge."""
+        """Initialize and start the Telegram notification bridge.
+
+        DEPRECATED: The [dpc_agent_telegram] system is deprecated in favor of
+        per-agent Telegram linking. Use telegram_enabled, telegram_chat_id in
+        agent's config.json instead. This will be removed in v0.20.0.
+        """
         # Get Telegram config from settings
         settings = getattr(self.service, "settings", None)
         if settings is None:
@@ -219,6 +224,14 @@ class DpcAgentManager:
         if not telegram_config.get("enabled", False):
             log.debug("Telegram notifications for agent disabled")
             return
+
+        # DEPRECATION WARNING
+        log.warning(
+            "DEPRECATED: [dpc_agent_telegram] config section is deprecated. "
+            "Use per-agent Telegram linking instead (telegram_enabled in agent config.json). "
+            "See docs/DPC_AGENT_TELEGRAM.md for migration guide. "
+            "This will be removed in v0.20.0."
+        )
 
         bot_token = telegram_config.get("bot_token", "")
         chat_ids = telegram_config.get("allowed_chat_ids", [])
