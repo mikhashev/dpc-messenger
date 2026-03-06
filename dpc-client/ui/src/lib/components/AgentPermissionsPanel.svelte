@@ -9,6 +9,8 @@
   export let editMode: boolean = false;
   export let isGlobal: boolean = false;    // True if editing global dpc_agent settings
   export let agentName: string = '';       // Name of the selected agent (for info text)
+  export let hasCustomProfile: boolean = false;  // True if agent has its own profile
+  export let onResetToGlobal: (() => void) | undefined = undefined;  // Reset button callback
 
   // Tool definitions by category
   const toolCategories = [
@@ -375,8 +377,8 @@
           </div>
         {/each}
 
-        {#if isGlobal}
-          <!-- Sandbox Path Configuration (only for global settings) -->
+        {#if !isGlobal}
+          <!-- Sandbox Path Configuration (per-agent) -->
           <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Configure Extended Paths</h5>
           <p class="help-text-small" style="margin-bottom: 0.5rem;">Add directories outside the default sandbox that the agent can access</p>
 
@@ -474,17 +476,38 @@
 {/if}
 
 {#if !editMode}
-  <div class="info-box" style="margin-top: 1.5rem;">
+  <div class="info-box" style="margin-top: 1.5rem">
     {#if isGlobal}
       <strong>Info:</strong> These are the <strong>global default settings</strong> for all DPC agents.
       Individual agents can override these settings with their own profiles.
       File operations are always sandboxed to ~/.dpc/agent/.
       Shell access and code editing are disabled by default for security.
+    {:else if hasCustomProfile}
+      <strong>Info:</strong> These are <strong>custom settings</strong> for agent <strong>{agentName || 'this agent'}</strong>.
+      This agent overrides the global defaults with its own profile.
+      Evolution and sandbox paths are configured individually for this agent.
+      File operations are always sandboxed to ~/.dpc/agent/
     {:else}
-      <strong>Info:</strong> These settings apply to agent <strong>{agentName || 'this agent'}</strong>.
-      Changes here override the global defaults.
-      File operations are always sandboxed to ~/.dpc/agent/.
+      <strong>Info:</strong> Agent <strong>{agentName || 'this agent'}</strong> is <strong>inheriting global settings</strong>.
+      Any edits will create a custom profile for this agent.
+      File operations are always sandboxed to ~/.dpc/agent/
     {/if}
+  </div>
+{/if}
+
+{#if !isGlobal && hasCustomProfile && onResetToGlobal && !editMode}
+  <div class="reset-section" style="margin-top: 0.5rem; padding: 0.75rem; background: var(--bg-secondary); border-radius: 8px; border-left: 4px solid var(--warning)">
+    <button
+      type="button"
+      class="btn-reset"
+      on:click={onResetToGlobal}
+      style="padding: 0.5rem 1rem; background: var(--warning); color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: 500;"
+    >
+      Reset to Global Settings
+    </button>
+    <p class="help-text-small" style="margin-top: 0.5rem;">
+      Remove custom profile and inherit from global defaults
+    </p>
   </div>
 {/if}
 

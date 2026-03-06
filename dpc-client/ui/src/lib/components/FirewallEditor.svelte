@@ -502,8 +502,44 @@
   $: effectiveEditProfile = editedRules
     ? (selectedAgentId === 'default'
         ? editedRules.dpc_agent || null
-        : editedRules.agent_profiles?.[selectedAgentId] || null)
+        : editedRules.agent_profiles?.[selectedAgentId] || editedRules.dpc_agent || null)
     : null;
+
+  // Track whether current agent uses inherited (global) settings
+  $: agentUsesInheritedSettings = selectedAgentId !== 'default'
+    && editedRules
+    && !editedRules.agent_profiles?.[selectedAgentId];
+
+  // Create agent profile as copy of global settings (copy-on-write)
+  function ensureAgentProfileExists(): void {
+    if (!editedRules || selectedAgentId === 'default') return;
+    if (editedRules.agent_profiles?.[selectedAgentId]) return;
+
+    if (!editedRules.agent_profiles) {
+      editedRules.agent_profiles = {};
+    }
+
+    // Deep copy from dpc_agent
+    editedRules.agent_profiles[selectedAgentId] = JSON.parse(
+      JSON.stringify(editedRules.dpc_agent || {
+        enabled: true,
+        personal_context_access: true,
+        device_context_access: true,
+        knowledge_access: 'read_only',
+        tools: { repo_read: true, repo_list: true, update_scratchpad: true, browse_page: true, search_web: true },
+      })
+    );
+    editedRules = editedRules;  // Trigger reactivity
+  }
+
+  // Reset agent to inherited state
+  function resetAgentToGlobal(): void {
+    if (!editedRules || selectedAgentId === 'default') return;
+    if (editedRules.agent_profiles?.[selectedAgentId]) {
+      delete editedRules.agent_profiles[selectedAgentId];
+      editedRules = editedRules;
+    }
+  }
 
   // File Groups Management Functions
   function addFileGroup() {
@@ -1686,6 +1722,16 @@
               {/if}
             </div>
 
+            <!-- Inheritance Banner -->
+            {#if editMode && agentUsesInheritedSettings}
+              <div class="inheritance-banner" style="background: var(--bg-tertiary); padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem; border-left: 4px solid var(--primary);">
+                <strong>Inheriting from Global Settings</strong>
+                <p class="help-text" style="margin: 0;">
+                  This agent uses global defaults. Any changes will create a custom profile.
+                </p>
+              </div>
+            {/if}
+
             <!-- Unified panel for all agents (global and individual) -->
             <AgentPermissionsPanel
               displaySettings={effectiveDisplayProfile}
@@ -1693,6 +1739,8 @@
               {editMode}
               isGlobal={selectedAgentId === 'default'}
               agentName={selectedAgentId === 'default' ? '' : (agents.find(a => a.agent_id === selectedAgentId)?.name || selectedAgentId)}
+              hasCustomProfile={selectedAgentId !== 'default' && !agentUsesInheritedSettings}
+              onResetToGlobal={selectedAgentId !== 'default' && !agentUsesInheritedSettings ? resetAgentToGlobal : undefined}
             />
           </div>
         {:else if selectedTab === 'peers'}
