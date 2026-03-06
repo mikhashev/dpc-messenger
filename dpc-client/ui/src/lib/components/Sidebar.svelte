@@ -3,10 +3,10 @@
 
 <script lang="ts">
   // State for Telegram linking dialog
-  let showTelegramLinkDialog = false;
-  let linkingAgentId = '';
-  let telegramChatId = '';
-  let linkErrorMessage = '';
+  let showTelegramLinkDialog = $state(false);
+  let linkingAgentId = $state('');
+  let telegramChatId = $state('');
+  let linkErrorMessage = $state('');
 
   // Handle Telegram link button click
   function handleLinkTelegram(agentId: string) {
@@ -653,10 +653,10 @@
 
 <!-- Telegram Link Dialog -->
 {#if showTelegramLinkDialog}
-  <div class="telegram-link-dialog-overlay" onkeydown={(e) => e.key === 'Escape' && cancelTelegramLink()}>
-    <div class="telegram-link-dialog">
+  <div class="telegram-link-dialog-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && cancelTelegramLink()}>
+    <div class="telegram-link-dialog" role="dialog" aria-modal="true" aria-labelledby="telegram-dialog-title">
       <div class="dialog-header">
-        <h3>Link Agent to Telegram</h3>
+        <h3 id="telegram-dialog-title">Link Agent to Telegram</h3>
         <button
           type="button"
           class="dialog-close-btn"
