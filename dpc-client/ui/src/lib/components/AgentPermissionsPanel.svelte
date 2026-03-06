@@ -327,7 +327,7 @@
           {#if !editMode}
             <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
               <strong>Evolution</strong> allows the agent to modify its own memory files
-              (identity.md, scratchpad.md, knowledge/*.md) within the ~/.dpc/agent/ sandbox.
+              (identity.md, scratchpad.md, knowledge/*.md) within the ~/.dpc/agents/AGENT_ID/ sandbox.
               When auto-apply is disabled, you must manually approve each change.
             </div>
           {/if}
@@ -480,17 +480,17 @@
     {#if isGlobal}
       <strong>Info:</strong> These are the <strong>global default settings</strong> for all DPC agents.
       Individual agents can override these settings with their own profiles.
-      File operations are always sandboxed to ~/.dpc/agent/.
+      File operations are always sandboxed to ~/.dpc/agents/AGENT_ID/.
       Shell access and code editing are disabled by default for security.
     {:else if hasCustomProfile}
       <strong>Info:</strong> These are <strong>custom settings</strong> for agent <strong>{agentName || 'this agent'}</strong>.
       This agent overrides the global defaults with its own profile.
       Evolution and sandbox paths are configured individually for this agent.
-      File operations are always sandboxed to ~/.dpc/agent/
+      File operations are always sandboxed to ~/.dpc/agents/AGENT_ID/
     {:else}
       <strong>Info:</strong> Agent <strong>{agentName || 'this agent'}</strong> is <strong>inheriting global settings</strong>.
       Any edits will create a custom profile for this agent.
-      File operations are always sandboxed to ~/.dpc/agent/
+      File operations are always sandboxed to ~/.dpc/agents/AGENT_ID/
     {/if}
   </div>
 {/if}
