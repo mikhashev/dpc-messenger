@@ -4357,8 +4357,8 @@
               }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                // Send if: peer connected, OR local AI chat, OR Telegram chat, OR AI_xxx chat AND (has text OR has pending image)
-                if ((isPeerConnected || isTelegramChat || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) && (currentInput.trim() || pendingImage)) {
+                // Send if: peer connected, OR local AI chat, OR Telegram chat, OR AI_xxx chat, OR agent chat AND (has text OR has pending image)
+                if ((isPeerConnected || isTelegramChat || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_')) && (currentInput.trim() || pendingImage)) {
                   handleSendMessage();
                 }
               }
@@ -4376,15 +4376,15 @@
           <button
             class="file-button"
             onclick={handleSendFile}
-            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || (!isPeerConnected && !isTelegramChat)}
-            title={isPeerConnected || isTelegramChat ? "Send file" : "Peer disconnected"}
+            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_') || (!isPeerConnected && !isTelegramChat)}
+            title={isPeerConnected || isTelegramChat || activeChatId.startsWith('agent_') ? "Send file" : "Peer disconnected"}
           >
             📎
           </button>
           <button
             onclick={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || (!isPeerConnected && !isTelegramChat)}
-            title={!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer disconnected" : ""}
+            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || (!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_'))}
+            title={!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') ? "Peer disconnected" : ""}
           >
             {#if isLoading}Sending...{:else}Send{/if}
           </button>
