@@ -120,26 +120,64 @@ class TelegramBridge:
         except Exception as e:
             logger.error(f"Failed to save conversation links: {e}")
 
-    def _get_or_create_conversation_id(self, telegram_chat_id: str) -> str:
+    def _get_agent_for_chat(self, chat_id: str) -> Optional[str]:
+        """
+        Check if a Telegram chat is linked to an agent.
+
+        Args:
+            chat_id: Telegram chat ID
+
+        Returns:
+            Agent ID if linked, None otherwise
+        """
+        try:
+            from ..dpc_agent.utils import AgentRegistry
+
+            registry = AgentRegistry()
+            # Check all agents to see if any have this chat_id linked
+            for agent in registry.list_agents():
+                if agent.get("telegram_enabled") and agent.get("telegram_chat_id") == chat_id:
+                    return agent.get("agent_id")
+
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get agent for chat {chat_id}: {e}", exc_info=True)
+            return None
+
+    def _get_or_create_conversation_id(self, telegram_chat_id: str, agent_id: Optional[str] = None) -> str:
         """
         Get or create DPC conversation ID for a Telegram chat.
 
+        This method is agent-aware: if the chat_id is linked to an agent,
+        it returns an agent-specific conversation ID (agent-{agent_id}).
+        Otherwise, it returns a standard Telegram conversation ID (telegram-{chat_id}).
+
         Args:
             telegram_chat_id: Telegram chat ID
+            agent_id: Optional agent ID (for explicit agent routing)
 
         Returns:
-            DPC conversation ID (format: telegram-{chat_id})
+            DPC conversation ID (format: agent-{agent_id} or telegram-{chat_id})
         """
         # Check if we have a mapping
         if telegram_chat_id in self.conversation_map:
             return self.conversation_map[telegram_chat_id]
 
-        # Create new conversation ID
-        conversation_id = f"telegram-{telegram_chat_id}"
+        # Check if this chat is linked to an agent
+        linked_agent_id = agent_id or self._get_agent_for_chat(telegram_chat_id)
+
+        if linked_agent_id:
+            # Use agent-specific conversation ID
+            conversation_id = f"agent-{linked_agent_id}"
+            logger.info(f"Using agent conversation ID: {telegram_chat_id} → {conversation_id} (agent: {linked_agent_id})")
+        else:
+            # Use standard Telegram conversation ID
+            conversation_id = f"telegram-{telegram_chat_id}"
+            logger.info(f"Using telegram conversation ID: {telegram_chat_id} → {conversation_id}")
+
         self.conversation_map[telegram_chat_id] = conversation_id
         self._save_conversation_links()
 
-        logger.info(f"Created conversation link: {telegram_chat_id} → {conversation_id}")
         return conversation_id
 
     def _get_linked_chat_id(self, conversation_id: str) -> Optional[str]:
@@ -185,6 +223,38 @@ class TelegramBridge:
 
         logger.info(f"Removed conversation link: {telegram_chat_id}")
         return True
+
+    def _load_agent_context(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Load agent's memory and context files.
+
+        Args:
+            agent_id: Agent ID
+
+        Returns:
+            Dict with agent context (identity, scratchpad, etc.)
+        """
+        try:
+            from ..dpc_agent.utils import get_agent_root
+            from ..dpc_agent.memory import Memory
+
+            agent_root = get_agent_root(agent_id)
+            memory = Memory(agent_root=agent_root)
+
+            # Load agent's memory files
+            context = {
+                "agent_id": agent_id,
+                "identity": memory.read_file("memory/identity.md") or "",
+                "scratchpad": memory.read_file("memory/scratchpad.md") or "",
+                "dialogue_summary": memory.read_file("memory/dialogue_summary.md") or "",
+            }
+
+            logger.debug(f"Loaded context for agent {agent_id}")
+            return context
+
+        except Exception as e:
+            logger.error(f"Failed to load agent context for {agent_id}: {e}", exc_info=True)
+            return {}
 
     async def _send_unknown_user_info(self, chat_id: str, from_user):
         """Send helpful message to unknown user with their chat_id (v0.15.0)."""
@@ -268,8 +338,15 @@ class TelegramBridge:
             # Get sender info
             sender_name = from_user.full_name or from_user.username or f"User_{chat_id}"
 
-            # Get or create conversation
+            # Get or create conversation (agent-aware)
             conversation_id = self._get_or_create_conversation_id(chat_id)
+
+            # Check if this is an agent conversation
+            agent_context = None
+            if conversation_id.startswith("agent-"):
+                agent_id = conversation_id.replace("agent-", "")
+                agent_context = self._load_agent_context(agent_id)
+                logger.info(f"Routing message to agent {agent_id} with context")
 
             # Convert to DPC message format
             dpc_message = {
@@ -281,6 +358,10 @@ class TelegramBridge:
                 "telegram_chat_id": chat_id,
                 "telegram_message_id": message_id
             }
+
+            # Add agent context if available
+            if agent_context:
+                dpc_message["agent_context"] = agent_context
 
             # Get or create conversation monitor
             from ..conversation_monitor import ConversationMonitor, Message as ConvMessage

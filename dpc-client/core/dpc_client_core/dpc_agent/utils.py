@@ -129,6 +129,8 @@ class AgentRegistry:
         provider_alias: str = "dpc_agent",
         profile_name: str = "default",
         instruction_set_name: str = "general",
+        telegram_chat_id: Optional[str] = None,
+        telegram_enabled: bool = False,
     ) -> Dict[str, Any]:
         """
         Register a new agent.
@@ -139,10 +141,20 @@ class AgentRegistry:
             provider_alias: AI provider to use
             profile_name: Permission profile name
             instruction_set_name: Instruction set for the agent
+            telegram_chat_id: Optional Telegram chat ID for linking
+            telegram_enabled: Whether Telegram integration is enabled
 
         Returns:
             Agent metadata dict
         """
+        # Validate telegram_chat_id format if provided
+        if telegram_chat_id is not None:
+            if not isinstance(telegram_chat_id, str):
+                raise ValueError("telegram_chat_id must be a string")
+            # Telegram chat IDs should be numeric (can be negative for groups)
+            if not telegram_chat_id.lstrip('-').isdigit():
+                raise ValueError("telegram_chat_id must be a numeric string")
+
         agent_meta = {
             "agent_id": agent_id,
             "name": name,
@@ -150,7 +162,14 @@ class AgentRegistry:
             "profile_name": profile_name,
             "created_at": utc_now_iso(),
             "instruction_set_name": instruction_set_name,
+            "telegram_enabled": telegram_enabled,
         }
+
+        # Only add telegram_chat_id if provided
+        if telegram_chat_id is not None:
+            agent_meta["telegram_chat_id"] = telegram_chat_id
+            agent_meta["telegram_linked_at"] = utc_now_iso()
+
         self._registry["agents"][agent_id] = agent_meta
         self._save_registry()
         log.info(f"Registered agent: {agent_id} ({name})")
@@ -191,6 +210,84 @@ class AgentRegistry:
         self._registry["agents"][agent_id]["updated_at"] = utc_now_iso()
         self._save_registry()
         return self._registry["agents"][agent_id]
+
+    def link_agent_to_telegram(self, agent_id: str, chat_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Link an agent to a Telegram chat.
+
+        Args:
+            agent_id: Agent to link
+            chat_id: Telegram chat ID (numeric string)
+
+        Returns:
+            Updated agent metadata or None if not found
+
+        Raises:
+            ValueError: If chat_id format is invalid
+        """
+        # Validate chat_id format
+        if not isinstance(chat_id, str):
+            raise ValueError("telegram_chat_id must be a string")
+        if not chat_id.lstrip('-').isdigit():
+            raise ValueError("telegram_chat_id must be a numeric string")
+
+        return self.update_agent(agent_id, {
+            "telegram_chat_id": chat_id,
+            "telegram_enabled": True,
+            "telegram_linked_at": utc_now_iso()
+        })
+
+    def unlink_agent_from_telegram(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Remove Telegram chat linkage for an agent.
+
+        Args:
+            agent_id: Agent to unlink
+
+        Returns:
+            Updated agent metadata or None if not found
+        """
+        agent = self.get_agent(agent_id)
+        if not agent:
+            return None
+
+        updates = {
+            "telegram_enabled": False
+        }
+
+        # Remove telegram_chat_id and telegram_linked_at if present
+        if "telegram_chat_id" in agent:
+            updates["telegram_chat_id"] = None
+        if "telegram_linked_at" in agent:
+            updates["telegram_linked_at"] = None
+
+        return self.update_agent(agent_id, updates)
+
+    def get_agent_linked_chat(self, agent_id: str) -> Optional[str]:
+        """
+        Get the telegram_chat_id for an agent.
+
+        Args:
+            agent_id: Agent to query
+
+        Returns:
+            Telegram chat ID or None if not linked
+        """
+        agent = self.get_agent(agent_id)
+        if not agent:
+            return None
+
+        return agent.get("telegram_chat_id") if agent.get("telegram_enabled") else None
+
+    def list_linked_agents(self) -> List[Dict[str, Any]]:
+        """
+        List all agents with Telegram links.
+
+        Returns:
+            List of agent metadata dicts with telegram_enabled=True
+        """
+        all_agents = self.list_agents()
+        return [agent for agent in all_agents if agent.get("telegram_enabled", False)]
 
 
 def create_name_slug(name: str, max_length: int = 20) -> str:
@@ -324,6 +421,8 @@ def create_agent_storage(
     instruction_set_name: str = "general",
     budget_usd: float = 50.0,
     max_rounds: int = 200,
+    telegram_chat_id: Optional[str] = None,
+    telegram_enabled: bool = False,
     **extra_config
 ) -> Dict[str, Any]:
     """
@@ -337,6 +436,8 @@ def create_agent_storage(
         instruction_set_name: Instruction set for the agent
         budget_usd: Budget limit in USD
         max_rounds: Maximum LLM rounds per task
+        telegram_chat_id: Optional Telegram chat ID for linking
+        telegram_enabled: Whether Telegram integration is enabled
         **extra_config: Additional config fields
 
     Returns:
@@ -367,7 +468,7 @@ def create_agent_storage(
     # Save config
     save_agent_config(agent_id, config)
 
-    # Register in global registry
+    # Register in global registry with Telegram support
     registry = AgentRegistry()
     registry.register_agent(
         agent_id=agent_id,
@@ -375,9 +476,13 @@ def create_agent_storage(
         provider_alias=provider_alias,
         profile_name=profile_name,
         instruction_set_name=instruction_set_name,
+        telegram_chat_id=telegram_chat_id,
+        telegram_enabled=telegram_enabled,
     )
 
     log.info(f"Created agent storage for {agent_id} ({name})")
+    if telegram_chat_id:
+        log.info(f"Agent {agent_id} linked to Telegram chat {telegram_chat_id}")
     return config
 
 

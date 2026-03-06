@@ -5917,6 +5917,131 @@ Respond in JSON format:
                 "message": str(e)
             }
 
+    async def link_agent_telegram(self, agent_id: str, chat_id: str) -> Dict[str, Any]:
+        """
+        Link an agent to a Telegram chat.
+
+        UI Integration: Called when user clicks "Link Telegram" button for an agent.
+
+        Args:
+            agent_id: Agent ID to link
+            chat_id: Telegram chat ID (numeric string)
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            if not self.telegram_manager:
+                return {
+                    "status": "error",
+                    "message": "Telegram integration not enabled"
+                }
+
+            # Delegate to TelegramBotManager
+            result = await self.telegram_manager.link_agent_to_chat(agent_id, chat_id)
+
+            if result.get("success"):
+                return {
+                    "status": "success",
+                    "message": result.get("message"),
+                    "agent_id": result.get("agent_id"),
+                    "chat_id": result.get("chat_id")
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": result.get("error", "Failed to link agent")
+                }
+
+        except Exception as e:
+            logger.error("Failed to link agent to Telegram: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def unlink_agent_telegram(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Unlink an agent from its Telegram chat.
+
+        UI Integration: Called when user clicks "Unlink Telegram" button for an agent.
+
+        Args:
+            agent_id: Agent ID to unlink
+
+        Returns:
+            Dict with status and message
+        """
+        try:
+            if not self.telegram_manager:
+                return {
+                    "status": "error",
+                    "message": "Telegram integration not enabled"
+                }
+
+            # Delegate to TelegramBotManager
+            result = await self.telegram_manager.unlink_agent_from_chat(agent_id)
+
+            if result.get("success"):
+                return {
+                    "status": "success",
+                    "message": result.get("message"),
+                    "agent_id": result.get("agent_id")
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": result.get("error", "Failed to unlink agent")
+                }
+
+        except Exception as e:
+            logger.error("Failed to unlink agent from Telegram: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
+    async def get_agent_telegram_status(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Get Telegram link status for an agent.
+
+        UI Integration: Called to display current Telegram link status for an agent.
+
+        Args:
+            agent_id: Agent ID to query
+
+        Returns:
+            Dict with status information
+        """
+        try:
+            from .dpc_agent.utils import AgentRegistry
+
+            registry = AgentRegistry()
+            agent = registry.get_agent(agent_id)
+
+            if not agent:
+                return {
+                    "status": "error",
+                    "message": f"Agent {agent_id} not found"
+                }
+
+            linked_chat_id = registry.get_agent_linked_chat(agent_id)
+
+            return {
+                "status": "success",
+                "agent_id": agent_id,
+                "telegram_enabled": agent.get("telegram_enabled", False),
+                "telegram_chat_id": linked_chat_id,
+                "telegram_linked_at": agent.get("telegram_linked_at")
+            }
+
+        except Exception as e:
+            logger.error("Failed to get agent Telegram status: %s", e, exc_info=True)
+            return {
+                "status": "error",
+                "message": str(e)
+            }
+
     async def vote_new_session(self, proposal_id: str, vote: bool) -> Dict[str, Any]:
         """Cast vote on a new session proposal.
 

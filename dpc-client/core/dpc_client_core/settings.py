@@ -274,6 +274,15 @@ class Settings:
         # NOTE: Create a separate Telegram bot for agent monitoring via @BotFather
         # Get your chat ID via @userinfobot
 
+        # Agent-Telegram Chat Linking (v0.15.0+)
+        self._config['agent_telegram'] = {
+            'auto_link_on_create': 'false',  # Auto-link Telegram chat when creating agents
+            'require_confirmation': 'true',  # Require user confirmation before linking
+            'default_enabled': 'false'  # Default telegram_enabled state for new agents
+        }
+        # NOTE: This section controls agent-Telegram chat linking behavior
+        # Uses the main Telegram bot (from [telegram] section), not a separate bot
+
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
             'console': 'true',  # Enable console output

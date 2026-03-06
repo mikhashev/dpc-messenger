@@ -874,3 +874,157 @@ class TelegramBotManager:
             await bridge.handle_document_message(update, context)
         elif update.message and update.message.video:
             await bridge.handle_video_message(update, context)
+
+    # Agent-Telegram Linking Methods (v0.15.0+)
+
+    async def link_agent_to_chat(self, agent_id: str, chat_id: str) -> Dict[str, Any]:
+        """
+        Link an agent to a Telegram chat.
+
+        This method:
+        1. Validates the chat_id exists in the whitelist
+        2. Updates the agent registry with the telegram_chat_id
+        3. Emits an event for UI updates
+
+        Args:
+            agent_id: Agent to link
+            chat_id: Telegram chat ID (numeric string)
+
+        Returns:
+            Dict with success status and message
+
+        Raises:
+            ValueError: If chat_id is not whitelisted or invalid
+        """
+        try:
+            # Import AgentRegistry
+            from ..dpc_agent.utils import AgentRegistry
+
+            # Validate chat_id format
+            if not isinstance(chat_id, str):
+                raise ValueError("chat_id must be a string")
+            if not chat_id.lstrip('-').isdigit():
+                raise ValueError("chat_id must be a numeric string")
+
+            # Check if chat_id is whitelisted
+            if not self.is_allowed(chat_id):
+                raise ValueError(f"chat_id {chat_id} is not in the Telegram whitelist")
+
+            # Update agent registry
+            registry = AgentRegistry()
+            agent_meta = registry.link_agent_to_telegram(agent_id, chat_id)
+
+            if not agent_meta:
+                return {
+                    "success": False,
+                    "error": f"Agent {agent_id} not found"
+                }
+
+            logger.info(f"Linked agent {agent_id} to Telegram chat {chat_id}")
+
+            # Emit event for UI updates
+            await self.service.local_api.broadcast_event("agent_telegram_linked", {
+                "agent_id": agent_id,
+                "chat_id": chat_id,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+
+            return {
+                "success": True,
+                "agent_id": agent_id,
+                "chat_id": chat_id,
+                "message": f"Agent {agent_id} linked to Telegram chat {chat_id}"
+            }
+
+        except ValueError as e:
+            logger.warning(f"Failed to link agent to Telegram: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+        except Exception as e:
+            logger.error(f"Unexpected error linking agent to Telegram: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"Failed to link agent: {str(e)}"
+            }
+
+    async def unlink_agent_from_chat(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Remove Telegram chat linkage for an agent.
+
+        Args:
+            agent_id: Agent to unlink
+
+        Returns:
+            Dict with success status and message
+        """
+        try:
+            from ..dpc_agent.utils import AgentRegistry
+
+            registry = AgentRegistry()
+            agent_meta = registry.unlink_agent_from_telegram(agent_id)
+
+            if not agent_meta:
+                return {
+                    "success": False,
+                    "error": f"Agent {agent_id} not found"
+                }
+
+            logger.info(f"Unlinked agent {agent_id} from Telegram chat")
+
+            # Emit event for UI updates
+            await self.service.local_api.broadcast_event("agent_telegram_unlinked", {
+                "agent_id": agent_id,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+
+            return {
+                "success": True,
+                "agent_id": agent_id,
+                "message": f"Agent {agent_id} unlinked from Telegram"
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to unlink agent from Telegram: {e}", exc_info=True)
+            return {
+                "success": False,
+                "error": f"Failed to unlink agent: {str(e)}"
+            }
+
+    async def get_agent_linked_chat(self, agent_id: str) -> Optional[str]:
+        """
+        Get the telegram_chat_id for an agent.
+
+        Args:
+            agent_id: Agent to query
+
+        Returns:
+            Telegram chat ID or None if not linked
+        """
+        try:
+            from ..dpc_agent.utils import AgentRegistry
+
+            registry = AgentRegistry()
+            return registry.get_agent_linked_chat(agent_id)
+
+        except Exception as e:
+            logger.error(f"Failed to get agent linked chat: {e}", exc_info=True)
+            return None
+
+    async def list_linked_agents(self) -> List[Dict[str, Any]]:
+        """
+        List all agents with Telegram links.
+
+        Returns:
+            List of agent metadata dicts with telegram_enabled=True
+        """
+        try:
+            from ..dpc_agent.utils import AgentRegistry
+
+            registry = AgentRegistry()
+            return registry.list_linked_agents()
+
+        except Exception as e:
+            logger.error(f"Failed to list linked agents: {e}", exc_info=True)
+            return []
