@@ -118,6 +118,10 @@ export const telegramImageReceived = writable<any>(null);  // {conversation_id, 
 export const telegramFileReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes, mime_type}
 export const telegramStatus = writable<any>(null);  // {enabled, connected, webhook_mode, whitelist_count, transcription_enabled, bridge_to_p2p, conversation_links}
 
+// Agent Telegram linking events (v0.15.0+)
+export const agentTelegramLinked = writable<any>(null);  // {agent_id, chat_id, timestamp}
+export const agentTelegramUnlinked = writable<any>(null);  // {agent_id, timestamp}
+
 // Whisper model loading stores (v0.13.3 - model pre-loading)
 export const whisperModelLoadingStarted = writable<any>(null);  // {provider}
 export const whisperModelLoaded = writable<any>(null);  // {provider}
@@ -758,6 +762,15 @@ export function connectToCoreService() {
                 else if (message.event === "whisper_model_download_failed") {
                     console.error("Whisper model download failed:", message.payload);
                     whisperModelDownloadFailed.set(message.payload);
+                }
+                // Agent Telegram linking events (v0.15.0+)
+                else if (message.event === "agent_telegram_linked") {
+                    console.log("Agent linked to Telegram:", message.payload);
+                    agentTelegramLinked.set(message.payload);
+                }
+                else if (message.event === "agent_telegram_unlinked") {
+                    console.log("Agent unlinked from Telegram:", message.payload);
+                    agentTelegramUnlinked.set(message.payload);
                 }
                 // DPC Agent progress events (v0.15.0+ - real-time agent progress in chat)
                 else if (message.event === "agent_progress") {

@@ -2,6 +2,47 @@
 <!-- Displays connection status, node info, peer list, chat list, and action buttons -->
 
 <script lang="ts">
+  // State for Telegram linking dialog
+  let showTelegramLinkDialog = false;
+  let linkingAgentId = '';
+  let telegramChatId = '';
+  let linkErrorMessage = '';
+
+  // Handle Telegram link button click
+  function handleLinkTelegram(agentId: string) {
+    linkingAgentId = agentId;
+    telegramChatId = '';
+    linkErrorMessage = '';
+    showTelegramLinkDialog = true;
+  }
+
+  // Confirm Telegram link
+  async function confirmTelegramLink() {
+    if (!telegramChatId.trim()) {
+      linkErrorMessage = 'Please enter a Telegram chat ID';
+      return;
+    }
+
+    if (onLinkAgentTelegram) {
+      try {
+        await onLinkAgentTelegram(linkingAgentId, telegramChatId.trim());
+        showTelegramLinkDialog = false;
+        telegramChatId = '';
+        linkErrorMessage = '';
+      } catch (error: any) {
+        linkErrorMessage = error.message || 'Failed to link agent to Telegram';
+      }
+    }
+  }
+
+  // Cancel Telegram link
+  function cancelTelegramLink() {
+    showTelegramLinkDialog = false;
+    telegramChatId = '';
+    linkErrorMessage = '';
+    linkingAgentId = '';
+  }
+
   // Type definitions
   type NodeStatus = {
     node_id: string;
@@ -33,6 +74,8 @@
     profile_name: string;
     instruction_set_name?: string;
     created_at: string;
+    telegram_enabled?: boolean;
+    telegram_chat_id?: string;
   };
 
   // Props (Svelte 5 runes mode)
@@ -73,6 +116,8 @@
     agents = [],
     onSelectAgent,
     onDeleteAgent,
+    onLinkAgentTelegram,
+    onUnlinkAgentTelegram,
   }: {
     connectionStatus: string;
     nodeStatus: NodeStatus | null;
@@ -108,6 +153,8 @@
     agents?: AgentInfo[];
     onSelectAgent?: (agentId: string) => void;
     onDeleteAgent?: (agentId: string) => void;
+    onLinkAgentTelegram?: (agentId: string, chatId: string) => Promise<void>;
+    onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
   } = $props();
 </script>
 
@@ -431,17 +478,42 @@
                 <span class="agent-icon">🤖</span>
                 <span class="agent-name">{agent.name}</span>
                 <span class="agent-provider">{agent.provider_alias}</span>
+                {#if agent.telegram_enabled}
+                  <span class="telegram-link-badge" title="Linked to Telegram">✓ 📱</span>
+                {/if}
               </button>
-              {#if onDeleteAgent}
-                <button
-                  type="button"
-                  class="disconnect-btn"
-                  onclick={(e) => { e.stopPropagation(); onDeleteAgent(agent.agent_id); }}
-                  title="Delete agent"
-                >
-                  ×
-                </button>
-              {/if}
+              <div class="agent-actions">
+                {#if agent.telegram_enabled && onUnlinkAgentTelegram}
+                  <button
+                    type="button"
+                    class="telegram-action-btn unlink-btn"
+                    onclick={(e) => { e.stopPropagation(); onUnlinkAgentTelegram(agent.agent_id); }}
+                    title="Unlink from Telegram"
+                  >
+                    📱✕
+                  </button>
+                {/if}
+                {#if !agent.telegram_enabled && onLinkAgentTelegram}
+                  <button
+                    type="button"
+                    class="telegram-action-btn link-btn"
+                    onclick={(e) => { e.stopPropagation(); handleLinkTelegram(agent.agent_id); }}
+                    title="Link to Telegram"
+                  >
+                    📱+
+                  </button>
+                {/if}
+                {#if onDeleteAgent}
+                  <button
+                    type="button"
+                    class="disconnect-btn"
+                    onclick={(e) => { e.stopPropagation(); onDeleteAgent(agent.agent_id); }}
+                    title="Delete agent"
+                  >
+                    ×
+                  </button>
+                {/if}
+              </div>
             </li>
           {/each}
         {/if}
@@ -578,6 +650,63 @@
     </div>
   {/if}
 </div>
+
+<!-- Telegram Link Dialog -->
+{#if showTelegramLinkDialog}
+  <div class="telegram-link-dialog-overlay" onkeydown={(e) => e.key === 'Escape' && cancelTelegramLink()}>
+    <div class="telegram-link-dialog">
+      <div class="dialog-header">
+        <h3>Link Agent to Telegram</h3>
+        <button
+          type="button"
+          class="dialog-close-btn"
+          onclick={cancelTelegramLink}
+          aria-label="Close dialog"
+        >
+          ×
+        </button>
+      </div>
+      <div class="dialog-content">
+        <p class="dialog-info">
+          Enter your Telegram chat ID to link this agent. You can find your chat ID by messaging
+          <a href="https://t.me/userinfobot" target="_blank" rel="noopener noreferrer">@userinfobot</a>
+          on Telegram.
+        </p>
+        <label for="telegram-chat-id" class="dialog-label">
+          Telegram Chat ID:
+        </label>
+        <input
+          id="telegram-chat-id"
+          type="text"
+          bind:value={telegramChatId}
+          placeholder="123456789"
+          onkeydown={(e) => e.key === 'Enter' && confirmTelegramLink()}
+          class="dialog-input"
+        />
+        {#if linkErrorMessage}
+          <p class="dialog-error">{linkErrorMessage}</p>
+        {/if}
+        <div class="dialog-actions">
+          <button
+            type="button"
+            class="dialog-btn dialog-btn-cancel"
+            onclick={cancelTelegramLink}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="dialog-btn dialog-btn-confirm"
+            onclick={confirmTelegramLink}
+            disabled={!telegramChatId.trim()}
+          >
+            Link Agent
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
 
 <style>
   .sidebar {
@@ -1400,5 +1529,184 @@
     font-family: inherit;
     box-sizing: border-box;
     margin-bottom: 0.5rem;
+  }
+
+  /* Agent Actions */
+  .agent-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.25rem;
+  }
+
+  .telegram-action-btn {
+    padding: 0.3rem 0.5rem;
+    background: transparent;
+    color: #0088cc;
+    font-size: 0.9rem;
+    border: 1px solid #0088cc;
+    flex: 0 0 auto;
+    min-width: auto;
+    width: auto;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .telegram-action-btn:hover:not(:disabled) {
+    background: #e6f3ff;
+    transform: translateY(-1px);
+  }
+
+  .telegram-action-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .telegram-link-badge {
+    font-size: 0.65rem;
+    background: #0088cc;
+    color: white;
+    padding: 0.1rem 0.3rem;
+    border-radius: 3px;
+    margin-left: 0.25rem;
+  }
+
+  /* Telegram Link Dialog */
+  .telegram-link-dialog-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 1rem;
+  }
+
+  .telegram-link-dialog {
+    background: white;
+    border-radius: 8px;
+    max-width: 500px;
+    width: 100%;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+  }
+
+  .dialog-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    border-bottom: 1px solid #e0e0e0;
+  }
+
+  .dialog-header h3 {
+    margin: 0;
+    padding: 0;
+    border: none;
+    font-size: 1.1rem;
+  }
+
+  .dialog-close-btn {
+    background: transparent;
+    border: none;
+    font-size: 1.5rem;
+    color: #666;
+    cursor: pointer;
+    padding: 0;
+    width: auto;
+    min-width: auto;
+    line-height: 1;
+  }
+
+  .dialog-close-btn:hover {
+    background: transparent;
+    color: #333;
+  }
+
+  .dialog-content {
+    padding: 1.5rem;
+  }
+
+  .dialog-info {
+    font-size: 0.9rem;
+    color: #666;
+    margin-bottom: 1rem;
+    line-height: 1.5;
+  }
+
+  .dialog-info a {
+    color: #0088cc;
+    text-decoration: none;
+  }
+
+  .dialog-info a:hover {
+    text-decoration: underline;
+  }
+
+  .dialog-label {
+    display: block;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+    color: #333;
+  }
+
+  .dialog-input {
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    font-size: 1rem;
+    font-family: inherit;
+    box-sizing: border-box;
+    margin-bottom: 0.5rem;
+  }
+
+  .dialog-error {
+    color: #dc3545;
+    font-size: 0.85rem;
+    margin: -0.25rem 0 0.5rem 0;
+  }
+
+  .dialog-actions {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 1rem;
+  }
+
+  .dialog-btn {
+    flex: 1;
+    padding: 0.75rem 1rem;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.95rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .dialog-btn-cancel {
+    background: #e0e0e0;
+    color: #333;
+  }
+
+  .dialog-btn-cancel:hover {
+    background: #d0d0d0;
+  }
+
+  .dialog-btn-confirm {
+    background: #0088cc;
+    color: white;
+  }
+
+  .dialog-btn-confirm:hover:not(:disabled) {
+    background: #0077b3;
+  }
+
+  .dialog-btn-confirm:disabled {
+    background: #a0c4e8;
+    cursor: not-allowed;
   }
 </style>

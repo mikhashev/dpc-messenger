@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, telegramMessages, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, deleteAgent, agentCreated, agentsList } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, telegramMessages, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, agentTelegramLinked, agentTelegramUnlinked, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, deleteAgent, agentCreated, agentsList } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -408,6 +408,58 @@
       agentProgressTool = null;
       agentProgressRound = 0;
     };
+  });
+
+  // Reactive: Handle agent Telegram linked event (v0.15.0+)
+  $effect(() => {
+    if ($agentTelegramLinked) {
+      const { agent_id, chat_id } = $agentTelegramLinked;
+      console.log(`[AgentTelegram] Agent ${agent_id} linked to Telegram chat ${chat_id}`);
+
+      // Show success toast
+      agentToastMessage = `Agent linked to Telegram successfully`;
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
+      // Refresh agent list to update Telegram status
+      (async () => {
+        try {
+          const agentsResult = await listAgents();
+          if (agentsResult?.status === 'success' && agentsResult.agents) {
+            agentsList.set(agentsResult.agents);
+          }
+        } catch (error) {
+          console.error('Failed to refresh agents list:', error);
+        }
+      })();
+    }
+  });
+
+  // Reactive: Handle agent Telegram unlinked event (v0.15.0+)
+  $effect(() => {
+    if ($agentTelegramUnlinked) {
+      const { agent_id } = $agentTelegramUnlinked;
+      console.log(`[AgentTelegram] Agent ${agent_id} unlinked from Telegram`);
+
+      // Show info toast
+      agentToastMessage = `Agent unlinked from Telegram`;
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
+      // Refresh agent list to update Telegram status
+      (async () => {
+        try {
+          const agentsResult = await listAgents();
+          if (agentsResult?.status === 'success' && agentsResult.agents) {
+            agentsList.set(agentsResult.agents);
+          }
+        } catch (error) {
+          console.error('Failed to refresh agents list:', error);
+        }
+      })();
+    }
   });
 
   // Persist AI chats (including Agent chats) to localStorage for page refresh recovery
@@ -3100,6 +3152,89 @@
     }
   }
 
+  async function handleLinkAgentTelegram(agentId: string, chatId: string) {
+    console.log('Link agent to Telegram:', agentId, 'chatId:', chatId);
+
+    try {
+      const result = await sendCommand('link_agent_telegram', { agent_id: agentId, chat_id: chatId });
+
+      if (result.status === 'error') {
+        console.error('Failed to link agent to Telegram:', result.message);
+        agentToastMessage = `Failed to link agent: ${result.message}`;
+        agentToastType = 'error';
+        showAgentToast = true;
+        setTimeout(() => { showAgentToast = false; }, 5000);
+        throw new Error(result.message);
+      }
+
+      // Show success toast
+      agentToastMessage = 'Agent linked to Telegram successfully';
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
+      // Refresh agent list to update Telegram status
+      try {
+        const agentsResult = await listAgents();
+        if (agentsResult?.status === 'success' && agentsResult.agents) {
+          agentsList.set(agentsResult.agents);
+        }
+      } catch (error) {
+        console.error('Failed to refresh agents list:', error);
+      }
+
+      console.log('Agent linked to Telegram successfully');
+    } catch (error) {
+      console.error('Error linking agent to Telegram:', error);
+      agentToastMessage = `Error linking agent: ${error}`;
+      agentToastType = 'error';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 5000);
+      throw error;
+    }
+  }
+
+  async function handleUnlinkAgentTelegram(agentId: string) {
+    console.log('Unlink agent from Telegram:', agentId);
+
+    try {
+      const result = await sendCommand('unlink_agent_telegram', { agent_id: agentId });
+
+      if (result.status === 'error') {
+        console.error('Failed to unlink agent from Telegram:', result.message);
+        agentToastMessage = `Failed to unlink agent: ${result.message}`;
+        agentToastType = 'error';
+        showAgentToast = true;
+        setTimeout(() => { showAgentToast = false; }, 5000);
+        return;
+      }
+
+      // Show success toast
+      agentToastMessage = 'Agent unlinked from Telegram successfully';
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
+      // Refresh agent list to update Telegram status
+      try {
+        const agentsResult = await listAgents();
+        if (agentsResult?.status === 'success' && agentsResult.agents) {
+          agentsList.set(agentsResult.agents);
+        }
+      } catch (error) {
+        console.error('Failed to refresh agents list:', error);
+      }
+
+      console.log('Agent unlinked from Telegram successfully');
+    } catch (error) {
+      console.error('Error unlinking agent from Telegram:', error);
+      agentToastMessage = `Error unlinking agent: ${error}`;
+      agentToastType = 'error';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 5000);
+    }
+  }
+
   // File transfer handlers (Week 1)
   async function handleSendFile() {
     // Only allow file transfer to P2P chats and Telegram chats (not local_ai or ai_xxx chats)
@@ -4059,6 +4194,8 @@
       agents={$agentsList}
       onSelectAgent={handleSelectAgent}
       onDeleteAgent={handleDeleteAgent}
+      onLinkAgentTelegram={handleLinkAgentTelegram}
+      onUnlinkAgentTelegram={handleUnlinkAgentTelegram}
     />
 
 
