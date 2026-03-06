@@ -246,8 +246,8 @@
         </div>
       </div>
 
-      {#if isGlobal}
-        <!-- Evolution Settings Section (only for global settings) -->
+      {#if !isGlobal}
+        <!-- Evolution Settings Section (per-agent) -->
         <div class="subsection">
           <h4>Evolution Settings</h4>
           <p class="help-text-small">Configure autonomous self-modification behavior</p>
