@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 import re
 import ssl
+from html.parser import HTMLParser
+from io import StringIO
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
@@ -71,32 +73,73 @@ def _fetch_url(url: str, timeout: int = 30) -> Dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 
+class _TextExtractor(HTMLParser):
+    """HTML parser that extracts text content, skipping script/style tags.
+
+    Uses HTMLParser instead of regexps for robustness against malformed HTML
+    and edge cases that regexp-based filtering misses (e.g., spaces before
+    closing tags, attributes containing '>', malformed HTML).
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.text = StringIO()
+        self.skip_tags = {'script', 'style'}
+        self.skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        """Track when we enter a script or style tag."""
+        if tag in self.skip_tags:
+            self.skip_depth += 1
+
+    def handle_endtag(self, tag):
+        """Track when we exit a script or style tag."""
+        if tag in self.skip_tags and self.skip_depth > 0:
+            self.skip_depth -= 1
+
+    def handle_data(self, data):
+        """Collect text data, skipping script/style content."""
+        if self.skip_depth == 0:
+            self.text.write(data)
+
+    def get_text(self) -> str:
+        """Get the extracted and cleaned text."""
+        text = self.text.getvalue()
+
+        # Clean up whitespace
+        text = re.sub(r"\s+", " ", text)
+        text = re.sub(r"\n\s*\n", "\n\n", text)
+
+        return text.strip()
+
+
 def _extract_text(html: str) -> str:
     """
     Extract readable text from HTML.
+
+    Uses HTMLParser instead of regexps for robustness against malformed HTML
+    and edge cases that regexp-based filtering misses. This addresses CodeQL
+    warning py/bad-tag-filter about regexp-based HTML tag filtering.
 
     Args:
         html: HTML content
 
     Returns:
-        Extracted text
+        Extracted text with script/style content removed
     """
-    # Remove script and style elements
-    html = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
-    html = re.sub(r"<style[^>]*>.*?</style>", "", html, flags=re.DOTALL | re.IGNORECASE)
+    import html as html_module
 
-    # Remove HTML tags
-    text = re.sub(r"<[^>]+>", " ", html)
+    # Use HTMLParser to extract text, skipping script/style tags
+    parser = _TextExtractor()
+    parser.feed(html)
+    parser.close()
+
+    text = parser.get_text()
 
     # Decode HTML entities
-    import html as html_module
     text = html_module.unescape(text)
 
-    # Clean up whitespace
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"\n\s*\n", "\n\n", text)
-
-    return text.strip()
+    return text
 
 
 def browse_page(ctx: ToolContext, url: str, extract_text: bool = True) -> str:
