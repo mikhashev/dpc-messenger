@@ -166,6 +166,7 @@ class TelegramBotManager:
                 # Import telegram library (lazy import for optional dependency)
                 from telegram import Update
                 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+                from telegram.error import InvalidToken, NetworkError
 
                 # Build bot application
                 self.application = (
@@ -271,10 +272,30 @@ class TelegramBotManager:
             except ImportError as e:
                 logger.error(f"Failed to import telegram library: {e}")
                 logger.error("Install with: poetry install")
+                error_msg = "Telegram library not installed. Run: poetry install"
+                await self._broadcast_error_event("Library Missing", error_msg)
                 raise
+
+            except InvalidToken as e:
+                logger.error(f"Invalid Telegram bot token: {e}", exc_info=True)
+                error_msg = (
+                    "Your Telegram bot token is invalid or expired. "
+                    "Please regenerate it in BotFather and update config.ini."
+                )
+                await self._broadcast_error_event("Invalid Bot Token", error_msg)
+                # Don't re-raise - allow service to continue without Telegram
+
+            except NetworkError as e:
+                logger.error(f"Telegram network error: {e}", exc_info=True)
+                error_msg = "Cannot connect to Telegram servers. Check your internet connection."
+                await self._broadcast_error_event("Network Error", error_msg)
+                # Don't re-raise - allow service to continue without Telegram
+
             except Exception as e:
                 logger.error(f"Failed to start Telegram bot: {e}", exc_info=True)
-                raise
+                error_msg = f"Telegram bot error: {str(e)}"
+                await self._broadcast_error_event("Telegram Bot Error", error_msg)
+                # Don't re-raise - allow service to continue without Telegram
 
     async def stop(self):
         """
@@ -311,6 +332,20 @@ class TelegramBotManager:
 
             # Broadcast disconnection event to UI
             await self.service.local_api.broadcast_event("telegram_disconnected", {
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            })
+
+    async def _broadcast_error_event(self, title: str, message: str):
+        """Broadcast a Telegram error event to the UI.
+
+        Args:
+            title: Error title (e.g., "Invalid Bot Token")
+            message: User-friendly error message
+        """
+        if self.service and self.service.local_api:
+            await self.service.local_api.broadcast_event("telegram_error", {
+                "title": title,
+                "message": message,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             })
 

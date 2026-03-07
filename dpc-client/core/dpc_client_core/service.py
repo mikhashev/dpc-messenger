@@ -680,7 +680,15 @@ class CoreService:
         # Start Telegram bot integration (v0.14.0+)
         if self.telegram_manager:
             logger.info("Starting Telegram bot integration...")
-            telegram_task = asyncio.create_task(self.telegram_manager.start())
+
+            async def start_telegram_with_error_handling():
+                try:
+                    await self.telegram_manager.start()
+                except Exception as e:
+                    logger.error(f"Telegram bot task failed: {e}", exc_info=True)
+                    # Don't crash the service - Telegram is optional
+
+            telegram_task = asyncio.create_task(start_telegram_with_error_handling())
             telegram_task.set_name("telegram_bot")
             self._background_tasks.add(telegram_task)
 

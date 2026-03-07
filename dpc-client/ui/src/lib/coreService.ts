@@ -117,6 +117,7 @@ export const telegramVoiceReceived = writable<any>(null);  // {conversation_id, 
 export const telegramImageReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes}
 export const telegramFileReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes, mime_type}
 export const telegramStatus = writable<any>(null);  // {enabled, connected, webhook_mode, whitelist_count, transcription_enabled, bridge_to_p2p, conversation_links}
+export const telegramError = writable<{ title: string; message: string; timestamp: string } | null>(null);  // {title, message, timestamp}
 
 // Agent Telegram linking events (v0.15.0+)
 export const agentTelegramLinked = writable<any>(null);  // {agent_id, chat_id, timestamp}
@@ -267,7 +268,7 @@ export function connectToCoreService() {
             }
         });
 
-        socket.addEventListener('message', (event) => {
+        socket.addEventListener('message', async (event) => {
             try {
                 const message = JSON.parse(event.data);
                 coreMessages.set(message);
@@ -583,10 +584,33 @@ export function connectToCoreService() {
                     console.log("Telegram bot connected");
                     telegramConnected.set(true);
                     telegramEnabled.set(true);
+                    // Clear any previous errors on successful connection
+                    telegramError.set(null);
                 }
                 else if (message.event === "telegram_disconnected") {
                     console.log("Telegram bot disconnected");
                     telegramConnected.set(false);
+                }
+                else if (message.event === "telegram_error") {
+                    console.error("Telegram bot error:", message.payload);
+                    const { title, message: errorMsg, timestamp } = message.payload;
+                    telegramError.set({ title, message: errorMsg, timestamp });
+
+                    // Show error toast using Tauri or fallback
+                    if (import.meta.env.VITE_TAURI) {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        try {
+                            await invoke('show_error', {
+                                title: `Telegram: ${title}`,
+                                message: errorMsg
+                            });
+                        } catch (err) {
+                            console.error('Failed to show error toast:', err);
+                        }
+                    } else {
+                        // Fallback for browser dev mode
+                        console.error(`Telegram Error - ${title}: ${errorMsg}`);
+                    }
                 }
                 else if (message.event === "telegram_message_received") {
                     console.log("Telegram message received:", message.payload);
