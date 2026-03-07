@@ -4925,19 +4925,68 @@ Respond in JSON format:
         UI Integration: Called when user clicks "New Session" button.
         For P2P chats: Initiates voting process - history only cleared if all peers approve.
         For AI chats: Directly resets conversation (no voting needed).
+        For Agent chats: Directly resets conversation via DpcAgentManager (no voting needed).
+        For Telegram chats: Directly resets conversation (no voting needed).
 
         Args:
             conversation_id: The conversation/chat ID to reset
 
         Returns:
-            Dict with status and proposal_id (for P2P) or status (for AI)
+            Dict with status and proposal_id (for P2P) or status (for AI/Agent/Telegram)
         """
         try:
-            # Check if this is an AI chat (local_ai or ai_chat_xxx) or Telegram chat
-            if conversation_id == 'local_ai' or conversation_id.startswith('ai_') or conversation_id.startswith('telegram-'):
-                # AI chats and Telegram chats: directly reset without proposal
-                # Telegram chats don't support peer voting (no peer connection)
-                chat_type = "AI" if conversation_id.startswith('ai_') or conversation_id == 'local_ai' else "Telegram"
+            # Check if this is an AI chat (local_ai or ai_chat_xxx), Telegram chat, or Agent chat
+            if conversation_id == 'local_ai' or conversation_id.startswith('ai_') or conversation_id.startswith('telegram-') or conversation_id.startswith('agent_'):
+                # AI chats, Telegram chats, and Agent chats: directly reset without proposal
+                # These chats don't support peer voting (no peer connection)
+
+                # Determine chat type for logging
+                if conversation_id.startswith('agent_'):
+                    chat_type = "Agent"
+                elif conversation_id.startswith('ai_') or conversation_id == 'local_ai':
+                    chat_type = "AI"
+                else:
+                    chat_type = "Telegram"
+
+                # Handle agent conversations differently (use DpcAgentManager)
+                if conversation_id.startswith('agent_'):
+                    logger.info("Resetting %s conversation: %s", chat_type, conversation_id)
+
+                    # Get the DPC agent provider
+                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+
+                    if not dpc_agent_provider or not hasattr(dpc_agent_provider, '_managers'):
+                        return {
+                            "status": "error",
+                            "message": "Agent provider not available"
+                        }
+
+                    # Get the agent manager for this conversation
+                    # conversation_id format is "agent_001", which matches the agent_id
+                    agent_manager = dpc_agent_provider._managers.get(conversation_id)
+
+                    if not agent_manager:
+                        return {
+                            "status": "error",
+                            "message": f"Agent manager not found for conversation: {conversation_id}"
+                        }
+
+                    # Reset the conversation using the agent manager's reset method
+                    success = agent_manager.reset_conversation(conversation_id)
+
+                    if success:
+                        logger.info("Successfully reset agent conversation: %s", conversation_id)
+                        return {
+                            "status": "success",
+                            "message": f"Agent conversation reset: {conversation_id}"
+                        }
+                    else:
+                        return {
+                            "status": "error",
+                            "message": f"Failed to reset agent conversation: {conversation_id}"
+                        }
+
+                # Handle AI and Telegram chats using the standard reset
                 logger.info("Resetting %s conversation: %s", chat_type, conversation_id)
                 result = await self.reset_conversation(conversation_id)
                 return result
