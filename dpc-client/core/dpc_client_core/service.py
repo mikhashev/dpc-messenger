@@ -3348,6 +3348,13 @@ class CoreService:
                 "provider": provider_alias
             })
 
+            # Unload any other loaded Whisper providers to free VRAM before loading
+            for alias, p in self.llm_manager.providers.items():
+                if alias != provider_alias and p.config.get("type") == "local_whisper":
+                    if hasattr(p, 'is_model_loaded') and p.is_model_loaded():
+                        logger.info(f"Unloading Whisper provider '{alias}' before loading '{provider_alias}'")
+                        await p.unload_model_async()
+
             # Load model (this runs in thread pool, so it won't block)
             logger.info(f"Pre-loading Whisper model for provider '{provider_alias}'...")
 
@@ -6510,8 +6517,8 @@ Respond in JSON format:
         image_bytes = base64.b64decode(data)
         size_bytes = len(image_bytes)
 
-        # Check size limit (5MB default from privacy_rules.json vision settings)
-        max_size_mb = 5  # TODO: Read from settings.vision_max_size_mb
+        # Check size limit from config (vision.max_image_size_mb)
+        max_size_mb = self.settings.get_vision_max_image_size_mb()
         if size_bytes > max_size_mb * 1024 * 1024:
             raise ValueError(f"Image too large ({round(size_bytes / (1024 * 1024), 2)}MB). Max: {max_size_mb}MB")
 

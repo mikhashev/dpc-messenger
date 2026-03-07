@@ -230,7 +230,7 @@ class ContextFirewall:
 
         # Check read_write paths first (they also allow read)
         for allowed_path in self.sandbox_read_write_paths:
-            if allowed_path and normalized.startswith(allowed_path):
+            if allowed_path and (normalized == allowed_path or normalized.startswith(allowed_path + "/")):
                 return True
 
         # If write is required, read_only paths are not sufficient
@@ -239,7 +239,7 @@ class ContextFirewall:
 
         # Check read_only paths
         for allowed_path in self.sandbox_read_only_paths:
-            if allowed_path and normalized.startswith(allowed_path):
+            if allowed_path and (normalized == allowed_path or normalized.startswith(allowed_path + "/")):
                 return True
 
         return False
@@ -727,14 +727,19 @@ class ContextFirewall:
             if rule:
                 return rule.lower() == 'allow'
 
-        # 2. Check for group rules
+        # 2. Check for group rules (deny-wins: if any group denies, access is denied)
         # Get all groups this node belongs to
         if requester_identity.startswith('dpc-node-'):
             groups = self._get_groups_for_node(requester_identity)
-            for group_name in groups:
-                rule = self._get_rule_for_resource('groups', group_name, resource_path)
-                if rule:
-                    return rule.lower() == 'allow'
+            group_rules = [
+                self._get_rule_for_resource('groups', gn, resource_path)
+                for gn in groups
+            ]
+            group_rules = [r.lower() for r in group_rules if r]
+            if 'deny' in group_rules:
+                return False
+            if 'allow' in group_rules:
+                return True
 
         # 3. Check for hub rule
         if requester_identity == "hub":
@@ -795,13 +800,18 @@ class ContextFirewall:
             # Try node-specific rule
             if peer_id.startswith('dpc-node-'):
                 specific_rule = self._get_rule_for_resource('nodes', peer_id, resource_path)
-                # Try group rules if no node rule
+                # Try group rules if no node rule (deny-wins across groups)
                 if not specific_rule:
                     groups = self._get_groups_for_node(peer_id)
-                    for group_name in groups:
-                        specific_rule = self._get_rule_for_resource('groups', group_name, resource_path)
-                        if specific_rule:
-                            break
+                    group_rules = [
+                        self._get_rule_for_resource('groups', gn, resource_path)
+                        for gn in groups
+                    ]
+                    group_rules = [r.lower() for r in group_rules if r]
+                    if 'deny' in group_rules:
+                        specific_rule = 'deny'
+                    elif 'allow' in group_rules:
+                        specific_rule = 'allow'
 
             # If there's a specific rule (allow or deny), use it - don't fall back to wildcard
             if specific_rule:
@@ -1078,10 +1088,15 @@ class ContextFirewall:
                     specific_rule = self._get_rule_for_resource('nodes', peer_id, resource_path)
                     if not specific_rule:
                         groups = self._get_groups_for_node(peer_id)
-                        for group_name in groups:
-                            specific_rule = self._get_rule_for_resource('groups', group_name, resource_path)
-                            if specific_rule:
-                                break
+                        group_rules = [
+                            self._get_rule_for_resource('groups', gn, resource_path)
+                            for gn in groups
+                        ]
+                        group_rules = [r.lower() for r in group_rules if r]
+                        if 'deny' in group_rules:
+                            specific_rule = 'deny'
+                        elif 'allow' in group_rules:
+                            specific_rule = 'allow'
 
                 # If there's a specific rule, use it - don't fall back to wildcard
                 if specific_rule:
@@ -1129,10 +1144,15 @@ class ContextFirewall:
                 specific_rule = self._get_rule_for_resource('nodes', peer_id, resource_path)
                 if not specific_rule:
                     groups = self._get_groups_for_node(peer_id)
-                    for group_name in groups:
-                        specific_rule = self._get_rule_for_resource('groups', group_name, resource_path)
-                        if specific_rule:
-                            break
+                    group_rules = [
+                        self._get_rule_for_resource('groups', gn, resource_path)
+                        for gn in groups
+                    ]
+                    group_rules = [r.lower() for r in group_rules if r]
+                    if 'deny' in group_rules:
+                        specific_rule = 'deny'
+                    elif 'allow' in group_rules:
+                        specific_rule = 'allow'
 
             # If there's a specific rule, use it - don't fall back to wildcard
             if specific_rule:

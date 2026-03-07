@@ -12,6 +12,102 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Explicit allowlist of commands the UI is permitted to invoke.
+# Any command not listed here is rejected, regardless of whether a method
+# with that name exists on CoreService.
+ALLOWED_COMMANDS: frozenset = frozenset({
+    # Status & connection
+    "get_status",
+    "connect_to_peer",
+    "connect_via_dht",
+    "disconnect_from_peer",
+    # Hub
+    "login_to_hub",
+    "disconnect_from_hub",
+    # Providers
+    "list_providers",
+    "get_providers_list",
+    "get_default_providers",
+    "get_providers_config",
+    "save_providers_config",
+    "query_ollama_model_info",
+    "query_remote_providers",
+    # Personal context & instructions
+    "get_personal_context",
+    "save_personal_context",
+    "get_instructions",
+    "save_instructions",
+    "create_instruction_set",
+    "delete_instruction_set",
+    "set_default_instruction_set",
+    "reload_instructions",
+    "get_available_templates",
+    "import_instruction_template",
+    "get_wizard_template",
+    "ai_assisted_instruction_creation",
+    "ai_assisted_instruction_creation_remote",
+    # Firewall
+    "get_firewall_rules",
+    "save_firewall_rules",
+    # AI queries
+    "execute_ai_query",
+    # Conversation history
+    "get_conversation_history",
+    "delete_conversation",
+    "end_conversation_session",
+    "get_conversation_settings",
+    "set_conversation_persist_history",
+    "toggle_auto_knowledge_detection",
+    # File transfer
+    "send_file",
+    "accept_file_transfer",
+    "cancel_file_transfer",
+    # Images
+    "send_image",
+    "send_p2p_image",
+    # P2P messaging
+    "send_p2p_message",
+    # Voice & transcription
+    "send_voice_message",
+    "preload_whisper_model",
+    "download_whisper_model",
+    "get_voice_transcription_config",
+    "save_voice_transcription_config",
+    "set_conversation_transcription",
+    "get_conversation_transcription",
+    "transcribe_audio",
+    # Session management
+    "propose_new_session",
+    "vote_new_session",
+    # Group chat
+    "create_group_chat",
+    "send_group_message",
+    "send_group_image",
+    "send_group_voice_message",
+    "send_group_file",
+    "add_group_member",
+    "remove_group_member",
+    "leave_group",
+    "delete_group",
+    "get_groups",
+    # Knowledge
+    "vote_knowledge_commit",
+    # Telegram
+    "get_telegram_status",
+    "send_to_telegram",
+    "link_telegram_chat",
+    "delete_telegram_conversation_link",
+    "link_agent_telegram",
+    "unlink_agent_telegram",
+    # Agents
+    "create_agent",
+    "list_agents",
+    "get_agent_config",
+    "update_agent_config",
+    "delete_agent",
+    "list_agent_profiles",
+})
+
 
 def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
     """
@@ -69,6 +165,10 @@ class LocalApiServer:
 
                     if not command_id or not command:
                         raise ValueError("'id' and 'command' are required fields.")
+
+                    if command not in ALLOWED_COMMANDS:
+                        logger.warning("Rejected disallowed command: '%s'", command)
+                        raise ValueError(f"Unknown or non-async command: {command}")
 
                     handler_method = getattr(self.core_service, command, None)
 
