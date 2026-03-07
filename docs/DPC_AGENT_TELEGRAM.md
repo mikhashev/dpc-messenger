@@ -36,8 +36,8 @@ The **new system** using **per-agent Telegram linking**:
 # ~/.dpc/config.ini
 [dpc_agent_telegram]
 enabled = true
-bot_token = 8237861519:AAFDhSOaZrxxRnCTweaoav__QrMYNZOKhO0
-allowed_chat_ids = ["429727247"]
+bot_token = YOUR_BOT_TOKEN_HERE
+allowed_chat_ids = ["123456789"]
 event_filter = task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message
 ```
 
@@ -47,8 +47,8 @@ event_filter = task_completed,task_failed,evolution_cycle_completed,code_modifie
 ```ini
 [telegram]
 enabled = true
-bot_token = 8307009971:AAGUisLxzksqw_CGW9vrg_kslUkrf2zWruo
-allowed_chat_ids = ["429727247", "41783586", "475097760", "454942631"]
+bot_token = YOUR_BOT_TOKEN_HERE
+allowed_chat_ids = ["123456789", "987654321"]
 ```
 
 **Step 2:** Link each agent individually in its `config.json`:
@@ -58,7 +58,7 @@ allowed_chat_ids = ["429727247", "41783586", "475097760", "454942631"]
   "agent_id": "default",
   "name": "Default Agent",
   "telegram_enabled": true,
-  "telegram_chat_id": "429727247",
+  "telegram_chat_id": "123456789",
   "telegram_linked_at": "2026-03-06T18:30:00.000000+00:00"
 }
 ```
