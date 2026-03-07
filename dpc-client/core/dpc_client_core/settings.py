@@ -933,6 +933,24 @@ class Settings:
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to save last_update_id: {e}")
 
+    def remove_telegram_last_update_id(self, chat_id: str):
+        """Remove last_update_id entry for a specific Telegram chat.
+
+        This should be called when a Telegram chat is unlinked/deleted to prevent
+        stale entries from accumulating in config.ini.
+        """
+        import json
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            all_updates = json.loads(self.get('telegram', 'last_update_id', '{}'))
+            if chat_id in all_updates:
+                del all_updates[chat_id]
+                self.set('telegram', 'last_update_id', json.dumps(all_updates))
+                logger.info(f"Removed last_update_id for Telegram chat {chat_id}")
+        except Exception as e:
+            logger.error(f"Failed to remove last_update_id for chat {chat_id}: {e}")
+
     # DPC Agent Runtime Settings
     # Note: Security/permission settings (enabled, tools, evolution) are in privacy_rules.json
     # Configure via Firewall Rules UI in the desktop app.

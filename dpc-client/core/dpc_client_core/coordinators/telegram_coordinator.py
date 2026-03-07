@@ -219,6 +219,10 @@ class TelegramBridge:
             return False
 
         del self.conversation_map[telegram_chat_id]
+
+        # Clean up last_update_id to prevent stale entries in config.ini
+        self.service.settings.remove_telegram_last_update_id(telegram_chat_id)
+
         self._save_conversation_links()
 
         logger.info(f"Removed conversation link: {telegram_chat_id}")
