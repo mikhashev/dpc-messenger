@@ -60,8 +60,8 @@ class DpcAgentManager:
         self.firewall = getattr(service, "firewall", None)
 
         # Storage paths
-        self.agent_root = get_agent_root()
-        ensure_agent_dirs()
+        self.agent_root = get_agent_root(agent_id)
+        ensure_agent_dirs(agent_id)
 
         # Agent instances (Phase 3: per-provider agents)
         # Key: provider_alias, Value: DpcAgent instance
@@ -419,6 +419,10 @@ class DpcAgentManager:
             sender_node_id=node_id,
             sender_name="User"
         )
+        monitor.save_history()  # Save to disk immediately
+
+        # Use agent_id as sender name for better identification in chat UI
+        agent_display_name = self.agent_id or "DPC Agent"
 
         # Get DPC context if requested
         dpc_context = None
@@ -472,9 +476,10 @@ class DpcAgentManager:
                 role="assistant",
                 content=response,
                 timestamp=utc_now_iso(),
-                sender_node_id="dpc-agent",
-                sender_name="DPC Agent"
+                sender_node_id=conversation_id,  # Use conversation_id as node_id (e.g., "agent_001")
+                sender_name=agent_display_name
             )
+            monitor.save_history()  # Save to disk immediately
 
             # Update token count in monitor after agent response
             # Get token usage from agent's last response

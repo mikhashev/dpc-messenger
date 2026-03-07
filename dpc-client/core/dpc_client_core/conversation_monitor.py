@@ -1493,9 +1493,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         """Check if this is a group conversation.
 
         Returns:
-            True if conversation_id starts with 'group-'
+            True if conversation_id starts with 'group-' or 'agent_' (both persist history)
         """
-        return self.conversation_id.startswith("group-")
+        return self.conversation_id.startswith("group-") or self.conversation_id.startswith("agent_")
 
     def _load_conversation_settings(self) -> Dict[str, Any]:
         """Load per-conversation settings from disk.

@@ -4808,6 +4808,46 @@ Respond in JSON format:
         """
         try:
             monitor = self.conversation_monitors.get(conversation_id)
+
+            # Special handling for agent conversations - their monitors are in AgentManager
+            if not monitor and conversation_id.startswith("agent_"):
+                # Get the dpc_agent provider to access the agent manager
+                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                    # Check if we have a manager for this specific agent
+                    # conversation_id format is "agent_001", so we use it as the agent_id
+                    if conversation_id in dpc_agent_provider._managers:
+                        agent_manager = dpc_agent_provider._managers[conversation_id]
+                        if hasattr(agent_manager, '_agent_monitors'):
+                            monitor = agent_manager._agent_monitors.get(conversation_id)
+                            if monitor:
+                                # Load history from disk if not already loaded
+                                if not monitor.message_history:
+                                    logger.debug("Loading agent conversation history from disk for %s", conversation_id)
+                                    monitor.load_history()
+                                logger.debug("Found agent conversation monitor for %s in AgentManager", conversation_id)
+                    else:
+                        # Agent manager not created yet - try to load history directly from disk
+                        logger.debug("Agent manager not created for %s, attempting to load history from disk", conversation_id)
+                        history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                        if history_path.exists():
+                            try:
+                                import json
+                                with open(history_path, encoding="utf-8") as f:
+                                    data = json.load(f)
+                                messages = data.get("messages", [])
+                                logger.info("Loaded %d messages from disk for %s (agent manager not created yet)", len(messages), conversation_id)
+                                # Return early with the loaded messages
+                                return {
+                                    "status": "success",
+                                    "messages": messages,
+                                    "message_count": len(messages)
+                                }
+                            except Exception as e:
+                                logger.error("Failed to load agent history from disk: %s", e)
+                        else:
+                            logger.debug("No history file found at %s", history_path)
+
             if not monitor:
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
                 return {
@@ -7445,6 +7485,89 @@ Respond in JSON format:
 
     # --- AI Query Methods ---
 
+    async def _execute_agent_query(self, command_id: str, prompt: str, conversation_id: str,
+                                   include_context: bool, instruction_set_name: str,
+                                   agent_llm_provider: str) -> None:
+        """
+        Execute an agent query (routes to DpcAgentManager).
+
+        Agent conversations use their own prompt assembly without PromptManager formatting.
+        This prevents "CONVERSATION HISTORY" and "USER QUERY" sections from appearing in chat.
+
+        Args:
+            command_id: Unique ID for this command
+            prompt: The user's raw prompt (no formatting applied)
+            conversation_id: Agent conversation ID (e.g., "agent_001")
+            include_context: Whether to include DPC context
+            instruction_set_name: Instruction set to use
+            agent_llm_provider: Underlying LLM provider for the agent
+        """
+        try:
+            # Get the dpc_agent provider
+            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+            if not dpc_agent_provider:
+                raise ValueError("DpcAgentProvider not configured")
+
+            # Ensure agent manager exists for this conversation
+            await dpc_agent_provider._ensure_manager(agent_id=conversation_id)
+            agent_manager = dpc_agent_provider.get_manager(conversation_id)
+
+            # Process message through agent (agent manager handles its own prompt assembly)
+            response = await agent_manager.process_message(
+                message=prompt,
+                conversation_id=conversation_id,
+                include_context=include_context,
+                agent_llm_provider=agent_llm_provider or conversation_id
+            )
+
+            # Get actual model and provider from agent's last usage
+            # The agent stores metadata after each query in agent._last_usage
+            agent = agent_manager.agent
+            model_name = "dpc_agent"
+            provider_name = agent_llm_provider or "dpc_agent"
+
+            if hasattr(agent, '_last_usage') and agent._last_usage:
+                # Try to get the actual model used
+                if "model" in agent._last_usage:
+                    model_name = agent._last_usage["model"]
+                # Try to get the actual provider used
+                if "provider" in agent._last_usage:
+                    provider_name = agent._last_usage["provider"]
+            else:
+                # Fallback: get from LLM manager
+                llm_manager = getattr(self.service, "llm_manager", None)
+                if llm_manager:
+                    model_name = llm_manager.get_active_model_name()
+                    # If agent_llm_provider was specified, use that; otherwise use default
+                    if agent_llm_provider and agent_llm_provider in llm_manager.providers:
+                        provider_name = agent_llm_provider
+                    elif llm_manager.default_provider in llm_manager.providers:
+                        provider_name = llm_manager.default_provider
+
+            # Send response to UI with actual metadata
+            await self.local_api.send_response_to_all(
+                command_id=command_id,
+                command="execute_ai_query",
+                status="OK",
+                payload={
+                    "content": response,
+                    "provider": provider_name,
+                    "model": model_name,
+                    "compute_host": "local"
+                }
+            )
+
+            logger.info("Agent query completed for conversation %s", conversation_id)
+
+        except Exception as e:
+            logger.error("Agent query failed for %s: %s", conversation_id, e, exc_info=True)
+            await self.local_api.send_response_to_all(
+                command_id=command_id,
+                command="execute_ai_query",
+                status="ERROR",
+                payload={"message": str(e)}
+            )
+
     async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, **kwargs):
         """
         Orchestrates an AI query and sends the response back to the UI.
@@ -7471,6 +7594,25 @@ Respond in JSON format:
 
         # Phase 7: Get or create conversation monitor early for history tracking
         conversation_id = kwargs.get("conversation_id", "local_ai")
+
+        # Check if this is an agent conversation - route directly to agent manager
+        # Agent conversations use their own prompt assembly, not PromptManager
+        is_agent_conversation = (
+            provider == 'dpc_agent' or
+            conversation_id.startswith('agent_')
+        )
+
+        if is_agent_conversation:
+            logger.debug("Routing to agent manager for conversation %s", conversation_id)
+            return await self._execute_agent_query(
+                command_id=command_id,
+                prompt=prompt,
+                conversation_id=conversation_id,
+                include_context=include_context,
+                instruction_set_name=instruction_set_name,
+                agent_llm_provider=agent_llm_provider
+            )
+
         monitor = self._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
 
         # Phase 7: Check if context window is full (hard limit enforcement)
