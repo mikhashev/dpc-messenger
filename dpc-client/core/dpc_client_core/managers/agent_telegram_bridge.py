@@ -485,7 +485,8 @@ Send a voice message and it will be transcribed and processed\\.
         try:
             # Download voice file
             voice_filename = f"agent_voice_{update.message.message_id}.ogg"
-            voice_dir = Path.home() / ".dpc" / "agent" / "voice"
+            # Use agent-specific storage instead of legacy ~/.dpc/agent/ path
+            voice_dir = self._agent_manager.agent_root / "voice"
             voice_dir.mkdir(parents=True, exist_ok=True)
             voice_path = voice_dir / voice_filename
 

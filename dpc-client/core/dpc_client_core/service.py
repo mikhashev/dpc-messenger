@@ -4828,10 +4828,15 @@ Respond in JSON format:
                         if hasattr(agent_manager, '_agent_monitors'):
                             monitor = agent_manager._agent_monitors.get(conversation_id)
                             if monitor:
-                                # Load history from disk if not already loaded
+                                # Load history from disk if not already loaded AND file exists
+                                # (Check file exists to prevent reloading after reset, where message_history is cleared but file is deleted)
                                 if not monitor.message_history:
-                                    logger.debug("Loading agent conversation history from disk for %s", conversation_id)
-                                    monitor.load_history()
+                                    history_path = monitor._get_history_path()
+                                    if history_path.exists():
+                                        logger.debug("Loading agent conversation history from disk for %s", conversation_id)
+                                        monitor.load_history()
+                                    else:
+                                        logger.debug("No history file found for %s (likely reset), skipping load", conversation_id)
                                 logger.debug("Found agent conversation monitor for %s in AgentManager", conversation_id)
                     else:
                         # Agent manager not created yet - try to load history directly from disk
@@ -4983,6 +4988,13 @@ Respond in JSON format:
 
                     if success:
                         logger.info("Successfully reset agent conversation: %s", conversation_id)
+
+                        # Broadcast to UI (same as AI/Telegram chat reset flow)
+                        await self.local_api.broadcast_event(
+                            "conversation_reset",
+                            {"conversation_id": conversation_id}
+                        )
+
                         return {
                             "status": "success",
                             "message": f"Agent conversation reset: {conversation_id}"
@@ -7591,7 +7603,7 @@ Respond in JSON format:
                     provider_name = agent._last_usage["provider"]
             else:
                 # Fallback: get from LLM manager
-                llm_manager = getattr(self.service, "llm_manager", None)
+                llm_manager = getattr(self, "llm_manager", None)
                 if llm_manager:
                     model_name = llm_manager.get_active_model_name()
                     # If agent_llm_provider was specified, use that; otherwise use default

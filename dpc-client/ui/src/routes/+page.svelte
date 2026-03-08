@@ -1060,6 +1060,11 @@
     if (chatProvider && chatProvider !== 'local_ai') {
       // Update dropdown to show chat-specific provider (e.g., dpc_agent)
       selectedTextProvider = `local:${chatProvider}`;
+    } else {
+      // Reset to default provider for chats without specific provider (local_ai, AI chats, etc.)
+      if ($availableProviders?.default_provider) {
+        selectedTextProvider = `local:${$availableProviders.default_provider}`;
+      }
     }
   });
 

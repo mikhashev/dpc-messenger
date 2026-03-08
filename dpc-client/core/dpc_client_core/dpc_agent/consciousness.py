@@ -355,7 +355,7 @@ Write about something you're curious to explore."""
 
     def _log_thought(self, thought_type: str, prompt: str, response: str) -> None:
         """Log the thought to the consciousness log."""
-        agent_root = get_agent_root()
+        agent_root = self.agent.agent_root
 
         append_jsonl(agent_root / "logs" / "consciousness.jsonl", {
             "ts": utc_now_iso(),

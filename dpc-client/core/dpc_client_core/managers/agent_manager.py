@@ -246,6 +246,11 @@ class DpcAgentManager:
             registry = AgentRegistry()
             agent_meta = registry.get_agent(self.agent_id)
 
+            # Special case: local_ai should not use Telegram (built-in conversation)
+            if self.agent_id == 'local_ai':
+                log.debug(f"Telegram not enabled for local_ai (built-in conversation), skipping Telegram bridge")
+                return
+
             if not agent_meta or not agent_meta.get("telegram_enabled", False):
                 log.debug(f"Telegram not enabled for agent {self.agent_id}, skipping Telegram bridge")
                 return

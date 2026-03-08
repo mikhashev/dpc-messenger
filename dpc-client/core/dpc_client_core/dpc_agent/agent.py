@@ -99,7 +99,7 @@ class DpcAgent:
         self._firewall = firewall  # Firewall controls tool access
         self._provider_alias = provider_alias  # Store for LLM adapter
         self._firewall_profile = firewall_profile  # Store for tool permission lookups
-        ensure_agent_dirs()
+        # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components
         self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias)
@@ -117,8 +117,9 @@ class DpcAgent:
         self._task_type_registry: Dict[str, TaskTypeDefinition] = {}
         self._load_task_type_registry()  # Load persisted task types
 
-        # Event emitter for notifications
-        self.events = get_event_emitter()
+        # Event emitter for notifications (per-agent instance with correct storage)
+        from .events import AgentEventEmitter
+        self.events = AgentEventEmitter(agent_root=self.agent_root, persist_events=True)
 
         # Budget tracker
         billing_model = BillingModel.SUBSCRIPTION if self.config.billing_model == "subscription" else BillingModel.PAY_PER_USE
