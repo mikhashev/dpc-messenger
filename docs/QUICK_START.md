@@ -5,7 +5,8 @@
 This guide will help you set up D-PC Messenger for the first time. Choose your setup method based on your needs:
 
 - **Option A:** Local network testing (no Hub needed)
-- **Option B:** Internet-wide connections (requires Hub)
+- **Option B:** Internet-wide, zero infrastructure (no Hub, no VPS — works for teams)
+- **Option C:** Internet-wide with Hub (full WebRTC signaling)
 
 > **NEW in v0.10.0:** Automatic 6-tier connection fallback! The system tries IPv6 → IPv4 → WebRTC → Hole Punch → Relay → Gossip until one succeeds. Connections "just work" regardless of network conditions.
 
@@ -113,9 +114,94 @@ Repeat Step 2 on another computer on the same network.
 
 ---
 
-## Option B: Internet-Wide Connections (Recommended)
+## Option B: Internet-Wide, Zero Infrastructure (No Hub, No VPS)
 
-**Use this if:** You want to connect to anyone, anywhere.
+**Use this if:** You want to connect over the internet with friends or a small team — no servers, no accounts, no infrastructure required.
+
+**Requirements:** At least one person in the group needs either:
+- **IPv6 connectivity** (check: `curl -6 ifconfig.me` — if it returns an IP, you have IPv6), or
+- **Port forwarding** configured on their router (forward TCP port 8888 to their PC)
+
+If nobody in your group has IPv6 or port forwarding, use Option C (Hub) instead.
+
+### How It Works
+
+1. **One person shares their URI** out-of-band (Telegram, email, QR code, anything)
+2. **Others connect once** — after the first connection, addresses are cached automatically
+3. **No ongoing infrastructure** — the DHT keeps peers discoverable after that first handshake
+
+### Step 1: Start Each Client
+
+On every computer, run:
+
+```bash
+# Terminal 1: Backend
+cd dpc-client/core
+poetry install
+poetry run python run_service.py
+
+# Terminal 2: Frontend (in new terminal)
+cd dpc-client/ui
+npm install
+npm run tauri dev
+```
+
+### Step 2: Find the Person With IPv6 or Port Forwarding
+
+That person notes their connection URI from the terminal output:
+
+```
+Your Direct TLS URI: dpc://203.0.113.42:8888/dpc-node-abc123...
+```
+
+Or for IPv6:
+```
+Your Direct TLS URI: dpc://[2001:db8::1]:8888?node_id=dpc-node-abc123...
+```
+
+### Step 3: Share URI Out-of-Band
+
+The person with the public address shares their URI via any channel (Telegram, email, etc.). This is the **only** step that requires an external channel.
+
+### Step 4: Everyone Connects to That Person
+
+Each other member:
+1. Opens the UI → click "Connect to Peer"
+2. Pastes the shared `dpc://` URI
+3. Clicks "Connect"
+
+After connecting, that peer's address is saved to `~/.dpc/known_peers.json` automatically.
+
+### Step 5: (Optional) Pin the Seed Node for Reconnection
+
+If the group goes offline for an extended period, the DHT may lose track of peers. To ensure fresh bootstrapping, each member can add the public peer's address to their config:
+
+```bash
+# Edit ~/.dpc/config.ini
+# Add under [dht] section:
+```
+
+```ini
+[dht]
+seed_nodes = 203.0.113.42:8888
+```
+
+> **Tip:** If multiple people have public addresses, add them all comma-separated:
+> `seed_nodes = 203.0.113.42:8888, 198.51.100.7:8888`
+
+### Result
+
+- **No Hub** required
+- **No VPS** required
+- **No accounts** required
+- After the first handshake, the DHT maintains peer connectivity automatically
+- Works for groups where at least one member has IPv6 or port forwarding
+
+---
+
+## Option C: Internet-Wide Connections With Hub (Recommended for Teams)
+
+**Use this if:** You want to connect to anyone, anywhere, with the easiest setup and full WebRTC NAT traversal.
 
 **NEW in v0.10.0:** Hub is now **optional**! The system can establish connections without Hub using DHT-based hole punching and volunteer relay nodes.
 
@@ -348,9 +434,9 @@ npm install
 
 ### "Could not connect to Hub"
 
-**This is OK if you're using Option A (local network).**
+**This is OK if you're using Option A (local network) or Option B (zero infrastructure).**
 
-For Option B:
+For Option C (Hub):
 ```bash
 # Check Hub is running
 curl http://localhost:8000/health
@@ -447,7 +533,8 @@ poetry run python run_service.py
 **No.** You can:
 - Use a public Hub (when available)
 - Use local network only (Option A)
-- Run your own Hub for privacy (Option B)
+- Connect zero-infrastructure with your team (Option B)
+- Run your own Hub for privacy (Option C)
 
 ### Is my data private?
 
