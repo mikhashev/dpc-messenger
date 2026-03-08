@@ -124,7 +124,11 @@ class HolePunchManager:
             # Create UDP socket for hole punching
             self.punch_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.punch_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.punch_socket.bind(("0.0.0.0", self.local_port))
+            # 0.0.0.0 is intentional: UDP hole punching requires receiving packets
+            # from the peer's external NAT address (any source IP). Binding to a
+            # specific interface would break hole punching. Authentication is handled
+            # by the DTLS handshake that follows the punch.
+            self.punch_socket.bind(("0.0.0.0", self.local_port))  # lgtm[py/bind-socket-all-network-interfaces]
             self.punch_socket.setblocking(False)
 
             self._running = True

@@ -29,7 +29,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Optional, List, Dict, TYPE_CHECKING
+from typing import Any, Optional, List, Dict, TYPE_CHECKING
 from collections import defaultdict
 
 from ..models.relay_node import RelayNode, RelaySession
@@ -107,7 +107,7 @@ class RelayManager:
         # Server mode state
         self.sessions: Dict[str, RelaySession] = {}  # session_id -> RelaySession
         self.peer_to_session: Dict[str, str] = {}  # node_id -> session_id
-        self.peer_connections: Dict[str, any] = {}  # node_id -> PeerConnection (for forwarding)
+        self.peer_connections: Dict[str, Any] = {}  # node_id -> PeerConnection (for forwarding)
         self.rate_limits: Dict[str, List[float]] = defaultdict(list)  # node_id -> timestamps
 
         # Client mode cache
