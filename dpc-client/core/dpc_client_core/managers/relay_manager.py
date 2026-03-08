@@ -16,8 +16,9 @@ Modes:
 - Server mode: handle_relay_register() - volunteer as relay for others
 
 Privacy:
-- Relay sees encrypted payloads only (end-to-end encryption maintained)
-- No relay can decrypt message content
+- Messages are E2E encrypted by sender (AES-256-GCM + RSA-OAEP) before relay sees them
+- Relay forwards opaque base64 blobs — never parses or decodes content
+- Relay sees: peer IDs, blob sizes, session metadata, timing
 - Rate limiting prevents abuse
 
 Success Rate:
@@ -330,19 +331,22 @@ class RelayManager:
 
         try:
             # Step 1: Connect to relay via P2P manager (TLS)
-            relay_connection = await asyncio.wait_for(
-                self.p2p_manager.connect_to_peer(
+            await asyncio.wait_for(
+                self.p2p_manager.connect_directly(
                     relay_node.ip,
                     relay_node.port,
                     relay_node.node_id
                 ),
                 timeout=20.0  # Connection timeout
             )
+            relay_connection = self.p2p_manager.peers.get(relay_node.node_id)
+            if not relay_connection:
+                raise ConnectionError("Relay connection not found after connect_directly")
 
             logger.info("Connected to relay %s", relay_node.node_id[:20])
 
             # Step 2: Send RELAY_REGISTER request
-            await relay_connection.send_message({
+            await relay_connection.send({
                 "command": "RELAY_REGISTER",
                 "payload": {
                     "peer_id": peer_id,  # Target peer we want to connect to
@@ -354,7 +358,7 @@ class RelayManager:
 
             # Step 3: Wait for RELAY_READY or RELAY_WAITING response
             response = await asyncio.wait_for(
-                relay_connection.receive_message(),
+                relay_connection.read(),
                 timeout=30.0
             )
 
@@ -366,7 +370,7 @@ class RelayManager:
                 # Relay is waiting for other peer - keep waiting for RELAY_READY
                 logger.debug("Relay waiting for peer %s to register", peer_id[:20])
                 response = await asyncio.wait_for(
-                    relay_connection.receive_message(),
+                    relay_connection.read(),
                     timeout=30.0  # Wait for other peer to register
                 )
 
@@ -390,7 +394,9 @@ class RelayManager:
                 peer_id=peer_id,
                 relay_node=relay_node,
                 relay_connection=relay_connection,
-                session_id=session_id
+                session_id=session_id,
+                own_node_id=self.dht_manager.node_id,
+                dht_manager=self.dht_manager,
             )
 
             await relayed_conn.start()
@@ -605,18 +611,17 @@ class RelayManager:
             # Get destination peer's connection
             dest_connection = self.peer_connections[to_peer]
 
-            # Decode message bytes to dict for protocol
-            import json
-            message_dict = json.loads(message.decode('utf-8'))
+            # Forward the opaque base64 blob — relay never parses message content
+            # message bytes are the base64 string as UTF-8 from relay_message_handler
+            data_b64 = message.decode('utf-8')
 
-            # Wrap in RELAY_MESSAGE protocol and forward
             relay_message = {
                 "command": "RELAY_MESSAGE",
                 "payload": {
                     "from": from_peer,
                     "to": to_peer,
                     "session_id": session_id,
-                    "message": message_dict
+                    "data": data_b64  # Opaque E2E-encrypted blob
                 }
             }
 
