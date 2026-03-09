@@ -96,6 +96,10 @@ class ConsensusManager:
         self.on_commit_applied: Optional[Callable] = None  # Called after commit is applied to personal.json
         self.on_result_broadcast: Optional[Callable] = None  # Broadcast voting results to participants
         self.on_commit_signed: Optional[Callable] = None    # Called after apply so service can sign+broadcast COMMIT_SIGNED
+        self.on_commit_ack: Optional[Callable] = None       # Called after apply so service can broadcast COMMIT_ACK
+
+        # Tracks which nodes confirmed successful apply per commit_id (Gap 3 observability)
+        self.commit_acks: Dict[str, set] = {}  # commit_id -> set of node_ids that sent COMMIT_ACK
 
     async def propose_commit(
         self,
@@ -568,6 +572,10 @@ class ConsensusManager:
             if self.on_commit_signed:
                 await self.on_commit_signed(commit)
 
+            # 11. Broadcast COMMIT_ACK so peers know we successfully applied the commit
+            if self.on_commit_ack:
+                await self.on_commit_ack(commit)
+
         except Exception as e:
             logger.error("Error applying commit: %s", e, exc_info=True)
 
@@ -642,6 +650,36 @@ class ConsensusManager:
         except Exception as e:
             logger.error("record_commit_signature error for %s: %s", commit_id[:12], e, exc_info=True)
             return False
+
+    def record_commit_ack(self, commit_id: str, ack_node_id: str, participants: List[str]) -> None:
+        """Track that a participant successfully applied a commit (Gap 3 observability).
+
+        Args:
+            commit_id: The commit that was applied.
+            ack_node_id: Node ID reporting success.
+            participants: Expected set of participating nodes (for completion check).
+        """
+        if commit_id not in self.commit_acks:
+            self.commit_acks[commit_id] = set()
+
+        self.commit_acks[commit_id].add(ack_node_id)
+        acked = self.commit_acks[commit_id]
+        expected = set(participants)
+
+        logger.info(
+            "COMMIT_ACK from %s for commit %s (%d/%d participants confirmed)",
+            ack_node_id[:20], commit_id[:12], len(acked), len(expected)
+        )
+
+        if expected and expected.issubset(acked):
+            logger.info(
+                "All %d participants confirmed commit %s — convergence complete",
+                len(expected), commit_id[:12]
+            )
+            # Prune old ack set to avoid unbounded memory growth
+            if len(self.commit_acks) > 200:
+                oldest = next(iter(self.commit_acks))
+                del self.commit_acks[oldest]
 
     async def _handle_vote_deadline(self, proposal_id: str) -> None:
         """Handle vote deadline timeout

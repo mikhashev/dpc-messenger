@@ -176,6 +176,49 @@ class KnowledgeCommit:
         """Convert to dictionary for commit history storage"""
         return asdict(self)
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'KnowledgeCommit':
+        """Reconstruct a KnowledgeCommit from a serialized dict (e.g. received over DPTP)."""
+        entries = []
+        for e in data.get('entries', []):
+            source_data = e.get('source', {})
+            source = KnowledgeSource(
+                type=source_data.get('type', 'ai_summary'),
+                conversation_id=source_data.get('conversation_id'),
+                timestamp=source_data.get('timestamp', datetime.now(timezone.utc).isoformat()),
+                participants=source_data.get('participants', [])
+            )
+            entries.append(KnowledgeEntry(
+                content=e.get('content', ''),
+                confidence=e.get('confidence', 1.0),
+                source=source,
+                tags=e.get('tags', []),
+                alternatives=e.get('alternatives', []),
+                flagged_assumptions=e.get('flagged_assumptions', [])
+            ))
+        return cls(
+            commit_id=data.get('commit_id', f"commit-{uuid.uuid4().hex[:8]}"),
+            parent_commit_id=data.get('parent_commit_id'),
+            summary=data.get('summary', ''),
+            description=data.get('description', ''),
+            topic=data.get('topic', ''),
+            entries=entries,
+            conversation_id=data.get('conversation_id'),
+            participants=data.get('participants', []),
+            timestamp=data.get('timestamp', datetime.now(timezone.utc).isoformat()),
+            consensus_type=data.get('consensus_type', 'unanimous'),
+            approved_by=data.get('approved_by', []),
+            rejected_by=data.get('rejected_by', []),
+            cultural_perspectives_considered=data.get('cultural_perspectives_considered', []),
+            confidence_score=data.get('confidence_score', 1.0),
+            sources_cited=data.get('sources_cited', []),
+            dissenting_opinion=data.get('dissenting_opinion'),
+            extraction_model=data.get('extraction_model'),
+            extraction_host=data.get('extraction_host'),
+            commit_hash=data.get('commit_hash'),
+            signatures=data.get('signatures', {})
+        )
+
     def compute_hash(self) -> str:
         """
         Compute hash-based commit ID.

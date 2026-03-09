@@ -52,7 +52,8 @@ from .message_handlers.transcription_handler import (
 from .message_handlers.provider_handler import GetProvidersHandler, ProvidersResponseHandler
 from .message_handlers.knowledge_handler import (
     ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler,
-    KnowledgeCommitResultHandler, CommitSignedHandler
+    KnowledgeCommitResultHandler, CommitSignedHandler, CommitAckHandler,
+    ApplyKnowledgeCommitHandler
 )
 from .message_handlers.gossip_handler import GossipSyncHandler, GossipMessageHandler
 from .message_handlers.relay_register_handler import RelayRegisterHandler
@@ -213,6 +214,9 @@ class CoreService:
 
         # Register callback to sign our own copy and broadcast COMMIT_SIGNED to peers
         self.consensus_manager.on_commit_signed = self._on_commit_signed
+
+        # Register callback to broadcast COMMIT_ACK to peers (Gap 3 observability)
+        self.consensus_manager.on_commit_ack = self._on_commit_ack
 
         # Register callback to broadcast peer proposals to UI
         self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
@@ -394,6 +398,8 @@ class CoreService:
         self.message_router.register_handler(VoteKnowledgeCommitHandler(self))
         self.message_router.register_handler(KnowledgeCommitResultHandler(self))
         self.message_router.register_handler(CommitSignedHandler(self))
+        self.message_router.register_handler(CommitAckHandler(self))
+        self.message_router.register_handler(ApplyKnowledgeCommitHandler(self))
 
         # Peer handshake
         self.message_router.register_handler(HelloHandler(self))
@@ -7236,6 +7242,36 @@ Respond in JSON format:
 
         except Exception as e:
             logger.error("Error in _on_commit_signed: %s", e, exc_info=True)
+
+    async def _on_commit_ack(self, commit):
+        """Broadcast COMMIT_ACK to all participants confirming this node applied the commit.
+
+        Called by ConsensusManager after _apply_commit succeeds. Enables peers to track
+        convergence: once all expected participants have ACKed, the commit is fully
+        confirmed across the group. Non-ACKing nodes can be retransmitted via
+        APPLY_KNOWLEDGE_COMMIT (future: with a timeout trigger).
+        """
+        try:
+            participants = commit.participants or []
+            payload = {
+                "commit_id": commit.commit_id,
+                "node_id": self.node_id,
+                "participants": participants
+            }
+
+            for peer_id in participants:
+                if peer_id == self.node_id:
+                    continue
+                try:
+                    await self.p2p_manager.send_message_to_peer(
+                        peer_id, {"command": "COMMIT_ACK", "payload": payload}
+                    )
+                    logger.debug("Sent COMMIT_ACK to %s for commit %s", peer_id[:20], commit.commit_id[:12])
+                except Exception as e:
+                    logger.debug("Could not send COMMIT_ACK to %s: %s", peer_id[:20], e)
+
+        except Exception as e:
+            logger.error("Error in _on_commit_ack: %s", e, exc_info=True)
 
     async def _broadcast_context_updated_to_peers(self, context_hash: str):
         """
