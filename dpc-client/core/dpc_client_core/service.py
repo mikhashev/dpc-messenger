@@ -4735,7 +4735,19 @@ Respond in JSON format:
             Dict with status and proposal (if knowledge detected)
         """
         try:
-            monitor = self._get_or_create_conversation_monitor(conversation_id)
+            # For agent conversations, the monitor lives inside DpcAgentManager._agent_monitors,
+            # not in service.conversation_monitors. Mirror the same lookup used by get_conversation_history.
+            monitor = None
+            if conversation_id.startswith("agent_"):
+                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                    if conversation_id in dpc_agent_provider._managers:
+                        agent_manager = dpc_agent_provider._managers[conversation_id]
+                        if hasattr(agent_manager, '_agent_monitors'):
+                            monitor = agent_manager._agent_monitors.get(conversation_id)
+            if monitor is None:
+                monitor = self._get_or_create_conversation_monitor(conversation_id)
+
             logger.info("End Session - attempting manual extraction for %s", conversation_id)
             logger.info(
                 "Full conversation: %d messages (incremental buffer: %d), Score: %.2f",
@@ -4757,9 +4769,10 @@ Respond in JSON format:
                     proposal.to_dict()
                 )
 
-                # For local_ai, ai_chat_xxx, and telegram conversations, don't broadcast knowledge to peers (privacy)
+                # For local_ai, ai_chat_xxx, telegram, and agent conversations, don't broadcast to peers (privacy)
                 # For peer conversations, broadcast for collaborative consensus
-                if conversation_id == "local_ai" or conversation_id.startswith("ai_") or conversation_id.startswith("telegram-"):
+                if (conversation_id == "local_ai" or conversation_id.startswith("ai_")
+                        or conversation_id.startswith("telegram-") or conversation_id.startswith("agent_")):
                     logger.info("%s - private conversation, knowledge will not be shared with peers", conversation_id)
                     # Use no-op broadcast function (local-only approval)
                     async def _no_op_broadcast(message: Dict[str, Any]) -> None:
