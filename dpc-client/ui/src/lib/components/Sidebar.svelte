@@ -553,7 +553,12 @@
                 <span class="agent-name">{agent.name}</span>
                 <span class="agent-provider">{agent.provider_alias}</span>
                 {#if agent.telegram_enabled}
-                  <span class="telegram-link-badge" title="Linked to Telegram">✓ 📱</span>
+                  <button
+                    type="button"
+                    class="telegram-link-badge"
+                    title="Linked to Telegram — click to edit settings"
+                    onclick={(e) => { e.stopPropagation(); handleLinkTelegram(agent.agent_id); }}
+                  >✓ 📱</button>
                 {/if}
               </button>
               <div class="agent-actions">
@@ -1748,6 +1753,12 @@
     padding: 0.1rem 0.3rem;
     border-radius: 3px;
     margin-left: 0.25rem;
+    border: none;
+    cursor: pointer;
+    line-height: 1;
+  }
+  .telegram-link-badge:hover {
+    background: #0077b6;
   }
 
   /* Telegram Link Dialog */
