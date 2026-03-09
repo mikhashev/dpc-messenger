@@ -414,6 +414,32 @@ class TelegramBridge:
             if self.telegram.bridge_to_p2p:
                 await self._forward_to_p2p_peers(conversation_id, dpc_message)
 
+            # If this conversation is linked to a DPC agent, process the message
+            # through the agent and send the response back to Telegram.
+            if conversation_id.startswith("agent-"):
+                agent_id = conversation_id[len("agent-"):]  # e.g. "agent_001"
+                try:
+                    dpc_agent_provider = self.service.llm_manager.providers.get("dpc_agent")
+                    if dpc_agent_provider:
+                        await dpc_agent_provider._ensure_manager(agent_id=agent_id)
+                        agent_manager = dpc_agent_provider.get_manager(agent_id)
+                        if agent_manager:
+                            logger.info(f"Forwarding Telegram message to agent {agent_id}")
+                            response = await agent_manager.process_message(
+                                message=text,
+                                conversation_id=agent_id,
+                                include_context=True,
+                            )
+                            if response:
+                                await self.telegram.send_message(chat_id, response)
+                        else:
+                            logger.warning(f"Agent manager not available for {agent_id}")
+                    else:
+                        logger.warning("dpc_agent provider not configured — cannot route to agent")
+                except Exception as agent_err:
+                    logger.error(f"Error forwarding Telegram message to agent {agent_id}: {agent_err}", exc_info=True)
+                    await self.telegram.send_message(chat_id, f"⚠️ Agent error: {agent_err}")
+
             logger.info(f"Processed Telegram text message from {chat_id}: {text[:50]}...")
 
             # Track update_id for history recovery

@@ -5035,13 +5035,29 @@ Respond in JSON format:
                     agent_manager = dpc_agent_provider._managers.get(conversation_id)
 
                     if not agent_manager:
-                        return {
-                            "status": "error",
-                            "message": f"Agent manager not found for conversation: {conversation_id}"
-                        }
+                        # Manager not initialized yet — history may still exist on disk, delete it directly
+                        history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                        if history_path.exists():
+                            history_path.unlink()
+                            logger.info("Deleted history file for %s (agent manager not yet initialized)", conversation_id)
+                        await self.local_api.broadcast_event("conversation_reset", {"conversation_id": conversation_id})
+                        return {"status": "success", "message": f"Agent conversation reset: {conversation_id}"}
 
-                    # Reset the conversation using the agent manager's reset method
+                    # Reset via agent manager (succeeds if monitor already exists in memory)
                     success = agent_manager.reset_conversation(conversation_id)
+
+                    if not success:
+                        # Monitor not in memory yet (user hasn't sent a message this session,
+                        # but history file exists on disk from a previous session).
+                        # Delete the history file directly so get_conversation_history returns 0.
+                        history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                        if history_path.exists():
+                            history_path.unlink()
+                            logger.info("Deleted orphaned history file for %s (monitor not yet initialized)", conversation_id)
+                            success = True
+                        else:
+                            logger.debug("No history file found for %s, nothing to reset", conversation_id)
+                            success = True  # Nothing to clear — treat as success
 
                     if success:
                         logger.info("Successfully reset agent conversation: %s", conversation_id)
