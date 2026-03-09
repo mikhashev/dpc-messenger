@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, telegramMessages, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, agentTelegramLinked, agentTelegramUnlinked, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, deleteAgent, agentCreated, agentsList, integrityWarnings } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, telegramMessages, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, deleteAgent, agentCreated, agentsList, integrityWarnings } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -460,6 +460,36 @@
           console.error('Failed to refresh agents list:', error);
         }
       })();
+    }
+  });
+
+  // Reactive: Handle Telegram→agent messages in unified_conversation mode
+  // Silently refreshes the agent chat history when Telegram bridge processes a message
+  $effect(() => {
+    if ($agentHistoryUpdated) {
+      const { conversation_id, messages } = $agentHistoryUpdated;
+      console.log(`[AgentTelegramMsg] Refreshing chat history for ${conversation_id} (${messages?.length} messages)`);
+
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const updatedMessages = (messages || []).map((msg: any, index: number) => ({
+          id: `tg-${index}-${Date.now()}`,
+          sender: msg.role === 'user' ? 'user' : conversation_id,
+          senderName: msg.role === 'user' ? 'Telegram' : getPeerDisplayName(conversation_id),
+          text: msg.content,
+          timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
+          attachments: msg.attachments || []
+        }));
+        newMap.set(conversation_id, updatedMessages);
+        return newMap;
+      });
+
+      // Scroll to bottom if this is the active chat
+      if (activeChatId === conversation_id) {
+        setTimeout(() => {
+          if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+        }, 50);
+      }
     }
   });
 
@@ -3167,6 +3197,7 @@
     max_events_per_minute?: number;
     cooldown_seconds?: number;
     transcription_enabled?: boolean;
+    unified_conversation?: boolean;
   }) {
     console.log('Link agent to Telegram:', agentId, 'config:', { ...config, bot_token: '***' });
 
@@ -3179,6 +3210,7 @@
         max_events_per_minute: config.max_events_per_minute || 20,
         cooldown_seconds: config.cooldown_seconds || 3.0,
         transcription_enabled: config.transcription_enabled !== false,
+        unified_conversation: config.unified_conversation === true,
       });
 
       if (result.status === 'error') {

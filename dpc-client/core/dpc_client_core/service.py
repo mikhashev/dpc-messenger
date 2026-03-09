@@ -736,6 +736,9 @@ class CoreService:
             telegram_task.set_name("telegram_bot")
             self._background_tasks.add(telegram_task)
 
+        # Auto-start Telegram bridges for agents with telegram_enabled=True
+        await self._start_agent_telegram_bridges()
+
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
 
@@ -6115,6 +6118,7 @@ Respond in JSON format:
         max_events_per_minute: int = 20,
         cooldown_seconds: float = 3.0,
         transcription_enabled: bool = True,
+        unified_conversation: bool = False,
     ) -> Dict[str, Any]:
         """
         Link an agent to Telegram with full configuration.
@@ -6129,6 +6133,7 @@ Respond in JSON format:
             max_events_per_minute: Maximum events to send per minute
             cooldown_seconds: Minimum time between same-type events
             transcription_enabled: Enable voice message transcription
+            unified_conversation: When True, Telegram messages share history with DPC chat UI
 
         Returns:
             Dict with status and message
@@ -6156,6 +6161,7 @@ Respond in JSON format:
                     max_events_per_minute=max_events_per_minute,
                     cooldown_seconds=cooldown_seconds,
                     transcription_enabled=transcription_enabled,
+                    unified_conversation=unified_conversation,
                 )
             except ValueError as e:
                 return {
@@ -6163,9 +6169,20 @@ Respond in JSON format:
                     "message": str(e)
                 }
 
-            # Restart agent's Telegram bridge if it's currently running
-            if agent_id in self._agent_managers:
-                await self._restart_agent_telegram_bridge(agent_id)
+            # Start or restart the agent's Telegram bridge immediately.
+            # _ensure_manager creates the manager if needed (starts it + bridge).
+            # If manager is already running, restart just the bridge with new config.
+            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+            if dpc_agent_provider:
+                if hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
+                    await self._restart_agent_telegram_bridge(agent_id)
+                else:
+                    # Manager not running yet — start it now so bridge is live immediately
+                    try:
+                        await dpc_agent_provider._ensure_manager(agent_id=agent_id)
+                        logger.info(f"Started agent manager and Telegram bridge for {agent_id}")
+                    except Exception as e:
+                        logger.warning(f"Could not start agent manager for {agent_id}: {e}")
 
             return {
                 "status": "success",
@@ -6181,6 +6198,38 @@ Respond in JSON format:
                 "message": str(e)
             }
 
+    async def _start_agent_telegram_bridges(self) -> None:
+        """
+        On startup, proactively initialize agent managers and start Telegram bridges
+        for all registered agents that have telegram_enabled=True.
+
+        Without this, bridges only start on the first DPC chat message, so Telegram
+        messages sent before any DPC chat activity would be silently ignored.
+        """
+        try:
+            from .dpc_agent.utils import AgentRegistry
+            registry = AgentRegistry()
+            agents = registry.list_agents()
+
+            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+            if not dpc_agent_provider:
+                return
+
+            for agent in agents:
+                agent_id = agent.get("agent_id", "")
+                if not agent_id or not agent.get("telegram_enabled", False):
+                    continue
+
+                try:
+                    # _ensure_manager creates the manager and calls start() + _start_telegram_bridge()
+                    await dpc_agent_provider._ensure_manager(agent_id=agent_id)
+                    logger.info(f"Auto-started Telegram bridge for agent {agent_id} on service startup")
+                except Exception as e:
+                    logger.warning(f"Failed to auto-start Telegram bridge for agent {agent_id}: {e}")
+
+        except Exception as e:
+            logger.warning(f"Failed to auto-start agent Telegram bridges: {e}")
+
     async def _restart_agent_telegram_bridge(self, agent_id: str) -> None:
         """
         Restart Telegram bridge for a running agent with new configuration.
@@ -6188,10 +6237,13 @@ Respond in JSON format:
         Args:
             agent_id: Agent ID whose Telegram bridge should be restarted
         """
-        if agent_id not in self._agent_managers:
+        dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+        if not dpc_agent_provider or not hasattr(dpc_agent_provider, '_managers'):
+            return
+        if agent_id not in dpc_agent_provider._managers:
             return
 
-        agent_manager = self._agent_managers[agent_id]
+        agent_manager = dpc_agent_provider._managers[agent_id]
 
         # Stop existing bridge if running
         if hasattr(agent_manager, "_telegram_bridge") and agent_manager._telegram_bridge:
@@ -6237,8 +6289,9 @@ Respond in JSON format:
             registry.unlink_agent_from_telegram(agent_id)
 
             # Stop agent's Telegram bridge if it's currently running
-            if agent_id in self._agent_managers:
-                agent_manager = self._agent_managers[agent_id]
+            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+            if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
+                agent_manager = dpc_agent_provider._managers[agent_id]
                 if hasattr(agent_manager, "_telegram_bridge") and agent_manager._telegram_bridge:
                     try:
                         await agent_manager._telegram_bridge.stop()
@@ -6277,8 +6330,9 @@ Respond in JSON format:
 
             # Restart Telegram bridges for any agents that were migrated
             if result.get("status") == "success" and result.get("migrated_count", 0) > 0:
+                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
                 for agent_id in result.get("migrated_agents", []):
-                    if agent_id in self._agent_managers:
+                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
                         await self._restart_agent_telegram_bridge(agent_id)
 
             return result

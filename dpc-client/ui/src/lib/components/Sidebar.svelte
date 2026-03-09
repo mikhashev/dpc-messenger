@@ -14,6 +14,7 @@
   let telegramMaxEventsPerMinute = $state(20);
   let telegramCooldownSeconds = $state(3.0);
   let telegramTranscriptionEnabled = $state(true);
+  let telegramUnifiedConversation = $state(false);
 
   // Handle Telegram link button click
   function handleLinkTelegram(agentId: string) {
@@ -27,6 +28,7 @@
     telegramMaxEventsPerMinute = agent?.telegram_max_events_per_minute || 20;
     telegramCooldownSeconds = agent?.telegram_cooldown_seconds || 3.0;
     telegramTranscriptionEnabled = agent?.telegram_transcription_enabled !== false;
+    telegramUnifiedConversation = agent?.telegram_unified_conversation === true;
 
     linkErrorMessage = '';
     showTelegramLinkDialog = true;
@@ -51,6 +53,7 @@
           max_events_per_minute: telegramMaxEventsPerMinute,
           cooldown_seconds: telegramCooldownSeconds,
           transcription_enabled: telegramTranscriptionEnabled,
+          unified_conversation: telegramUnifiedConversation,
         });
 
         showTelegramLinkDialog = false;
@@ -60,6 +63,7 @@
         telegramMaxEventsPerMinute = 20;
         telegramCooldownSeconds = 3.0;
         telegramTranscriptionEnabled = true;
+        telegramUnifiedConversation = false;
         linkErrorMessage = '';
       } catch (error: any) {
         linkErrorMessage = error.message || 'Failed to link agent to Telegram';
@@ -79,6 +83,7 @@
         telegramMaxEventsPerMinute = 20;
         telegramCooldownSeconds = 3.0;
         telegramTranscriptionEnabled = true;
+        telegramUnifiedConversation = false;
         linkErrorMessage = '';
         linkingAgentId = '';
       } catch (error: any) {
@@ -96,6 +101,7 @@
     telegramMaxEventsPerMinute = 20;
     telegramCooldownSeconds = 3.0;
     telegramTranscriptionEnabled = true;
+    telegramUnifiedConversation = false;
     linkErrorMessage = '';
     linkingAgentId = '';
   }
@@ -140,6 +146,7 @@
     telegram_max_events_per_minute?: number;
     telegram_cooldown_seconds?: number;
     telegram_transcription_enabled?: boolean;
+    telegram_unified_conversation?: boolean;
     telegram_linked_at?: string;
     // Legacy field (deprecated in favor of telegram_allowed_chat_ids)
     telegram_chat_id?: string;
@@ -227,6 +234,7 @@
       max_events_per_minute?: number;
       cooldown_seconds?: number;
       transcription_enabled?: boolean;
+      unified_conversation?: boolean;
     }) => Promise<void>;
     onUnlinkAgentTelegram?: (agentId: string) => Promise<void>;
   } = $props();
@@ -553,12 +561,14 @@
                 <span class="agent-name">{agent.name}</span>
                 <span class="agent-provider">{agent.provider_alias}</span>
                 {#if agent.telegram_enabled}
-                  <button
-                    type="button"
+                  <span
+                    role="button"
+                    tabindex="0"
                     class="telegram-link-badge"
                     title="Linked to Telegram — click to edit settings"
                     onclick={(e) => { e.stopPropagation(); handleLinkTelegram(agent.agent_id); }}
-                  >✓ 📱</button>
+                    onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); handleLinkTelegram(agent.agent_id); } }}
+                  >✓ 📱</span>
                 {/if}
               </button>
               <div class="agent-actions">
@@ -856,6 +866,16 @@
           />
           Enable voice message transcription
         </label>
+
+        <!-- Unified conversation -->
+        <label class="dialog-label checkbox-label">
+          <input
+            type="checkbox"
+            bind:checked={telegramUnifiedConversation}
+          />
+          Share conversation history with DPC chat UI
+        </label>
+        <p class="dialog-hint">When enabled, messages sent via this Telegram bot will appear in the DPC chat panel and share the same conversation context.</p>
 
         {#if linkErrorMessage}
           <p class="dialog-error">{linkErrorMessage}</p>
@@ -1858,6 +1878,13 @@
     color: #dc3545;
     font-size: 0.85rem;
     margin: -0.25rem 0 0.5rem 0;
+  }
+
+  .dialog-hint {
+    color: #888;
+    font-size: 0.8rem;
+    margin: -0.25rem 0 0.5rem 0;
+    line-height: 1.4;
   }
 
   .dialog-actions {

@@ -129,6 +129,7 @@ export const telegramError = writable<{ title: string; message: string; timestam
 // Agent Telegram linking events (v0.15.0+)
 export const agentTelegramLinked = writable<any>(null);  // {agent_id, chat_id, timestamp}
 export const agentTelegramUnlinked = writable<any>(null);  // {agent_id, timestamp}
+export const agentHistoryUpdated = writable<any>(null);  // {conversation_id, messages, message_count} - silent refresh from Telegram bridge
 
 // Whisper model loading stores (v0.13.3 - model pre-loading)
 export const whisperModelLoadingStarted = writable<any>(null);  // {provider}
@@ -807,6 +808,10 @@ export function connectToCoreService() {
                 else if (message.event === "agent_telegram_unlinked") {
                     console.log("Agent unlinked from Telegram:", message.payload);
                     agentTelegramUnlinked.set(message.payload);
+                }
+                else if (message.event === "agent_history_updated") {
+                    // Telegram bridge sent a message in unified_conversation mode — silently refresh chat
+                    agentHistoryUpdated.set(message.payload);
                 }
                 // DPC Agent progress events (v0.15.0+ - real-time agent progress in chat)
                 else if (message.event === "agent_progress") {

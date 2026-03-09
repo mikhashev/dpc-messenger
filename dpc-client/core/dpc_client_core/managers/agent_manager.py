@@ -239,6 +239,7 @@ class DpcAgentManager:
             max_events_per_minute = 20
             cooldown_seconds = 3.0
             transcription_enabled = True
+            unified_conversation = False
             skip_per_agent = True
         else:
             # First try to get per-agent Telegram config from registry
@@ -262,6 +263,7 @@ class DpcAgentManager:
             max_events_per_minute = agent_meta.get("telegram_max_events_per_minute", 20)
             cooldown_seconds = agent_meta.get("telegram_cooldown_seconds", 3.0)
             transcription_enabled = agent_meta.get("telegram_transcription_enabled", True)
+            unified_conversation = agent_meta.get("telegram_unified_conversation", False)
 
         # Backwards compatibility: fall back to global config if per-agent config is incomplete
         if not bot_token or not chat_ids:
@@ -321,6 +323,8 @@ class DpcAgentManager:
                 event_filter=event_filter,
                 rate_limit=rate_limit,
                 transcription_enabled=transcription_enabled,
+                agent_id=self.agent_id or "",
+                unified_conversation=unified_conversation,
             )
 
             # Set message handler for two-way communication

@@ -220,6 +220,7 @@ class AgentRegistry:
         max_events_per_minute: int = 20,
         cooldown_seconds: float = 3.0,
         transcription_enabled: bool = True,
+        unified_conversation: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """
         Link an agent to Telegram with full configuration.
@@ -232,6 +233,8 @@ class AgentRegistry:
             max_events_per_minute: Maximum events to send per minute
             cooldown_seconds: Minimum time between same-type events
             transcription_enabled: Enable voice message transcription
+            unified_conversation: When True, Telegram messages share conversation history
+                                  with the DPC chat UI (use agent_id as conversation_id)
 
         Returns:
             Updated agent metadata or None if not found
@@ -271,6 +274,7 @@ class AgentRegistry:
             "telegram_max_events_per_minute": max_events_per_minute,
             "telegram_cooldown_seconds": cooldown_seconds,
             "telegram_transcription_enabled": transcription_enabled,
+            "telegram_unified_conversation": unified_conversation,
             "telegram_linked_at": utc_now_iso()
         }
 

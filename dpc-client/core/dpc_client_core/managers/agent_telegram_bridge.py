@@ -110,6 +110,8 @@ class AgentTelegramBridge:
         event_filter: Optional[List[str]] = None,
         rate_limit: Optional[RateLimitConfig] = None,
         transcription_enabled: bool = True,
+        agent_id: str = "",
+        unified_conversation: bool = False,
     ):
         """
         Initialize agent Telegram bridge.
@@ -120,12 +122,17 @@ class AgentTelegramBridge:
             event_filter: List of event types to forward (None = all important events)
             rate_limit: Rate limiting configuration
             transcription_enabled: Enable voice message transcription (default: True)
+            agent_id: Agent ID this bridge belongs to (used for unified conversation)
+            unified_conversation: When True, Telegram messages share conversation history
+                                  with the DPC chat UI (conversation_id = agent_id)
         """
         self.bot_token = bot_token
         self.allowed_chat_ids = [str(cid) for cid in allowed_chat_ids]  # Ensure strings
         self.event_filter = set(event_filter) if event_filter else self._default_event_filter()
         self.rate_limit = rate_limit or RateLimitConfig()
         self.transcription_enabled = transcription_enabled
+        self._agent_id = agent_id
+        self._unified_conversation = unified_conversation
 
         self._bot = None
         self._application = None  # telegram.ext.Application
@@ -297,7 +304,7 @@ You can also send voice messages for transcription\\.
 
 Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] section\\.
 """
-        await update.message.reply_text(welcome, parse_mode="Markdown")
+        await update.message.reply_text(welcome, parse_mode="MarkdownV2")
 
     async def _handle_help_command(self, update, context):
         """Handle /help command."""
@@ -333,7 +340,7 @@ Send a voice message and it will be transcribed and processed\\.
 • Check firewall rules if tools seem unavailable
 • Use /clear to start fresh when context gets full
 """
-        await update.message.reply_text(help_text, parse_mode="Markdown")
+        await update.message.reply_text(help_text, parse_mode="MarkdownV2")
 
     async def _handle_status_command(self, update, context):
         """Handle /status command."""
@@ -362,7 +369,7 @@ Send a voice message and it will be transcribed and processed\\.
         status_lines.append(f"\n📡 Bridge: `{'Online' if self._enabled else 'Offline'}`")
         status_lines.append(f"💬 Allowed chats: `{len(self.allowed_chat_ids)}`")
 
-        await update.message.reply_text("\n".join(status_lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(status_lines), parse_mode="MarkdownV2")
 
     async def _handle_clear_command(self, update, context):
         """Handle /clear command - reset conversation context."""
@@ -371,7 +378,7 @@ Send a voice message and it will be transcribed and processed\\.
         if chat_id not in self.allowed_chat_ids:
             return
 
-        conversation_id = f"telegram-{chat_id}"
+        conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
 
         # Reset the conversation monitor
         if self._agent_manager:
@@ -381,14 +388,14 @@ Send a voice message and it will be transcribed and processed\\.
                     "✅ *Conversation Cleared*\n\n"
                     "Context and history have been reset\\. "
                     "You can start a fresh conversation now\\.",
-                    parse_mode="Markdown"
+                    parse_mode="MarkdownV2"
                 )
             else:
                 await update.message.reply_text(
                     "ℹ️ *No Conversation Found*\n\n"
                     "No existing conversation to clear\\. "
                     "Start chatting with the agent first\\.",
-                    parse_mode="Markdown"
+                    parse_mode="MarkdownV2"
                 )
         else:
             await update.message.reply_text("⚠️ Agent manager not available\\.")
@@ -415,22 +422,30 @@ Send a voice message and it will be transcribed and processed\\.
         log.info(f"Processing Telegram message from chat {chat_id}: {message_text[:50]}...")
 
         try:
+            # Use agent_id as conversation_id when unified_conversation is enabled,
+            # so Telegram messages share history with the DPC chat UI.
+            conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+
             # Call the message handler (agent_manager.process_message)
             response = await self._message_handler(
                 message=message_text,
-                conversation_id=f"telegram-{chat_id}",
+                conversation_id=conversation_id,
                 include_context=True,
             )
 
-            # Send response (truncate if needed, escape for Markdown)
+            # Send response (escape for MarkdownV2, split if needed)
             if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
                 # Split long messages
                 chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
                 for i, chunk in enumerate(chunks):
                     prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                    await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="Markdown")
+                    await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
             else:
-                await update.message.reply_text(escape_markdown(response), parse_mode="Markdown")
+                await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
+            # In unified_conversation mode, push updated history to DPC chat UI
+            if self._unified_conversation and self._agent_manager:
+                await self._broadcast_history_to_ui(conversation_id)
 
         except Exception as e:
             error_str = str(e)
@@ -442,10 +457,10 @@ Send a voice message and it will be transcribed and processed\\.
                     "⚠️ *Context Limit Reached*\n\n"
                     "The conversation has reached its token limit\\.\n\n"
                     "Use `/clear` to start a fresh conversation\\.",
-                    parse_mode="Markdown"
+                    parse_mode="MarkdownV2"
                 )
             else:
-                await update.message.reply_text(f"❌ Error processing message: {escape_markdown(error_str[:200])}", parse_mode="Markdown")
+                await update.message.reply_text(f"❌ Error processing message: {escape_markdown(error_str[:200])}", parse_mode="MarkdownV2")
 
     async def _handle_voice_message(self, update, context):
         """
@@ -527,7 +542,7 @@ Send a voice message and it will be transcribed and processed\\.
                             if transcription_text:
                                 await update.message.reply_text(
                                     f"📝 *Transcription:*\n{escape_markdown(transcription_text)}",
-                                    parse_mode="Markdown"
+                                    parse_mode="MarkdownV2"
                                 )
                             else:
                                 await update.message.reply_text("⚠️ No speech detected in voice message.")
@@ -556,22 +571,29 @@ Send a voice message and it will be transcribed and processed\\.
 
                 log.info(f"Processing transcribed voice message from chat {chat_id}: {transcription_text[:50]}...")
 
+                # Use agent_id as conversation_id when unified_conversation is enabled
+                conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+
                 # Call the message handler (agent_manager.process_message)
                 response = await self._message_handler(
                     message=transcription_text,
-                    conversation_id=f"telegram-{chat_id}",
+                    conversation_id=conversation_id,
                     include_context=True,
                 )
 
-                # Send response (truncate if needed, escape for Markdown)
+                # Send response (escape for MarkdownV2, split if needed)
                 if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
                     # Split long messages
                     chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
                     for i, chunk in enumerate(chunks):
                         prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="Markdown")
+                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
                 else:
-                    await update.message.reply_text(escape_markdown(response), parse_mode="Markdown")
+                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
+                # In unified_conversation mode, push updated history to DPC chat UI
+                if self._unified_conversation and self._agent_manager:
+                    await self._broadcast_history_to_ui(conversation_id)
 
             # Clean up voice file
             try:
@@ -582,6 +604,28 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"Error processing voice message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing voice message: {str(e)[:200]}")
+
+    async def _broadcast_history_to_ui(self, conversation_id: str) -> None:
+        """
+        Broadcast updated conversation history to the DPC chat UI via WebSocket.
+
+        Called after processing a Telegram message in unified_conversation mode so
+        the DPC chat panel reflects the Telegram exchange in real time.
+        """
+        try:
+            service = getattr(self._agent_manager, 'service', None)
+            if not service:
+                return
+            history_result = await service.get_conversation_history(conversation_id)
+            messages = history_result.get("messages", [])
+            await service.local_api.broadcast_event("agent_history_updated", {
+                "conversation_id": conversation_id,
+                "messages": messages,
+                "message_count": len(messages),
+            })
+            log.debug(f"[_broadcast_history_to_ui] Pushed {len(messages)} messages for {conversation_id}")
+        except Exception as e:
+            log.warning(f"[_broadcast_history_to_ui] Failed to push history: {e}")
 
     def _split_message(self, text: str, max_length: int) -> List[str]:
         """Split a long message into chunks."""
@@ -742,7 +786,7 @@ Send a voice message and it will be transcribed and processed\\.
                 result = await self._bot.send_message(
                     chat_id=chat_id,
                     text=text,
-                    parse_mode="Markdown",
+                    parse_mode="MarkdownV2",
                     disable_notification=False,
                 )
                 log.debug(f"[_send_message] Success! message_id={result.message_id}")
@@ -893,6 +937,7 @@ Configure event types in `~/.dpc/config.ini` [dpc_agent_telegram] section.
             "chat_count": len(self.allowed_chat_ids),
             "event_filter": list(self.event_filter),
             "transcription_enabled": self.transcription_enabled,
+            "unified_conversation": self._unified_conversation,
             "rate_limit": {
                 "max_per_minute": self.rate_limit.max_events_per_minute,
                 "cooldown_seconds": self.rate_limit.cooldown_seconds,
