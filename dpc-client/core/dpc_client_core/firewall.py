@@ -436,9 +436,9 @@ class ContextFirewall:
                     "personal.json:profile.description": "allow"
                 },
                 "node_groups": {
-                    "_comment": "Define which nodes belong to which groups. Add your peers' actual node IDs here.",
-                    "friends": ["dpc-node-alice-123", "dpc-node-charlie-789"],
-                    "colleagues": ["dpc-node-bob-456"],
+                    "_comment": "Define which nodes belong to which groups. Add your peers' node IDs here (copy from their URI or HELLO handshake).",
+                    "friends": [],
+                    "colleagues": [],
                     "family": []
                 },
                 "file_groups": {
@@ -449,28 +449,19 @@ class ContextFirewall:
                 "compute": {
                     "_comment": "Compute sharing settings - Allow peers to run AI inference on your GPU/CPU",
                     "enabled": False,
-                    "allow_groups": ["friends"],
-                    "allow_nodes": ["dpc-node-alice-123"],
+                    "allow_groups": [],
+                    "allow_nodes": [],
                     "allowed_models": ["llama3.1:8b", "llama3:70b"]
                 },
                 "transcription": {
                     "_comment": "Transcription sharing settings - Allow peers to use your Whisper model for voice transcription",
                     "enabled": False,
-                    "allow_groups": ["friends"],
-                    "allow_nodes": ["dpc-node-alice-123"],
+                    "allow_groups": [],
+                    "allow_nodes": [],
                     "allowed_models": ["openai/whisper-large-v3", "openai/whisper-medium"]
                 },
                 "nodes": {
-                    "_comment": "Per-node access rules - Most specific, overrides group rules",
-                    "dpc-node-alice-123": {
-                        "personal.json:profile.*": "allow",
-                        "personal.json:knowledge.*": "allow",
-                        "device_context.json:software.*": "allow"
-                    },
-                    "dpc-node-bob-456": {
-                        "personal.json:profile.name": "allow",
-                        "personal.json:profile.description": "allow"
-                    }
+                    "_comment": "Per-node access rules - Most specific, overrides group rules. Add entries like: \"dpc-node-xxxx\": {\"personal.json:profile.*\": \"allow\"}"
                 },
                 "groups": {
                     "_comment": "Per-group access rules - Applied to all nodes in the group",

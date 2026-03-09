@@ -83,13 +83,14 @@ npm run tauri dev
   - `node.key` - Your private key
   - `node.crt` - Your certificate
   - `node.id` - Your node ID
-  - `providers.json` - AI provider config
-  - `privacy_rules.json` - Firewall rules
-  - `personal.json` - Your context
-  - `device_context.json` - Auto-generated device info
+  - `config.ini` - All settings with sensible defaults
+  - `providers.json` - AI provider config (defaults to Ollama — UI notifies if not installed)
+  - `privacy_rules.json` - Firewall rules (secure defaults: deny all sharing)
+  - `personal.json` - Your context (editable in-app)
+  - `device_context.json` - Auto-collected hardware/software info
   - `instructions.json` - AI instruction customizations
-  - `known_peers.json` - Known peer connections
   - `knowledge/` - Knowledge commits directory
+  - `known_peers.json` - Created automatically after your first peer connection
 
 **Note your connection URI** displayed in the terminal:
 ```
@@ -119,8 +120,12 @@ Repeat Step 2 on another computer on the same network.
 **Use this if:** You want to connect over the internet with friends or a small team — no servers, no accounts, no infrastructure required.
 
 **Requirements:** At least one person in the group needs either:
-- **IPv6 connectivity** (check: `curl -6 ifconfig.me` — if it returns an IP, you have IPv6), or
-- **Port forwarding** configured on their router (forward TCP port 8888 to their PC)
+- **IPv6 connectivity** — check by running:
+  ```bash
+  curl -6 ifconfig.me   # Returns your IPv6 address if you have it
+  ```
+  If it returns an IP address, you have IPv6 and are ready to go.
+- **Port forwarding** configured on their router (forward TCP port 8888 to their PC's local IP)
 
 If nobody in your group has IPv6 or port forwarding, use Option C (Hub) instead.
 
@@ -488,10 +493,39 @@ poetry run python run_service.py
 
 ### For Users
 
-1. **Configure Context Firewall** - Edit `~/.dpc/privacy_rules.json`
+1. **Configure Context Firewall** - Edit `~/.dpc/privacy_rules.json` or use 🛡️ Firewall Rules in the sidebar
 2. **Add AI Providers** - Edit `~/.dpc/providers.json`
-3. **Customize Profile** - Edit `~/.dpc/personal.json`
+3. **Customize Profile** - Click 📚 Personal Context in the sidebar
 4. **Read the Whitepaper** - Understand the vision
+
+### Optional Features
+
+#### DPC Agent (AI Assistant with Tools)
+
+An autonomous AI agent is **pre-configured by default** — no setup needed. Select `dpc_agent` as your AI provider in the UI to start using it.
+
+The agent has 45+ tools (web search, file read, git, memory, scheduling), runs in a sandbox (`~/.dpc/agents/`), and can be given different permission profiles via the Firewall Rules editor.
+
+- Full guide: [DPC Agent Guide](./DPC_AGENT_GUIDE.md)
+- Telegram integration: [Agent Telegram](./DPC_AGENT_TELEGRAM.md)
+
+#### Telegram Bot Integration
+
+Connect DPC Messenger to Telegram for two-way messaging, voice transcription, and agent interaction from your phone. **Disabled by default** — requires a bot token.
+
+**Setup (3 steps):**
+1. Create a bot: open Telegram → search **@BotFather** → `/newbot` → copy the token
+2. Get your Chat ID: search **@userinfobot** → send any message → copy the number
+3. Edit `~/.dpc/config.ini`:
+   ```ini
+   [telegram]
+   enabled = true
+   bot_token = 123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+   allowed_chat_ids = ["123456789"]
+   ```
+4. Restart the backend — you'll see `Telegram bot started` in the logs
+
+- Full guide: [Telegram Setup](./TELEGRAM_SETUP.md)
 
 ### For Developers
 
@@ -592,7 +626,7 @@ You know everything is working when:
 
 **You've learned:**
 - How to set up D-PC Messenger
-- Two connection methods (local and Hub)
+- Three connection methods (local, zero-infrastructure, and Hub)
 - How to configure AI providers
 - How to troubleshoot common issues
 

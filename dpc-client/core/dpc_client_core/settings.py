@@ -265,14 +265,10 @@ class Settings:
         # Security settings (enabled, tools, evolution) are configured via Firewall Rules UI
         # which writes to ~/.dpc/privacy_rules.json.
 
-        self._config['dpc_agent_telegram'] = {
-            'enabled': 'false',  # Enable Telegram notifications for agent events
-            'bot_token': '',  # Telegram bot token (separate from main DPC bot)
-            'allowed_chat_ids': '',  # JSON array of chat IDs: ["123456789"]
-            'event_filter': 'task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message',  # Events to forward
-        }
-        # NOTE: Create a separate Telegram bot for agent monitoring via @BotFather
-        # Get your chat ID via @userinfobot
+        # NOTE: [dpc_agent_telegram] section removed in v0.15.0 — deprecated.
+        # Agent Telegram linking is now per-agent via ~/.dpc/agents/{id}/config.json.
+        # Use the main [telegram] bot (same token) and link agents via the UI.
+        # See docs/DPC_AGENT_TELEGRAM.md for migration guide.
 
         # Agent-Telegram Chat Linking (v0.15.0+)
         self._config['agent_telegram'] = {
