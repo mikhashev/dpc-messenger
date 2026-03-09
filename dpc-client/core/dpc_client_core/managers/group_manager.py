@@ -140,8 +140,13 @@ class GroupManager:
         # Load from new location
         if self.conversations_dir.exists():
             for conv_dir in self.conversations_dir.iterdir():
-                # Only process directories that look like group IDs
-                if not conv_dir.is_dir() or not conv_dir.name.startswith("group-"):
+                # Only process directories that look like group IDs.
+                # Exclude legacy _history-suffixed dirs (old conversation format).
+                if (
+                    not conv_dir.is_dir()
+                    or not conv_dir.name.startswith("group-")
+                    or conv_dir.name.endswith("_history")
+                ):
                     continue
 
                 metadata_file = conv_dir / "metadata.json"
@@ -151,6 +156,12 @@ class GroupManager:
                 try:
                     with open(metadata_file, "r") as f:
                         data = json.load(f)
+                    if "group_id" not in data:
+                        logger.warning(
+                            "Skipping %s: not a valid group metadata file (missing group_id)",
+                            metadata_file
+                        )
+                        continue
                     group = GroupMetadata.from_dict(data)
                     self._groups[group.group_id] = group
                     loaded += 1
