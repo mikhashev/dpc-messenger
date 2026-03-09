@@ -7856,6 +7856,14 @@ Respond in JSON format:
             tokens_used = session_state.get("tokens_used", 0)
             token_limit = session_state.get("tokens_limit", 128000)
 
+            # Get thinking/reasoning from last LLM round if available
+            thinking_text = None
+            thinking_tokens = None
+            if hasattr(agent, '_last_usage') and agent._last_usage:
+                thinking_text = agent._last_usage.get("thinking")
+                if thinking_text:
+                    thinking_tokens = len(thinking_text) // 4  # rough token estimate
+
             # Send response to UI with actual metadata including token info
             await self.local_api.send_response_to_all(
                 command_id=command_id,
@@ -7868,6 +7876,8 @@ Respond in JSON format:
                     "compute_host": "local",
                     "tokens_used": tokens_used,
                     "token_limit": token_limit,
+                    "thinking": thinking_text,
+                    "thinking_tokens": thinking_tokens,
                 }
             )
 

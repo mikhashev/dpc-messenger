@@ -270,6 +270,9 @@ async def run_llm_loop(
                 accumulated_usage["total_tokens"] += usage.get("total_tokens", 0)
                 accumulated_usage["cost"] += usage.get("cost", 0)
                 accumulated_usage["rounds"] += 1
+                # Carry forward thinking from each round (last non-empty thinking wins)
+                if msg.get("thinking"):
+                    accumulated_usage["thinking"] = msg["thinking"]
             except Exception as e:
                 log.error(f"LLM error: {e}", exc_info=True)
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace

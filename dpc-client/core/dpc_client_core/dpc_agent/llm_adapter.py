@@ -214,6 +214,12 @@ class DpcLlmAdapter:
                 "content": response,
             }
 
+            # Capture thinking/reasoning if the provider produced it
+            if hasattr(provider, 'get_last_thinking'):
+                thinking = provider.get_last_thinking()
+                if thinking:
+                    response_msg["thinking"] = thinking
+
             # Parse for tool calls if tools were provided
             if tools:
                 log.debug(f"Parsing tool calls from response (len={len(response)})")
