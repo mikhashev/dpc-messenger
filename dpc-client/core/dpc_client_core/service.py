@@ -52,7 +52,7 @@ from .message_handlers.transcription_handler import (
 from .message_handlers.provider_handler import GetProvidersHandler, ProvidersResponseHandler
 from .message_handlers.knowledge_handler import (
     ContextUpdatedHandler, ProposeKnowledgeCommitHandler, VoteKnowledgeCommitHandler,
-    KnowledgeCommitResultHandler
+    KnowledgeCommitResultHandler, CommitSignedHandler
 )
 from .message_handlers.gossip_handler import GossipSyncHandler, GossipMessageHandler
 from .message_handlers.relay_register_handler import RelayRegisterHandler
@@ -210,6 +210,9 @@ class CoreService:
 
         # Register callback to reload context and notify peers after commit
         self.consensus_manager.on_commit_applied = self._on_commit_applied
+
+        # Register callback to sign our own copy and broadcast COMMIT_SIGNED to peers
+        self.consensus_manager.on_commit_signed = self._on_commit_signed
 
         # Register callback to broadcast peer proposals to UI
         self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
@@ -390,6 +393,7 @@ class CoreService:
         self.message_router.register_handler(ProposeKnowledgeCommitHandler(self))
         self.message_router.register_handler(VoteKnowledgeCommitHandler(self))
         self.message_router.register_handler(KnowledgeCommitResultHandler(self))
+        self.message_router.register_handler(CommitSignedHandler(self))
 
         # Peer handshake
         self.message_router.register_handler(HelloHandler(self))
@@ -7187,6 +7191,51 @@ Respond in JSON format:
             logger.error("Error in _on_commit_applied: %s", e, exc_info=True)
             import traceback
             traceback.print_exc()
+
+    async def _on_commit_signed(self, commit):
+        """Sign the commit with our private key and broadcast COMMIT_SIGNED to participants.
+
+        Called by ConsensusManager after _apply_commit succeeds.  Every participating
+        node broadcasts their own RSA-PSS signature so peers can accumulate multi-party
+        attestations in the markdown frontmatter.
+        """
+        try:
+            from dpc_protocol.commit_integrity import CommitSigner
+            from cryptography.hazmat.primitives import serialization as _ser
+
+            key_path = DPC_HOME_DIR / NODE_KEY
+            if not key_path.exists():
+                logger.debug("_on_commit_signed: key file not found, skipping")
+                return
+
+            with open(key_path, 'rb') as f:
+                private_key = _ser.load_pem_private_key(f.read(), password=None)
+
+            signer = CommitSigner(self.node_id, private_key)
+            signature_b64 = signer.sign_commit(commit.commit_hash)
+
+            payload = {
+                "commit_id": commit.commit_id,
+                "commit_hash": commit.commit_hash,
+                "node_id": self.node_id,
+                "signature": signature_b64
+            }
+
+            # Broadcast to all participants (excluding self — we already applied locally)
+            participants = commit.participants or []
+            for peer_id in participants:
+                if peer_id == self.node_id:
+                    continue
+                try:
+                    await self.p2p_manager.send_message_to_peer(
+                        peer_id, {"command": "COMMIT_SIGNED", "payload": payload}
+                    )
+                    logger.debug("Sent COMMIT_SIGNED to %s for commit %s", peer_id[:20], commit.commit_id[:12])
+                except Exception as e:
+                    logger.debug("Could not send COMMIT_SIGNED to %s: %s", peer_id[:20], e)
+
+        except Exception as e:
+            logger.error("Error in _on_commit_signed: %s", e, exc_info=True)
 
     async def _broadcast_context_updated_to_peers(self, context_hash: str):
         """

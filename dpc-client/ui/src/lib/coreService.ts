@@ -99,6 +99,13 @@ export const conversationSettings = writable<any>(null);  // {conversation_id, p
 export const conversationSettingsChanged = writable<any>(null);  // {conversation_id, persist_history}
 export const conversationDeleted = writable<any>(null);  // {conversation_id}
 
+// Knowledge integrity warning store (v0.19.2 - startup tamper/corruption detection)
+// Populated from backend _startup_integrity_check() which runs verify_markdown_integrity()
+// on every ~/.dpc/knowledge/*_commit-*.md file and checks for orphaned personal.json refs.
+// Payload: { count: number, warnings: Array<{file, type, severity, message, ...}> }
+// Warning types: content_tampered | filename_mismatch | invalid_signature | missing_parent | missing_markdown
+export const integrityWarnings = writable<{count: number, warnings: any[], dismissed: boolean} | null>(null);
+
 // Voice message stores (v0.13.0 - voice recording and playback)
 export const voiceOfferReceived = writable<any>(null);  // {transfer_id, node_id, sender_name, filename, size_bytes, duration_seconds, ...voice_metadata}
 
@@ -397,6 +404,11 @@ export function connectToCoreService() {
                 else if (message.event === "peer_context_updated") {
                     console.log("Peer context updated:", message.payload);
                     peerContextUpdated.set(message.payload);
+                }
+                // Knowledge integrity warnings (v0.19.2 - startup tamper/corruption detection)
+                else if (message.event === "integrity_warnings") {
+                    console.warn("Knowledge integrity issues detected:", message.payload);
+                    integrityWarnings.set({ ...message.payload, dismissed: false });
                 }
                 // Handle get_personal_context response
                 else if (message.command === "get_personal_context" && message.status === "OK") {

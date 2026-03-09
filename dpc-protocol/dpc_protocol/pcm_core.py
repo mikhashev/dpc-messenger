@@ -418,11 +418,24 @@ class PCMCore:
         Ensures the file exists before trying to load it.
         """
         self.ensure_context_file_exists()
-        
+
         with open(self.file_path, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
-        
-        return PersonalContext.from_dict(raw_data)
+
+        context = PersonalContext.from_dict(raw_data)
+
+        # Spot-check: last_commit_id must match the last entry in commit_history.
+        # A mismatch means the file was edited outside the commit system or partially corrupted.
+        if context.last_commit_id and context.commit_history:
+            last_history_id = context.commit_history[-1].get('commit_id')
+            if last_history_id and last_history_id != context.last_commit_id:
+                logger.warning(
+                    "personal.json HEAD mismatch: last_commit_id=%s but commit_history tail=%s — "
+                    "file may have been modified outside the commit system",
+                    context.last_commit_id, last_history_id
+                )
+
+        return context
 
     def save_context(self, context: PersonalContext):
         """Save context to file, updating metadata timestamps"""

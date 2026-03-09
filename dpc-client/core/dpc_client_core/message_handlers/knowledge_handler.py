@@ -128,3 +128,47 @@ class KnowledgeCommitResultHandler(MessageHandler):
         await self.service.local_api.broadcast_event("knowledge_commit_result", payload)
 
         return None
+
+
+class CommitSignedHandler(MessageHandler):
+    """Handles COMMIT_SIGNED messages — a peer broadcasting their signature for an applied commit."""
+
+    @property
+    def command_name(self) -> str:
+        return "COMMIT_SIGNED"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        """
+        A remote peer has applied the same commit and is sharing their RSA-PSS signature.
+
+        Payload fields:
+            commit_id   (str) — the commit this signature covers
+            commit_hash (str) — deterministic hash the signature was made over
+            node_id     (str) — signer's node_id (should match sender_node_id)
+            signature   (str) — base64-encoded RSA-PSS signature
+
+        The handler verifies the signature and, if valid, appends it to the
+        markdown frontmatter so the file accumulates multi-party attestations.
+        """
+        commit_id = payload.get("commit_id", "")
+        commit_hash = payload.get("commit_hash", "")
+        signer_node_id = payload.get("node_id", sender_node_id)
+        signature_b64 = payload.get("signature", "")
+
+        if not all([commit_id, commit_hash, signature_b64]):
+            self.logger.warning("COMMIT_SIGNED from %s missing fields", sender_node_id[:20])
+            return None
+
+        if not hasattr(self.service, 'consensus_manager') or self.service.consensus_manager is None:
+            return None
+
+        ok = await self.service.consensus_manager.record_commit_signature(
+            commit_id, commit_hash, signer_node_id, signature_b64
+        )
+        if ok:
+            self.logger.info(
+                "Stored COMMIT_SIGNED from %s for commit %s",
+                signer_node_id[:20], commit_id[:12]
+            )
+
+        return None

@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, telegramMessages, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, agentTelegramLinked, agentTelegramUnlinked, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, deleteAgent, agentCreated, agentsList } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, telegramMessages, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, agentTelegramLinked, agentTelegramUnlinked, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, deleteAgent, agentCreated, agentsList, integrityWarnings } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -26,6 +26,7 @@
   import GroupInviteDialog from "$lib/components/GroupInviteDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
   import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
+  import IntegrityWarningBanner from "$lib/components/IntegrityWarningBanner.svelte";
   import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
   import VoicePlayer from "$lib/components/VoicePlayer.svelte";
   import MentionAutocomplete from "$lib/components/MentionAutocomplete.svelte";
@@ -4486,6 +4487,15 @@
         />
 
         <div class="input-row">
+          <!-- Knowledge Integrity Warning Banner (shown on startup if tampered/corrupted commits detected) -->
+          {#if $integrityWarnings && $integrityWarnings.count > 0 && !$integrityWarnings.dismissed}
+            <IntegrityWarningBanner
+              count={$integrityWarnings.count}
+              warnings={$integrityWarnings.warnings}
+              onDismiss={() => integrityWarnings.update(w => w ? { ...w, dismissed: true } : w)}
+            />
+          {/if}
+
           <!-- Token Warning Banner (90% and 100% warnings) -->
           {#if showTokenBanner}
             <TokenWarningBanner
