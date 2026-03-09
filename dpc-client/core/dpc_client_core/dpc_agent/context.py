@@ -156,6 +156,7 @@ def build_llm_messages(
     system_prompt: Optional[str] = None,
     dpc_context: Optional[Dict[str, Any]] = None,
     session_state: Optional[Dict[str, Any]] = None,
+    conversation_history: Optional[List[Dict[str, Any]]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -168,6 +169,9 @@ def build_llm_messages(
         dpc_context: Optional DPC context (personal, device)
         session_state: Optional session state from ConversationMonitor
                       (tokens_used, tokens_limit, usage_percent, etc.)
+        conversation_history: Optional list of previous user/assistant message dicts
+                              from ConversationMonitor (all turns except the current one).
+                              Each dict has at minimum {"role": "user"/"assistant", "content": "..."}
 
     Returns:
         (messages, cap_info) tuple:
@@ -232,8 +236,17 @@ def build_llm_messages(
                 },
             ],
         },
-        {"role": "user", "content": _build_user_content(task)},
     ]
+
+    # Insert previous conversation turns so the agent has continuity
+    if conversation_history:
+        for hist_msg in conversation_history:
+            role = hist_msg.get("role", "")
+            content = hist_msg.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+
+    messages.append({"role": "user", "content": _build_user_content(task)})
 
     # --- Soft-cap token trimming ---
     messages, cap_info = apply_message_token_soft_cap(messages, 200000)

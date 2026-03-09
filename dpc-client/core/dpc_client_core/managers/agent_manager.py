@@ -480,15 +480,18 @@ class DpcAgentManager:
                 image_caption=image_caption,
             )
 
-            # Track agent response in monitor (reuse existing method)
-            monitor.add_message(
-                role="assistant",
-                content=response,
-                timestamp=utc_now_iso(),
-                sender_node_id=conversation_id,  # Use conversation_id as node_id (e.g., "agent_001")
-                sender_name=agent_display_name
-            )
-            monitor.save_history()  # Save to disk immediately
+            # Track agent response in monitor — skip thinking-only fallback responses
+            # since they contain no real content for knowledge extraction or continuity
+            _THINKING_FALLBACK = "(thinking completed - see reasoning for details)"
+            if response and response.strip() != _THINKING_FALLBACK:
+                monitor.add_message(
+                    role="assistant",
+                    content=response,
+                    timestamp=utc_now_iso(),
+                    sender_node_id=conversation_id,
+                    sender_name=agent_display_name
+                )
+                monitor.save_history()  # Save to disk immediately
 
             # Update token count in monitor after agent response
             # Get token usage from agent's last response

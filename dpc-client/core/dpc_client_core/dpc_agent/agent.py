@@ -187,7 +187,14 @@ class DpcAgent:
             "image_caption": image_caption,
         }
 
-        # Build LLM context
+        # Build LLM context — pass prior conversation turns (all except current user msg,
+        # which was added to the monitor just before this call, so it's the last entry)
+        prior_history = None
+        if conversation_monitor is not None:
+            full_history = conversation_monitor.get_message_history()
+            if len(full_history) > 1:
+                prior_history = full_history[:-1]  # exclude the current user message
+
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
             memory=self.memory,
@@ -195,6 +202,7 @@ class DpcAgent:
             system_prompt=system_prompt,
             dpc_context=dpc_context,
             session_state=session_state,
+            conversation_history=prior_history,
         )
 
         # Set tool context with firewall-controlled tool access
