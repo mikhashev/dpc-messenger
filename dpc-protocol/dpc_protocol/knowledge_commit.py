@@ -53,6 +53,10 @@ class KnowledgeCommitProposal:
     # AI confidence
     avg_confidence: float = 1.0  # Average confidence across entries
 
+    # Commit ancestry — set by the proposer before voting starts so all participants
+    # anchor the same parent (prevents divergent chains from concurrent proposals)
+    parent_commit_id: Optional[str] = None
+
     # Extraction metadata (tracking which model extracted this knowledge)
     extraction_model: Optional[str] = None  # Model used for extraction (e.g., "claude-haiku-4-5", "llama3.1:8b")
     extraction_host: Optional[str] = None  # Compute host ("local" or node_id for remote)

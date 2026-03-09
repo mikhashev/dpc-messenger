@@ -7744,7 +7744,12 @@ Respond in JSON format:
                     elif llm_manager.default_provider in llm_manager.providers:
                         provider_name = llm_manager.default_provider
 
-            # Send response to UI with actual metadata
+            # Get token usage from the agent monitor (set during process_message)
+            session_state = agent_manager.get_session_state(conversation_id)
+            tokens_used = session_state.get("tokens_used", 0)
+            token_limit = session_state.get("tokens_limit", 128000)
+
+            # Send response to UI with actual metadata including token info
             await self.local_api.send_response_to_all(
                 command_id=command_id,
                 command="execute_ai_query",
@@ -7753,7 +7758,9 @@ Respond in JSON format:
                     "content": response,
                     "provider": provider_name,
                     "model": model_name,
-                    "compute_host": "local"
+                    "compute_host": "local",
+                    "tokens_used": tokens_used,
+                    "token_limit": token_limit,
                 }
             )
 

@@ -225,6 +225,12 @@ async def run_llm_loop(
     # Get tool schemas (use firewall whitelist, not just core tools)
     tool_schemas = tools.schemas(core_only=False, include_restricted=False)
 
+    # Deduplication: track (tool_name, args_hash) → call count.
+    # If the same call is repeated MAX_DUPLICATE_CALLS times without new information,
+    # break the loop to prevent infinite repetition.
+    MAX_DUPLICATE_CALLS = 5
+    _tool_call_counts: Dict[str, int] = {}
+
     round_idx = 0
     try:
         while True:
@@ -293,6 +299,51 @@ async def run_llm_loop(
             if content and content.strip():
                 emit_progress(content.strip(), None, round_idx)
                 llm_trace["assistant_notes"].append(content.strip()[:320])
+
+            # Check for duplicate tool calls before executing.
+            # If the same (tool, args) fingerprint has appeared MAX_DUPLICATE_CALLS
+            # times the model is stuck in a loop — inject a stop signal.
+            stuck_tools = []
+            for tc in tool_calls:
+                try:
+                    raw_args = tc["function"].get("arguments", {})
+                    args_key = json.dumps(raw_args, sort_keys=True) if isinstance(raw_args, dict) else str(raw_args)
+                    fingerprint = f"{tc['function']['name']}::{args_key}"
+                    _tool_call_counts[fingerprint] = _tool_call_counts.get(fingerprint, 0) + 1
+                    if _tool_call_counts[fingerprint] >= MAX_DUPLICATE_CALLS:
+                        stuck_tools.append(tc["function"]["name"])
+                except Exception:
+                    pass
+
+            if stuck_tools:
+                dedup_names = ", ".join(sorted(set(stuck_tools)))
+                log.warning(
+                    "Duplicate tool call limit reached for: %s — injecting stop signal", dedup_names
+                )
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[LOOP_GUARD] You have called the following tool(s) with identical arguments "
+                        f"{MAX_DUPLICATE_CALLS} or more times without new information: {dedup_names}. "
+                        "Stop repeating these calls. Summarise what you know so far and give your final answer now."
+                    )
+                })
+                try:
+                    final_msg, _ = await llm.chat(
+                        messages,
+                        tools=None,
+                        on_stream_chunk=on_stream_chunk,
+                        conversation_id=conversation_id,
+                    )
+                    if final_msg and final_msg.get("content"):
+                        return final_msg["content"], accumulated_usage, llm_trace
+                except Exception:
+                    log.warning("Failed to get response after loop guard", exc_info=True)
+                return (
+                    f"⚠️ Agent loop stopped: repeated calls to {dedup_names} without progress.",
+                    accumulated_usage,
+                    llm_trace,
+                )
 
             # Execute tool calls
             for tc in tool_calls:
