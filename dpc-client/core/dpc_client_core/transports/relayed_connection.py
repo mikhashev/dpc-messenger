@@ -31,7 +31,11 @@ from typing import Optional, TYPE_CHECKING
 from cryptography.hazmat.primitives import serialization
 from cryptography.x509 import load_pem_x509_certificate
 
-from dpc_protocol.crypto import encrypt_with_public_key_hybrid, decrypt_with_private_key_hybrid
+from dpc_protocol.crypto import (
+    encrypt_with_public_key_hybrid,
+    decrypt_with_private_key_hybrid,
+    generate_node_id,
+)
 
 if TYPE_CHECKING:
     from ..models.relay_node import RelayNode
@@ -124,7 +128,20 @@ class RelayedPeerConnection:
                     cert_pem = result["value"]
                     if isinstance(cert_pem, str):
                         cert_pem = cert_pem.encode()
-                    return load_pem_x509_certificate(cert_pem)
+                    cert = load_pem_x509_certificate(cert_pem)
+
+                    # Verify the cert's public key fingerprint matches the node_id
+                    # we requested, preventing DHT poisoning attacks.
+                    derived_node_id = generate_node_id(cert.public_key())
+                    if derived_node_id != node_id:
+                        logger.warning(
+                            "DHT cert fingerprint mismatch for %s: cert public key "
+                            "hashes to %s — discarding (possible DHT poisoning attack)",
+                            node_id[:20], derived_node_id[:20]
+                        )
+                        continue
+
+                    return cert
             except Exception as e:
                 logger.debug("DHT cert lookup from %s: %s", peer.node_id[:20], e)
 
