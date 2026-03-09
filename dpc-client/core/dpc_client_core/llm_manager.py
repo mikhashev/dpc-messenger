@@ -773,6 +773,9 @@ class ZaiProvider(AIProvider):
 
             # Note: Do NOT add stream=True - messages.stream() is already a streaming method
 
+            # Reset thinking at the start of each call (prevent stale values)
+            self._last_thinking = None
+
             # Stream response
             full_text = ""
             thinking_text = ""
@@ -784,24 +787,20 @@ class ZaiProvider(AIProvider):
                     if on_chunk:
                         await on_chunk(text, conversation_id)
 
-                # After streaming, check for thinking blocks in final message
-                # This handles the case where LLM produces only thinking, no text
-                if self.thinking_enabled and not full_text:
+                # After streaming, always check final message for thinking blocks.
+                # text_stream only yields text tokens; thinking blocks are separate
+                # and must be read from the final message.
+                if self.thinking_enabled:
                     try:
                         final_message = await stream.get_final_message()
                         for block in final_message.content:
                             if hasattr(block, 'type') and block.type == "thinking":
                                 thinking_text = getattr(block, 'thinking', "")
                                 if thinking_text:
-                                    logger.info(f"GLM streaming thinking (no text): {len(thinking_text)} chars")
                                     self._last_thinking = thinking_text
+                                    logger.info(f"GLM streaming thinking: {len(thinking_text)} chars")
                     except Exception as e:
                         logger.debug(f"Could not get final message for thinking: {e}")
-
-            # Store thinking for retrieval if available
-            if thinking_text:
-                self._last_thinking = thinking_text
-                logger.info(f"GLM streaming thinking: {len(thinking_text)} chars")
 
             # If no text produced but thinking was done, return a summary
             if not full_text and thinking_text:
