@@ -327,7 +327,7 @@ class RelayManager:
         Example:
             >>> relay = await manager.find_relay()
             >>> connection = await manager.connect_via_relay("dpc-node-peer", relay)
-            >>> await connection.send_message({"command": "HELLO"})
+            >>> await connection.send_message({"command": "HELLO"})  # noqa: use send() on RelayedPeerConnection
         """
         logger.info(
             "Connecting to peer %s via relay %s",
@@ -664,7 +664,7 @@ class RelayManager:
                 }
             }
 
-            await dest_connection.send_message(relay_message)
+            await dest_connection.send(relay_message)
 
             logger.debug(
                 "Forwarded RELAY_MESSAGE: %s → %s (%d bytes, session=%s)",
