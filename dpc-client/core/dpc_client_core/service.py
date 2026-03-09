@@ -58,6 +58,7 @@ from .message_handlers.gossip_handler import GossipSyncHandler, GossipMessageHan
 from .message_handlers.relay_register_handler import RelayRegisterHandler
 from .message_handlers.relay_message_handler import RelayMessageHandler
 from .message_handlers.relay_disconnect_handler import RelayDisconnectHandler
+from .message_handlers.relay_response_handler import RelayWaitingHandler, RelayReadyHandler
 from .message_handlers.file_offer_handler import FileOfferHandler
 from .message_handlers.file_accept_handler import FileAcceptHandler
 from .message_handlers.file_chunk_handler import FileChunkHandler
@@ -397,10 +398,13 @@ class CoreService:
         self.message_router.register_handler(GossipSyncHandler(self))  # Anti-entropy sync
         self.message_router.register_handler(GossipMessageHandler(self))  # Epidemic routing
 
-        # Volunteer relay handlers (server mode)
-        self.message_router.register_handler(RelayRegisterHandler(self))  # Relay session registration
-        self.message_router.register_handler(RelayMessageHandler(self))  # Message forwarding
-        self.message_router.register_handler(RelayDisconnectHandler(self))  # Session cleanup
+        # Volunteer relay handlers (server mode — relay node)
+        self.message_router.register_handler(RelayRegisterHandler(self))   # Session registration
+        self.message_router.register_handler(RelayMessageHandler(self))    # Forward / receive blobs
+        self.message_router.register_handler(RelayDisconnectHandler(self)) # Session cleanup
+        # Relay response handlers (client mode — connecting via relay)
+        self.message_router.register_handler(RelayWaitingHandler(self))    # Waiting for other peer
+        self.message_router.register_handler(RelayReadyHandler(self))      # Session ready
 
         # File transfer handlers (v0.13.0: FileOfferHandler handles images, voice messages, and regular files)
         self.message_router.register_handler(FileOfferHandler(self))

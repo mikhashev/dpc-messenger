@@ -74,7 +74,7 @@ class RelayRegisterHandler(MessageHandler):
 
         if not target_peer_id:
             logger.warning("RELAY_REGISTER missing peer_id from %s", sender_node_id[:20])
-            await connection.send_message({
+            await connection.send({
                 "command": "ERROR",
                 "payload": {
                     "error": "invalid_request",
@@ -86,7 +86,7 @@ class RelayRegisterHandler(MessageHandler):
         # Check if relay_manager is initialized and volunteering
         if not hasattr(self.service, 'relay_manager') or not self.service.relay_manager:
             logger.warning("RelayManager not initialized - rejecting registration from %s", sender_node_id[:20])
-            await connection.send_message({
+            await connection.send({
                 "command": "ERROR",
                 "payload": {
                     "error": "not_volunteering",
@@ -97,7 +97,7 @@ class RelayRegisterHandler(MessageHandler):
 
         if not self.service.relay_manager.volunteer:
             logger.warning("Not volunteering as relay - rejecting registration from %s", sender_node_id[:20])
-            await connection.send_message({
+            await connection.send({
                 "command": "ERROR",
                 "payload": {
                     "error": "not_volunteering",
@@ -125,22 +125,43 @@ class RelayRegisterHandler(MessageHandler):
                 session_id, sender_node_id[:20], target_peer_id[:20]
             )
 
-            # Send RELAY_READY to requester
-            await connection.send_message({
+            # Send RELAY_READY to requester (second peer to register)
+            await connection.send({
                 "command": "RELAY_READY",
                 "payload": {
                     "session_id": session_id,
-                    "peer_id": target_peer_id
+                    "peer_id": target_peer_id  # The other peer in this session
                 }
             })
 
-            # TODO: Send RELAY_READY to target peer as well
-            # (Requires storing connection references in RelayManager)
+            # Send RELAY_READY to first peer (who was waiting with RELAY_WAITING)
+            first_peer_conn = self.service.relay_manager.peer_connections.get(target_peer_id)
+            if first_peer_conn:
+                try:
+                    await first_peer_conn.send({
+                        "command": "RELAY_READY",
+                        "payload": {
+                            "session_id": session_id,
+                            "peer_id": sender_node_id  # The peer who just completed the session
+                        }
+                    })
+                    logger.debug(
+                        "Sent RELAY_READY to waiting peer %s", target_peer_id[:20]
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to send RELAY_READY to first peer %s: %s",
+                        target_peer_id[:20], e
+                    )
+            else:
+                logger.warning(
+                    "First peer %s connection not found for RELAY_READY", target_peer_id[:20]
+                )
         else:
             # Waiting for target peer to register
             logger.debug("Waiting for target peer %s to register", target_peer_id[:20])
 
-            await connection.send_message({
+            await connection.send({
                 "command": "RELAY_WAITING",
                 "payload": {
                     "message": f"Waiting for peer {target_peer_id[:20]} to register",

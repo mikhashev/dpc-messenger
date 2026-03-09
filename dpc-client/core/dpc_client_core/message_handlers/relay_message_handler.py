@@ -89,7 +89,7 @@ class RelayMessageHandler(MessageHandler):
         # Validate payload — "data" must be a non-empty string (base64 blob)
         if not all([from_peer, to_peer, session_id]) or not isinstance(encrypted_data, str) or not encrypted_data:
             logger.warning("Invalid RELAY_MESSAGE payload from %s", sender_node_id[:20])
-            await connection.send_message({
+            await connection.send({
                 "command": "ERROR",
                 "payload": {
                     "error": "invalid_request",
@@ -104,7 +104,7 @@ class RelayMessageHandler(MessageHandler):
                 "RELAY_MESSAGE from field mismatch: connection=%s, from=%s",
                 sender_node_id[:20], from_peer[:20]
             )
-            await connection.send_message({
+            await connection.send({
                 "command": "ERROR",
                 "payload": {
                     "error": "invalid_sender",
@@ -113,39 +113,43 @@ class RelayMessageHandler(MessageHandler):
             })
             return
 
-        # Check if relay_manager is initialized and volunteering
-        if not hasattr(self.service, 'relay_manager') or not self.service.relay_manager:
-            logger.warning("RelayManager not initialized - cannot forward message")
-            await connection.send_message({
-                "command": "ERROR",
-                "payload": {
-                    "error": "not_volunteering",
-                    "message": "This node is not volunteering as a relay"
-                }
-            })
+        relay_manager = getattr(self.service, 'relay_manager', None)
+        if not relay_manager:
+            logger.warning("RelayManager not initialized - cannot handle RELAY_MESSAGE")
             return
 
-        if not self.service.relay_manager.volunteer:
-            logger.warning("Not volunteering as relay - cannot forward message")
-            await connection.send_message({
-                "command": "ERROR",
-                "payload": {
-                    "error": "not_volunteering",
-                    "message": "This node is not volunteering as a relay"
-                }
-            })
+        # Client mode: message is addressed TO US (we are the destination)
+        # Dispatch to the active RelayedPeerConnection for this sender
+        if from_peer in relay_manager._active_relay_connections:
+            logger.debug(
+                "Client-side RELAY_MESSAGE from %s (session=%s, blob=%d bytes)",
+                from_peer[:20], session_id, len(encrypted_data)
+            )
+            await relay_manager.dispatch_incoming_relay_message(
+                from_peer=from_peer,
+                session_id=session_id,
+                data_b64=encrypted_data
+            )
+            return
+
+        # Server mode: we are the relay, forward to destination peer
+        if not relay_manager.volunteer:
+            logger.warning(
+                "RELAY_MESSAGE from %s but not volunteering as relay and no active "
+                "client connection for sender — dropping",
+                from_peer[:20]
+            )
             return
 
         logger.debug(
-            "Forwarding RELAY_MESSAGE: %s → %s (session=%s, blob=%d bytes)",
+            "Relay-server forwarding RELAY_MESSAGE: %s → %s (session=%s, blob=%d bytes)",
             from_peer[:20], to_peer[:20], session_id, len(encrypted_data)
         )
 
         # Pass the raw base64 string as bytes — relay never decodes the blob
         message_bytes = encrypted_data.encode('utf-8')
 
-        # Forward via RelayManager
-        success = await self.service.relay_manager.handle_relay_message(
+        success = await relay_manager.handle_relay_message(
             from_peer=from_peer,
             to_peer=to_peer,
             message=message_bytes
@@ -153,10 +157,10 @@ class RelayMessageHandler(MessageHandler):
 
         if not success:
             logger.warning(
-                "Failed to forward RELAY_MESSAGE: %s → %s",
+                "Failed to relay RELAY_MESSAGE: %s → %s",
                 from_peer[:20], to_peer[:20]
             )
-            await connection.send_message({
+            await connection.send({
                 "command": "ERROR",
                 "payload": {
                     "error": "forward_failed",

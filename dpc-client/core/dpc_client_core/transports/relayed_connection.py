@@ -6,9 +6,11 @@ same interface as direct PeerConnection. Messages are encrypted end-to-end
 with the recipient's public key before being handed to the relay.
 
 Architecture:
-- Client connects to relay via TLS
+- Client connects to relay via TLS (connect_directly — full message routing)
+- All messages from relay arrive through MessageRouter (no raw .read())
 - Before sending, client encrypts payload with recipient's RSA public key
 - Relay forwards opaque encrypted blob — cannot read content
+- Incoming RELAY_MESSAGE is dispatched by RelayMessageHandler via relay_manager
 - Recipient decrypts with own private key
 - Transparent to higher layers (same API as direct connection)
 
@@ -46,17 +48,21 @@ class RelayedPeerConnection:
     through relay instead of direct connection, with E2E encryption
     so the relay cannot read message content.
 
+    Incoming messages are pushed into this object by the relay_manager
+    (via _dispatch_incoming) when RelayMessageHandler routes them, rather
+    than by a background read loop. This avoids conflicting with the
+    _listen_to_peer task that owns the relay TLS socket.
+
     Attributes:
         peer_id: Target peer node ID
         relay_node: Relay node handling forwarding
-        relay_connection: TLS connection to relay (PeerConnection)
+        relay_connection: TLS connection to relay (PeerConnection, .send() only)
         session_id: Relay session identifier
         own_node_id: Our own node ID (used in "from" field)
         dht_manager: DHT manager for certificate discovery
         running: Whether connection is active
 
     Example:
-        >>> # Establish relayed connection
         >>> conn = RelayedPeerConnection(
         ...     peer_id="dpc-node-bob",
         ...     relay_node=relay,
@@ -66,8 +72,6 @@ class RelayedPeerConnection:
         ...     dht_manager=dht_manager,
         ... )
         >>> await conn.start()
-        >>>
-        >>> # Use like direct connection
         >>> await conn.send_message({"command": "HELLO"})
         >>> message = await conn.receive_message()
     """
@@ -76,22 +80,11 @@ class RelayedPeerConnection:
         self,
         peer_id: str,
         relay_node: "RelayNode",
-        relay_connection,  # PeerConnection to relay (.send() / .read())
+        relay_connection,  # PeerConnection to relay (.send() only — no raw .read())
         session_id: str,
         own_node_id: str = "",
         dht_manager: Optional["DHTManager"] = None,
     ):
-        """
-        Initialize relayed connection.
-
-        Args:
-            peer_id: Target peer node ID
-            relay_node: Relay node metadata
-            relay_connection: TLS connection to relay
-            session_id: Relay session identifier
-            own_node_id: Our own node ID (for "from" field in relay envelope)
-            dht_manager: DHT manager for peer certificate discovery
-        """
         self.peer_id = peer_id
         self.relay_node = relay_node
         self.relay_connection = relay_connection
@@ -101,7 +94,6 @@ class RelayedPeerConnection:
 
         self.running = False
         self._receive_queue: asyncio.Queue = asyncio.Queue()
-        self._receive_task: Optional[asyncio.Task] = None
         self._own_private_key = None  # Lazy-loaded, cached after first use
 
         logger.info(
@@ -113,28 +105,17 @@ class RelayedPeerConnection:
 
     async def _get_peer_certificate(self, node_id: str):
         """
-        Get peer's X.509 certificate for E2E encryption.
+        Get peer's X.509 certificate for E2E encryption via DHT lookup.
 
-        Queries DHT using key "cert:<node_id>" (same mechanism as gossip tier).
-
-        Args:
-            node_id: Target peer node ID
-
-        Returns:
-            x509.Certificate object
-
-        Raises:
-            ConnectionError: If certificate not found
+        Uses cert:<node_id> key — same mechanism as the gossip tier.
         """
         if not self.dht_manager:
             raise ConnectionError(
-                f"No DHT manager available — cannot look up certificate for {node_id[:20]}"
+                f"No DHT manager — cannot look up certificate for {node_id[:20]}"
             )
 
         cert_key = f"cert:{node_id}"
-        known_peers = self.dht_manager.get_known_peers()
-
-        for peer in known_peers:
+        for peer in self.dht_manager.get_known_peers():
             try:
                 result = await self.dht_manager.rpc_handler.find_value(
                     peer.ip, peer.port, cert_key
@@ -145,67 +126,40 @@ class RelayedPeerConnection:
                         cert_pem = cert_pem.encode()
                     return load_pem_x509_certificate(cert_pem)
             except Exception as e:
-                logger.debug("DHT cert lookup from %s failed: %s", peer.node_id[:20], e)
-                continue
+                logger.debug("DHT cert lookup from %s: %s", peer.node_id[:20], e)
 
         raise ConnectionError(
-            f"Certificate for peer {node_id[:20]} not found in DHT. "
+            f"Certificate for {node_id[:20]} not found in DHT. "
             "Peer must be online and have published their certificate."
         )
 
     async def _load_own_private_key(self):
-        """
-        Load own RSA private key for decryption (cached after first load).
-
-        Returns:
-            RSA private key object
-        """
+        """Load own RSA private key for decryption (cached after first load)."""
         if self._own_private_key is not None:
             return self._own_private_key
-
         dpc_dir = Path(os.getenv("DPC_DIR", Path.home() / ".dpc"))
-        key_path = dpc_dir / "node.key"
-
-        with open(key_path, "rb") as f:
+        with open(dpc_dir / "node.key", "rb") as f:
             self._own_private_key = serialization.load_pem_private_key(
                 f.read(), password=None
             )
-
         return self._own_private_key
 
     # ===== Connection Lifecycle =====
 
     async def start(self):
-        """
-        Start relayed connection (begin receiving messages).
-
-        Starts background task to receive RELAY_MESSAGE protocol messages
-        from relay and enqueue them for application consumption.
-        """
+        """Mark connection as active. No background task needed — incoming
+        messages are pushed via _dispatch_incoming by the message router."""
         if self.running:
             logger.warning("RelayedPeerConnection already running")
             return
-
         self.running = True
-        self._receive_task = asyncio.create_task(self._receive_loop())
-
         logger.info("RelayedPeerConnection started for peer %s", self.peer_id[:20])
 
     async def stop(self):
-        """Stop relayed connection and cleanup."""
+        """Stop relayed connection and notify relay."""
         if not self.running:
             return
-
         self.running = False
-
-        if self._receive_task:
-            self._receive_task.cancel()
-            try:
-                await self._receive_task
-            except asyncio.CancelledError:
-                pass
-
-        # Send RELAY_DISCONNECT to relay
         try:
             await self.relay_connection.send({
                 "command": "RELAY_DISCONNECT",
@@ -217,169 +171,93 @@ class RelayedPeerConnection:
             })
         except Exception as e:
             logger.debug("Failed to send RELAY_DISCONNECT: %s", e)
-
         logger.info("RelayedPeerConnection stopped for peer %s", self.peer_id[:20])
+
+    # ===== Incoming message dispatch (called by RelayMessageHandler) =====
+
+    async def _dispatch_incoming(self, data_b64: str):
+        """
+        Decrypt and enqueue an incoming E2E-encrypted relay message.
+
+        Called by relay_manager when RelayMessageHandler routes a
+        RELAY_MESSAGE destined for this connection.
+
+        Args:
+            data_b64: Base64-encoded AES-GCM + RSA-OAEP encrypted blob
+        """
+        try:
+            encrypted_bytes = base64.b64decode(data_b64)
+            private_key = await self._load_own_private_key()
+            decrypted_bytes = decrypt_with_private_key_hybrid(encrypted_bytes, private_key)
+            message = json.loads(decrypted_bytes.decode("utf-8"))
+        except Exception as e:
+            logger.error(
+                "Failed to decrypt relay message from %s: %s "
+                "(wrong key, tampered data, or legacy unencrypted message)",
+                self.peer_id[:20], e
+            )
+            return
+        await self._receive_queue.put(message)
+        logger.debug("Decrypted and enqueued relay message from %s", self.peer_id[:20])
 
     # ===== Send / Receive =====
 
     async def send_message(self, message: dict):
         """
-        Send message to peer via relay with E2E encryption.
+        Send E2E-encrypted message to peer via relay.
 
-        Encrypts the message with the recipient's public key (AES-256-GCM +
-        RSA-OAEP) before wrapping it in the relay envelope. The relay node
-        forwards the opaque encrypted blob without being able to read it.
-
-        Args:
-            message: Message dictionary to send
-
-        Raises:
-            ConnectionError: If relay connection failed or cert not available
-
-        Protocol:
-            1. Fetch recipient's certificate from DHT
-            2. Encrypt: AES-256-GCM(message) + RSA-OAEP(AES key)
-            3. Base64-encode the encrypted blob
-            4. Wrap in RELAY_MESSAGE with "data" field (opaque to relay)
+        Encrypts with recipient's public key (AES-256-GCM + RSA-OAEP)
+        then wraps in relay envelope. Relay forwards opaque blob.
         """
         if not self.running:
             raise ConnectionError("RelayedPeerConnection not running")
 
-        # 1. Get recipient certificate from DHT for E2E encryption
         try:
             peer_cert = await self._get_peer_certificate(self.peer_id)
         except ConnectionError as e:
-            logger.error("Cannot encrypt for relay — cert lookup failed: %s", e)
+            logger.error("Cert lookup failed for relay send: %s", e)
             raise
 
-        # 2. Encrypt payload (same hybrid scheme as gossip tier)
         payload_bytes = json.dumps(message).encode("utf-8")
         encrypted = encrypt_with_public_key_hybrid(payload_bytes, peer_cert.public_key())
         data_b64 = base64.b64encode(encrypted).decode("utf-8")
 
-        # 3. Wrap in relay envelope — relay sees only "from/to/session_id/data"
-        relay_message = {
+        relay_envelope = {
             "command": "RELAY_MESSAGE",
             "payload": {
                 "from": self.own_node_id,
                 "to": self.peer_id,
                 "session_id": self.session_id,
-                "data": data_b64  # Opaque encrypted blob — relay cannot read
+                "data": data_b64  # Opaque blob — relay cannot read
             }
         }
 
         try:
-            await self.relay_connection.send(relay_message)
+            await self.relay_connection.send(relay_envelope)
             logger.debug(
-                "Sent E2E-encrypted message to peer %s via relay (%d bytes)",
+                "Sent E2E-encrypted message to %s via relay (%d bytes)",
                 self.peer_id[:20], len(encrypted)
             )
         except Exception as e:
-            logger.error("Failed to send relayed message: %s", e)
+            logger.error("Relay send failed: %s", e)
             raise ConnectionError(f"Relay send failed: {e}")
 
     async def receive_message(self, timeout: Optional[float] = None) -> Optional[dict]:
-        """
-        Receive message from peer via relay.
-
-        Args:
-            timeout: Receive timeout in seconds
-
-        Returns:
-            Decrypted message dictionary, or None if timeout
-
-        Raises:
-            ConnectionError: If connection closed
-        """
+        """Receive next decrypted message from peer (blocks until available or timeout)."""
         if not self.running:
             raise ConnectionError("RelayedPeerConnection not running")
-
         try:
             if timeout:
-                message = await asyncio.wait_for(
-                    self._receive_queue.get(),
-                    timeout=timeout
-                )
-            else:
-                message = await self._receive_queue.get()
-
-            return message
-
+                return await asyncio.wait_for(self._receive_queue.get(), timeout=timeout)
+            return await self._receive_queue.get()
         except asyncio.TimeoutError:
             return None
-
-    async def _receive_loop(self):
-        """
-        Background task: receive RELAY_MESSAGE from relay, decrypt, and enqueue.
-
-        Runs until connection closed. Filters for RELAY_MESSAGE commands
-        from our session, decrypts the E2E-encrypted payload, and queues
-        the plaintext message for application consumption.
-        """
-        logger.debug("Relay receive loop started for peer %s", self.peer_id[:20])
-
-        try:
-            while self.running:
-                # Receive message from relay
-                relay_msg = await self.relay_connection.read()
-
-                if not relay_msg:
-                    await asyncio.sleep(0.05)
-                    continue
-
-                # Filter for RELAY_MESSAGE from our session
-                if relay_msg.get("command") != "RELAY_MESSAGE":
-                    continue
-
-                payload = relay_msg.get("payload", {})
-
-                if (payload.get("session_id") != self.session_id
-                        or payload.get("from") != self.peer_id):
-                    continue
-
-                # Decrypt E2E-encrypted blob
-                data_b64 = payload.get("data")
-                if not data_b64:
-                    logger.warning(
-                        "Received RELAY_MESSAGE without 'data' field from %s",
-                        self.peer_id[:20]
-                    )
-                    continue
-
-                try:
-                    encrypted_bytes = base64.b64decode(data_b64)
-                    private_key = await self._load_own_private_key()
-                    decrypted_bytes = decrypt_with_private_key_hybrid(
-                        encrypted_bytes, private_key
-                    )
-                    peer_message = json.loads(decrypted_bytes.decode("utf-8"))
-                except Exception as e:
-                    logger.error(
-                        "Failed to decrypt relay message from %s: %s "
-                        "(wrong key, tampered data, or legacy unencrypted message)",
-                        self.peer_id[:20], e
-                    )
-                    continue
-
-                await self._receive_queue.put(peer_message)
-                logger.debug(
-                    "Decrypted and enqueued relay message from %s",
-                    self.peer_id[:20]
-                )
-
-        except asyncio.CancelledError:
-            logger.debug("Relay receive loop cancelled")
-            raise
-        except Exception as e:
-            logger.error("Relay receive loop error: %s", e)
-            self.running = False
 
     def is_connected(self) -> bool:
         """Check if relayed connection is active."""
         return self.running
 
     def __repr__(self) -> str:
-        """String representation for debugging."""
         return (
             f"<RelayedPeerConnection peer={self.peer_id[:20]} "
             f"relay={self.relay_node.node_id[:20]} session={self.session_id}>"
