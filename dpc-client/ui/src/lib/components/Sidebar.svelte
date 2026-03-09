@@ -7,10 +7,47 @@
   let linkingAgentId = $state('');
   let linkErrorMessage = $state('');
 
+  // All available agent event types (mirrors EVENT_EMOJIS in agent_telegram_bridge.py)
+  const ALL_EVENT_TYPES: { key: string; label: string }[] = [
+    { key: 'task_started',              label: 'Task Started' },
+    { key: 'task_completed',            label: 'Task Completed' },
+    { key: 'task_failed',               label: 'Task Failed' },
+    { key: 'task_scheduled',            label: 'Task Scheduled' },
+    { key: 'agent_message',             label: 'Agent Message' },
+    { key: 'agent_started',             label: 'Agent Started' },
+    { key: 'agent_stopped',             label: 'Agent Stopped' },
+    { key: 'tool_executed',             label: 'Tool Executed' },
+    { key: 'budget_warning',            label: 'Budget Warning' },
+    { key: 'rate_limit_hit',            label: 'Rate Limit Hit' },
+    { key: 'evolution_cycle_completed', label: 'Evolution Completed' },
+    { key: 'code_modified',             label: 'Code Modified' },
+    { key: 'evolution_cycle_started',   label: 'Evolution Started' },
+    { key: 'knowledge_updated',         label: 'Knowledge Updated' },
+    { key: 'identity_updated',          label: 'Identity Updated' },
+    { key: 'scratchpad_updated',        label: 'Scratchpad Updated' },
+    { key: 'thought_completed',         label: 'Thought Completed' },
+    { key: 'thought_started',           label: 'Thought Started' },
+  ];
+  const DEFAULT_EVENT_FILTER = 'task_started,task_completed,task_failed,evolution_cycle_completed,code_modified,budget_warning,rate_limit_hit,agent_message';
+
+  function isEventSelected(key: string): boolean {
+    return telegramEventFilter.split(',').map((e: string) => e.trim()).includes(key);
+  }
+
+  function toggleEventType(key: string): void {
+    const current = new Set(telegramEventFilter.split(',').map((e: string) => e.trim()).filter((e: string) => e));
+    if (current.has(key)) {
+      current.delete(key);
+    } else {
+      current.add(key);
+    }
+    telegramEventFilter = [...current].join(',');
+  }
+
   // Telegram configuration fields
   let telegramBotToken = $state('');
   let telegramAllowedChatIds = $state('');
-  let telegramEventFilter = $state('task_completed,task_failed,agent_message');
+  let telegramEventFilter = $state(DEFAULT_EVENT_FILTER);
   let telegramMaxEventsPerMinute = $state(20);
   let telegramCooldownSeconds = $state(3.0);
   let telegramTranscriptionEnabled = $state(true);
@@ -24,7 +61,7 @@
     // Pre-populate with existing config or defaults
     telegramBotToken = agent?.telegram_bot_token || '';
     telegramAllowedChatIds = agent?.telegram_allowed_chat_ids?.join(', ') || '';
-    telegramEventFilter = agent?.telegram_event_filter?.join(', ') || 'task_completed,task_failed,agent_message';
+    telegramEventFilter = agent?.telegram_event_filter?.join(',') || DEFAULT_EVENT_FILTER;
     telegramMaxEventsPerMinute = agent?.telegram_max_events_per_minute || 20;
     telegramCooldownSeconds = agent?.telegram_cooldown_seconds || 3.0;
     telegramTranscriptionEnabled = agent?.telegram_transcription_enabled !== false;
@@ -59,7 +96,7 @@
         showTelegramLinkDialog = false;
         telegramBotToken = '';
         telegramAllowedChatIds = '';
-        telegramEventFilter = 'task_completed,task_failed,agent_message';
+        telegramEventFilter = DEFAULT_EVENT_FILTER;
         telegramMaxEventsPerMinute = 20;
         telegramCooldownSeconds = 3.0;
         telegramTranscriptionEnabled = true;
@@ -79,7 +116,7 @@
         showTelegramLinkDialog = false;
         telegramBotToken = '';
         telegramAllowedChatIds = '';
-        telegramEventFilter = 'task_completed,task_failed,agent_message';
+        telegramEventFilter = DEFAULT_EVENT_FILTER;
         telegramMaxEventsPerMinute = 20;
         telegramCooldownSeconds = 3.0;
         telegramTranscriptionEnabled = true;
@@ -572,16 +609,6 @@
                 {/if}
               </button>
               <div class="agent-actions">
-                {#if agent.telegram_enabled && onUnlinkAgentTelegram}
-                  <button
-                    type="button"
-                    class="telegram-action-btn unlink-btn"
-                    onclick={(e) => { e.stopPropagation(); onUnlinkAgentTelegram(agent.agent_id); }}
-                    title="Unlink from Telegram"
-                  >
-                    📱✕
-                  </button>
-                {/if}
                 {#if !agent.telegram_enabled && onLinkAgentTelegram}
                   <button
                     type="button"
@@ -812,20 +839,19 @@
         </p>
 
         <!-- Event Filter -->
-        <label for="telegram-event-filter" class="dialog-label">
-          Event Filter (comma-separated):
-        </label>
-        <input
-          id="telegram-event-filter"
-          type="text"
-          bind:value={telegramEventFilter}
-          placeholder="task_completed,task_failed,agent_message"
-          onkeydown={(e) => e.key === 'Enter' && confirmTelegramLink()}
-          class="dialog-input"
-        />
-        <p class="dialog-info small">
-          Event types to forward to Telegram. Leave empty for default filter.
-        </p>
+        <span class="dialog-label">Event Filter:</span>
+        <div class="event-filter-grid">
+          {#each ALL_EVENT_TYPES as evt}
+            <label class="event-filter-item">
+              <input
+                type="checkbox"
+                checked={isEventSelected(evt.key)}
+                onchange={() => toggleEventType(evt.key)}
+              />
+              {evt.label}
+            </label>
+          {/each}
+        </div>
 
         <!-- Rate Limiting -->
         <div class="form-row">
@@ -1799,7 +1825,7 @@
   .telegram-link-dialog {
     background: white;
     border-radius: 8px;
-    max-width: 500px;
+    max-width: 680px;
     width: 100%;
     box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
   }
@@ -1885,6 +1911,35 @@
     font-size: 0.8rem;
     margin: -0.25rem 0 0.5rem 0;
     line-height: 1.4;
+  }
+
+  .event-filter-grid {
+    display: flex;
+    flex-wrap: wrap;
+    margin-bottom: 0.75rem;
+    padding: 0.5rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+  }
+
+  .event-filter-item {
+    width: 50%;
+    box-sizing: border-box;
+    padding: 0.2rem 0.5rem 0.2rem 0;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    color: #333;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .event-filter-item input[type="checkbox"] {
+    width: auto;
+    flex-shrink: 0;
+    cursor: pointer;
   }
 
   .dialog-actions {

@@ -147,6 +147,10 @@ class AgentTelegramBridge:
         self._message_handler: Optional[Callable] = None
         self._agent_manager: Optional["DpcAgentManager"] = None
 
+        # Pending knowledge commit proposals awaiting Telegram approval
+        # Maps proposal_id -> chat_id so vote callbacks can identify who to respond to
+        self._pending_proposals: Dict[str, str] = {}
+
         # Semaphore to limit concurrent Telegram API calls (prevents pool exhaustion)
         self._send_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent sends
 
@@ -204,7 +208,7 @@ class AgentTelegramBridge:
         try:
             # Import telegram library
             from telegram import Bot
-            from telegram.ext import Application, MessageHandler, filters, CommandHandler
+            from telegram.ext import Application, MessageHandler, filters, CommandHandler, CallbackQueryHandler
             from telegram.request import HTTPXRequest
 
             # Create session with timeout
@@ -226,6 +230,9 @@ class AgentTelegramBridge:
             self._application.add_handler(CommandHandler("clear", self._handle_clear_command))
             self._application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
             self._application.add_handler(CommandHandler("endsession", self._handle_endsession_command))
+
+            # Add handler for inline keyboard votes on knowledge commit proposals
+            self._application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
 
             # Add handler for regular messages (non-commands)
             self._application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -343,8 +350,8 @@ Send a voice message and it will be transcribed and processed\\.
 *Session Management:*
 • /clear — instant history reset \\(no knowledge saved\\)
 • /newsession — same as /clear
-• /endsession — saves knowledge from conversation, then clears
-• Knowledge proposals appear in the DPC chat UI for review
+• /endsession — extracts knowledge, shows inline approve/reject buttons
+• You can approve or reject the knowledge proposal directly here
 
 *Tips:*
 • Be specific in your requests
@@ -467,13 +474,25 @@ Send a voice message and it will be transcribed and processed\\.
             status = result.get("status", "unknown")
 
             if status == "success":
-                knowledge_proposed = result.get("knowledge_proposed", False)
-                if knowledge_proposed:
+                proposal_id = result.get("proposal_id")
+                if proposal_id:
+                    # Store pending proposal so vote callback can look it up
+                    self._pending_proposals[proposal_id] = chat_id
+
+                    # Send message with inline approve/reject keyboard
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                            InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
+                        ]
+                    ])
                     await update.message.reply_text(
                         "✅ *Session Ended*\n\n"
-                        "📚 Knowledge proposal created\\!\n"
-                        "Open DPC chat to review and approve the knowledge commit\\.",
-                        parse_mode="MarkdownV2"
+                        "📚 *Knowledge proposal created\\!*\n\n"
+                        "Review and vote on the knowledge commit:",
+                        parse_mode="MarkdownV2",
+                        reply_markup=keyboard,
                     )
                 else:
                     await update.message.reply_text(
@@ -486,6 +505,113 @@ Send a voice message and it will be transcribed and processed\\.
                 await update.message.reply_text(f"❌ Failed to end session: {msg}", parse_mode="MarkdownV2")
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+
+    async def _handle_vote_callback(self, update, context):
+        """
+        Handle inline keyboard vote callback for knowledge commit proposals.
+
+        Callback data format: "vote:{proposal_id}:{approve|reject}"
+        """
+        query = update.callback_query
+        await query.answer()  # Acknowledge the callback to stop the loading spinner
+
+        chat_id = str(query.message.chat.id)
+        if chat_id not in self.allowed_chat_ids:
+            await query.edit_message_text("⛔ Unauthorized.")
+            return
+
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("❌ Invalid vote data.")
+            return
+
+        _, proposal_id, vote = parts
+        service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
+        if not service:
+            await query.edit_message_text("⚠️ Service not available.")
+            return
+
+        try:
+            result = await service.vote_knowledge_commit(proposal_id, vote)
+            status = result.get("status", "unknown")
+
+            if status == "success":
+                if vote == "approve":
+                    label = "✅ *Approved*"
+                    detail = "\n\nKnowledge will be saved to your personal context\\."
+                else:
+                    label = "❌ *Rejected*"
+                    detail = "\n\nKnowledge commit rejected\\."
+
+                await query.edit_message_text(
+                    f"{label}\n\nVote recorded\\."
+                    f"{detail}",
+                    parse_mode="MarkdownV2",
+                )
+            else:
+                msg = escape_markdown(result.get("message", "Unknown error"))
+                await query.edit_message_text(
+                    f"❌ *Vote failed:* {msg}",
+                    parse_mode="MarkdownV2",
+                )
+
+            # Clean up pending proposal
+            self._pending_proposals.pop(proposal_id, None)
+
+        except Exception as e:
+            log.error(f"Error handling vote callback: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+
+    async def notify_knowledge_proposal(
+        self,
+        proposal_id: str,
+        topic: str,
+        chat_ids: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Send a Telegram notification for an auto-detected knowledge commit proposal.
+
+        Called by service.py when a ConversationMonitor auto-detects knowledge and creates
+        a proposal. Sends a message with inline [✅ Approve] [❌ Reject] buttons.
+
+        Args:
+            proposal_id: The proposal ID from consensus_manager
+            topic: Short topic description for the user
+            chat_ids: Optional list of chat IDs to notify (defaults to all allowed_chat_ids)
+        """
+        if not self._enabled or not self._bot:
+            return
+
+        targets = [str(c) for c in chat_ids] if chat_ids else self.allowed_chat_ids
+
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
+                ]
+            ])
+            topic_escaped = escape_markdown(topic or "New knowledge detected")
+            text = (
+                "📚 *Knowledge Proposal*\n\n"
+                f"*Topic:* {topic_escaped}\n\n"
+                "Review and vote:"
+            )
+            for chat_id in targets:
+                if chat_id in self.allowed_chat_ids:
+                    self._pending_proposals[proposal_id] = chat_id
+                    try:
+                        await self._bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            parse_mode="MarkdownV2",
+                            reply_markup=keyboard,
+                        )
+                    except Exception as e:
+                        log.warning(f"Failed to notify chat {chat_id} of knowledge proposal: {e}")
+        except Exception as e:
+            log.error(f"notify_knowledge_proposal error: {e}", exc_info=True)
 
     async def _handle_message(self, update, context):
         """Handle incoming text message."""

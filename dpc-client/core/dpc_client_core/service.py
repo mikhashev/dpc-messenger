@@ -6230,6 +6230,43 @@ Respond in JSON format:
         except Exception as e:
             logger.warning(f"Failed to auto-start agent Telegram bridges: {e}")
 
+    def _get_telegram_bridge_for_conversation(self, conversation_id: str):
+        """
+        Find the AgentTelegramBridge associated with a conversation, if any.
+
+        In unified_conversation mode, conversation_id == agent_id (e.g. "agent_foo").
+        In non-unified mode, conversation_id == "telegram-{chat_id}" — in that case
+        we scan all running bridges whose allowed_chat_ids contain the chat_id.
+
+        Returns:
+            AgentTelegramBridge instance, or None if not found / bridge not running.
+        """
+        try:
+            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+            if not dpc_agent_provider or not hasattr(dpc_agent_provider, '_managers'):
+                return None
+
+            managers = dpc_agent_provider._managers
+
+            # Unified mode: conversation_id IS the agent_id
+            if conversation_id in managers:
+                mgr = managers[conversation_id]
+                bridge = getattr(mgr, '_telegram_bridge', None)
+                if bridge and bridge.is_enabled():
+                    return bridge
+
+            # Non-unified mode: conversation_id = "telegram-{chat_id}"
+            if conversation_id.startswith("telegram-"):
+                chat_id = conversation_id[len("telegram-"):]
+                for mgr in managers.values():
+                    bridge = getattr(mgr, '_telegram_bridge', None)
+                    if bridge and bridge.is_enabled() and chat_id in bridge.allowed_chat_ids:
+                        return bridge
+
+        except Exception as e:
+            logger.debug("_get_telegram_bridge_for_conversation: %s", e)
+        return None
+
     async def _restart_agent_telegram_bridge(self, agent_id: str) -> None:
         """
         Restart Telegram bridge for a running agent with new configuration.
