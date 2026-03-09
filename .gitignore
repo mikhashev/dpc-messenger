@@ -103,3 +103,6 @@ social-media/
 
 # 14. Ideas folder (future feature plans)
 ideas/
+
+# 15. Audit folder (codebase analysis - local only)
+audit/
