@@ -520,6 +520,15 @@ class ConsensusManager:
             markdown_content = markdown_manager.topic_to_markdown_content(topic)
             content_hash = hashlib.sha256(markdown_content.encode('utf-8')).hexdigest()[:16]
 
+            # Compute canonical_json (the exact bytes used to produce commit_hash).
+            # Stored in frontmatter so any node can independently re-derive the hash
+            # and detect tampering without needing RSA peer certificates.
+            from dpc_protocol.commit_integrity import compute_canonical_json
+            import base64 as _b64
+            canonical_json_b64 = _b64.b64encode(
+                compute_canonical_json(commit).encode('utf-8')
+            ).decode('ascii')
+
             # Create markdown with frontmatter
             safe_topic_name = markdown_manager.sanitize_filename(topic_name)
             markdown_filename = f"{safe_topic_name}_{commit.commit_id}.md"
@@ -531,6 +540,7 @@ class ConsensusManager:
                 'commit_hash': commit.commit_hash,
                 'parent_commit': commit.parent_commit_id or "",
                 'content_hash': content_hash,
+                'canonical_json': canonical_json_b64,
                 'timestamp': commit.timestamp,
                 'version': topic.version,
                 'author': node_id,

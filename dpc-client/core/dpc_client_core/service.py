@@ -536,6 +536,36 @@ class CoreService:
                         'message': f'Topic "{topic_name}" references deleted markdown file'
                     })
 
+        # CHECK 3: Cross-verify personal.json commit_history hashes against markdown frontmatter.
+        # Detects independent tampering of either file (one can't be altered without breaking the other).
+        for entry in context.commit_history:
+            entry_commit_id = entry.get('commit_id', '')
+            entry_commit_hash = entry.get('commit_hash', '')
+            if not entry_commit_id or not entry_commit_hash:
+                continue
+            if not knowledge_dir.exists():
+                break
+            candidates = list(knowledge_dir.glob(f"*_{entry_commit_id}.md"))
+            if not candidates:
+                continue
+            try:
+                from dpc_protocol.commit_integrity import parse_markdown_with_frontmatter as _parse_fm
+                md_frontmatter, _ = _parse_fm(candidates[0], knowledge_dir)
+                md_commit_hash = md_frontmatter.get('commit_hash', '')
+                if md_commit_hash and md_commit_hash != entry_commit_hash:
+                    warnings.append({
+                        'type': 'history_hash_mismatch',
+                        'severity': 'error',
+                        'commit_id': entry_commit_id,
+                        'file': candidates[0].name,
+                        'message': (
+                            f'personal.json commit_history hash differs from markdown frontmatter '
+                            f'for commit {entry_commit_id[:16]} — one of the files was tampered'
+                        )
+                    })
+            except Exception as e:
+                logger.debug("Could not cross-check commit %s: %s", entry_commit_id[:12], e)
+
         # Report results
         if warnings:
             # Broadcast warning to UI

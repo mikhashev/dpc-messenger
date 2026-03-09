@@ -485,6 +485,11 @@ class MarkdownKnowledgeManager:
         lines.append("# Integrity Verification")
         if 'content_hash' in frontmatter:
             lines.append(f"content_hash: {frontmatter['content_hash']}")
+        # canonical_json: base64-encoded canonical JSON used to produce commit_hash.
+        # Stored so any node can independently recompute the hash without needing
+        # the original structured KnowledgeCommit object (contract tamper-detection).
+        if 'canonical_json' in frontmatter and frontmatter['canonical_json']:
+            lines.append(f"canonical_json: {frontmatter['canonical_json']}")
         lines.append("")
 
         # Metadata
