@@ -224,6 +224,8 @@ class AgentTelegramBridge:
             self._application.add_handler(CommandHandler("help", self._handle_help_command))
             self._application.add_handler(CommandHandler("status", self._handle_status_command))
             self._application.add_handler(CommandHandler("clear", self._handle_clear_command))
+            self._application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
+            self._application.add_handler(CommandHandler("endsession", self._handle_endsession_command))
 
             # Add handler for regular messages (non-commands)
             self._application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -292,11 +294,13 @@ class AgentTelegramBridge:
 
         welcome = """🤖 *DPC Agent Bot*
 
-Welcome! You can send messages to the DPC Agent\\.
+Welcome\\! You can send messages to the DPC Agent\\.
 
 *Commands:*
-/help - Show available commands
-/status - Check agent status
+/help \\- Show available commands
+/status \\- Check agent status
+/newsession \\- Start a new session
+/endsession \\- End session and save knowledge
 
 *Usage:*
 Just send any message and the agent will process it\\.
@@ -313,13 +317,15 @@ Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] sectio
         if chat_id not in self.allowed_chat_ids:
             return
 
-        help_text = """🤖 *DPC Agent Bot - Help*
+        help_text = """🤖 *DPC Agent Bot \\- Help*
 
 *Commands:*
-/start - Initialize bot
-/help - Show this help
-/status - Check agent status
-/clear - Clear conversation history and reset context
+/start \\- Initialize bot
+/help \\- Show this help
+/status \\- Check agent status
+/clear \\- Clear conversation history and start fresh
+/newsession \\- Start a new session \\(clears history\\)
+/endsession \\- End session and extract knowledge to personal context
 
 *Sending Tasks:*
 Just type a message and the agent will process it\\.
@@ -334,11 +340,16 @@ You can also send voice messages for transcription\\.
 *Voice Messages:*
 Send a voice message and it will be transcribed and processed\\.
 
+*Session Management:*
+• /clear — instant history reset \\(no knowledge saved\\)
+• /newsession — same as /clear
+• /endsession — saves knowledge from conversation, then clears
+• Knowledge proposals appear in the DPC chat UI for review
+
 *Tips:*
 • Be specific in your requests
 • The agent has access to configured tools
 • Check firewall rules if tools seem unavailable
-• Use /clear to start fresh when context gets full
 """
         await update.message.reply_text(help_text, parse_mode="MarkdownV2")
 
@@ -399,6 +410,82 @@ Send a voice message and it will be transcribed and processed\\.
                 )
         else:
             await update.message.reply_text("⚠️ Agent manager not available\\.")
+
+    async def _handle_newsession_command(self, update, context):
+        """Handle /newsession command — clear history and start a fresh session."""
+        chat_id = str(update.effective_chat.id)
+
+        if chat_id not in self.allowed_chat_ids:
+            return
+
+        conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+        service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
+
+        if not service:
+            await update.message.reply_text("⚠️ Service not available\\.", parse_mode="MarkdownV2")
+            return
+
+        try:
+            result = await service.propose_new_session(conversation_id)
+            if result.get("status") == "success":
+                await update.message.reply_text(
+                    "🔄 *New Session Started*\n\n"
+                    "Conversation history has been cleared\\. "
+                    "Start fresh\\!",
+                    parse_mode="MarkdownV2"
+                )
+                # Push empty history to DPC chat UI if unified
+                if self._unified_conversation:
+                    await self._broadcast_history_to_ui(conversation_id)
+            else:
+                msg = escape_markdown(result.get("message", "Unknown error"))
+                await update.message.reply_text(f"❌ Failed to start new session: {msg}", parse_mode="MarkdownV2")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+
+    async def _handle_endsession_command(self, update, context):
+        """Handle /endsession command — end session and trigger knowledge extraction."""
+        chat_id = str(update.effective_chat.id)
+
+        if chat_id not in self.allowed_chat_ids:
+            return
+
+        conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+        service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
+
+        if not service:
+            await update.message.reply_text("⚠️ Service not available\\.", parse_mode="MarkdownV2")
+            return
+
+        await update.message.reply_text(
+            "🧠 *Ending Session\\.\\.\\.*\n\nAnalyzing conversation for knowledge\\.\\.\\.",
+            parse_mode="MarkdownV2"
+        )
+
+        try:
+            result = await service.end_conversation_session(conversation_id)
+            status = result.get("status", "unknown")
+
+            if status == "success":
+                knowledge_proposed = result.get("knowledge_proposed", False)
+                if knowledge_proposed:
+                    await update.message.reply_text(
+                        "✅ *Session Ended*\n\n"
+                        "📚 Knowledge proposal created\\!\n"
+                        "Open DPC chat to review and approve the knowledge commit\\.",
+                        parse_mode="MarkdownV2"
+                    )
+                else:
+                    await update.message.reply_text(
+                        "✅ *Session Ended*\n\n"
+                        "No new knowledge found in this conversation\\.",
+                        parse_mode="MarkdownV2"
+                    )
+            else:
+                msg = escape_markdown(result.get("message", "Unknown error"))
+                await update.message.reply_text(f"❌ Failed to end session: {msg}", parse_mode="MarkdownV2")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
 
     async def _handle_message(self, update, context):
         """Handle incoming text message."""
