@@ -550,7 +550,7 @@ class CoreService:
                 continue
             try:
                 from dpc_protocol.commit_integrity import parse_markdown_with_frontmatter as _parse_fm
-                md_frontmatter, _ = _parse_fm(candidates[0], knowledge_dir)
+                md_frontmatter, _ = _parse_fm(candidates[0])
                 md_commit_hash = md_frontmatter.get('commit_hash', '')
                 if md_commit_hash and md_commit_hash != entry_commit_hash:
                     warnings.append({
