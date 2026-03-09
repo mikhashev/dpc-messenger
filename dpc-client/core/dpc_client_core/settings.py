@@ -83,8 +83,18 @@ class Settings:
         }
 
         self._config['webrtc'] = {
-            # STUN servers for NAT traversal (discovering public IP)
-            'stun_servers': 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:global.stun.twilio.com:3478,stun:stun.rtc.yandex.net:3478'
+            # STUN servers for NAT traversal (discovering public IP).
+            # Hostname-based entries are tried first; IP-based entries are
+            # fallbacks for environments where DNS resolution is unreliable
+            # (e.g., Docker with a custom DNS resolver blocking external names).
+            'stun_servers': (
+                'stun:stun.l.google.com:19302,'
+                'stun:stun1.l.google.com:19302,'
+                'stun:global.stun.twilio.com:3478,'
+                'stun:stun.rtc.yandex.net:3478,'
+                'stun:74.125.250.129:19302,'   # stun.l.google.com resolved IP (DNS fallback)
+                'stun:74.125.250.127:19302'    # stun1.l.google.com resolved IP (DNS fallback)
+            )
         }
 
         self._config['system'] = {
