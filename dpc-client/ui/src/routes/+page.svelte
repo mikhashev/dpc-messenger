@@ -467,8 +467,14 @@
   // Silently refreshes the agent chat history when Telegram bridge processes a message
   $effect(() => {
     if ($agentHistoryUpdated) {
-      const { conversation_id, messages } = $agentHistoryUpdated;
+      const { conversation_id, messages, tokens_used, token_limit } = $agentHistoryUpdated;
       console.log(`[AgentTelegramMsg] Refreshing chat history for ${conversation_id} (${messages?.length} messages)`);
+
+      // Update token usage map so the token counter reflects the agent's LLM usage
+      if (tokens_used !== undefined && token_limit !== undefined && token_limit > 0) {
+        tokenUsageMap = new Map(tokenUsageMap);
+        tokenUsageMap.set(conversation_id, { used: tokens_used, limit: token_limit });
+      }
 
       chatHistories.update(map => {
         const newMap = new Map(map);

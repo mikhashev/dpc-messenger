@@ -7872,6 +7872,20 @@ Respond in JSON format:
             tokens_used = session_state.get("tokens_used", 0)
             token_limit = session_state.get("tokens_limit", 128000)
 
+            # Token warning — mirror the same threshold check as local AI chat
+            monitor = agent_manager._agent_monitors.get(conversation_id)
+            if monitor and monitor.should_suggest_extraction():
+                usage_percent = monitor.current_token_count / token_limit if token_limit > 0 else 0.0
+                await self.local_api.broadcast_event("token_limit_warning", {
+                    "conversation_id": conversation_id,
+                    "tokens_used": monitor.current_token_count,
+                    "token_limit": token_limit,
+                    "usage_percent": usage_percent
+                })
+                logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
+                               conversation_id, usage_percent * 100,
+                               monitor.current_token_count, token_limit)
+
             # Get thinking/reasoning from last LLM round if available
             thinking_text = None
             thinking_tokens = None

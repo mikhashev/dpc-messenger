@@ -493,18 +493,23 @@ class DpcAgentManager:
                 )
                 monitor.save_history()  # Save to disk immediately
 
-            # Update token count in monitor after agent response
-            # Get token usage from agent's last response
-            if hasattr(agent, '_last_usage') and agent._last_usage:
-                usage = agent._last_usage
-                if usage.get("prompt_tokens"):
-                    # Get context window from LLMManager (reuse existing)
-                    llm_manager = getattr(self.service, "llm_manager", None)
-                    if llm_manager:
-                        model = llm_manager.get_active_model_name()
-                        context_window = llm_manager.get_context_window(model)
-                        monitor.set_token_limit(context_window)
-                    monitor.set_token_count(usage["prompt_tokens"])
+            # Update token count in monitor after agent response.
+            # Count tokens directly from the conversation history (user + assistant messages)
+            # stored in the monitor — the same data that gets sent as input on every new request.
+            # This excludes constant overhead (system prompt, tool schemas, agent memory) so the
+            # counter reflects only the growing conversation portion, consistent with the intent
+            # of the local AI chat token counter.
+            conversation_tokens = sum(
+                len(msg.get("content", "") or "")
+                for msg in monitor.message_history
+            ) // 4
+            if conversation_tokens:
+                llm_manager = getattr(self.service, "llm_manager", None)
+                if llm_manager:
+                    model = llm_manager.get_active_model_name()
+                    context_window = llm_manager.get_context_window(model)
+                    monitor.set_token_limit(context_window)
+                monitor.set_token_count(conversation_tokens)
 
             # Emit TASK_COMPLETED event
             await emitter.emit(EventType.TASK_COMPLETED, {

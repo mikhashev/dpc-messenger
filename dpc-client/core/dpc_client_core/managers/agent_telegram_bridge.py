@@ -831,10 +831,30 @@ Send a voice message and it will be transcribed and processed\\.
                 return
             history_result = await service.get_conversation_history(conversation_id)
             messages = history_result.get("messages", [])
+
+            # Include token usage from agent manager's own monitor registry so the UI token counter updates
+            monitor = self._agent_manager._agent_monitors.get(conversation_id)
+            tokens_used = monitor.current_token_count if monitor else 0
+            token_limit = monitor.token_limit if monitor else 0
+
+            # Token warning — same threshold check as UI-triggered agent queries
+            if monitor and token_limit > 0 and monitor.should_suggest_extraction():
+                usage_percent = tokens_used / token_limit
+                await service.local_api.broadcast_event("token_limit_warning", {
+                    "conversation_id": conversation_id,
+                    "tokens_used": tokens_used,
+                    "token_limit": token_limit,
+                    "usage_percent": usage_percent
+                })
+                log.warning(f"[_broadcast_history_to_ui] Token Warning - {conversation_id}: "
+                            f"{usage_percent * 100:.1f}% of context window used ({tokens_used}/{token_limit})")
+
             await service.local_api.broadcast_event("agent_history_updated", {
                 "conversation_id": conversation_id,
                 "messages": messages,
                 "message_count": len(messages),
+                "tokens_used": tokens_used,
+                "token_limit": token_limit,
             })
             log.debug(f"[_broadcast_history_to_ui] Pushed {len(messages)} messages for {conversation_id}")
         except Exception as e:

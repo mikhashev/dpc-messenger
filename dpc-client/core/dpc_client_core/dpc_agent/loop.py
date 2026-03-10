@@ -215,7 +215,9 @@ async def run_llm_loop(
         "tool_calls": [],
     }
     accumulated_usage: Dict[str, Any] = {
-        "prompt_tokens": 0,
+        "prompt_tokens": 0,        # cumulative across all rounds (for cost/billing)
+        "first_prompt_tokens": 0,  # round-1 only — baseline context before tool results inflate it
+        "last_prompt_tokens": 0,   # last round only — peak context size during this response
         "completion_tokens": 0,
         "total_tokens": 0,
         "cost": 0.0,
@@ -265,7 +267,11 @@ async def run_llm_loop(
                     on_stream_chunk=on_stream_chunk,
                     conversation_id=conversation_id,
                 )
-                accumulated_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+                round_prompt_tokens = usage.get("prompt_tokens", 0)
+                accumulated_usage["prompt_tokens"] += round_prompt_tokens
+                if accumulated_usage["rounds"] == 0:  # first round, before increment
+                    accumulated_usage["first_prompt_tokens"] = round_prompt_tokens
+                accumulated_usage["last_prompt_tokens"] = round_prompt_tokens  # replace — tracks peak context
                 accumulated_usage["completion_tokens"] += usage.get("completion_tokens", 0)
                 accumulated_usage["total_tokens"] += usage.get("total_tokens", 0)
                 accumulated_usage["cost"] += usage.get("cost", 0)
