@@ -474,6 +474,7 @@ class DpcAgentManager:
                 on_stream_chunk=emit_stream_chunk,
                 session_state=session_state,
                 conversation_monitor=monitor,  # For knowledge extraction tool
+                task_id=task_id,  # Unique per-message ID for event logging
                 # Pass image parameters for vision queries
                 image_base64=image_base64,
                 image_mime=image_mime,

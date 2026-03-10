@@ -156,6 +156,8 @@ class DpcAgent:
         image_base64: Optional[str] = None,
         image_mime: str = "image/png",
         image_caption: Optional[str] = None,
+        # Unique per-message task ID (distinct from conversation_id)
+        task_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -219,11 +221,16 @@ class DpcAgent:
         ctx._agent = self  # Enable schedule_task and other agent-dependent tools
         self.tools.set_context(ctx)
 
+        # Use provided task_id or generate one; never use conversation_id as task identity
+        import uuid as _uuid
+        event_task_id = task_id or f"chat-{_uuid.uuid4().hex[:8]}"
+
         # Log task start
         append_jsonl(self.agent_root / "logs" / "events.jsonl", {
             "ts": utc_now_iso(),
             "type": "task_start",
-            "task_id": conversation_id,
+            "task_id": event_task_id,
+            "conversation_id": conversation_id,
             "text_preview": message[:200] if message else "",
         })
 
@@ -248,7 +255,8 @@ class DpcAgent:
         append_jsonl(self.agent_root / "logs" / "events.jsonl", {
             "ts": utc_now_iso(),
             "type": "task_complete",
-            "task_id": conversation_id,
+            "task_id": event_task_id,
+            "conversation_id": conversation_id,
             "response_preview": response[:200] if response else "",
             "rounds": usage.get("rounds", 0),
             "cost_usd": usage.get("cost", 0),
