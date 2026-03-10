@@ -8680,7 +8680,8 @@ Respond in JSON format:
 
         Reads:
         - state/task_queue.json for pending/scheduled tasks
-        - logs/events.jsonl for completed/failed task history
+        - task_results/*.json for completed tasks (primary source)
+        - logs/events.jsonl for legacy completed/failed entries without a result file
 
         Returns:
             Dict with running, scheduled, completed, failed task lists
@@ -8721,12 +8722,42 @@ Respond in JSON format:
                 except Exception as e:
                     logger.warning("Failed to parse task queue: %s", e)
 
-            # --- History from events.jsonl ---
+            # --- Completed/failed from task_results/ (primary source) ---
+            results_dir = agent_root / "task_results"
+            seen_task_ids: set = set()
+            if results_dir.exists():
+                try:
+                    result_files = sorted(
+                        results_dir.glob("*.json"),
+                        key=lambda p: p.stat().st_mtime,
+                        reverse=True,
+                    )
+                    for rf in result_files:
+                        try:
+                            data = json.loads(rf.read_text(encoding="utf-8"))
+                            tid = data.get("task_id", rf.stem)
+                            seen_task_ids.add(tid)
+                            completed.append({
+                                "id": tid,
+                                "type": data.get("task_type", "chat"),
+                                "preview": (data.get("prompt") or "")[:120],
+                                "status": "completed",
+                                "started_at": data.get("started_at"),
+                                "completed_at": data.get("completed_at"),
+                                "scheduled_at": None,
+                                "result_preview": (data.get("response") or "")[:200],
+                                "has_full_result": True,
+                            })
+                        except Exception:
+                            continue
+                except Exception as e:
+                    logger.warning("Failed to read task_results dir: %s", e)
+
+            # --- Legacy fallback: events.jsonl for entries without a result file ---
             events_file = agent_root / "logs" / "events.jsonl"
             if events_file.exists():
                 try:
                     lines = events_file.read_text(encoding="utf-8").splitlines()
-                    # Build pairs: match task_start with next task_complete
                     pending_start = None
                     for line in lines:
                         line = line.strip()
@@ -8740,49 +8771,71 @@ Respond in JSON format:
                         if ev_type == "task_start":
                             pending_start = ev
                         elif ev_type == "task_complete" and pending_start:
-                            # Paired completion
-                            preview_text = pending_start.get("text_preview", "")[:120]
-                            completed.append({
-                                "id": ev.get("task_id", ""),
-                                "type": "chat",
-                                "preview": preview_text,
-                                "status": "completed",
-                                "started_at": pending_start.get("ts"),
-                                "completed_at": ev.get("ts"),
-                                "scheduled_at": None,
-                                "result_preview": ev.get("response_preview", "")[:200] if ev.get("response_preview") else None,
-                            })
+                            tid = ev.get("task_id", "")
+                            if tid not in seen_task_ids:
+                                # Legacy entry — no result file exists
+                                completed.append({
+                                    "id": tid,
+                                    "type": "chat",
+                                    "preview": pending_start.get("text_preview", "")[:120],
+                                    "status": "completed",
+                                    "started_at": pending_start.get("ts"),
+                                    "completed_at": ev.get("ts"),
+                                    "scheduled_at": None,
+                                    "result_preview": (ev.get("response_preview") or "")[:200],
+                                    "has_full_result": False,
+                                })
                             pending_start = None
                         elif ev_type == "task_failed" and pending_start:
-                            preview_text = pending_start.get("text_preview", "")[:120]
-                            failed.append({
-                                "id": ev.get("task_id", ""),
-                                "type": "chat",
-                                "preview": preview_text,
-                                "status": "failed",
-                                "started_at": pending_start.get("ts"),
-                                "completed_at": ev.get("ts"),
-                                "scheduled_at": None,
-                                "result_preview": None,
-                            })
+                            tid = ev.get("task_id", "")
+                            if tid not in seen_task_ids:
+                                failed.append({
+                                    "id": tid,
+                                    "type": "chat",
+                                    "preview": pending_start.get("text_preview", "")[:120],
+                                    "status": "failed",
+                                    "started_at": pending_start.get("ts"),
+                                    "completed_at": ev.get("ts"),
+                                    "scheduled_at": None,
+                                    "result_preview": None,
+                                    "has_full_result": False,
+                                })
                             pending_start = None
                 except Exception as e:
                     logger.warning("Failed to parse events log: %s", e)
 
-            # Return most recent completed first (reverse chronological)
-            completed.reverse()
+            # Sort completed by completed_at descending
+            def _sort_key(e: dict) -> str:
+                return e.get("completed_at") or e.get("started_at") or ""
+            completed.sort(key=_sort_key, reverse=True)
 
             return {
                 "status": "success",
                 "agent_id": agent_id,
                 "running": running,
                 "scheduled": scheduled,
-                "completed": completed[:50],  # Cap at 50 entries
+                "completed": completed[:50],
                 "failed": failed,
+                "total_completed": len(completed),
             }
 
         except Exception as e:
             logger.error("Error in get_agent_tasks: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def get_agent_task_result(self, agent_id: str = "agent_001", task_id: str = "") -> Dict[str, Any]:
+        """Get full result for a specific task from task_results/{task_id}.json."""
+        import json
+        try:
+            from .dpc_agent.utils import get_agent_root
+            agent_root = get_agent_root(agent_id)
+            result_file = agent_root / "task_results" / f"{task_id}.json"
+            if not result_file.exists():
+                return {"status": "error", "message": f"No result file for task {task_id}"}
+            data = json.loads(result_file.read_text(encoding="utf-8"))
+            return {"status": "success", **data}
+        except Exception as e:
+            logger.error("Error in get_agent_task_result: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
     async def get_agent_learning(self, agent_id: str = "agent_001") -> Dict[str, Any]:

@@ -109,6 +109,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Agent Task Board (v0.20.0)
     "get_agent_tasks",
     "get_agent_learning",
+    "get_agent_task_result",
     "schedule_agent_task",
 })
 

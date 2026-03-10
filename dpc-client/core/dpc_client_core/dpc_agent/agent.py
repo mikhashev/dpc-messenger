@@ -223,11 +223,13 @@ class DpcAgent:
 
         # Use provided task_id or generate one; never use conversation_id as task identity
         import uuid as _uuid
+        import json as _json
         event_task_id = task_id or f"chat-{_uuid.uuid4().hex[:8]}"
+        started_at = utc_now_iso()
 
         # Log task start
         append_jsonl(self.agent_root / "logs" / "events.jsonl", {
-            "ts": utc_now_iso(),
+            "ts": started_at,
             "type": "task_start",
             "task_id": event_task_id,
             "conversation_id": conversation_id,
@@ -251,9 +253,11 @@ class DpcAgent:
         # Store last usage for session state access by agent_manager
         self._last_usage = usage
 
+        completed_at = utc_now_iso()
+
         # Log task completion
         append_jsonl(self.agent_root / "logs" / "events.jsonl", {
-            "ts": utc_now_iso(),
+            "ts": completed_at,
             "type": "task_complete",
             "task_id": event_task_id,
             "conversation_id": conversation_id,
@@ -261,6 +265,29 @@ class DpcAgent:
             "rounds": usage.get("rounds", 0),
             "cost_usd": usage.get("cost", 0),
         })
+
+        # Persist full task result to task_results/{task_id}.json
+        try:
+            results_dir = self.agent_root / "task_results"
+            results_dir.mkdir(exist_ok=True)
+            result_data = {
+                "task_id": event_task_id,
+                "conversation_id": conversation_id,
+                "task_type": "chat",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "prompt": message[:2000] if message else "",
+                "response": response or "",
+                "rounds": usage.get("rounds", 0),
+                "cost_usd": usage.get("cost", 0),
+                "tokens": usage.get("tokens", {}),
+            }
+            (results_dir / f"{event_task_id}.json").write_text(
+                _json.dumps(result_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            log.warning("Failed to save task result file: %s", e)
 
         # Update budget
         self._update_budget(usage.get("cost", 0))
@@ -376,6 +403,27 @@ class DpcAgent:
                 "task_type": task.task_type,
                 "result": task.result[:500] if task.result else None,
             })
+            # Persist full result (scheduled tasks use task.id directly as task_id)
+            try:
+                import json as _json
+                results_dir = self.agent_root / "task_results"
+                results_dir.mkdir(exist_ok=True)
+                result_data = {
+                    "task_id": task.id,
+                    "task_type": task.task_type,
+                    "started_at": getattr(task, "started_at", None),
+                    "completed_at": utc_now_iso(),
+                    "prompt": str(task.data)[:2000] if task.data else "",
+                    "response": task.result or "",
+                    "rounds": 0,
+                    "cost_usd": 0.0,
+                }
+                (results_dir / f"{task.id}.json").write_text(
+                    _json.dumps(result_data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as e:
+                log.warning("Failed to save scheduled task result: %s", e)
 
         async def on_task_failed(task: Task) -> None:
             await self.events.emit(EventType.TASK_FAILED, {

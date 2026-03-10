@@ -24,6 +24,7 @@
     completed_at: string | null;
     scheduled_at: string | null;
     result_preview: string | null;
+    has_full_result?: boolean;
   };
 
   type TaskData = {
@@ -69,6 +70,34 @@
   // Agent selector
   let selectedAgentId: string = agentId;
   let agentList: string[] = [];
+
+  // Task expand state: task_id -> { loading, response }
+  let expandedTasks: Record<string, { loading: boolean; response: string | null }> = {};
+
+  async function toggleExpand(task: TaskEntry) {
+    if (!task.has_full_result) return;
+    if (expandedTasks[task.id]) {
+      const { [task.id]: _, ...rest } = expandedTasks;
+      expandedTasks = rest;
+      return;
+    }
+    expandedTasks = { ...expandedTasks, [task.id]: { loading: true, response: null } };
+    try {
+      const result = await sendCommand('get_agent_task_result', {
+        agent_id: selectedAgentId,
+        task_id: task.id,
+      }) as any;
+      expandedTasks = {
+        ...expandedTasks,
+        [task.id]: { loading: false, response: result?.response ?? result?.message ?? 'No content' },
+      };
+    } catch (e: any) {
+      expandedTasks = {
+        ...expandedTasks,
+        [task.id]: { loading: false, response: `Error: ${e?.message}` },
+      };
+    }
+  }
 
   // Schedule task form state
   let showScheduleForm = false;
@@ -316,15 +345,35 @@
                 <div class="empty-hint">No completed tasks yet</div>
               {:else}
                 {#each taskData.completed as task}
-                  <div class="task-row completed">
+                  <div class="task-row completed" class:expanded={!!expandedTasks[task.id]}>
                     <div class="task-row-main">
                       <span class="task-type">{task.type}</span>
-                      {#if task.completed_at}
-                        <span class="task-date">{formatDateTime(task.completed_at)}</span>
-                      {/if}
+                      <div class="task-row-right">
+                        {#if task.completed_at}
+                          <span class="task-date">{formatDateTime(task.completed_at)}</span>
+                        {/if}
+                        {#if task.has_full_result}
+                          <button
+                            class="btn-expand"
+                            on:click={() => toggleExpand(task)}
+                            title={expandedTasks[task.id] ? 'Collapse' : 'Expand'}
+                          >
+                            {expandedTasks[task.id] ? '▲' : '▼'}
+                          </button>
+                        {/if}
+                      </div>
                     </div>
                     {#if task.preview}
                       <div class="task-preview">{task.preview}</div>
+                    {/if}
+                    {#if expandedTasks[task.id]}
+                      <div class="task-full-result">
+                        {#if expandedTasks[task.id].loading}
+                          <span class="result-loading">Loading...</span>
+                        {:else}
+                          <pre class="result-text">{expandedTasks[task.id].response}</pre>
+                        {/if}
+                      </div>
                     {/if}
                   </div>
                 {/each}
@@ -619,6 +668,56 @@
     border-radius: 4px;
     margin-bottom: 4px;
     background: var(--bg-tertiary, #181825);
+  }
+
+  .task-row-right {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .btn-expand {
+    padding: 0 4px;
+    font-size: 10px;
+    background: transparent;
+    border: none;
+    color: var(--text-muted, #6c7086);
+    cursor: pointer;
+    line-height: 1;
+  }
+
+  .btn-expand:hover {
+    color: var(--text-primary, #cdd6f4);
+  }
+
+  .task-full-result {
+    margin-top: 6px;
+    padding: 8px;
+    background: var(--bg-input, #11111b);
+    border-radius: 4px;
+    border-left: 2px solid var(--accent, #89b4fa);
+    max-height: 300px;
+    overflow-y: auto;
+  }
+
+  .result-text {
+    font-size: 11px;
+    color: var(--text-secondary, #a6adc8);
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0;
+    font-family: inherit;
+  }
+
+  .result-loading {
+    font-size: 11px;
+    color: var(--text-muted, #6c7086);
+    font-style: italic;
+  }
+
+  .task-row.expanded {
+    background: var(--bg-hover, #313244);
   }
 
   .task-row-main {
