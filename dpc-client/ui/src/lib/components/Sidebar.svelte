@@ -210,6 +210,7 @@
     onOpenInstructionsEditor,
     onOpenFirewallEditor,
     onOpenProvidersEditor,
+    onOpenAgentBoard,
     onToggleAutoKnowledgeDetection,
     onConnectPeer,
     onResetUnreadCount,
@@ -247,6 +248,7 @@
     onOpenInstructionsEditor: () => void;
     onOpenFirewallEditor: () => void;
     onOpenProvidersEditor: () => void;
+    onOpenAgentBoard?: () => void;
     onToggleAutoKnowledgeDetection: () => void;
     onConnectPeer: () => void;
     onResetUnreadCount: (peerId: string) => void;
@@ -458,6 +460,12 @@
       <button class="btn-context" onclick={onOpenProvidersEditor}>
         AI Providers
       </button>
+
+      {#if onOpenAgentBoard}
+        <button class="btn-context" onclick={onOpenAgentBoard}>
+          Agent Progress Board
+        </button>
+      {/if}
 
       <!-- Auto Knowledge Detection Toggle -->
       <div class="knowledge-toggle">

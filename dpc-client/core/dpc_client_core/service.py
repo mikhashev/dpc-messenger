@@ -8673,6 +8673,336 @@ Respond in JSON format:
                 "message": str(e),
             }
 
+    # --- Agent Task Board Methods (v0.20.0) ---
+
+    async def get_agent_tasks(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+        """Get agent task history for the Task Board panel.
+
+        Reads:
+        - state/task_queue.json for pending/scheduled tasks
+        - logs/events.jsonl for completed/failed task history
+
+        Returns:
+            Dict with running, scheduled, completed, failed task lists
+        """
+        import json
+        from pathlib import Path
+        from datetime import datetime, timezone
+
+        try:
+            from .dpc_agent.utils import get_agent_root
+            agent_root = get_agent_root(agent_id)
+
+            running: list = []
+            scheduled: list = []
+            completed: list = []
+            failed: list = []
+
+            # --- Pending/scheduled tasks from queue file ---
+            queue_file = agent_root / "state" / "task_queue.json"
+            if queue_file.exists():
+                try:
+                    queue_data = json.loads(queue_file.read_text(encoding="utf-8"))
+                    for t in queue_data.get("tasks", []):
+                        entry = {
+                            "id": t.get("id", ""),
+                            "type": t.get("task_type", "chat"),
+                            "preview": (t.get("data", {}) or {}).get("message", "")[:120],
+                            "status": t.get("status", "pending"),
+                            "started_at": t.get("started_at"),
+                            "completed_at": t.get("completed_at"),
+                            "scheduled_at": t.get("scheduled_at"),
+                            "result_preview": None,
+                        }
+                        if t.get("status") == "running":
+                            running.append(entry)
+                        elif t.get("status") == "pending":
+                            scheduled.append(entry)
+                except Exception as e:
+                    logger.warning("Failed to parse task queue: %s", e)
+
+            # --- History from events.jsonl ---
+            events_file = agent_root / "logs" / "events.jsonl"
+            if events_file.exists():
+                try:
+                    lines = events_file.read_text(encoding="utf-8").splitlines()
+                    # Build pairs: match task_start with next task_complete
+                    pending_start = None
+                    for line in lines:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            ev = json.loads(line)
+                        except Exception:
+                            continue
+                        ev_type = ev.get("type", "")
+                        if ev_type == "task_start":
+                            pending_start = ev
+                        elif ev_type == "task_complete" and pending_start:
+                            # Paired completion
+                            preview_text = pending_start.get("text_preview", "")[:120]
+                            completed.append({
+                                "id": ev.get("task_id", ""),
+                                "type": "chat",
+                                "preview": preview_text,
+                                "status": "completed",
+                                "started_at": pending_start.get("ts"),
+                                "completed_at": ev.get("ts"),
+                                "scheduled_at": None,
+                                "result_preview": ev.get("response_preview", "")[:200] if ev.get("response_preview") else None,
+                            })
+                            pending_start = None
+                        elif ev_type == "task_failed" and pending_start:
+                            preview_text = pending_start.get("text_preview", "")[:120]
+                            failed.append({
+                                "id": ev.get("task_id", ""),
+                                "type": "chat",
+                                "preview": preview_text,
+                                "status": "failed",
+                                "started_at": pending_start.get("ts"),
+                                "completed_at": ev.get("ts"),
+                                "scheduled_at": None,
+                                "result_preview": None,
+                            })
+                            pending_start = None
+                except Exception as e:
+                    logger.warning("Failed to parse events log: %s", e)
+
+            # Return most recent completed first (reverse chronological)
+            completed.reverse()
+
+            return {
+                "status": "success",
+                "agent_id": agent_id,
+                "running": running,
+                "scheduled": scheduled,
+                "completed": completed[:50],  # Cap at 50 entries
+                "failed": failed,
+            }
+
+        except Exception as e:
+            logger.error("Error in get_agent_tasks: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def get_agent_learning(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+        """Get agent learning progress from knowledge/llm_learning_schedule.md.
+
+        Parses the '## Progress Tracking' section with standardized format:
+            ### Task 1.1: Title
+            Status: in_progress
+            Last Activity: 2026-03-03
+            Session Summary: ...
+            Next Step: ...
+
+        Returns stalled status if in_progress and Last Activity > 3 days ago.
+
+        Returns:
+            Dict with phases, streak_days, last_session
+        """
+        from pathlib import Path
+        from datetime import datetime, timezone, timedelta
+
+        try:
+            from .dpc_agent.utils import get_agent_root
+            agent_root = get_agent_root(agent_id)
+
+            learning_file = agent_root / "knowledge" / "llm_learning_schedule.md"
+            if not learning_file.exists():
+                return {
+                    "status": "error",
+                    "message": f"Learning file not found: {learning_file}",
+                }
+
+            content = learning_file.read_text(encoding="utf-8")
+
+            # --- Parse Progress Tracking section ---
+            tracking_start = None
+            for i, line in enumerate(content.splitlines()):
+                if line.strip().startswith("## Progress Tracking"):
+                    tracking_start = i + 1
+                    break
+
+            if tracking_start is None:
+                return {
+                    "status": "error",
+                    "message": "No '## Progress Tracking' section found in learning file.",
+                }
+
+            lines = content.splitlines()
+            # Collect tracking section until next ## heading
+            tracking_lines = []
+            for line in lines[tracking_start:]:
+                if line.startswith("## ") and tracking_lines:
+                    break
+                tracking_lines.append(line)
+
+            tracking_text = "\n".join(tracking_lines)
+
+            # Split by ### Task headings
+            import re
+            task_blocks = re.split(r'\n(?=### )', tracking_text.strip())
+
+            tasks_raw = []
+            for block in task_blocks:
+                block = block.strip()
+                if not block.startswith("###"):
+                    continue
+                first_line = block.splitlines()[0]
+                # Extract task id and title e.g. "### Task 1.1: Matrix Multiplication"
+                m = re.match(r'^### Task\s+(\d+\.\d+):\s+(.+)$', first_line.strip())
+                if not m:
+                    continue
+                task_num = m.group(1)
+                task_title = m.group(2).strip()
+
+                # Parse key-value fields
+                fields: Dict[str, str] = {}
+                for line in block.splitlines()[1:]:
+                    if ": " in line:
+                        key, _, val = line.partition(": ")
+                        fields[key.strip()] = val.strip()
+
+                status_raw = fields.get("Status", "pending").lower().strip()
+                last_activity_str = fields.get("Last Activity", fields.get("Completed", ""))
+                started_str = fields.get("Started", "")
+                completed_str = fields.get("Completed", "")
+
+                # Parse last_activity date
+                last_activity_date = None
+                for date_str in [last_activity_str, completed_str, started_str]:
+                    if date_str:
+                        try:
+                            last_activity_date = datetime.strptime(date_str[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                            break
+                        except ValueError:
+                            pass
+
+                # Stalled detection
+                days_stalled = None
+                status = status_raw
+                if status == "in_progress" and last_activity_date:
+                    now = datetime.now(timezone.utc)
+                    days_since = (now - last_activity_date).days
+                    if days_since > 3:
+                        status = "stalled"
+                        days_stalled = days_since
+
+                tasks_raw.append({
+                    "id": f"Task {task_num}",
+                    "title": task_title,
+                    "status": status,
+                    "started_at": started_str or None,
+                    "completed_at": completed_str or None,
+                    "last_activity": last_activity_str or None,
+                    "days_stalled": days_stalled,
+                    "session_summary": fields.get("Session Summary") or None,
+                    "next_step": fields.get("Next Step") or None,
+                })
+
+            # --- Group tasks into phases by major number ---
+            phase_map: Dict[str, list] = {}
+            for task in tasks_raw:
+                major = task["id"].split(".")[0].replace("Task ", "")
+                phase_key = f"Phase {major}"
+                if phase_key not in phase_map:
+                    phase_map[phase_key] = []
+                phase_map[phase_key].append(task)
+
+            phases = [{"title": k, "tasks": v} for k, v in sorted(phase_map.items())]
+
+            # --- Compute last_session and streak ---
+            all_dates = []
+            for task in tasks_raw:
+                for date_str in [task.get("last_activity"), task.get("completed_at"), task.get("started_at")]:
+                    if date_str:
+                        try:
+                            all_dates.append(datetime.strptime(date_str[:10], "%Y-%m-%d"))
+                        except ValueError:
+                            pass
+
+            last_session_str = None
+            streak_days = 0
+            if all_dates:
+                last_session_dt = max(all_dates)
+                last_session_str = last_session_dt.strftime("%Y-%m-%d")
+                now_local = datetime.now()
+                days_since = (now_local.date() - last_session_dt.date()).days
+                streak_days = 1 if days_since <= 1 else 0
+
+            return {
+                "status": "success",
+                "agent_id": agent_id,
+                "phases": phases,
+                "streak_days": streak_days,
+                "last_session": last_session_str,
+            }
+
+        except Exception as e:
+            logger.error("Error in get_agent_learning: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def schedule_agent_task(
+        self,
+        agent_id: str = "agent_001",
+        task_type: str = "chat",
+        data: Dict[str, Any] = None,
+        priority: str = "NORMAL",
+        delay_seconds: int = 0,
+    ) -> Dict[str, Any]:
+        """Schedule an agent task from the Task Board UI.
+
+        Returns:
+            Dict with task_id and scheduled_at
+        """
+        from datetime import datetime, timezone, timedelta
+
+        try:
+            from .dpc_agent.task_queue import TaskPriority
+
+            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+            if not dpc_agent_provider:
+                return {"status": "error", "message": "DPC Agent provider not available"}
+
+            # Get or create agent manager for this agent_id
+            if agent_id not in dpc_agent_provider._managers:
+                return {"status": "error", "message": f"Agent '{agent_id}' not running. Open an agent chat first."}
+
+            agent_manager = dpc_agent_provider._managers[agent_id]
+            await agent_manager.ensure_started()
+
+            if not agent_manager._agent:
+                return {"status": "error", "message": "Agent not initialized"}
+
+            # Resolve priority enum
+            try:
+                prio = TaskPriority[priority.upper()]
+            except KeyError:
+                prio = TaskPriority.NORMAL
+
+            # Compute scheduled_at
+            scheduled_at = None
+            if delay_seconds and delay_seconds > 0:
+                scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
+
+            task = agent_manager._agent.schedule_task(
+                task_type=task_type,
+                data=data or {},
+                priority=prio,
+                delay_seconds=delay_seconds if delay_seconds > 0 else 0,
+            )
+
+            return {
+                "status": "success",
+                "task_id": task.id,
+                "task_type": task_type,
+                "scheduled_at": task.scheduled_at,
+            }
+
+        except Exception as e:
+            logger.error("Error in schedule_agent_task: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     def _get_iso_timestamp(self) -> str:
         """Get current timestamp in ISO format."""
         from datetime import datetime, timezone

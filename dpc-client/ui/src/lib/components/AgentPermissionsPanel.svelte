@@ -58,6 +58,7 @@
         { key: 'knowledge_read', label: 'Read Knowledge', desc: 'Read knowledge base' },
         { key: 'knowledge_write', label: 'Write Knowledge', desc: 'Write to knowledge base' },
         { key: 'knowledge_list', label: 'List Knowledge', desc: 'List knowledge topics' },
+        { key: 'get_task_board', label: 'Progress Board', desc: 'Read task history and learning progress from the shared Agent Progress Board' },
         { key: 'extract_knowledge', label: 'Extract Knowledge', desc: 'Extract knowledge from conversation' },
         { key: 'get_dpc_context', label: 'Get DPC Context', desc: 'Access DPC personal/device context' },
       ]

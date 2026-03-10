@@ -1089,7 +1089,11 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_agent_config',  // DPC Agent isolation - get agent configuration
             'update_agent_config',  // DPC Agent isolation - update agent configuration
             'delete_agent',  // DPC Agent isolation - delete agent
-            'list_agent_profiles'  // DPC Agent isolation - list permission profiles
+            'list_agent_profiles',  // DPC Agent isolation - list permission profiles
+            // Agent Task Board (v0.20.0)
+            'get_agent_tasks',
+            'get_agent_learning',
+            'schedule_agent_task',
         ].includes(command);
 
         if (expectsResponse) {

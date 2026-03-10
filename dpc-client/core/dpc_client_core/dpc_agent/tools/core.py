@@ -624,6 +624,135 @@ Last updated: {datetime.now(timezone.utc).isoformat()}
 
 
 # ---------------------------------------------------------------------------
+# Agent Progress Board Tool
+# ---------------------------------------------------------------------------
+
+def get_task_board(ctx: ToolContext) -> str:
+    """
+    Read your Agent Progress Board — the shared task and learning workspace
+    visible to both you and the user in the DPC desktop UI.
+
+    Returns two sections:
+
+    TASK HISTORY — your last 20 completed/failed tasks from logs/events.jsonl.
+    This is populated automatically whenever you run tasks; no action needed.
+
+    LEARNING PROGRESS — your current status parsed from the
+    ## Progress Tracking section of knowledge/llm_learning_schedule.md.
+    You are responsible for keeping this section current.
+
+    IMPORTANT — after every learning session, update llm_learning_schedule.md
+    via knowledge_write using this exact format inside ## Progress Tracking:
+
+        ### Task 1.1: Title
+        Status: completed | in_progress | pending
+        Started: YYYY-MM-DD
+        Last Activity: YYYY-MM-DD      (update this every session)
+        Session Summary: One sentence.
+        Next Step: Specific actionable next step.
+
+    The backend auto-computes 'stalled' when Last Activity is more than 3 days
+    old and status is in_progress — do not write 'stalled' yourself.
+
+    Use this tool at the start of a learning session to review where you left off,
+    or before scheduling a task to understand what is already queued.
+    """
+    import re
+    from datetime import datetime, timezone
+
+    output_parts: list[str] = []
+
+    # --- Task History ---
+    try:
+        events_path = ctx.logs_path("events.jsonl")
+        task_events: list[dict] = []
+        if events_path.exists():
+            with open(events_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if entry.get("type") in ("task_start", "task_complete", "task_error"):
+                            task_events.append(entry)
+                    except json.JSONDecodeError:
+                        continue
+
+        recent = task_events[-40:]  # up to 40 events = up to 20 task pairs
+        if recent:
+            lines = ["=== Task History (recent) ==="]
+            for ev in recent:
+                ts = ev.get("ts", "")[:10]
+                etype = ev.get("type", "")
+                preview = ev.get("text_preview") or ev.get("response_preview") or ""
+                preview = preview[:80].replace("\n", " ")
+                lines.append(f"[{ts}] {etype}: {preview}")
+            output_parts.append("\n".join(lines))
+        else:
+            output_parts.append("=== Task History ===\nNo task events found.")
+    except Exception as e:
+        output_parts.append(f"=== Task History ===\nError reading task history: {e}")
+
+    # --- Learning Progress ---
+    try:
+        knowledge_dir = ctx.agent_root / "knowledge"
+        schedule_path = knowledge_dir / "llm_learning_schedule.md"
+        if not schedule_path.exists():
+            output_parts.append(
+                "=== Learning Progress ===\n"
+                "knowledge/llm_learning_schedule.md not found.\n"
+                "Create it with a ## Progress Tracking section to use this feature."
+            )
+        else:
+            content = schedule_path.read_text(encoding="utf-8", errors="replace")
+            # Extract only the ## Progress Tracking section
+            match = re.search(r"##\s+Progress Tracking\s*\n(.*?)(?=\n##\s|\Z)", content, re.DOTALL)
+            if not match:
+                output_parts.append(
+                    "=== Learning Progress ===\n"
+                    "No ## Progress Tracking section found in llm_learning_schedule.md."
+                )
+            else:
+                tracking_text = match.group(1).strip()
+                now = datetime.now(timezone.utc)
+                lines = ["=== Learning Progress ==="]
+                for task_block in re.split(r"(?=###\s+Task)", tracking_text):
+                    task_block = task_block.strip()
+                    if not task_block:
+                        continue
+                    header_match = re.match(r"###\s+(Task\s+[\d.]+):\s+(.+)", task_block)
+                    if not header_match:
+                        continue
+                    task_id = header_match.group(1)
+                    title = header_match.group(2).strip()
+                    status_m = re.search(r"^Status:\s*(.+)$", task_block, re.MULTILINE)
+                    last_act_m = re.search(r"^Last Activity:\s*(.+)$", task_block, re.MULTILINE)
+                    next_step_m = re.search(r"^Next Step:\s*(.+)$", task_block, re.MULTILINE)
+                    status = status_m.group(1).strip() if status_m else "unknown"
+                    last_activity = last_act_m.group(1).strip() if last_act_m else None
+                    next_step = next_step_m.group(1).strip() if next_step_m else None
+                    # Stalled detection
+                    if status == "in_progress" and last_activity:
+                        try:
+                            la_date = datetime.strptime(last_activity, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+                            days_ago = (now - la_date).days
+                            if days_ago > 3:
+                                status = f"stalled ({days_ago} days)"
+                        except ValueError:
+                            pass
+                    line = f"  {task_id}: {title}  [{status}]"
+                    if next_step and "in_progress" in status or "stalled" in status:
+                        line += f"\n    Next: {next_step}"
+                    lines.append(line)
+                output_parts.append("\n".join(lines))
+    except Exception as e:
+        output_parts.append(f"=== Learning Progress ===\nError reading learning data: {e}")
+
+    return "\n\n".join(output_parts)
+
+
+# ---------------------------------------------------------------------------
 # DPC Integration Tools
 # ---------------------------------------------------------------------------
 
@@ -1834,6 +1963,28 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=knowledge_list,
             timeout_sec=10,
+        ),
+
+        ToolEntry(
+            name="get_task_board",
+            schema={
+                "name": "get_task_board",
+                "description": (
+                    "Read your Agent Progress Board — task history and learning progress "
+                    "visible to both you and the user in the DPC desktop UI. "
+                    "Use at the start of a learning session to review where you left off, "
+                    "or before scheduling a task to see what is already queued. "
+                    "Also documents the required format for updating your learning progress "
+                    "in knowledge/llm_learning_schedule.md."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            },
+            handler=get_task_board,
+            timeout_sec=15,
         ),
 
         # Knowledge extraction from conversation

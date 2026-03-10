@@ -124,6 +124,7 @@ class ContextFirewall:
             'knowledge_read': True,
             'knowledge_write': False,  # Controlled by knowledge_access
             'knowledge_list': True,
+            'get_task_board': True,     # Read task history + learning progress (Agent Progress Board)
             'extract_knowledge': True,  # Extract knowledge from conversation to knowledge base
             'deduplicate_identity': True,  # Clean up duplicate sections in identity
             # DPC integration
@@ -556,6 +557,7 @@ class ContextFirewall:
                         "knowledge_read": True,
                         "knowledge_write": False,
                         "knowledge_list": True,
+                        "get_task_board": True,
                         "get_dpc_context": True,
                         "browse_page": True,
                         "fetch_json": True,
@@ -1416,6 +1418,7 @@ class ContextFirewall:
                                 'update_scratchpad', 'update_identity', 'chat_history',
                                 # Knowledge
                                 'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                'get_task_board',
                                 # DPC integration
                                 'get_dpc_context',
                                 # Web tools
@@ -1503,6 +1506,7 @@ class ContextFirewall:
                                         'drive_read', 'drive_list', 'drive_write',
                                         'update_scratchpad', 'update_identity', 'chat_history',
                                         'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                        'get_task_board',
                                         'get_dpc_context',
                                         'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
                                         'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',

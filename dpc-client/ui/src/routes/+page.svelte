@@ -10,6 +10,7 @@
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ModelDownloadDialog from "$lib/components/ModelDownloadDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
+  import AgentTaskBoard from "$lib/components/AgentTaskBoard.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
@@ -211,6 +212,7 @@
   let showInstructionsEditor = $state(false);
   let showFirewallEditor = $state(false);
   let showProvidersEditor = $state(false);
+  let showAgentBoard = $state(false);
   let showCommitDialog = $state(false);
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
   let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
@@ -2546,6 +2548,10 @@
     showContextViewer = true;
   }
 
+  function openAgentBoard() {
+    showAgentBoard = true;
+  }
+
   function openInstructionsEditor() {
     showInstructionsEditor = true;
   }
@@ -4240,6 +4246,7 @@
       onOpenInstructionsEditor={openInstructionsEditor}
       onOpenFirewallEditor={openFirewallEditor}
       onOpenProvidersEditor={openProvidersEditor}
+      onOpenAgentBoard={openAgentBoard}
       onToggleAutoKnowledgeDetection={toggleAutoKnowledgeDetection}
       onConnectPeer={handleConnectPeer}
       onResetUnreadCount={resetUnreadCount}
@@ -4734,6 +4741,20 @@
   bind:open={showContextViewer}
   context={$personalContext}
   on:close={() => showContextViewer = false}
+/>
+
+<AgentTaskBoard
+  bind:open={showAgentBoard}
+  agentId={activeChatId && agentChatToAgentId.has(activeChatId)
+    ? (agentChatToAgentId.get(activeChatId) ?? 'agent_001')
+    : 'agent_001'}
+  onSendToAgent={(msg) => {
+    if (activeChatId && agentChatToAgentId.has(activeChatId)) {
+      currentInput = msg;
+      handleSendMessage();
+    }
+  }}
+  on:close={() => showAgentBoard = false}
 />
 
 <!-- Mention Autocomplete (Group Chats) -->
