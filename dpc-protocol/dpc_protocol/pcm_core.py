@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 from .crypto import DPC_HOME_DIR
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime, timezone
 
@@ -104,7 +104,19 @@ class Profile:
 
 @dataclass
 class Preferences:
-    communication_style: str
+    communication_style: str = ""
+    # Extended fields written by agent/AI sessions
+    communication: Optional[Dict[str, Any]] = None
+    learning: Optional[Dict[str, Any]] = None
+    work_style: Optional[Dict[str, Any]] = None
+    technical_interests: Optional[List[str]] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Preferences':
+        """Construct Preferences tolerating unknown/extra fields."""
+        known = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)
 
 # --- Enhanced Data Structures (v2.0) ---
 
@@ -281,7 +293,7 @@ class PersonalContext:
             profile = Profile(name="[Restricted]", description="[Access denied by firewall]")
 
         preferences_data = data.get('preferences')
-        preferences = Preferences(**preferences_data) if preferences_data else None
+        preferences = Preferences.from_dict(preferences_data) if preferences_data else None
 
         # Load knowledge with v1/v2 compatibility
         knowledge_data = data.get('knowledge', {})

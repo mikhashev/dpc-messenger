@@ -4401,6 +4401,9 @@ class CoreService:
                 if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
                     is_ai_chat = True
                     ai_agent_node_id = conversation_id
+                elif conversation_id.startswith("agent_"):
+                    is_ai_chat = True
+                    ai_agent_node_id = "dpc-agent"  # hardcoded in agent_manager.py participants
 
             # Cast user's vote through ConsensusManager
             # For AI chats, don't broadcast to peers (use no-op)
@@ -7342,6 +7345,19 @@ Respond in JSON format:
                 "message": f"Knowledge commit applied: {commit.topic}",
                 "context_hash": new_context_hash
             })
+
+            # For private conversations (agent, ai_chat, local_ai, telegram), reset the
+            # conversation after commit so the context window counter clears in the UI,
+            # allowing the user to start a fresh session.
+            conv_id = commit.conversation_id
+            if conv_id and (
+                conv_id == "local_ai"
+                or conv_id.startswith("ai_")
+                or conv_id.startswith("agent_")
+                or conv_id.startswith("telegram-")
+            ):
+                logger.info("Resetting private conversation %s after knowledge commit applied", conv_id)
+                await self.local_api.broadcast_event("conversation_reset", {"conversation_id": conv_id})
 
         except Exception as e:
             logger.error("Error in _on_commit_applied: %s", e, exc_info=True)
