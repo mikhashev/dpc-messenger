@@ -24,24 +24,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VotingSession:
-    """Active voting session for a commit proposal
-
-    KNOWN ISSUE: Proposal Editing During Voting
-    ============================================
-    Currently, there is no locking mechanism to prevent proposal edits during voting.
-    If a peer edits the proposal while voting is in progress, the following issues can occur:
-
-    1. Votes are cast on the OLD version of the proposal
-    2. The NEW version receives those votes without re-review
-    3. Could result in approving content that voters didn't see
-
-    RECOMMENDED FIX (Future Enhancement):
-    - Option A: Lock proposal during voting (prevent edits)
-    - Option B: Invalidate all votes when proposal is edited (force re-vote)
-    - Option C: Version proposals and track which version each vote is for
-
-    This issue was identified during v0.9.2 testing (2025-12-02).
-    """
+    """Active voting session for a commit proposal"""
     proposal: KnowledgeCommitProposal
     votes: Dict[str, CommitVote] = None  # node_id -> vote
     required_dissenter: Optional[str] = None
@@ -97,6 +80,7 @@ class ConsensusManager:
         self.on_result_broadcast: Optional[Callable] = None  # Broadcast voting results to participants
         self.on_commit_signed: Optional[Callable] = None    # Called after apply so service can sign+broadcast COMMIT_SIGNED
         self.on_commit_ack: Optional[Callable] = None       # Called after apply so service can broadcast COMMIT_ACK
+        self.on_commit_apply_failed: Optional[Callable] = None  # Called when _apply_commit fails (disk error etc); arg: (commit, error_msg)
 
         # Tracks which nodes confirmed successful apply per commit_id (Gap 3 observability)
         self.commit_acks: Dict[str, set] = {}  # commit_id -> set of node_ids that sent COMMIT_ACK
@@ -376,8 +360,15 @@ class ConsensusManager:
                 parent_commit_id=proposal.parent_commit_id
             )
 
-            # Apply commit to local context
-            await self._apply_commit(commit)
+            # Apply commit to local context; only fire success callbacks if write succeeded
+            apply_ok = await self._apply_commit(commit)
+
+            if not apply_ok:
+                # Disk write failed — mark session as failed so peers can detect missing ACK,
+                # but do NOT broadcast success. on_commit_apply_failed already fired inside
+                # _apply_commit to surface the error to the UI.
+                session.status = "apply_failed"
+                return
 
             # Trigger callback
             if self.on_commit_approved:
@@ -434,11 +425,14 @@ class ConsensusManager:
             await self.on_result_broadcast(result_payload, proposal.participants)
             logger.info("Broadcasted KNOWLEDGE_COMMIT_RESULT for proposal %s", proposal.proposal_id)
 
-    async def _apply_commit(self, commit: KnowledgeCommit) -> None:
+    async def _apply_commit(self, commit: KnowledgeCommit) -> bool:
         """Apply approved commit to local PCM with cryptographic integrity
 
         Args:
             commit: KnowledgeCommit to apply
+
+        Returns:
+            True if commit was successfully written to disk, False on any error.
         """
         try:
             import hashlib
@@ -586,8 +580,13 @@ class ConsensusManager:
             if self.on_commit_ack:
                 await self.on_commit_ack(commit)
 
+            return True
+
         except Exception as e:
             logger.error("Error applying commit: %s", e, exc_info=True)
+            if self.on_commit_apply_failed:
+                await self.on_commit_apply_failed(commit, str(e))
+            return False
 
     async def record_commit_signature(
         self,
@@ -613,13 +612,20 @@ class ConsensusManager:
         from dpc_protocol.commit_integrity import CommitSigner
         from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
 
-        # Verify signature before touching the file
-        if not CommitSigner.verify_signature(signer_node_id, commit_hash, signature_b64):
+        # Verify signature before touching the file.
+        # None = peer cert not cached (unverifiable); False = signature invalid (reject).
+        sig_result = CommitSigner.verify_signature(signer_node_id, commit_hash, signature_b64)
+        if sig_result is False:
             logger.warning(
                 "Rejected invalid COMMIT_SIGNED from %s for commit %s",
                 signer_node_id, commit_id[:12]
             )
             return False
+        if sig_result is None:
+            logger.info(
+                "Storing unverified COMMIT_SIGNED from %s for commit %s (peer cert not cached)",
+                signer_node_id, commit_id[:12]
+            )
 
         # Locate the markdown file (filename: {topic}_{commit_id}.md)
         markdown_manager = MarkdownKnowledgeManager()

@@ -277,8 +277,10 @@ class KnowledgeCommit:
             return False
 
         for node_id, signature in self.signatures.items():
-            if not CommitSigner.verify_signature(node_id, self.commit_hash, signature):
+            result = CommitSigner.verify_signature(node_id, self.commit_hash, signature)
+            if result is False:
                 return False
+            # result is None: cert not cached, skip (cannot verify but not evidence of tampering)
 
         return True
 

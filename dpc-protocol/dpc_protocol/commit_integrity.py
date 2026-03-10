@@ -210,7 +210,7 @@ class CommitSigner:
         commit_hash: str,
         signature_b64: str,
         peers_dir: Optional[Path] = None
-    ) -> bool:
+    ) -> Optional[bool]:
         """
         Verify signature from a peer.
 
@@ -221,22 +221,37 @@ class CommitSigner:
             peers_dir: Directory containing peer certificates (default: ~/.dpc/peers)
 
         Returns:
-            True if signature is valid
+            True  — signature is cryptographically valid
+            False — signature is invalid (possible tampering)
+            None  — peer certificate not cached locally; cannot verify
         """
         if peers_dir is None:
             peers_dir = DPC_HOME_DIR / "peers"
 
-        # Load peer's public key from certificate
+        # Load peer's public key from certificate.
+        # For our own node_id the cert lives at ~/.dpc/node.crt (not in peers/).
         cert_path = peers_dir / f"{node_id}.crt"
 
         if not cert_path.exists():
-            # Try own certificate (for self-signed commits)
             own_cert_path = DPC_HOME_DIR / "node.crt"
             if own_cert_path.exists():
-                cert_path = own_cert_path
+                # Only use own cert when verifying our own node's signature.
+                # Using it for a *peer* would always fail (different key pair) and
+                # produce a misleading "invalid signature" result.
+                try:
+                    from dpc_protocol.crypto import load_identity
+                    own_node_id, _, _ = load_identity()
+                    if own_node_id == node_id:
+                        cert_path = own_cert_path
+                    else:
+                        logger.debug(f"Peer certificate not cached for {node_id} — cannot verify signature")
+                        return None
+                except Exception:
+                    logger.debug(f"Peer certificate not cached for {node_id} — cannot verify signature")
+                    return None
             else:
-                logger.error(f"Certificate not found for {node_id}")
-                return False
+                logger.debug(f"Certificate not found for {node_id}")
+                return None
 
         try:
             with open(cert_path, 'rb') as f:
@@ -521,13 +536,24 @@ def verify_markdown_integrity(
                 is_valid = CommitSigner.verify_signature(node_id, commit_hash, signature)
                 result['signatures_valid'][node_id] = is_valid
 
-                if not is_valid:
+                if is_valid is None:
+                    # Cert not cached — signature cannot be verified on this node.
+                    # This is NOT evidence of tampering; it just means the peer hasn't
+                    # connected directly to share its certificate yet.
+                    result['warnings'].append({
+                        'file': markdown_path.name,
+                        'type': 'signature_unverifiable',
+                        'severity': 'warning',
+                        'message': f'Peer certificate not cached for {node_id} — signature cannot be verified',
+                        'signer': node_id
+                    })
+                elif is_valid is False:
                     result['valid'] = False
                     result['warnings'].append({
                         'file': markdown_path.name,
                         'type': 'invalid_signature',
                         'severity': 'error',
-                        'message': f'Invalid signature from {node_id}',
+                        'message': f'Invalid signature from {node_id} — possible tampering',
                         'signer': node_id
                     })
 

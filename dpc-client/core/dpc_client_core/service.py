@@ -218,6 +218,9 @@ class CoreService:
         # Register callback to broadcast COMMIT_ACK to peers (Gap 3 observability)
         self.consensus_manager.on_commit_ack = self._on_commit_ack
 
+        # Register callback to surface apply failures to the UI
+        self.consensus_manager.on_commit_apply_failed = self._on_commit_apply_failed
+
         # Register callback to broadcast peer proposals to UI
         self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
 
@@ -4891,8 +4894,9 @@ Respond in JSON format:
                         if hasattr(agent_manager, '_agent_monitors'):
                             monitor = agent_manager._agent_monitors.get(conversation_id)
                             if monitor:
-                                # Load history from disk if not already loaded AND file exists
-                                # (Check file exists to prevent reloading after reset, where message_history is cleared but file is deleted)
+                                # Monitor exists in memory — load history from disk if empty
+                                # (Check file exists to prevent reloading after reset, where
+                                # message_history is cleared but file is deleted)
                                 if not monitor.message_history:
                                     history_path = monitor._get_history_path()
                                     if history_path.exists():
@@ -4901,6 +4905,27 @@ Respond in JSON format:
                                     else:
                                         logger.debug("No history file found for %s (likely reset), skipping load", conversation_id)
                                 logger.debug("Found agent conversation monitor for %s in AgentManager", conversation_id)
+                            else:
+                                # Agent manager exists but monitor not created yet (no messages
+                                # processed since service start) — load history from disk directly
+                                logger.debug("Agent monitor not created for %s, loading history from disk", conversation_id)
+                                history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                                if history_path.exists():
+                                    try:
+                                        import json as _json
+                                        with open(history_path, encoding="utf-8") as f:
+                                            data = _json.load(f)
+                                        messages = data.get("messages", [])
+                                        logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
+                                        return {
+                                            "status": "success",
+                                            "messages": messages,
+                                            "message_count": len(messages)
+                                        }
+                                    except Exception as e:
+                                        logger.error("Failed to load agent history from disk: %s", e)
+                                else:
+                                    logger.debug("No history file found at %s", history_path)
                     else:
                         # Agent manager not created yet - try to load history directly from disk
                         logger.debug("Agent manager not created for %s, attempting to load history from disk", conversation_id)
@@ -7438,6 +7463,22 @@ Respond in JSON format:
 
         except Exception as e:
             logger.error("Error in _on_commit_ack: %s", e, exc_info=True)
+
+    async def _on_commit_apply_failed(self, commit, error_msg: str):
+        """Callback called when _apply_commit fails to write to disk.
+
+        Surfaces the error to the UI so the user knows the commit was not persisted
+        on this node, even though peers voted to approve it.
+        """
+        logger.error(
+            "Failed to apply knowledge commit %s: %s",
+            getattr(commit, 'commit_id', '?'), error_msg
+        )
+        await self.local_api.broadcast_event("knowledge_commit_apply_failed", {
+            "topic": getattr(commit, 'topic', 'unknown'),
+            "commit_id": getattr(commit, 'commit_id', None),
+            "error": error_msg
+        })
 
     async def _broadcast_context_updated_to_peers(self, context_hash: str):
         """
