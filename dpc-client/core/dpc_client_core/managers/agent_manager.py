@@ -307,6 +307,18 @@ class DpcAgentManager:
             log.warning(f"Agent {agent_desc} has telegram_enabled=true but missing bot_token or allowed_chat_ids")
             return
 
+        # Check for token conflict with main TelegramBotManager
+        main_telegram = getattr(self.service, "telegram_manager", None)
+        if main_telegram and getattr(main_telegram, "bot_token", None) == bot_token:
+            agent_desc = self.agent_id if self.agent_id else "singleton"
+            log.error(
+                f"Agent {agent_desc} Telegram bridge is configured with the same bot token as the main "
+                f"TelegramBotManager. This causes a Conflict error (two instances polling the same bot). "
+                f"Create a separate bot via @BotFather for the agent bridge. "
+                f"See docs/DPC_AGENT_TELEGRAM.md for setup instructions."
+            )
+            return
+
         try:
             from .agent_telegram_bridge import AgentTelegramBridge, RateLimitConfig, create_telegram_bridge_callback
 
