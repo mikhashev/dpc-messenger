@@ -7383,20 +7383,20 @@ Respond in JSON format:
             with open(key_path, 'rb') as f:
                 private_key = _ser.load_pem_private_key(f.read(), password=None)
 
-            signer = CommitSigner(self.node_id, private_key)
+            signer = CommitSigner(self.p2p_manager.node_id, private_key)
             signature_b64 = signer.sign_commit(commit.commit_hash)
 
             payload = {
                 "commit_id": commit.commit_id,
                 "commit_hash": commit.commit_hash,
-                "node_id": self.node_id,
+                "node_id": self.p2p_manager.node_id,
                 "signature": signature_b64
             }
 
             # Broadcast to all participants (excluding self — we already applied locally)
             participants = commit.participants or []
             for peer_id in participants:
-                if peer_id == self.node_id:
+                if peer_id == self.p2p_manager.node_id:
                     continue
                 try:
                     await self.p2p_manager.send_message_to_peer(
@@ -7421,12 +7421,12 @@ Respond in JSON format:
             participants = commit.participants or []
             payload = {
                 "commit_id": commit.commit_id,
-                "node_id": self.node_id,
+                "node_id": self.p2p_manager.node_id,
                 "participants": participants
             }
 
             for peer_id in participants:
-                if peer_id == self.node_id:
+                if peer_id == self.p2p_manager.node_id:
                     continue
                 try:
                     await self.p2p_manager.send_message_to_peer(

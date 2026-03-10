@@ -1516,6 +1516,7 @@
       }
 
       showCommitResultToast = true;
+      closeCommitDialog();
 
       // Send notification for knowledge commit result
       (async () => {
