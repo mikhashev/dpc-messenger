@@ -383,11 +383,129 @@ When no single peer has sufficient VRAM — even with multiple GPUs — it becom
 
 ---
 
-## Relationship to Dynamo/KVBM
+## 120B+ Models: Hardware Reality and Team Strategies
 
-NVIDIA Dynamo's KV Block Manager targets datacenter-scale disaggregated prefill across hundreds of workers with NVLink/InfiniBand interconnects. DPC's team compute pools target 2–20 trusted peers over commodity networks. The scoring algorithm above (`capacity × 0.5 + vram × 0.3 + latency × 0.2`) covers the entire scheduling problem at this scale. No external scheduler is warranted.
+Serving 120B+ parameter models to a team of 10–20 requires confronting two hard constraints: **model weight memory** and **KV cache memory**. The KV cache — which grows linearly with context length and concurrent user count — routinely exceeds model weight size in realistic workloads.
+
+### MoE vs Dense: the decisive difference
+
+Dense models activate all parameters per token. MoE (Mixture of Experts) models route each token through only a small subset of experts, making them dramatically cheaper at inference time.
+
+| Model | Architecture | Total Params | Active Params/token | Min VRAM (FP8) | 20 users @ 32K ctx |
+|---|---|---|---|---|---|
+| Llama 3.1 405B | Dense | 405B | 405B | ~8× H100 (640 GB) | ~1 TB+ (KV dominates) |
+| **GPT-OSS 120B** | **MoE** | 120B | **5.1B** | **1× H100 80GB** | 4× H100 |
+| **DeepSeek V3** | **MoE** | 685B | **~37B** | 16× H100 / 8× H200 | 8× H200 |
+| Qwen2.5-72B | Dense | 72B | 72B | 4× H100 | 8× H100 |
+
+**Key insight:** MoE KV cache is proportional to active parameters, not total parameters. GPT-OSS 120B (5.1B active) consumes ~40× less KV cache per user than Llama 3.1 405B. For a team of 20, model choice matters more than hardware count.
+
+**Hardware sizing formula:**
+```
+Total VRAM = model_weights + (kv_cache_per_user × concurrent_users) + overhead (~2 GB)
+
+# Llama 3.1 405B, 20 users, 32K context (FP8):
+Total = 230 GB weights + (40 GB/user × 20 users) + 2 GB = 1,032 GB  ← infeasible
+
+# GPT-OSS 120B MoE, 20 users, 32K context (MXFP4):
+Total = 60 GB weights + (1 GB/user × 20 users) + 2 GB = 82 GB  ← single H100 80GB (tight)
+                                                                  or 2× RTX 4090 (comfortable)
+```
+
+### Recommended hardware for teams
+
+**Minimum viable (10–20 users, moderate context 4–32K):**
+
+| Budget | Hardware | Model | Concurrent sessions |
+|---|---|---|---|
+| ~$15–20K | 2× RTX 4090 (48 GB total) | GPT-OSS 120B (MXFP4) or Qwen2.5-72B (Q4) | ~12–15 |
+| ~$25–35K | 4× RTX 4090 (96 GB total) or 4× A6000 (192 GB) | Qwen2.5-72B (FP8) or DeepSeek V2 | ~20 |
+| ~$250–400K | 8× H100 80GB (640 GB total) | Any 120B dense or DeepSeek V3 MoE | 20+ at 128K ctx |
+
+**Rule of thumb:** Reserve 25–30% VRAM beyond model weights for KV cache. Long-context (>32K) workloads require much more — at 128K context, a single user's KV cache can exceed the model's own weight footprint.
+
+### Disaggregated Prefill/Decode (Phase 3 architecture)
+
+The 2024–2025 research consensus is that **disaggregated prefill/decode** is the single most impactful architectural change for serving 120B+ models at team scale. All major inference frameworks now support it.
+
+**The core idea:** Prefill (processing the input prompt) and decode (generating output tokens) have opposite resource needs:
+- Prefill: compute-bound, benefits from fast GPUs, short-lived
+- Decode: memory-bound, holds KV cache for entire generation, long-lived
+
+Running them on the same GPU forces constant trade-offs. Splitting them unlocks much higher utilisation.
+
+```
+                  ┌─────────────────────────────────────────────────────────┐
+                  │  Prefill Pool (e.g., 2× powerful GPUs)                 │
+Team member       │  - Process incoming prompts (fast)                      │
+sends prompt  ──► │  - Populate KV cache blocks                             │
+                  │  - Transfer KV cache → Decode Pool                      │
+                  └───────────────┬─────────────────────────────────────────┘
+                                  │ KV cache transfer
+                  ┌───────────────▼─────────────────────────────────────────┐
+                  │  Decode Pool (e.g., 4–6× GPUs with large DRAM)         │
+                  │  - Hold per-user KV cache slabs                         │
+                  │  - Generate tokens (streaming to user)                  │
+                  │  - Release KV slab when session ends                    │
+                  └─────────────────────────────────────────────────────────┘
+```
+
+**Measured results from peer-reviewed research:**
+- DistServe (OSDI '24): **7.4× more requests served** or **12.6× tighter SLOs** vs. monolithic vLLM at the same hardware budget; TTFT <200ms, inter-token latency <50ms at full concurrency ([arXiv:2401.09670](https://arxiv.org/abs/2401.09670))
+- Mooncake (FAST '25 Best Paper — production at Kimi, 100B tokens/day): **59–498% increase in effective request capacity** from KV-cache-centric scheduling; cross-node KV cache hit rate **2.36× higher** than local-only caching ([arXiv:2407.00079](https://arxiv.org/abs/2407.00079))
+- SGLang with PD disaggregation on 96× H100: **52,300 input tokens/sec**, 22,300 output tokens/sec
+
+**Why this is deferred to Phase 3 for DPC:**
+- Requires binary activation streaming between peers (tensors are not JSON-serialisable; new transport needed)
+- KV cache transfer is only low-latency on 10 GbE / InfiniBand — internet connections make it slower than just routing to a single-peer with sufficient VRAM
+- Only viable when ≥2 peers are on the same LAN segment
+
+**Phase 3 prerequisites (tracked alongside pipeline parallelism):**
+1. `vllm_direct` provider type in `LLMManager` (direct Python API, not HTTP)
+2. Binary `DISTRIBUTED_INFERENCE_SHARD` protocol message (msgpack or raw bytes)
+3. LAN detection guard (refuses disaggregation over WAN)
+4. KV cache transfer budget estimation in `COMPUTE_ADVERTISE`
+
+### Shared KV Cache with Prefix Reuse (Phase 3, LAN)
+
+When team members share the same system prompt (e.g., a shared project brief sent to every AI query), that common prefix can be computed once and cached for all users. This is the technique used by Mooncake in production.
+
+**Applicability to DPC:**
+- DPC already includes context data (personal.json, device_context.json) in prompts — large shared prefixes are the norm
+- LMCache ([docs.lmcache.ai](https://docs.lmcache.ai)) provides this as a vLLM plugin, compatible with Path A (transparent multi-GPU host)
+- Cross-user prefix reuse saves 30–50% of prefill compute for workloads where team members use similar system prompts
+
+**Privacy constraint:** Shared KV caches introduce a timing side-channel (PromptPeek, InputSnatch). Per-user cache isolation must be enforced for private prompts — only system-prompt-level prefixes should be shared. DPC's firewall rules already control what context data is sent, providing a natural isolation boundary.
+
+---
+
+## Relationship to Dynamo and Modern Inference Frameworks
+
+NVIDIA Dynamo ([github.com/ai-dynamo/dynamo](https://github.com/ai-dynamo/dynamo), open-sourced 2025) is a production-grade disaggregated inference framework built on vLLM/SGLang/TensorRT-LLM backends. Its benchmarks on GB200 NVL72 show **30× more requests served for DeepSeek-R1** vs. non-disaggregated deployment.
+
+**DPC scope vs. Dynamo scope:**
+
+| Dimension | NVIDIA Dynamo | DPC Team Compute Pools |
+|---|---|---|
+| Target scale | 100s of GPUs, datacenter | 2–20 trusted peers, commodity hardware |
+| Interconnect | NVLink / InfiniBand | Consumer Ethernet / internet |
+| Scheduling | SLA-based Planner, auto-parallelism | Scoring algorithm (capacity × 0.5 + VRAM × 0.3 + latency × 0.2) |
+| KV transfer | NIXL (RDMA-accelerated) | Not yet (Phase 3) |
+| Phase 2.3 scope | N/A | Capability advertisement + failover routing |
+
+DPC's Phase 2.3 scoring algorithm covers the entire scheduling problem at team scale. No external scheduler is warranted for 2–20 peers on commodity networks.
 
 **Dynamo as a transparent backend (Path A variant):** If a team member runs a Dynamo + vLLM cluster behind an OpenAI-compatible endpoint, DPC routes to it exactly like any other provider — no protocol changes needed. The `COMPUTE_ADVERTISE` message will carry whatever models that cluster exposes. This makes DPC a natural front-end for teams that have access to shared datacenter resources alongside personal workstations.
+
+**Recommended software stack for team members hosting large models (Path A):**
+
+| Component | Tool | Notes |
+|---|---|---|
+| Inference server | vLLM (`--enable-chunked-prefill --enable-prefix-caching`) | Chunked prefill prevents long prompts from blocking short queries |
+| Alternative server | SGLang | Better MoE throughput; same OpenAI-compatible API |
+| KV cache layer | LMCache | Cross-session prefix reuse; integrates as vLLM plugin |
+| Orchestration (optional) | NVIDIA Dynamo | Only if running ≥4 GPU nodes with InfiniBand |
+| Quantization | AWQ 4-bit or FP8 | AWQ for consumer GPUs; FP8 for H100/H200 |
 
 ---
 
@@ -421,8 +539,53 @@ poetry run pytest tests/test_team_compute_pool.py::test_no_available_compute -v
 
 ## References
 
+### Internal
+
 - `docs/REMOTE_INFERENCE.md` — existing MVP (v0.6.1)
 - `dpc-client/core/dpc_client_core/managers/relay_manager.py` — scoring pattern to reuse
 - `dpc-client/core/dpc_client_core/inference_orchestrator.py` — entry point for modifications
 - `ROADMAP.md` Phase 2.3, Feature #10
 - `PRODUCT_VISION.md` — "The only messenger that lets you borrow your friend's GPU"
+
+### Research Papers
+
+**Disaggregated Prefill/Decode:**
+- **DistServe** (Zhong et al., OSDI '24) — disaggregated P/D, 7.4× goodput improvement
+  [arXiv:2401.09670](https://arxiv.org/abs/2401.09670) | [PDF](https://www.usenix.org/system/files/osdi24-zhong-yinmin.pdf)
+- **Splitwise** (Patel et al., ISCA '24) — heterogeneous GPU pools for P/D splitting
+  [ResearchGate](https://www.researchgate.net/publication/382806162_Splitwise_Efficient_Generative_LLM_Inference_Using_Phase_Splitting)
+- **Mooncake** (Qin et al., FAST '25 Best Paper) — KV-cache-centric scheduling, Kimi production (100B tokens/day)
+  [arXiv:2407.00079](https://arxiv.org/abs/2407.00079) | [GitHub](https://github.com/kvcache-ai/Mooncake)
+- **PPD Disaggregation** (2026) — partial P/D disaggregation for multi-turn conversations
+  [arXiv:2603.13358](https://arxiv.org/abs/2603.13358)
+
+**KV Cache Management:**
+- **MemServe** (arXiv:2406.17565, 2024) — elastic memory pool combining prefix KV caching with P/D disaggregation
+- **KVFlow** (NeurIPS 2025) — KV cache management for multi-agent workflows; 2.19× speedup vs. SGLang hierarchical cache
+- **TraCT** (arXiv:2512.18194, 2025) — CXL shared memory for rack-scale KV transfer, lower latency than RDMA
+
+**Emerging / 2025–2026:**
+- **PrefillShare** (arXiv:2602.12029) — cross-model KV reuse for multi-LLM deployments
+- **Aggregated vs. Disaggregated?** (arXiv:2508.01989) — unified framework that dynamically chooses strategy per load
+
+### Tools and Frameworks
+
+- **NVIDIA Dynamo** (open source, GTC 2025) — production disaggregated inference orchestration
+  [GitHub](https://github.com/ai-dynamo/dynamo) | [Blog](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/)
+- **LMCache** — persistent cross-session KV cache sharing (vLLM plugin)
+  [docs.lmcache.ai](https://docs.lmcache.ai)
+- **llm-d** (Red Hat/IBM) — Kubernetes-native distributed serving with prefix-cache-aware routing
+  [llm-d.ai](https://llm-d.ai) | [GitHub](https://github.com/llm-d/llm-d)
+- **vLLM Parallelism Docs** — TP/PP/DP/EP configuration guide
+  [docs.vllm.ai/en/stable/serving/parallelism_scaling/](https://docs.vllm.ai/en/stable/serving/parallelism_scaling/)
+
+### Hardware Sizing
+
+- **Spheron VRAM Calculator** — model weight and KV cache memory estimator
+  [spheron.network/blog/gpu-memory-requirements-llm/](https://www.spheron.network/blog/gpu-memory-requirements-llm/)
+- **DeepSeek GPU Requirements Guide**
+  [apxml.com/posts/system-requirements-deepseek-models](https://apxml.com/posts/system-requirements-deepseek-models)
+- **GPT-OSS 120B Hardware Guide**
+  [byteplus.com/en/topic/577679](https://www.byteplus.com/en/topic/577679)
+- **Multi-Node Inference Explainer** (Baseten)
+  [baseten.co/blog/how-multi-node-inference-works-llms-deepseek-r1/](https://www.baseten.co/blog/how-multi-node-inference-works-llms-deepseek-r1/)
