@@ -18,15 +18,28 @@ Team Compute Pools extends the existing Remote Inference MVP (v0.6.1) with autom
 
 ## Problem Statement
 
-### Current limitations (v0.19.1)
+### How it works today (v0.19.1)
+
+When a user wants to run inference on a peer's hardware:
+
+1. User opens the **"AI Host"** dropdown in `ProviderSelector.svelte` and selects a connected peer
+2. UI sends `query_remote_providers` → backend sends `GET_PROVIDERS` to that peer
+3. Host filters its local `providers.json` models by firewall rules (`compute.enabled`, `allow_nodes`, `allowed_models`) and replies with `PROVIDERS_RESPONSE`
+4. UI populates a second dropdown with the host's permitted models (prefixed `remote:{node_id}:{alias}`)
+5. User picks a model; UI sends `execute_ai_query` with `compute_host` + `provider` fields
+6. Backend sends `REMOTE_INFERENCE_REQUEST` → host runs `llm_manager.query()` → returns `REMOTE_INFERENCE_RESPONSE`
+
+The host fully controls what models are advertised — the remote user only sees what the host's firewall permits. Provider metadata (alias, model name, type, vision/voice support) is fetched on-demand and cached in `peer_metadata[peer_id]["providers"]`.
+
+### Current limitations
 
 | Problem | Impact |
 |---------|--------|
-| Manual peer selection via dropdown | User must know who has what GPU and whether they're free |
-| No failover — timeout on busy/offline peer | Silent 60s wait, then error |
-| No capability awareness — model mismatch at request time | "Model not found" error after full round-trip |
-| Static `remote_peer` provider config (hardcoded `peer_id`) | Breaks when peer changes node ID or goes offline |
-| No queue depth visibility | Can't tell if Anna is already running 3 inference jobs |
+| Manual peer selection required | User must pick a specific peer from the dropdown; no automatic routing |
+| Model list fetched on-demand, not pre-advertised | First dropdown open triggers a `GET_PROVIDERS` round-trip (10s timeout) |
+| No failover — timeout on busy/offline peer | Silent 60s wait on `REMOTE_INFERENCE_REQUEST`, then error |
+| No load visibility | Can't tell if Anna is already running 3 inference jobs before sending |
+| Peer selection resets on disconnect | If Anna goes offline, `selectedComputeHost` resets to "local" silently |
 
 These are tolerable for 1:1 compute sharing. They become friction in a team of 5–20 where multiple members have capable hardware and should be interchangeable compute sources.
 
