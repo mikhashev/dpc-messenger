@@ -291,11 +291,103 @@ Queue depth is a **local counter** (`len(self._active_inference_requests)`), not
 
 ---
 
+## Running Models Larger Than Any Single Peer's VRAM
+
+Team Compute Pools solve load distribution (routing queries to the best single peer). A separate question is whether peers' GPUs can be **combined** to run a model too large for any one machine — e.g., a 70B model requiring 48 GB VRAM when the team's largest GPU is 24 GB.
+
+Two approaches are realistic at team scale.
+
+---
+
+### Path A — Transparent multi-GPU host (works today, zero protocol changes)
+
+A peer who owns multiple GPUs (or uses CPU/RAM offload) can run vLLM or llama.cpp with tensor parallelism **locally** and expose a standard OpenAI-compatible endpoint. DPC routes to this peer exactly like any other remote provider — no new protocol messages, no shard coordination.
+
+**Example setup on Anna's machine:**
+
+```
+Anna's workstation:
+  GPU 0: RTX 4090  24 GB  ─┐
+  GPU 1: RTX 3090  24 GB  ─┤─ vLLM (tensor_parallel_size=2) → /v1/completions
+  System RAM: 128 GB       ─┘  (llama.cpp can offload layers to RAM)
+```
+
+Anna configures her `providers.json`:
+
+```json
+{
+  "alias": "llama3_70b_tp2",
+  "type": "openai_compatible",
+  "model": "llama3:70b",
+  "base_url": "http://localhost:11434/v1",
+  "context_window": 128000
+}
+```
+
+Anna's firewall permits her team to request inference from this provider. When Bob selects "Team Alpha Pool" and the query requires `llama3:70b`, `ComputePoolManager.select_peer()` routes to Anna. Anna's vLLM handles the two-GPU split invisibly. Bob's experience is identical to any other remote inference request.
+
+**Why this is the preferred approach:**
+- No changes to DPC protocol, orchestrator, or firewall schema
+- vLLM and llama.cpp already implement battle-tested tensor and pipeline parallelism
+- Works today: Anna can set this up with the current v0.19.1 client
+- `COMPUTE_ADVERTISE` in Phase 2.3 will advertise `llama3:70b` as available once vLLM loads it, making pool selection seamless
+
+**Advertising multi-GPU capacity correctly:**
+
+When the `ComputePoolManager` reads `free_vram_gb` from a peer running vLLM across two GPUs, it should report the **combined** free VRAM. The advertiser (Anna's node) is responsible for summing across devices before broadcasting:
+
+```python
+# In ComputePoolManager._build_capability_ad()
+free_vram = sum(gpu.free_vram_gb for gpu in detected_gpus)  # 10.5 + 8.0 = 18.5 → rounded to 18.5
+```
+
+This is already consistent with how `device_context_collector.py` handles multi-GPU machines.
+
+---
+
+### Path B — Pipeline parallelism across separate peer machines (Phase 3, LAN only)
+
+When no single peer has sufficient VRAM — even with multiple GPUs — it becomes theoretically possible to split model layers across **different machines**. Peer A holds layers 0–34, Peer B holds layers 35–69; activations flow from A to B during each forward pass.
+
+**Why this is hard and deferred:**
+
+| Constraint | Detail |
+|------------|--------|
+| **Bandwidth** | Activations for a 70B forward pass are ~140 GB at fp16. A gigabit home connection (125 MB/s) makes per-layer transfer take minutes. |
+| **Latency** | Token generation is sequential — each token requires a full round-trip through all peers before the next token starts. 3 peers × 20ms network latency = 60ms overhead per token. |
+| **LAN requirement** | Only viable on 10 GbE or faster local networks. Attempting this over the internet produces worse throughput than running a smaller model locally. |
+| **Framework change** | Current `LLMManager` uses Ollama/OpenAI API — opaque, no layer-level control. Would require switching to direct vLLM or llama.cpp integration. |
+| **Protocol additions** | Needs a binary activation streaming protocol (tensors are not JSON-serialisable at this scale); new shard assignment in firewall rules. |
+
+**What would be required (tracked as a Phase 3 investigation):**
+
+1. `LLMManager` gains a `vllm_direct` provider type that talks to a co-located vLLM process via its Python API (not HTTP)
+2. New `DISTRIBUTED_INFERENCE_SHARD` protocol message with binary payload (msgpack or raw bytes, not JSON)
+3. `DistributedInferenceOrchestrator` coordinates the multi-peer forward pass and reassembles the response
+4. Firewall schema extension: `compute.shard_assignments` maps layer ranges to specific node IDs
+5. LAN detection guard: DPC refuses to initiate pipeline parallelism if any peer is reachable only over WAN
+6. `COMPUTE_ADVERTISE` extended with `shard_capable: bool` and `available_layer_budget: int`
+
+**Triggering condition for Phase 3 work:** A team member requests `llama3:70b` (or larger), no single peer in the pool has sufficient VRAM (including multi-GPU Path A), and at least two peers are on the same LAN segment.
+
+---
+
+### Decision matrix
+
+| Scenario | Approach | Status |
+|----------|----------|--------|
+| Anna has 2× RTX 4090 (48 GB total), runs vLLM | Path A — route to Anna via pool | Works today (v0.19.1) |
+| No peer has >24 GB, team wants 70B | Path A — Anna uses llama.cpp RAM offload | Works today with performance trade-off |
+| 3 peers on 10 GbE LAN, want to pool all VRAM | Path B — pipeline parallelism | Phase 3 investigation |
+| 3 peers on internet, want to pool all VRAM | Not viable | Network bandwidth is the hard limit |
+
+---
+
 ## Relationship to Dynamo/KVBM
 
-NVIDIA Dynamo's KV Block Manager targets datacenter-scale disaggregated prefill across hundreds of workers. DPC's team compute pools target 2–20 trusted peers. The scoring algorithm above (`capacity × 0.5 + vram × 0.3 + latency × 0.2`) covers the entire scheduling problem at this scale. No external scheduler is warranted.
+NVIDIA Dynamo's KV Block Manager targets datacenter-scale disaggregated prefill across hundreds of workers with NVLink/InfiniBand interconnects. DPC's team compute pools target 2–20 trusted peers over commodity networks. The scoring algorithm above (`capacity × 0.5 + vram × 0.3 + latency × 0.2`) covers the entire scheduling problem at this scale. No external scheduler is warranted.
 
-If a team member runs Dynamo + vLLM behind an OpenAI-compatible endpoint, DPC routes to it transparently via the existing provider system — no protocol changes needed.
+**Dynamo as a transparent backend (Path A variant):** If a team member runs a Dynamo + vLLM cluster behind an OpenAI-compatible endpoint, DPC routes to it exactly like any other provider — no protocol changes needed. The `COMPUTE_ADVERTISE` message will carry whatever models that cluster exposes. This makes DPC a natural front-end for teams that have access to shared datacenter resources alongside personal workstations.
 
 ---
 
