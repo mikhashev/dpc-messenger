@@ -1,7 +1,7 @@
 # DPC-Client Configuration Guide
 
-> **Version:** 0.19.1
-> **Last Updated:** 2026-03-02
+> **Version:** 0.20.0
+> **Last Updated:** 2026-03-22
 
 ## Overview
 

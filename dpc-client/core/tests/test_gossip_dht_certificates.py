@@ -17,16 +17,25 @@ from dpc_client_core.managers.gossip_manager import GossipManager
 from dpc_client_core.dht.routing import DHTNode
 
 
-def generate_test_certificate(node_id: str):
-    """Helper to generate valid test certificate."""
+def generate_test_certificate():
+    """Helper to generate valid test certificate with matching node_id.
+
+    Computes the node_id from the generated key so that gossip_manager's
+    fingerprint validation (Sprint 2 DHT cert spoofing fix) accepts the cert.
+    Returns (cert_pem, cert, private_key, node_id).
+    """
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography import x509
     from cryptography.x509.oid import NameOID
     from cryptography.hazmat.primitives import hashes, serialization
     from datetime import datetime, timedelta, timezone
+    from dpc_protocol.crypto import generate_node_id
 
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     public_key = private_key.public_key()
+
+    # Derive node_id from the key so the fingerprint check passes
+    node_id = generate_node_id(public_key)
 
     subject = issuer = x509.Name([
         x509.NameAttribute(NameOID.COMMON_NAME, node_id)
@@ -47,7 +56,7 @@ def generate_test_certificate(node_id: str):
     ).sign(private_key, hashes.SHA256())
 
     cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode('utf-8')
-    return cert_pem, cert, private_key
+    return cert_pem, cert, private_key, node_id
 
 
 @pytest.fixture
@@ -179,18 +188,18 @@ class TestCertificateQuerying:
     async def test_query_dht_for_certificate(self, gossip_manager, mock_dht_manager):
         """Test successful certificate retrieval from DHT."""
 
-        # Generate valid test certificate
-        cert_pem, cert_obj, private_key = generate_test_certificate("dpc-node-bob456")
+        # Generate valid test certificate with matching node_id
+        cert_pem, cert_obj, private_key, node_id = generate_test_certificate()
 
         # First DHT node returns the certificate
         mock_dht_manager.rpc_handler.find_value.return_value = {
             "value": cert_pem
         }
 
-        cert = await gossip_manager._query_dht_for_certificate("dpc-node-bob456")
+        cert = await gossip_manager._query_dht_for_certificate(node_id)
 
         # Should find k closest nodes
-        mock_dht_manager.find_node.assert_called_once_with("dpc-node-bob456")
+        mock_dht_manager.find_node.assert_called_once_with(node_id)
 
         # Should query DHT nodes
         mock_dht_manager.rpc_handler.find_value.assert_called()
@@ -271,17 +280,17 @@ class TestCertificateRetrievalFlow:
     async def test_get_certificate_falls_back_to_dht(self, gossip_manager, mock_dht_manager):
         """Test fallback to DHT when certificate not in cache."""
 
-        # Generate valid test certificate
-        cert_pem, cert_obj, private_key = generate_test_certificate("dpc-node-bob456")
+        # Generate valid test certificate with matching node_id
+        cert_pem, cert_obj, private_key, node_id = generate_test_certificate()
 
         mock_dht_manager.rpc_handler.find_value.return_value = {
             "value": cert_pem
         }
 
-        cert = await gossip_manager._get_peer_certificate("dpc-node-bob456")
+        cert = await gossip_manager._get_peer_certificate(node_id)
 
         # Should query DHT
-        mock_dht_manager.find_node.assert_called_once_with("dpc-node-bob456")
+        mock_dht_manager.find_node.assert_called_once_with(node_id)
 
         # Should return certificate from DHT
         assert cert is not None
@@ -317,15 +326,15 @@ class TestIntegration:
         stored_cert_pem = mock_dht_manager.rpc_handler.store.call_args_list[0][0][3]
 
         # Query for another node's certificate (simulating cross-node retrieval)
-        # Generate Bob's certificate
-        bob_cert_pem, bob_cert_obj, bob_private_key = generate_test_certificate("dpc-node-bob456")
+        # Generate Bob's certificate with matching node_id
+        bob_cert_pem, bob_cert_obj, bob_private_key, bob_node_id = generate_test_certificate()
 
         mock_dht_manager.rpc_handler.find_value.return_value = {
             "value": bob_cert_pem
         }
 
         # Query for Bob's certificate (will get from DHT)
-        cert = await gossip_manager._get_peer_certificate("dpc-node-bob456")
+        cert = await gossip_manager._get_peer_certificate(bob_node_id)
 
         # Should successfully retrieve certificate
         assert cert is not None
@@ -345,9 +354,13 @@ class TestIntegration:
         bob_private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         bob_public_key = bob_private_key.public_key()
 
-        # Create Bob's certificate
+        # Derive node_id from the key so the fingerprint check passes
+        from dpc_protocol.crypto import generate_node_id
+        bob_node_id = generate_node_id(bob_public_key)
+
+        # Create Bob's certificate using the derived node_id as CN
         subject = issuer = x509.Name([
-            x509.NameAttribute(NameOID.COMMON_NAME, "dpc-node-bob456")
+            x509.NameAttribute(NameOID.COMMON_NAME, bob_node_id)
         ])
         bob_cert = x509.CertificateBuilder().subject_name(
             subject
@@ -373,7 +386,7 @@ class TestIntegration:
         test_payload = {"command": "SEND_TEXT", "text": "Hello via DHT!"}
 
         # Retrieve Bob's cert from DHT
-        cert = await gossip_manager._get_peer_certificate("dpc-node-bob456")
+        cert = await gossip_manager._get_peer_certificate(bob_node_id)
         assert cert is not None
 
         # Encrypt payload (should work with DHT certificate)
