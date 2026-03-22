@@ -218,6 +218,8 @@ class UDPHolePunchStrategy(ConnectionStrategy):
                 sock.close()
                 raise ConnectionError(f"DTLS handshake failed: {e}")
 
+        except StrategyNotApplicableError:
+            raise
         except asyncio.TimeoutError:
             logger.warning(
                 "UDP hole punch timeout to %s (after %.1fs)",

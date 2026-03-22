@@ -16,6 +16,28 @@
       description: string;
       core_values: string[];
     };
+    preferences: {
+      communication_style?: string;
+      communication?: {
+        style?: string;
+        format?: string;
+        language?: string;
+        depth?: string;
+      };
+      learning?: {
+        visual_learner?: boolean;
+        preferred_methods?: string[];
+        math_background?: string;
+        learning_style?: string;
+      };
+      work_style?: {
+        deep_work_sessions?: boolean;
+        optimal_session_time?: string;
+        recognizes_stop_points?: string;
+        collaboration_preference?: string;
+      };
+      technical_interests?: string[];
+    } | null;
     knowledge: Record<string, Topic>;
     cognitive_profile: CognitiveProfile | null;
     version: number;
@@ -43,6 +65,12 @@
   type CognitiveProfile = {
     cultural_background: string;
     memory_strengths: string[];
+    memory_challenges: string[];
+    optimal_learning_times: Record<string, string>;
+    attention_span: Record<string, string>;
+    cultural_values: string[];
+    communication_norms: Record<string, string>;
+    bias_profile: string | null;
   };
 
   type CommitHistoryItem = {
@@ -238,6 +266,88 @@
             </div>
           </div>
 
+          {#if context.preferences}
+            <div class="section">
+              <h3>Preferences</h3>
+              <div class="info-grid">
+                {#if context.preferences.communication}
+                  {#if context.preferences.communication.style}
+                    <div class="info-item">
+                      <strong>Communication Style:</strong>
+                      <span>{context.preferences.communication.style}</span>
+                    </div>
+                  {/if}
+                  {#if context.preferences.communication.format}
+                    <div class="info-item">
+                      <strong>Format:</strong>
+                      <span>{context.preferences.communication.format}</span>
+                    </div>
+                  {/if}
+                  {#if context.preferences.communication.language}
+                    <div class="info-item">
+                      <strong>Language:</strong>
+                      <span>{context.preferences.communication.language}</span>
+                    </div>
+                  {/if}
+                  {#if context.preferences.communication.depth}
+                    <div class="info-item">
+                      <strong>Depth:</strong>
+                      <span>{context.preferences.communication.depth}</span>
+                    </div>
+                  {/if}
+                {/if}
+                {#if context.preferences.learning}
+                  {#if context.preferences.learning.learning_style}
+                    <div class="info-item">
+                      <strong>Learning Style:</strong>
+                      <span>{context.preferences.learning.learning_style}</span>
+                    </div>
+                  {/if}
+                  {#if context.preferences.learning.math_background}
+                    <div class="info-item">
+                      <strong>Math Background:</strong>
+                      <span>{context.preferences.learning.math_background}</span>
+                    </div>
+                  {/if}
+                  {#if context.preferences.learning.preferred_methods && context.preferences.learning.preferred_methods.length > 0}
+                    <div class="info-item">
+                      <strong>Preferred Learning Methods:</strong>
+                      <div class="tags">
+                        {#each context.preferences.learning.preferred_methods as method}
+                          <span class="tag">{method}</span>
+                        {/each}
+                      </div>
+                    </div>
+                  {/if}
+                {/if}
+                {#if context.preferences.work_style}
+                  {#if context.preferences.work_style.optimal_session_time}
+                    <div class="info-item">
+                      <strong>Optimal Session Time:</strong>
+                      <span>{context.preferences.work_style.optimal_session_time}</span>
+                    </div>
+                  {/if}
+                  {#if context.preferences.work_style.collaboration_preference}
+                    <div class="info-item">
+                      <strong>Collaboration Preference:</strong>
+                      <span>{context.preferences.work_style.collaboration_preference}</span>
+                    </div>
+                  {/if}
+                {/if}
+                {#if context.preferences.technical_interests && context.preferences.technical_interests.length > 0}
+                  <div class="info-item">
+                    <strong>Technical Interests:</strong>
+                    <div class="tags">
+                      {#each context.preferences.technical_interests as interest}
+                        <span class="tag">{interest}</span>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </div>
+            </div>
+          {/if}
+
           {#if context.cognitive_profile}
             <div class="section">
               <h3>Cognitive Profile</h3>
@@ -246,7 +356,17 @@
                   <strong>Cultural Background:</strong>
                   <span>{context.cognitive_profile.cultural_background || 'Not specified'}</span>
                 </div>
-                {#if context.cognitive_profile.memory_strengths.length > 0}
+                {#if context.cognitive_profile.cultural_values && context.cognitive_profile.cultural_values.length > 0}
+                  <div class="info-item">
+                    <strong>Cultural Values:</strong>
+                    <div class="tags">
+                      {#each context.cognitive_profile.cultural_values as value}
+                        <span class="tag">{value}</span>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+                {#if context.cognitive_profile.memory_strengths && context.cognitive_profile.memory_strengths.length > 0}
                   <div class="info-item">
                     <strong>Memory Strengths:</strong>
                     <div class="tags">
@@ -254,6 +374,22 @@
                         <span class="tag">{strength}</span>
                       {/each}
                     </div>
+                  </div>
+                {/if}
+                {#if context.cognitive_profile.memory_challenges && context.cognitive_profile.memory_challenges.length > 0}
+                  <div class="info-item">
+                    <strong>Memory Challenges:</strong>
+                    <div class="tags">
+                      {#each context.cognitive_profile.memory_challenges as challenge}
+                        <span class="tag">{challenge}</span>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+                {#if context.cognitive_profile.bias_profile}
+                  <div class="info-item">
+                    <strong>Bias Profile:</strong>
+                    <span>{context.cognitive_profile.bias_profile}</span>
                   </div>
                 {/if}
               </div>
@@ -486,6 +622,8 @@
   }
 
   .version-badge {
+    display: inline-block;
+    width: fit-content;
     background: #4caf50;
     color: white;
     padding: 0.25rem 0.75rem;

@@ -4,7 +4,7 @@ import json
 import logging
 from pathlib import Path
 from .crypto import DPC_HOME_DIR
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from typing import List, Dict, Any, Optional, Literal
 from datetime import datetime, timezone
 
@@ -104,7 +104,19 @@ class Profile:
 
 @dataclass
 class Preferences:
-    communication_style: str
+    communication_style: str = ""
+    # Extended fields written by agent/AI sessions
+    communication: Optional[Dict[str, Any]] = None
+    learning: Optional[Dict[str, Any]] = None
+    work_style: Optional[Dict[str, Any]] = None
+    technical_interests: Optional[List[str]] = None
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'Preferences':
+        """Construct Preferences tolerating unknown/extra fields."""
+        known = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)
 
 # --- Enhanced Data Structures (v2.0) ---
 
@@ -281,7 +293,7 @@ class PersonalContext:
             profile = Profile(name="[Restricted]", description="[Access denied by firewall]")
 
         preferences_data = data.get('preferences')
-        preferences = Preferences(**preferences_data) if preferences_data else None
+        preferences = Preferences.from_dict(preferences_data) if preferences_data else None
 
         # Load knowledge with v1/v2 compatibility
         knowledge_data = data.get('knowledge', {})
@@ -418,11 +430,24 @@ class PCMCore:
         Ensures the file exists before trying to load it.
         """
         self.ensure_context_file_exists()
-        
+
         with open(self.file_path, 'r', encoding='utf-8') as f:
             raw_data = json.load(f)
-        
-        return PersonalContext.from_dict(raw_data)
+
+        context = PersonalContext.from_dict(raw_data)
+
+        # Spot-check: last_commit_id must match the last entry in commit_history.
+        # A mismatch means the file was edited outside the commit system or partially corrupted.
+        if context.last_commit_id and context.commit_history:
+            last_history_id = context.commit_history[-1].get('commit_id')
+            if last_history_id and last_history_id != context.last_commit_id:
+                logger.warning(
+                    "personal.json HEAD mismatch: last_commit_id=%s but commit_history tail=%s — "
+                    "file may have been modified outside the commit system",
+                    context.last_commit_id, last_history_id
+                )
+
+        return context
 
     def save_context(self, context: PersonalContext):
         """Save context to file, updating metadata timestamps"""

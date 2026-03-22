@@ -46,6 +46,56 @@ class AuthorizationError(Exception):
     pass
 
 
+def compute_canonical_json(commit: 'KnowledgeCommit') -> str:
+    """Return the canonical JSON string that is the input to the commit hash.
+
+    This is the exact UTF-8 string fed to SHA256.  Storing it alongside the
+    commit (as ``canonical_json`` in the markdown frontmatter) allows any node
+    to independently re-derive the hash and confirm the commit was not tampered
+    with — even without peer certificates to verify RSA-PSS signatures.
+
+    Args:
+        commit: KnowledgeCommit object
+
+    Returns:
+        Compact, deterministic JSON string (sort_keys=True, no whitespace,
+        ensure_ascii=True) — identical across all platforms and Python versions.
+    """
+    hash_input = {
+        "parent": commit.parent_commit_id or "",
+        "timestamp": commit.timestamp,
+        "topic": commit.topic,
+        "summary": commit.summary,
+        "description": commit.description,
+
+        # Entries: sorted by content, volatile fields excluded
+        "entries": sorted([
+            {
+                "content": entry.content,
+                "tags": sorted(entry.tags),
+                "confidence": round(entry.confidence, 2),
+                "cultural_specific": entry.cultural_specific,
+                "alternative_viewpoints": sorted(entry.alternative_viewpoints or [])
+            }
+            for entry in commit.entries
+        ], key=lambda x: x["content"]),
+
+        # Consensus metadata: sorted for determinism
+        "participants": sorted(commit.participants),
+        "approved_by": sorted(commit.approved_by),
+        "rejected_by": sorted(commit.rejected_by),
+        "cultural_perspectives": sorted(commit.cultural_perspectives_considered),
+        "confidence": round(commit.confidence_score, 2)
+    }
+
+    return json.dumps(
+        hash_input,
+        sort_keys=True,
+        separators=(',', ':'),
+        ensure_ascii=True
+    )
+
+
 def compute_commit_hash(commit: 'KnowledgeCommit') -> str:
     """
     Compute deterministic SHA256 hash of commit content.
@@ -78,43 +128,7 @@ def compute_commit_hash(commit: 'KnowledgeCommit') -> str:
         - commit_id itself (circular dependency)
         - signatures (added after hash computation)
     """
-    # Build canonical hash input
-    hash_input = {
-        "parent": commit.parent_commit_id or "",
-        "timestamp": commit.timestamp,
-        "topic": commit.topic,
-        "summary": commit.summary,
-        "description": commit.description,
-
-        # Entries: sorted by content, exclude volatile fields
-        "entries": sorted([
-            {
-                "content": entry.content,
-                "tags": sorted(entry.tags),
-                "confidence": round(entry.confidence, 2),
-                "cultural_specific": entry.cultural_specific,
-                "alternative_viewpoints": sorted(entry.alternative_viewpoints or [])
-            }
-            for entry in commit.entries
-        ], key=lambda x: x["content"]),
-
-        # Consensus metadata: sorted for determinism
-        "participants": sorted(commit.participants),
-        "approved_by": sorted(commit.approved_by),
-        "rejected_by": sorted(commit.rejected_by),
-        "cultural_perspectives": sorted(commit.cultural_perspectives_considered),
-        "confidence": round(commit.confidence_score, 2)
-    }
-
-    # Canonical JSON: sorted keys, no whitespace
-    canonical_json = json.dumps(
-        hash_input,
-        sort_keys=True,
-        separators=(',', ':'),
-        ensure_ascii=True
-    )
-
-    # SHA256 hash
+    canonical_json = compute_canonical_json(commit)
     hash_bytes = hashlib.sha256(canonical_json.encode('utf-8'))
     return hash_bytes.hexdigest()
 
@@ -196,7 +210,7 @@ class CommitSigner:
         commit_hash: str,
         signature_b64: str,
         peers_dir: Optional[Path] = None
-    ) -> bool:
+    ) -> Optional[bool]:
         """
         Verify signature from a peer.
 
@@ -207,22 +221,37 @@ class CommitSigner:
             peers_dir: Directory containing peer certificates (default: ~/.dpc/peers)
 
         Returns:
-            True if signature is valid
+            True  — signature is cryptographically valid
+            False — signature is invalid (possible tampering)
+            None  — peer certificate not cached locally; cannot verify
         """
         if peers_dir is None:
             peers_dir = DPC_HOME_DIR / "peers"
 
-        # Load peer's public key from certificate
+        # Load peer's public key from certificate.
+        # For our own node_id the cert lives at ~/.dpc/node.crt (not in peers/).
         cert_path = peers_dir / f"{node_id}.crt"
 
         if not cert_path.exists():
-            # Try own certificate (for self-signed commits)
             own_cert_path = DPC_HOME_DIR / "node.crt"
             if own_cert_path.exists():
-                cert_path = own_cert_path
+                # Only use own cert when verifying our own node's signature.
+                # Using it for a *peer* would always fail (different key pair) and
+                # produce a misleading "invalid signature" result.
+                try:
+                    from dpc_protocol.crypto import load_identity
+                    own_node_id, _, _ = load_identity()
+                    if own_node_id == node_id:
+                        cert_path = own_cert_path
+                    else:
+                        logger.debug(f"Peer certificate not cached for {node_id} — cannot verify signature")
+                        return None
+                except Exception:
+                    logger.debug(f"Peer certificate not cached for {node_id} — cannot verify signature")
+                    return None
             else:
-                logger.error(f"Certificate not found for {node_id}")
-                return False
+                logger.debug(f"Certificate not found for {node_id}")
+                return None
 
         try:
             with open(cert_path, 'rb') as f:
@@ -386,11 +415,12 @@ def verify_markdown_integrity(
     Verify markdown file integrity.
 
     Performs comprehensive integrity checks:
-    1. Content hash matches actual markdown content
-    2. Commit ID in filename matches frontmatter
-    3. Recomputed commit hash matches stored commit_hash
-    4. All signatures are valid
-    5. Parent commit exists (chain integrity)
+    1. Content hash (16-char SHA256) matches actual markdown body
+    2. Commit ID in filename matches frontmatter commit_id
+    3. Recomputed commit_hash from canonical_json matches stored commit_hash
+       (flags unsigned_commit warning for pre-Sprint-5 commits without canonical_json)
+    4. All RSA-PSS signatures are valid against commit_hash
+    5. Parent commit file exists (chain integrity)
 
     Args:
         markdown_path: Path to markdown file
@@ -457,26 +487,77 @@ def verify_markdown_integrity(
                     'actual': commit_id_from_filename
                 })
 
-        # CHECK 3: Verify signatures (if present)
-        signatures = frontmatter.get('signatures', {})
+        # CHECK 3: Recompute commit_hash from canonical_json and compare to stored value.
+        # canonical_json (base64) was written at apply time — it is the exact bytes
+        # that were SHA256-hashed to produce commit_hash.  This check is independent of
+        # signatures: it works even when no peer certificates are available.
         commit_hash = frontmatter.get('commit_hash')
+        canonical_json_b64 = frontmatter.get('canonical_json', '')
+
+        if canonical_json_b64 and commit_hash:
+            try:
+                canonical_bytes = base64.b64decode(canonical_json_b64.encode('ascii'))
+                recomputed_hash = hashlib.sha256(canonical_bytes).hexdigest()
+                if recomputed_hash != commit_hash:
+                    result['valid'] = False
+                    result['commit_hash_valid'] = False
+                    result['warnings'].append({
+                        'file': markdown_path.name,
+                        'type': 'commit_hash_tampered',
+                        'severity': 'error',
+                        'message': 'commit_hash does not match canonical_json — content or hash was altered',
+                        'expected': recomputed_hash[:16],
+                        'actual': commit_hash[:16]
+                    })
+            except Exception as e:
+                result['warnings'].append({
+                    'file': markdown_path.name,
+                    'type': 'canonical_json_invalid',
+                    'severity': 'warning',
+                    'message': f'canonical_json field could not be decoded: {e}'
+                })
+        elif commit_hash and not canonical_json_b64:
+            # Commit predates canonical_json storage (pre-Sprint 5).
+            # Flag as unverifiable rather than silently passing.
+            result['warnings'].append({
+                'file': markdown_path.name,
+                'type': 'unsigned_commit',
+                'severity': 'warning',
+                'message': 'Commit has no canonical_json — hash cannot be independently verified '
+                           '(commit predates Sprint 5 or was created by an older client)'
+            })
+
+        # CHECK 4: Verify RSA-PSS signatures (when present).
+        # Signatures cover commit_hash — provides cryptographic multi-party attestation.
+        signatures = frontmatter.get('signatures', {})
 
         if signatures and commit_hash:
             for node_id, signature in signatures.items():
                 is_valid = CommitSigner.verify_signature(node_id, commit_hash, signature)
                 result['signatures_valid'][node_id] = is_valid
 
-                if not is_valid:
+                if is_valid is None:
+                    # Cert not cached — signature cannot be verified on this node.
+                    # This is NOT evidence of tampering; it just means the peer hasn't
+                    # connected directly to share its certificate yet.
+                    result['warnings'].append({
+                        'file': markdown_path.name,
+                        'type': 'signature_unverifiable',
+                        'severity': 'warning',
+                        'message': f'Peer certificate not cached for {node_id} — signature cannot be verified',
+                        'signer': node_id
+                    })
+                elif is_valid is False:
                     result['valid'] = False
                     result['warnings'].append({
                         'file': markdown_path.name,
                         'type': 'invalid_signature',
                         'severity': 'error',
-                        'message': f'Invalid signature from {node_id}',
+                        'message': f'Invalid signature from {node_id} — possible tampering',
                         'signer': node_id
                     })
 
-        # CHECK 4: Parent commit exists
+        # CHECK 5: Parent commit exists
         parent_commit_id = frontmatter.get('parent_commit')
         if parent_commit_id and parent_commit_id != "":
             parent_file_pattern = f"*_{parent_commit_id}.md"

@@ -668,7 +668,15 @@ class FileTransferManager:
 
         # Save file - use screenshots subdirectory for images
         subdir = "files/screenshots" if is_image else "files"
-        storage_path = self._get_peer_storage_path(node_id, subdir)
+
+        # v0.21.0: Store group files in group's conversation folder
+        if transfer.group_id:
+            # Group file: store in group's conversation folder
+            storage_path = self.storage_base_path / transfer.group_id / subdir
+            storage_path.mkdir(parents=True, exist_ok=True)
+        else:
+            # P2P file: store in peer's conversation folder
+            storage_path = self._get_peer_storage_path(node_id, subdir)
         # Use hash in filename to avoid collisions
         safe_filename = f"{transfer.filename.replace('/', '_')}"
         file_path = storage_path / safe_filename

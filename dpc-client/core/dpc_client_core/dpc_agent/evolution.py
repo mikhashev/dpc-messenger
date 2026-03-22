@@ -133,7 +133,7 @@ class EvolutionManager:
             auto_apply: If True, auto-apply changes; if False, require approval
         """
         self.agent = agent
-        self.agent_root = get_agent_root()
+        self.agent_root = agent.agent_root  # Use agent's agent_root instead of calling get_agent_root()
         self.enabled = enabled
         self.interval_minutes = interval_minutes
         self.auto_apply = auto_apply

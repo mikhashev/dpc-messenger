@@ -2,6 +2,53 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
+## [0.20.0] - 2026-03-22
+
+### MAJOR FEATURES
+
+#### Agent Progress Board
+- **Progress Board Panel** - New `AgentTaskBoard` UI panel showing all running and completed agent tasks in real time
+- **`get_task_board` tool** - Agent can query its own task board to inspect active/completed tasks
+- **Task result persistence** - Task results written to `task_results/` directory, restored on agent restart
+- **Unique task IDs** - Each message/event gets a unique `task_id` in `events.jsonl` to avoid duplication
+
+#### Agent Intelligence Improvements
+- **Collapsible Thought blocks** - Agent reasoning (thinking) surfaced as collapsible `<Thought>` sections in chat UI
+- **Conversation history in LLM context** - Agent now passes full conversation history into LLM prompts
+- **Agent history restore on restart** - Agent chat history reloaded from disk on service startup
+
+#### Telegram Integration Improvements
+- **Unified Telegram↔DPC chat** - Telegram and DPC conversations merged into a single thread with real-time UI sync
+- **Inline vote buttons** - Knowledge commit proposals show Approve/Reject inline buttons in Telegram
+- **Event filter checkboxes** - Users can filter which event types are forwarded to Telegram
+- **`/newsession` and `/endsession` commands** - Start/end conversation sessions from Telegram
+- **Conflict error prevention** - Prevents bot Conflict error when agent bridge shares token with main bot
+
+### SECURITY FIXES (Sprint 1 + Sprint 2)
+
+- **Token blacklist** (`token_blacklist.py`) — Refresh tokens now expire based on JWT `exp` claim, not a fixed 1-hour cleanup window; prevents token reuse after logout
+- **Whisper VRAM** (`service.py`) — Unloads other Whisper providers before loading a new model to prevent VRAM exhaustion and service crash
+- **Local API allowlist** (`local_api.py`) — Replaced unrestricted `getattr` dispatch with explicit ~90-command allowlist; rejects unknown commands
+- **Firewall deny-wins** (`firewall.py`) — Group rule evaluation now uses deny-wins semantics (any deny in group rules blocks access)
+- **Sandbox path traversal** (`firewall.py`) — Fixed `startswith` path check to require `/` separator, preventing adjacent-directory bypass
+- **P2P HELLO spoofing** (`p2p_manager.py`) — Challenge-response verification added to P2P handshake
+- **DHT cert spoofing** (`gossip_manager.py`, `relayed_connection.py`) — Self-certifying DHT certificate validation enforced
+
+### BUG FIXES
+
+- **Knowledge Layer 4 integrity** — Multiple integrity fixes for knowledge commit signing and verification
+- **Agent vote + context reset** — Agent resets context correctly after knowledge commit vote
+- **Preferences loader** — Fixed missing preferences and cognitive profile data in ContextViewer
+- **AttributeError in commit signing** — Fixed crash in knowledge commit proposal dialog
+- **Auto-close proposal dialog** — Dialog closes automatically after commit result
+- **Token counter** — Fixed token counter for agent chat paths (UI and Telegram)
+- **GLM thinking blocks** — Always extracts thinking blocks from GLM responses, not only on empty text
+- **Agent new session reset** — Fixed new session not clearing agent context correctly
+- **Agent Telegram routing** — Fixed Telegram→agent message routing
+- **Agent commit/infinite loop** — Fixed crash on commit proposal and potential inference loop
+- **`end_conversation_session`** — Uses empty monitor for agent chats to prevent monitor contamination
+- **`parse_markdown_with_frontmatter`** — Fixed call signature in knowledge CHECK 3
+
 ## [0.19.0] - 2026-02-26
 
 ### MAJOR FEATURES

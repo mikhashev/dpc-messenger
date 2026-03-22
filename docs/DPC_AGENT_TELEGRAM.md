@@ -1,93 +1,169 @@
 # DPC Agent Telegram Integration
 
-Two-way communication between the DPC Agent and users via Telegram.
+## ⚠️ DEPRECATION NOTICE
 
-## Overview
+**The `[dpc_agent_telegram]` system is DEPRECATED as of v0.15.0 and will be REMOVED in v0.20.0.**
 
-The Agent Telegram integration enables:
+### What's Deprecated?
 
-1. **Event Notifications** - Receive real-time notifications about agent activity
-2. **Two-way Messaging** - Send messages to the agent and receive responses
-3. **Agent-initiated Communication** - Agent can proactively send messages to users
+The **old system** using `[dpc_agent_telegram]` config section in `~/.dpc/config.ini`:
+- ❌ Separate bot just for agent events
+- ❌ One bridge for ALL agents
+- ❌ Requires managing two Telegram bots
+- ❌ Global configuration for all agents
 
-## Architecture
+### What's New?
+
+The **new system** using **per-agent Telegram linking**:
+- ✅ Uses main `[telegram]` bot (same bot for P2P + agents)
+- ✅ Per-agent configuration in `agent's config.json`
+- ✅ Each agent can have separate Telegram chat
+- ✅ Simpler: one bot instead of two
+- ✅ Granular control: enable/disable per agent
+
+### Migration Timeline
+
+- **v0.15.0** (current): Deprecation warning added
+- **v0.20.0** (future): Old system will be **REMOVED**
+
+---
+
+## Quick Migration Guide
+
+### Before (Old System - DEPRECATED)
+
+```ini
+# ~/.dpc/config.ini
+[dpc_agent_telegram]
+enabled = true
+bot_token = YOUR_BOT_TOKEN_HERE
+allowed_chat_ids = ["123456789"]
+event_filter = task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message
+```
+
+### After (New System - RECOMMENDED)
+
+**Step 1:** Ensure main Telegram bot is configured in `~/.dpc/config.ini`:
+```ini
+[telegram]
+enabled = true
+bot_token = YOUR_BOT_TOKEN_HERE
+allowed_chat_ids = ["123456789", "987654321"]
+```
+
+**Step 2:** Link each agent individually in its `config.json`:
+```json
+// ~/.dpc/agents/default/config.json
+{
+  "agent_id": "default",
+  "name": "Default Agent",
+  "telegram_enabled": true,
+  "telegram_chat_id": "123456789",
+  "telegram_linked_at": "2026-03-06T18:30:00.000000+00:00"
+}
+```
+
+**Step 3:** Remove old `[dpc_agent_telegram]` section from `~/.dpc/config.ini`
+
+---
+
+## Per-Agent Telegram Linking (Current System)
+
+### Overview
+
+Each agent can be individually linked to Telegram for **two-way messaging**:
+
+### Features
+
+1. **Two-Way Messaging** - Send messages to agent and receive responses
+2. **Voice Messages** - Send voice messages, agent transcribes and responds
+3. **Agent-Initiated Messages** - Agent can proactively send you messages
+4. **Per-Agent Control** - Each agent has independent Telegram configuration
+
+### Architecture
 
 ```
-┌─────────────────┐      Events       ┌───────────────────┐      API       ┌──────────┐
-│   DPC Agent     │ ─────────────────>│ AgentTelegramBridge│ ─────────────>│ Telegram │
-│                 │                    │                   │               │   API    │
-│  (tools, tasks) │ <───────────────── │                   │ <─────────────│          │
-└─────────────────┘     Messages       └───────────────────┘    Messages   └──────────┘
-        │                                      ▲
-        │                                      │
-        ▼                                      │
-┌─────────────────┐                            │
-│ AgentEventEmitter│ ──────────────────────────┘
-│   (singleton)   │        Event subscription
-└─────────────────┘
+┌─────────────┐                 ┌──────────────┐              ┌──────────┐
+│  Agent A    │ ←Telegram Chat→ │              │  Main Bot   │          │
+│  (default)  │     ID: 123     │   Telegram   │ ←←←←←←←←←→ │ Telegram │
+└─────────────┘                 │   Manager    │              │   API    │
+                                │              │              └──────────┘
+┌─────────────┐                 │              |
+│  Agent B    │ ←Telegram Chat→ │              |
+│  (agent_X)  │     ID: 456     │              |
+└─────────────┘                 └──────────────┘
 ```
 
-### Components
+### Configuration
 
-- **`AgentTelegramBridge`** - Manages Telegram bot connection and message routing
-- **`AgentEventEmitter`** - Global event emitter for agent lifecycle events
-- **`EventType.AGENT_MESSAGE`** - Event type for agent-initiated messages
-- **`send_user_message` tool** - Agent tool for sending Telegram messages
+#### Step 1: Configure Main Telegram Bot
 
-## Configuration
+Edit `~/.dpc/config.ini`:
 
-### Step 1: Create a Telegram Bot
+```ini
+[telegram]
+enabled = true
+bot_token = YOUR_BOT_TOKEN_HERE
+allowed_chat_ids = ["123456789", "987654321"]
+transcription_enabled = true
+```
 
-1. Open Telegram and search for **@BotFather**
-2. Send `/newbot` and follow the prompts
-3. Save the **bot token** (looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`)
+**This is the SAME bot used for:**
+- P2P messaging with contacts
+- Agent chat linking
+- Voice message transcription
 
-### Step 2: Get Your Chat ID
+#### Step 2: Get Your Chat ID
 
 1. Open Telegram and search for **@userinfobot**
 2. Send any message
 3. Save your **chat ID** (a number like `123456789`)
 
-### Step 3: Configure DPC
+#### Step 3: Link Agent to Telegram
 
-Edit `~/.dpc/config.ini`:
+**Option A: Via UI (Recommended)**
 
-```ini
-[dpc_agent_telegram]
-enabled = true
-bot_token = 123456789:ABCdefGHIjklMNOpqrsTUVwxyz
-allowed_chat_ids = ["123456789"]
-event_filter = task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message
-transcription_enabled = true
+1. Open DPC Messenger UI
+2. Click on the agent in the sidebar
+3. Click "Link Telegram" button
+4. Select your chat ID from the list
+5. Confirm linking
+
+**Option B: Manually Edit Config**
+
+Edit the agent's `config.json`:
+
+```json
+{
+  "agent_id": "default",
+  "name": "Default Agent",
+  "provider_alias": "dpc_agent",
+  "profile_name": "default",
+  "instruction_set_name": "general",
+  "telegram_enabled": true,
+  "telegram_chat_id": "123456789",
+  "telegram_linked_at": "2026-03-06T18:30:00.000000+00:00"
+}
+```
+
+#### Step 4: Restart Service
+
+```bash
+cd dpc-client/core
+poetry run python run_service.py
 ```
 
 ### Configuration Options
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `enabled` | bool | `false` | Enable/disable Telegram integration |
-| `bot_token` | string | "" | Telegram bot token from @BotFather |
-| `allowed_chat_ids` | JSON array | `[]` | List of chat IDs to receive notifications |
-| `event_filter` | comma-separated | (see below) | Event types to forward |
-| `transcription_enabled` | bool | `true` | Enable voice message transcription |
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `telegram_enabled` | bool | Yes | Enable Telegram linking for this agent |
+| `telegram_chat_id` | string | Yes | Your Telegram chat ID (number) |
+| `telegram_linked_at` | string | Yes | ISO timestamp of when linking was created |
 
-### Default Event Filter
+### Using the Telegram Bot
 
-```
-task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message
-```
-
-## Using the Telegram Bot
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `/start` | Initialize the bot and show welcome message |
-| `/help` | Show available commands and usage tips |
-| `/status` | Check agent status (running, queue, etc.) |
-
-### Sending Messages to Agent
+#### Sending Messages to Agent
 
 Simply send any text message to the bot. The agent will process it and respond.
 
@@ -97,7 +173,7 @@ Simply send any text message to the bot. The agent will process it and respond.
 - "What files are in the memory directory?"
 - "Schedule a task to review code in 5 minutes"
 
-### Voice Messages
+#### Voice Messages
 
 The bot supports voice messages with automatic transcription:
 
@@ -107,40 +183,19 @@ The bot supports voice messages with automatic transcription:
 4. The transcribed text is processed by the agent
 5. You receive both the transcription and the agent's response
 
-**Requirements:**
-- `transcription_enabled = true` in config (enabled by default)
-- Whisper provider configured in DPC (same as voice message transcription for P2P)
-
 **Example flow:**
 ```
 User: [Voice message: "Check the status of my git repository"]
 Bot: 📝 Transcription: Check the status of my git repository
 Bot: I'll check your git repository status...
-      [Agent response with git status information]
+     [Agent response with git status information]
 ```
 
 ### Agent-Initiated Messages
 
-The agent can proactively send messages using the `send_user_message` tool. Messages include a priority level with visual indicators:
+The agent can proactively send messages using the `send_user_message` tool.
 
-| Priority | Emoji | Use Case |
-|----------|-------|----------|
-| `urgent` | 🔴 | Critical notifications |
-| `high` | 🟠 | Important updates |
-| `normal` | 🟡 | Standard messages |
-| `low` | 🟢 | Informational messages |
-
-## Tool Reference
-
-### `send_user_message`
-
-The agent uses this tool to send Telegram messages to users.
-
-**Parameters:**
-- `message` (string, required) - The message to send (Markdown supported)
-- `priority` (string, optional) - One of: `urgent`, `high`, `normal`, `low`
-
-**Example Agent Usage:**
+**Example:**
 ```python
 # Agent can use this tool to send messages
 await send_user_message(
@@ -149,70 +204,95 @@ await send_user_message(
 )
 ```
 
-## Event Types
+**Priority levels:**
+| Priority | Emoji | Use Case |
+|----------|-------|----------|
+| `urgent` | 🔴 | Critical notifications |
+| `high` | 🟠 | Important updates |
+| `normal` | 🟡 | Standard messages |
+| `low` | 🟢 | Informational messages |
 
-The bridge forwards these event types by default:
+### Troubleshooting
 
-| Event | Description |
-|-------|-------------|
-| `task_completed` | A task finished successfully |
-| `task_failed` | A task failed with an error |
-| `evolution_cycle_completed` | Agent self-improvement cycle finished |
-| `code_modified` | Agent modified code in its sandbox |
-| `agent_message` | Agent-initiated message to user |
+#### Bot Not Responding
 
-Additional events available for filtering:
-- `agent_started`, `agent_stopped`
-- `task_scheduled`, `task_started`
-- `thought_started`, `thought_completed`
-- `tool_executed`
-- `budget_warning`, `rate_limit_hit`
-
-## Rate Limiting
-
-The bridge includes built-in rate limiting to prevent spam:
-
-- **Max events per minute**: 20 (configurable)
-- **Cooldown between same-type events**: 3 seconds (configurable)
-
-## Troubleshooting
-
-### Bot Not Responding
-
-1. Check that `enabled = true` in config
+1. Check that main `[telegram]` section has `enabled = true`
 2. Verify `bot_token` is correct
 3. Ensure your `chat_id` is in `allowed_chat_ids`
-4. Check the service logs for errors
+4. Check agent's config has `telegram_enabled = true`
+5. Check service logs for errors
 
-### Messages Not Received
+#### Agent Not Responding to Messages
 
-1. Start a conversation with the bot first (send `/start`)
-2. Check that the event type is in `event_filter`
-3. Verify rate limiting isn't blocking messages
+1. Verify agent is running and not at budget limit
+2. Check agent's `telegram_chat_id` matches your chat ID
+3. Ensure agent has access to necessary tools
+4. Check firewall rules in `~/.dpc/privacy_rules.json`
 
-### Agent Messages Not Sending
+#### Voice Transcription Not Working
 
-1. Ensure `agent_message` is in `event_filter`
-2. Verify the agent has access to the `send_user_message` tool
-3. Check firewall rules in `~/.dpc/privacy_rules.json`
-
-### Voice Transcription Not Working
-
-1. Check that `transcription_enabled = true` in config
+1. Check that `transcription_enabled = true` in `[telegram]` section
 2. Ensure a Whisper provider is configured in `~/.dpc/providers.json`
 3. Verify the voice provider alias is set in providers config
 4. Check service logs for transcription errors
-5. Ensure the voice file was downloaded (check `~/.dpc/agent/voice/`)
 
-## Security Notes
+### Security Notes
 
-- The Telegram bot is **separate** from the main DPC Telegram integration
-- Only chat IDs in `allowed_chat_ids` can interact with the bot
+- Uses main DPC Telegram bot (same bot for P2P + agents)
+- Only chat IDs in `allowed_chat_ids` can interact with agents
+- Each agent must have explicit `telegram_enabled = true`
+- Agent can only send to its linked `telegram_chat_id`
 - Messages are sent over Telegram's encrypted connection
-- The bot token should be kept secret
+
+### Advanced: Multiple Agents
+
+You can link multiple agents to different Telegram chats:
+
+**Agent 1 (Default Agent):**
+```json
+// ~/.dpc/agents/default/config.json
+{
+  "telegram_enabled": true,
+  "telegram_chat_id": "123456789",
+  "telegram_linked_at": "2026-03-06T18:30:00.000000+00:00"
+}
+```
+
+**Agent 2 (Code Review Agent):**
+```json
+// ~/.dpc/agents/agent_code_review/config.json
+{
+  "telegram_enabled": true,
+  "telegram_chat_id": "987654321",
+  "telegram_linked_at": "2026-03-06T18:35:00.000000+00:00"
+}
+```
+
+**Main Telegram Config:**
+```ini
+[telegram]
+allowed_chat_ids = ["123456789", "987654321"]
+```
+
+Now each agent responds to messages from its linked Telegram chat!
+
+### Comparison: Old vs New System
+
+| Feature | Old System | New System |
+|---------|-----------|-----------|
+| **Config location** | `config.ini` (global) | `agents/{id}/config.json` (per-agent) |
+| **Bot** | Separate bot | Main bot (shared with P2P) |
+| **Scope** | All agents | Per-agent |
+| **Granularity** | Global on/off | Per-agent on/off |
+| **Two-way messaging** | ✅ Yes | ✅ Yes |
+| **Voice messages** | ✅ Yes | ✅ Yes |
+| **Agent-initiated messages** | ✅ Yes | ✅ Yes |
+| **Multiple chats** | ❌ One for all agents | ✅ Each agent can have own chat |
+| **Status** | ⚠️ Deprecated | ✅ Recommended |
 
 ## Related Documentation
 
 - [DPC Agent Guide](DPC_AGENT_GUIDE.md) - General agent usage
+- [Telegram Setup Guide](TELEGRAM_SETUP.md) - Main Telegram bot configuration
 - [Configuration](CONFIGURATION.md) - Full configuration reference
 - [CLAUDE.md](../CLAUDE.md) - Project development guide

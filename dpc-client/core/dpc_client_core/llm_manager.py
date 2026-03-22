@@ -638,9 +638,8 @@ class ZaiProvider(AIProvider):
         self._last_thinking: Optional[str] = None
 
     def supports_vision(self) -> bool:
-        """GLM vision models: models with 'v' suffix (glm-4.6v-flash, glm-4.5v, glm-4.0v)"""
-        vision_models = ["glm-4.6v", "glm-4.5v", "glm-4.0v", "glm-4v"]
-        return any(vm in self.model.lower() for vm in vision_models)
+        """All GLM models support vision via Z.AI's Anthropic-compatible endpoint."""
+        return True
 
     def supports_thinking(self) -> bool:
         """All GLM models support extended thinking."""
@@ -774,6 +773,9 @@ class ZaiProvider(AIProvider):
 
             # Note: Do NOT add stream=True - messages.stream() is already a streaming method
 
+            # Reset thinking at the start of each call (prevent stale values)
+            self._last_thinking = None
+
             # Stream response
             full_text = ""
             thinking_text = ""
@@ -785,24 +787,20 @@ class ZaiProvider(AIProvider):
                     if on_chunk:
                         await on_chunk(text, conversation_id)
 
-                # After streaming, check for thinking blocks in final message
-                # This handles the case where LLM produces only thinking, no text
-                if self.thinking_enabled and not full_text:
+                # After streaming, always check final message for thinking blocks.
+                # text_stream only yields text tokens; thinking blocks are separate
+                # and must be read from the final message.
+                if self.thinking_enabled:
                     try:
                         final_message = await stream.get_final_message()
                         for block in final_message.content:
                             if hasattr(block, 'type') and block.type == "thinking":
                                 thinking_text = getattr(block, 'thinking', "")
                                 if thinking_text:
-                                    logger.info(f"GLM streaming thinking (no text): {len(thinking_text)} chars")
                                     self._last_thinking = thinking_text
+                                    logger.info(f"GLM streaming thinking: {len(thinking_text)} chars")
                     except Exception as e:
                         logger.debug(f"Could not get final message for thinking: {e}")
-
-            # Store thinking for retrieval if available
-            if thinking_text:
-                self._last_thinking = thinking_text
-                logger.info(f"GLM streaming thinking: {len(thinking_text)} chars")
 
             # If no text produced but thinking was done, return a summary
             if not full_text and thinking_text:
@@ -816,6 +814,12 @@ class ZaiProvider(AIProvider):
             logger.info(f"GLM streaming completed: {len(full_text)} chars")
             return full_text
 
+        except RuntimeError as e:
+            # Handle "Event loop is closed" during shutdown gracefully
+            if "Event loop is closed" in str(e):
+                logger.debug(f"Z.AI streaming cleanup skipped (event loop closed)")
+                return full_text  # Return what we have
+            raise
         except Exception as e:
             logger.error(f"Z.AI streaming failed: {e}", exc_info=True)
             raise RuntimeError(f"Z.AI streaming provider '{self.alias}' failed: {e}") from e
@@ -1649,8 +1653,9 @@ class DpcAgentProvider(AIProvider):
         # Set model name for token counting (uses underlying provider's model)
         self.model = "dpc_agent"  # Identifier for token counting
 
-        # Agent manager (lazy initialization)
-        self._manager = None
+        # Agent managers (per-agent architecture)
+        self._manager = None  # DEPRECATED: Single manager (backwards compatibility)
+        self._managers: Dict[str, "DpcAgentManager"] = {}  # NEW: Multiple managers (one per agent)
         self._service = None  # Injected by LLMManager during initialization
 
         logger.info(f"DpcAgentProvider '{alias}' initialized (tools={len(self.enabled_tools)}, "
@@ -1666,9 +1671,53 @@ class DpcAgentProvider(AIProvider):
         self._service = service
         logger.debug(f"DpcAgentProvider '{self.alias}': CoreService injected")
 
-    async def _ensure_manager(self) -> "DpcAgentManager":
+    def get_manager(self, agent_id: str) -> "DpcAgentManager":
+        """
+        Get or create a manager for a specific agent.
+
+        Args:
+            agent_id: The agent ID to get/create manager for
+
+        Returns:
+            DpcAgentManager instance for the specified agent
+
+        Raises:
+            RuntimeError: If CoreService not injected
+        """
+        # Check if manager already exists for this agent
+        if agent_id in self._managers:
+            return self._managers[agent_id]
+
+        # Validate service reference
+        if self._service is None:
+            raise RuntimeError(
+                f"DpcAgentProvider '{self.alias}' requires CoreService reference. "
+                "Ensure the provider is properly initialized by CoreService."
+            )
+
+        # Import here to avoid circular imports
+        from dpc_client_core.managers.agent_manager import DpcAgentManager
+
+        # Create new manager for this agent
+        logger.debug(f"DpcAgentProvider '{self.alias}': Creating new manager for agent '{agent_id}'")
+        manager = DpcAgentManager(self._service, {
+            "tools": self.enabled_tools,
+            "background_consciousness": self.background_consciousness,
+            "budget_usd": self.budget_usd,
+            "max_rounds": self.max_rounds,
+        }, agent_id=agent_id)  # Pass agent_id for per-agent configuration
+
+        # Cache for reuse
+        self._managers[agent_id] = manager
+        logger.info(f"DpcAgentProvider '{self.alias}': Created manager for agent '{agent_id}'")
+        return manager
+
+    async def _ensure_manager(self, agent_id: Optional[str] = None) -> "DpcAgentManager":
         """
         Ensure the agent manager is initialized.
+
+        Args:
+            agent_id: Optional specific agent ID to load (for per-agent managers)
 
         Returns:
             DpcAgentManager instance
@@ -1676,6 +1725,16 @@ class DpcAgentProvider(AIProvider):
         Raises:
             RuntimeError: If CoreService not injected or initialization fails
         """
+        # NEW: If agent_id provided, use per-agent manager
+        if agent_id:
+            manager = self.get_manager(agent_id)
+            # Ensure the manager is started (lazy initialization)
+            if manager._agent is None:
+                await manager.start()
+                logger.info(f"DpcAgentProvider '{self.alias}': Per-agent manager started for '{agent_id}'")
+            return manager
+
+        # FALLBACK: Use legacy single manager for backwards compatibility
         if self._manager is not None:
             return self._manager
 
@@ -1695,21 +1754,22 @@ class DpcAgentProvider(AIProvider):
             "background_consciousness": self.background_consciousness,
             "budget_usd": self.budget_usd,
             "max_rounds": self.max_rounds,
-        })
+        }, agent_id=None)  # No agent_id for singleton manager
 
         # Start the agent
         await self._manager.start()
-        logger.info(f"DpcAgentProvider '{self.alias}': Agent manager started")
+        logger.info(f"DpcAgentProvider '{self.alias}': Agent manager started (singleton mode)")
 
         return self._manager
 
-    async def generate_response(self, prompt: str, conversation_id: str = None, **kwargs) -> str:
+    async def generate_response(self, prompt: str, conversation_id: str = None, agent_llm_provider: str = None, **kwargs) -> str:
         """
         Process a message through the autonomous agent.
 
         Args:
             prompt: User message text
             conversation_id: Optional conversation ID for progress tracking
+            agent_llm_provider: Optional underlying LLM provider for this agent (Phase 3)
             **kwargs: Additional arguments (ignored)
 
         Returns:
@@ -1719,7 +1779,14 @@ class DpcAgentProvider(AIProvider):
             RuntimeError: If agent processing fails
         """
         try:
-            manager = await self._ensure_manager()
+            # NEW: Extract agent_id from conversation_id for per-agent manager selection
+            agent_id = None
+            if conversation_id and conversation_id.startswith("agent_"):
+                agent_id = conversation_id
+                logger.debug(f"DpcAgentProvider '{self.alias}': Extracted agent_id '{agent_id}' from conversation_id")
+
+            # NEW: Pass agent_id to _ensure_manager for per-agent manager selection
+            manager = await self._ensure_manager(agent_id=agent_id)
 
             # Use provided conversation_id or generate one
             if not conversation_id:
@@ -1731,6 +1798,7 @@ class DpcAgentProvider(AIProvider):
                 message=prompt,
                 conversation_id=conversation_id,
                 include_context=True,
+                agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
             )
 
             logger.info(f"DpcAgentProvider '{self.alias}': Generated response ({len(response)} chars)")
@@ -1745,6 +1813,7 @@ class DpcAgentProvider(AIProvider):
         prompt: str,
         on_chunk: callable,
         conversation_id: str = None,
+        agent_llm_provider: str = None,
         **kwargs
     ) -> str:
         """
@@ -1754,13 +1823,21 @@ class DpcAgentProvider(AIProvider):
             prompt: User message text
             on_chunk: Async callback for each text chunk: await on_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for progress tracking
+            agent_llm_provider: Optional underlying LLM provider for this agent (Phase 3)
             **kwargs: Additional arguments (ignored)
 
         Returns:
             Agent's response text (accumulated from all chunks)
         """
         try:
-            manager = await self._ensure_manager()
+            # NEW: Extract agent_id from conversation_id for per-agent manager selection
+            agent_id = None
+            if conversation_id and conversation_id.startswith("agent_"):
+                agent_id = conversation_id
+                logger.debug(f"DpcAgentProvider '{self.alias}': Extracted agent_id '{agent_id}' from conversation_id (streaming)")
+
+            # NEW: Pass agent_id to _ensure_manager for per-agent manager selection
+            manager = await self._ensure_manager(agent_id=agent_id)
 
             # Use provided conversation_id or generate one
             if not conversation_id:
@@ -1774,6 +1851,7 @@ class DpcAgentProvider(AIProvider):
                 conversation_id=conversation_id,
                 include_context=True,
                 on_stream_chunk=None,  # Manager handles broadcast directly
+                agent_llm_provider=agent_llm_provider,  # Phase 3: per-agent provider selection
             )
 
             logger.info(f"DpcAgentProvider '{self.alias}': Generated streaming response ({len(response)} chars)")

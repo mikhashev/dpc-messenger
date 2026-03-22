@@ -7,8 +7,10 @@ For production at scale, consider using Redis for distributed blacklist.
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Set, Dict
+
+from jose import jwt as jose_jwt, JWTError
 
 logger = logging.getLogger(__name__)
 
@@ -71,19 +73,24 @@ class TokenBlacklist:
                 logger.error(f"Error in blacklist cleanup: {e}")
     
     async def _cleanup_expired(self):
-        """Remove tokens that have been blacklisted for more than 1 hour"""
+        """Remove tokens whose JWT expiry has passed (not just 1h since blacklisting)."""
         now = datetime.now(timezone.utc)
-        expired_threshold = now - timedelta(hours=1)
-        
-        expired_tokens = [
-            token for token, timestamp in self._blacklist_timestamps.items()
-            if timestamp < expired_threshold
-        ]
-        
+        expired_tokens = []
+
+        for token in list(self._blacklist):
+            try:
+                claims = jose_jwt.get_unverified_claims(token)
+                exp = claims.get("exp")
+                if exp and datetime.fromtimestamp(exp, tz=timezone.utc) < now:
+                    expired_tokens.append(token)
+            except JWTError:
+                # Malformed token — safe to remove
+                expired_tokens.append(token)
+
         for token in expired_tokens:
             self._blacklist.discard(token)
-            del self._blacklist_timestamps[token]
-        
+            self._blacklist_timestamps.pop(token, None)
+
         if expired_tokens:
             logger.info(f"Cleaned up {len(expired_tokens)} expired tokens from blacklist")
     

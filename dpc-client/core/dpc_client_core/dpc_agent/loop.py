@@ -215,7 +215,9 @@ async def run_llm_loop(
         "tool_calls": [],
     }
     accumulated_usage: Dict[str, Any] = {
-        "prompt_tokens": 0,
+        "prompt_tokens": 0,        # cumulative across all rounds (for cost/billing)
+        "first_prompt_tokens": 0,  # round-1 only — baseline context before tool results inflate it
+        "last_prompt_tokens": 0,   # last round only — peak context size during this response
         "completion_tokens": 0,
         "total_tokens": 0,
         "cost": 0.0,
@@ -224,6 +226,12 @@ async def run_llm_loop(
 
     # Get tool schemas (use firewall whitelist, not just core tools)
     tool_schemas = tools.schemas(core_only=False, include_restricted=False)
+
+    # Deduplication: track (tool_name, args_hash) → call count.
+    # If the same call is repeated MAX_DUPLICATE_CALLS times without new information,
+    # break the loop to prevent infinite repetition.
+    MAX_DUPLICATE_CALLS = 5
+    _tool_call_counts: Dict[str, int] = {}
 
     round_idx = 0
     try:
@@ -259,11 +267,18 @@ async def run_llm_loop(
                     on_stream_chunk=on_stream_chunk,
                     conversation_id=conversation_id,
                 )
-                accumulated_usage["prompt_tokens"] += usage.get("prompt_tokens", 0)
+                round_prompt_tokens = usage.get("prompt_tokens", 0)
+                accumulated_usage["prompt_tokens"] += round_prompt_tokens
+                if accumulated_usage["rounds"] == 0:  # first round, before increment
+                    accumulated_usage["first_prompt_tokens"] = round_prompt_tokens
+                accumulated_usage["last_prompt_tokens"] = round_prompt_tokens  # replace — tracks peak context
                 accumulated_usage["completion_tokens"] += usage.get("completion_tokens", 0)
                 accumulated_usage["total_tokens"] += usage.get("total_tokens", 0)
                 accumulated_usage["cost"] += usage.get("cost", 0)
                 accumulated_usage["rounds"] += 1
+                # Carry forward thinking from each round (last non-empty thinking wins)
+                if msg.get("thinking"):
+                    accumulated_usage["thinking"] = msg["thinking"]
             except Exception as e:
                 log.error(f"LLM error: {e}", exc_info=True)
                 return f"⚠️ LLM error: {e}", accumulated_usage, llm_trace
@@ -293,6 +308,51 @@ async def run_llm_loop(
             if content and content.strip():
                 emit_progress(content.strip(), None, round_idx)
                 llm_trace["assistant_notes"].append(content.strip()[:320])
+
+            # Check for duplicate tool calls before executing.
+            # If the same (tool, args) fingerprint has appeared MAX_DUPLICATE_CALLS
+            # times the model is stuck in a loop — inject a stop signal.
+            stuck_tools = []
+            for tc in tool_calls:
+                try:
+                    raw_args = tc["function"].get("arguments", {})
+                    args_key = json.dumps(raw_args, sort_keys=True) if isinstance(raw_args, dict) else str(raw_args)
+                    fingerprint = f"{tc['function']['name']}::{args_key}"
+                    _tool_call_counts[fingerprint] = _tool_call_counts.get(fingerprint, 0) + 1
+                    if _tool_call_counts[fingerprint] >= MAX_DUPLICATE_CALLS:
+                        stuck_tools.append(tc["function"]["name"])
+                except Exception:
+                    pass
+
+            if stuck_tools:
+                dedup_names = ", ".join(sorted(set(stuck_tools)))
+                log.warning(
+                    "Duplicate tool call limit reached for: %s — injecting stop signal", dedup_names
+                )
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[LOOP_GUARD] You have called the following tool(s) with identical arguments "
+                        f"{MAX_DUPLICATE_CALLS} or more times without new information: {dedup_names}. "
+                        "Stop repeating these calls. Summarise what you know so far and give your final answer now."
+                    )
+                })
+                try:
+                    final_msg, _ = await llm.chat(
+                        messages,
+                        tools=None,
+                        on_stream_chunk=on_stream_chunk,
+                        conversation_id=conversation_id,
+                    )
+                    if final_msg and final_msg.get("content"):
+                        return final_msg["content"], accumulated_usage, llm_trace
+                except Exception:
+                    log.warning("Failed to get response after loop guard", exc_info=True)
+                return (
+                    f"⚠️ Agent loop stopped: repeated calls to {dedup_names} without progress.",
+                    accumulated_usage,
+                    llm_trace,
+                )
 
             # Execute tool calls
             for tc in tool_calls:

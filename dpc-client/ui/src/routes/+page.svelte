@@ -4,12 +4,13 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, telegramMessages, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, deleteAgent, agentCreated, agentsList, integrityWarnings } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ModelDownloadDialog from "$lib/components/ModelDownloadDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
+  import AgentTaskBoard from "$lib/components/AgentTaskBoard.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
@@ -26,6 +27,7 @@
   import GroupInviteDialog from "$lib/components/GroupInviteDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
   import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
+  import IntegrityWarningBanner from "$lib/components/IntegrityWarningBanner.svelte";
   import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
   import VoicePlayer from "$lib/components/VoicePlayer.svelte";
   import MentionAutocomplete from "$lib/components/MentionAutocomplete.svelte";
@@ -90,6 +92,7 @@
         remote_provider_node_id?: string;
       };
     }>;
+    isError?: boolean;  // Error message styling (v0.19.2+)
   };
   const chatHistories = writable<Map<string, Message[]>>(new Map([
     ['local_ai', []]
@@ -195,7 +198,7 @@
   const chatProviders = writable<Map<string, string>>(new Map());
 
   // Store AI chat metadata (chatId -> {name: string, provider: string, instruction_set_name?: string})
-  const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string}>>(
+  const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string, profile_name?: string, llm_provider?: string}>>(
     new Map([['local_ai', {name: 'Local AI Chat', provider: '', instruction_set_name: 'general'}]])
   );
 
@@ -209,6 +212,7 @@
   let showInstructionsEditor = $state(false);
   let showFirewallEditor = $state(false);
   let showProvidersEditor = $state(false);
+  let showAgentBoard = $state(false);
   let showCommitDialog = $state(false);
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
   let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
@@ -244,10 +248,24 @@
   let modelDownloadToastMessage = $state("");
   let modelDownloadToastType = $state<"info" | "error" | "warning">("info");
 
+  // Agent operation toast state (v0.19.0+)
+  let showAgentToast = $state(false);
+  let agentToastMessage = $state("");
+  let agentToastType = $state<"info" | "error" | "warning">("info");
+
   // Add AI Chat dialog state
   let showAddAIChatDialog = $state(false);
   let selectedProviderForNewChat = $state("");
   let selectedInstructionSetForNewChat = $state("general");
+  let selectedProfileForNewAgent = $state("default");  // Agent permission profile
+  let newAgentName = $state("");  // Agent name input
+  let selectedAgentLLMProvider = $state("");  // LLM provider for agent
+
+  // Agent profiles state (v0.19.0+ - per-agent isolation)
+  let availableAgentProfiles = $state<string[]>(["default"]);
+
+  // Map: AI chat ID -> backend agent_id (for agent chats)
+  let agentChatToAgentId = $state<Map<string, string>>(new Map());
 
   // Instruction Sets state
   type InstructionSets = {
@@ -395,6 +413,94 @@
     };
   });
 
+  // Reactive: Handle agent Telegram linked event (v0.15.0+)
+  $effect(() => {
+    if ($agentTelegramLinked) {
+      const { agent_id, chat_id } = $agentTelegramLinked;
+      console.log(`[AgentTelegram] Agent ${agent_id} linked to Telegram chat ${chat_id}`);
+
+      // Show success toast
+      agentToastMessage = `Agent linked to Telegram successfully`;
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
+      // Refresh agent list to update Telegram status
+      (async () => {
+        try {
+          const agentsResult = await listAgents();
+          if (agentsResult?.status === 'success' && agentsResult.agents) {
+            agentsList.set(agentsResult.agents);
+          }
+        } catch (error) {
+          console.error('Failed to refresh agents list:', error);
+        }
+      })();
+    }
+  });
+
+  // Reactive: Handle agent Telegram unlinked event (v0.15.0+)
+  $effect(() => {
+    if ($agentTelegramUnlinked) {
+      const { agent_id } = $agentTelegramUnlinked;
+      console.log(`[AgentTelegram] Agent ${agent_id} unlinked from Telegram`);
+
+      // Show info toast
+      agentToastMessage = `Agent unlinked from Telegram`;
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
+      // Refresh agent list to update Telegram status
+      (async () => {
+        try {
+          const agentsResult = await listAgents();
+          if (agentsResult?.status === 'success' && agentsResult.agents) {
+            agentsList.set(agentsResult.agents);
+          }
+        } catch (error) {
+          console.error('Failed to refresh agents list:', error);
+        }
+      })();
+    }
+  });
+
+  // Reactive: Handle Telegram→agent messages in unified_conversation mode
+  // Silently refreshes the agent chat history when Telegram bridge processes a message
+  $effect(() => {
+    if ($agentHistoryUpdated) {
+      const { conversation_id, messages, tokens_used, token_limit } = $agentHistoryUpdated;
+      console.log(`[AgentTelegramMsg] Refreshing chat history for ${conversation_id} (${messages?.length} messages)`);
+
+      // Update token usage map so the token counter reflects the agent's LLM usage
+      if (tokens_used !== undefined && token_limit !== undefined && token_limit > 0) {
+        tokenUsageMap = new Map(tokenUsageMap);
+        tokenUsageMap.set(conversation_id, { used: tokens_used, limit: token_limit });
+      }
+
+      chatHistories.update(map => {
+        const newMap = new Map(map);
+        const updatedMessages = (messages || []).map((msg: any, index: number) => ({
+          id: `tg-${index}-${Date.now()}`,
+          sender: msg.role === 'user' ? 'user' : conversation_id,
+          senderName: msg.role === 'user' ? 'Telegram' : getPeerDisplayName(conversation_id),
+          text: msg.content,
+          timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
+          attachments: msg.attachments || []
+        }));
+        newMap.set(conversation_id, updatedMessages);
+        return newMap;
+      });
+
+      // Scroll to bottom if this is the active chat
+      if (activeChatId === conversation_id) {
+        setTimeout(() => {
+          if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+        }, 50);
+      }
+    }
+  });
+
   // Persist AI chats (including Agent chats) to localStorage for page refresh recovery
   // Debounced to avoid excessive writes
   let aiChatsSaveTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -410,11 +516,11 @@
     // Debounce save by 500ms
     aiChatsSaveTimeout = setTimeout(() => {
       try {
-        // Only save AI chats (excluding Telegram and local_ai)
+        // Only save AI chats and agent chats (excluding Telegram and local_ai)
         const aiChatsToSave = Object.fromEntries(
           Array.from($aiChats.entries())
             .filter(([id, info]) =>
-              id.startsWith('ai_') &&
+              (id.startsWith('ai_') || id.startsWith('agent_') || id === 'default') &&
               !id.startsWith('telegram-') &&
               info.provider !== 'telegram'
             )
@@ -961,6 +1067,17 @@
     } catch (error) {
       console.error('[Groups] Failed to load group chats:', error);
     }
+
+    // Load agents from backend (v0.19.0+)
+    try {
+      const agentsResult = await listAgents();
+      if (agentsResult?.status === 'success' && agentsResult.agents) {
+        agentsList.set(agentsResult.agents);
+        console.log(`[Agents] Loaded ${agentsResult.agents.length} agents from backend`);
+      }
+    } catch (error) {
+      console.error('[Agents] Failed to load agents:', error);
+    }
   });
 
   // Cleanup focus listener on component destroy
@@ -982,6 +1099,11 @@
     if (chatProvider && chatProvider !== 'local_ai') {
       // Update dropdown to show chat-specific provider (e.g., dpc_agent)
       selectedTextProvider = `local:${chatProvider}`;
+    } else {
+      // Reset to default provider for chats without specific provider (local_ai, AI chats, etc.)
+      if ($availableProviders?.default_provider) {
+        selectedTextProvider = `local:${$availableProviders.default_provider}`;
+      }
     }
   });
 
@@ -1217,6 +1339,8 @@
   let isP2PChat = $derived(
     activeChatId !== 'local_ai' &&
     !activeChatId.startsWith('ai_') &&
+    !activeChatId.startsWith('agent_') &&
+    activeChatId !== 'default' &&
     !activeChatId.startsWith('telegram-') &&
     !activeChatId.startsWith('group-')
   );
@@ -1400,6 +1524,7 @@
       }
 
       showCommitResultToast = true;
+      closeCommitDialog();
 
       // Send notification for knowledge commit result
       (async () => {
@@ -2049,7 +2174,8 @@
             image_base64: imageData.dataUrl,
             filename: imageData.filename,
             caption: text,
-            provider_alias: visionProvider.alias
+            provider_alias: visionProvider.alias,
+            chat_provider: $chatProviders.get(activeChatId) || null
           };
 
           // Add compute_host if using remote vision provider
@@ -2063,10 +2189,58 @@
           // The ai_response_with_image event handler will clear it when the vision response arrives
         } catch (error) {
           console.error('Error sending image:', error);
-          fileOfferToastMessage = `Failed to send image: ${error}`;
-          showFileOfferToast = true;
-          setTimeout(() => showFileOfferToast = false, 5000);
-          setChatLoading(activeChatId, false);  // Only clear loading on error
+
+          // Parse error into user-friendly message
+          let userMessage = 'Failed to analyze image';
+          let errorDetails = '';
+
+          const errorStr = String(error);
+
+          if (errorStr.includes('Failed to connect to Ollama')) {
+            userMessage = 'Ollama Connection Failed';
+            errorDetails = 'Ollama is not running. Please start Ollama and try again.\n\nDownload from: https://ollama.com/download';
+          } else if (errorStr.includes('memory layout cannot be allocated') || errorStr.includes('out of memory') || errorStr.includes('OOM') || errorStr.includes('VRAM')) {
+            userMessage = 'Out of Memory';
+            errorDetails = 'Not enough GPU memory for vision analysis. Try closing other GPU-intensive apps or using a smaller model.';
+          } else if (errorStr.includes('Ollama vision API failed')) {
+            // Generic Ollama vision failure (not connection or memory specific)
+            userMessage = 'Ollama Vision Failed';
+            errorDetails = 'The vision model encountered an error. Check Ollama logs for details.';
+          } else if (errorStr.includes('connection refused') || errorStr.includes('Connection refused')) {
+            userMessage = 'Connection Refused';
+            errorDetails = 'The AI service is not accepting connections. Please check if it\'s running.';
+          } else if (errorStr.includes('timeout') || errorStr.includes('Timeout')) {
+            userMessage = 'Request Timeout';
+            errorDetails = 'The AI service took too long to respond. Try again or use a smaller model.';
+          } else {
+            // Extract meaningful part of generic errors
+            const match = errorStr.match(/RuntimeError:\s*(.+)/);
+            if (match) {
+              errorDetails = match[1];
+            } else {
+              errorDetails = errorStr.slice(0, 200); // Truncate long errors
+            }
+          }
+
+          // Add error message to chat history (like AI response but with error styling)
+          chatHistories.update(h => {
+            const newMap = new Map(h);
+            const hist = newMap.get(activeChatId) || [];
+            newMap.set(activeChatId, [
+              ...hist,
+              {
+                id: crypto.randomUUID(),
+                sender: 'ai',
+                text: `⚠️ **${userMessage}**\n\n${errorDetails}`,
+                timestamp: Date.now(),
+                isError: true
+              }
+            ]);
+            return newMap;
+          });
+
+          autoScroll();
+          setChatLoading(activeChatId, false);
         }
       } else if (activeChatId.startsWith('telegram-')) {
         // Telegram chat: Save image to temp file and send via Telegram
@@ -2252,6 +2426,11 @@
       if (chatSpecificProvider) {
         // Use chat-specific provider (e.g., dpc_agent for agent chats)
         payload.provider = chatSpecificProvider;
+
+        // For DPC Agent, pass the underlying LLM provider (Phase 3: per-agent provider selection)
+        if (chatSpecificProvider === 'dpc_agent' && chatMetadata?.llm_provider) {
+          payload.agent_llm_provider = chatMetadata.llm_provider;
+        }
       } else {
         // Fall back to dropdown selection (supports remote inference)
         const textProvider = parseProviderSelection(selectedTextProvider);
@@ -2367,6 +2546,10 @@
   function loadPersonalContext() {
     sendCommand("get_personal_context");
     showContextViewer = true;
+  }
+
+  function openAgentBoard() {
+    showAgentBoard = true;
   }
 
   function openInstructionsEditor() {
@@ -2515,6 +2698,21 @@
   }
 
   async function handleDeleteGroup(groupId: string) {
+    // Show confirmation dialog before deletion
+    let shouldDelete = false;
+    if (ask) {
+      shouldDelete = await ask(
+        "Delete this group chat? This will permanently remove all messages and data for all members.",
+        { title: "Confirm Group Deletion", kind: "warning" }
+      );
+    } else {
+      shouldDelete = confirm("Delete this group chat? This will permanently remove all messages and data for all members.");
+    }
+
+    if (!shouldDelete) {
+      return;
+    }
+
     try {
       await deleteGroup(groupId);
       if (activeChatId === groupId) {
@@ -2608,19 +2806,31 @@
     proposeNewSession(chatId);
   }
 
-  function handleAddAIChat() {
+  async function handleAddAIChat() {
     if (!$availableProviders || !$availableProviders.providers || $availableProviders.providers.length === 0) {
       alert("No AI providers available. Please configure providers in ~/.dpc/providers.toml");
       return;
     }
 
+    // Load agent profiles from backend (v0.19.0+)
+    try {
+      const profilesResult = await listAgentProfiles();
+      if (profilesResult?.status === 'success' && profilesResult.profiles) {
+        availableAgentProfiles = profilesResult.profiles;
+      }
+    } catch (e) {
+      console.warn('Failed to load agent profiles:', e);
+      availableAgentProfiles = ["default"];
+    }
+
     // Set default selections and show dialog
     selectedProviderForNewChat = $availableProviders.default_provider;
     selectedInstructionSetForNewChat = availableInstructionSets?.default || "general";
+    selectedProfileForNewAgent = "default";
     showAddAIChatDialog = true;
   }
 
-  function confirmAddAIChat() {
+  async function confirmAddAIChat() {
     if (!selectedProviderForNewChat) return;
 
     // Find the selected provider
@@ -2632,7 +2842,47 @@
 
     // Create new AI chat ID
     const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
-    const chatName = `${provider.alias} (${provider.model})`;
+
+    // Determine chat name
+    let chatName: string;
+    if (selectedProviderForNewChat === 'dpc_agent') {
+      // Use agent name if provided, otherwise use default
+      chatName = newAgentName.trim() || `Agent (${selectedProfileForNewAgent})`;
+    } else {
+      chatName = `${provider.alias} (${provider.model})`;
+    }
+
+    // If creating a DPC Agent, also create backend agent storage (v0.19.0+)
+    if (selectedProviderForNewChat === 'dpc_agent') {
+      try {
+        const result = await createAgent(
+          chatName,
+          selectedAgentLLMProvider || $availableProviders?.default_provider || 'dpc_agent',
+          selectedProfileForNewAgent,
+          'general'  // Default instruction set for agents
+        );
+        if (result?.status === 'success') {
+          console.log('[DPC Agent] Created agent storage:', result.agent_id);
+          // Store agent_id in chat metadata for later reference
+          agentChatToAgentId.set(chatId, result.agent_id);
+
+          // Show success toast
+          agentToastMessage = `Agent "${chatName}" created successfully`;
+          agentToastType = 'info';
+          showAgentToast = true;
+          setTimeout(() => { showAgentToast = false; }, 3000);
+        } else {
+          console.warn('[DPC Agent] Failed to create agent storage:', result?.message);
+          agentToastMessage = `Warning: Agent chat created but storage failed: ${result?.message}`;
+          agentToastType = 'warning';
+          showAgentToast = true;
+          setTimeout(() => { showAgentToast = false; }, 5000);
+        }
+      } catch (e) {
+        console.warn('[DPC Agent] Error creating agent storage:', e);
+        // Continue anyway - non-blocking
+      }
+    }
 
     // Add to aiChats
     aiChats.update(chats => {
@@ -2640,7 +2890,9 @@
       newMap.set(chatId, {
         name: chatName,
         provider: selectedProviderForNewChat,
-        instruction_set_name: selectedInstructionSetForNewChat
+        instruction_set_name: selectedProviderForNewChat === 'dpc_agent' ? 'general' : selectedInstructionSetForNewChat,
+        profile_name: selectedProviderForNewChat === 'dpc_agent' ? selectedProfileForNewAgent : undefined,
+        llm_provider: selectedProviderForNewChat === 'dpc_agent' ? selectedAgentLLMProvider : undefined
       });
       return newMap;
     });
@@ -2669,6 +2921,9 @@
   function cancelAddAIChat() {
     showAddAIChatDialog = false;
     selectedProviderForNewChat = "";
+    selectedProfileForNewAgent = "default";
+    newAgentName = "";
+    selectedAgentLLMProvider = "";
   }
 
   async function handleAddAgentChat() {
@@ -2679,63 +2934,22 @@
       return;
     }
 
-    // Pre-initialize the agent and Telegram bridge
+    // Load agent profiles from backend (v0.19.0+)
     try {
-      const result = await sendCommand("prepare_agent", {});
-      if (result?.status === 'success') {
-        console.log('DPC Agent prepared:', result.message);
-      } else {
-        console.warn('Failed to prepare DPC Agent:', result?.message);
+      const profilesResult = await listAgentProfiles();
+      if (profilesResult?.status === 'success' && profilesResult.profiles) {
+        availableAgentProfiles = profilesResult.profiles;
       }
     } catch (e) {
-      console.warn('Error preparing DPC Agent:', e);
-      // Continue anyway - agent will initialize lazily on first query
+      console.warn('Failed to load agent profiles:', e);
+      availableAgentProfiles = ["default"];
     }
 
-    // Create new Agent chat ID
-    const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
-
-    // Determine display name based on whether using remote inference
-    let displayName: string;
-    if (agentProvider?.peer_id) {
-      // Remote inference - show remote model/provider info
-      const remoteModel = agentProvider.remote_model || 'unknown';
-      const remoteProvider = agentProvider.remote_provider ? `/${agentProvider.remote_provider}` : '';
-      displayName = `Agent (remote: ${remoteModel}${remoteProvider})`;
-    } else {
-      // Local inference - show the agent_provider or default_provider
-      const underlyingProvider = $availableProviders?.agent_provider || $availableProviders?.default_provider || 'unknown';
-      displayName = `Agent (${underlyingProvider})`;
-    }
-    const chatName = displayName;
-
-    // Add to aiChats
-    aiChats.update(chats => {
-      const newMap = new Map(chats);
-      newMap.set(chatId, {
-        name: chatName,
-        provider: 'dpc_agent',
-        instruction_set_name: 'none'
-      });
-      return newMap;
-    });
-
-    // Set provider for this chat
-    chatProviders.update(map => {
-      const newMap = new Map(map);
-      newMap.set(chatId, 'dpc_agent');
-      return newMap;
-    });
-
-    // Initialize chat history
-    chatHistories.update(h => {
-      const newMap = new Map(h);
-      newMap.set(chatId, []);
-      return newMap;
-    });
-
-    // Switch to the new chat
-    activeChatId = chatId;
+    // Show dialog with dpc_agent pre-selected
+    selectedProviderForNewChat = 'dpc_agent';
+    selectedInstructionSetForNewChat = availableInstructionSets?.default || "general";
+    selectedProfileForNewAgent = "default";
+    showAddAIChatDialog = true;
   }
 
   async function handleDeleteAIChat(chatId: string) {
@@ -2751,19 +2965,48 @@
     }
 
     // Use Tauri's ask dialog (works on all platforms including macOS)
+    // Show Telegram-specific message for Telegram chats
     let shouldDelete = false;
     if (ask) {
-      shouldDelete = await ask(
-        "Delete this AI chat? This will permanently remove the chat history.",
-        { title: "Confirm Deletion", kind: "warning" }
-      );
+      if (chatId.startsWith('telegram-')) {
+        shouldDelete = await ask(
+          "Delete this Telegram chat? This will remove the chat history and unlink the Telegram conversation. You can still receive new messages from this contact.",
+          { title: "Confirm Telegram Chat Deletion", kind: "warning" }
+        );
+      } else {
+        shouldDelete = await ask(
+          "Delete this AI chat? This will permanently remove the chat history.",
+          { title: "Confirm Deletion", kind: "warning" }
+        );
+      }
     } else {
-      shouldDelete = confirm("Delete this AI chat? This will permanently remove the chat history.");
+      if (chatId.startsWith('telegram-')) {
+        shouldDelete = confirm("Delete this Telegram chat? This will remove the chat history and unlink the Telegram conversation. You can still receive new messages from this contact.");
+      } else {
+        shouldDelete = confirm("Delete this AI chat? This will permanently remove the chat history.");
+      }
     }
     console.log('User confirmed deletion:', shouldDelete);
 
     if (!shouldDelete) {
       return;
+    }
+
+    // If this is a Telegram chat, tell backend to remove the conversation link
+    // This prevents the chat from reappearing on restart
+    if (chatId.startsWith('telegram-')) {
+      try {
+        const result = await sendCommand('delete_telegram_conversation_link', {
+          conversation_id: chatId
+        });
+        if (result.status === 'error') {
+          console.error('Failed to delete Telegram conversation link:', result.message);
+        } else {
+          console.log('Telegram conversation link deleted from backend');
+        }
+      } catch (error) {
+        console.error('Error deleting Telegram conversation link:', error);
+      }
     }
 
     // Remove from aiChats
@@ -2787,12 +3030,277 @@
       return newMap;
     });
 
+    // For Telegram chats, also clean up Telegram-specific storage
+    if (chatId.startsWith('telegram-')) {
+      // Update dpc-telegram-chats localStorage
+      try {
+        const savedTelegramChats = localStorage.getItem('dpc-telegram-chats');
+        if (savedTelegramChats) {
+          const telegramChats = JSON.parse(savedTelegramChats);
+          delete telegramChats[chatId];
+          localStorage.setItem('dpc-telegram-chats', JSON.stringify(telegramChats));
+          console.log('[Telegram] Removed chat from dpc-telegram-chats localStorage');
+        }
+      } catch (error) {
+        console.error('[Telegram] Failed to update dpc-telegram-chats:', error);
+      }
+
+      // Update telegramLinkedChats store
+      telegramLinkedChats.update(links => {
+        const newMap = new Map(links);
+        newMap.delete(chatId);
+        return newMap;
+      });
+
+      // Update telegramMessages store (clear any cached messages)
+      telegramMessages.update(msgs => {
+        const newMap = new Map(msgs);
+        newMap.delete(chatId);
+        return newMap;
+      });
+    }
+
     // Switch to default chat
     if (activeChatId === chatId) {
       activeChatId = 'local_ai';
     }
 
     console.log('AI chat deleted successfully');
+  }
+
+  // Agent handlers (Phase 4)
+  function handleSelectAgent(agentId: string) {
+    console.log('Selected agent:', agentId);
+
+    // Find the agent in the agents list
+    const agent = $agentsList.find(a => a.agent_id === agentId);
+    if (!agent) {
+      console.error('Agent not found:', agentId);
+      return;
+    }
+
+    // Check if there's already a chat associated with this agent
+    // by looking through agentChatToAgentId map
+    let existingChatId: string | null = null;
+    for (const [chatId, mappedAgentId] of agentChatToAgentId) {
+      if (mappedAgentId === agentId) {
+        existingChatId = chatId;
+        break;
+      }
+    }
+
+    if (existingChatId && $aiChats.has(existingChatId)) {
+      // Switch to existing chat for this agent
+      activeChatId = existingChatId;
+      resetUnreadCount(existingChatId);
+      console.log('Switched to existing agent chat:', existingChatId);
+      return;
+    }
+
+    // Also check if there's a chat with the agent ID as key (legacy format)
+    if ($aiChats.has(agentId)) {
+      activeChatId = agentId;
+      resetUnreadCount(agentId);
+      console.log('Switched to existing agent chat (legacy):', agentId);
+      return;
+    }
+
+    // Create a new chat for this agent using agentId directly as chatId
+    aiChats.update(chats => {
+      const newMap = new Map(chats);
+      newMap.set(agentId, {
+        name: agent.name,
+        provider: 'dpc_agent',
+        profile_name: agent.profile_name,
+        llm_provider: agent.provider_alias,
+      });
+      return newMap;
+    });
+
+    // Set the chat provider
+    chatProviders.update(map => {
+      const newMap = new Map(map);
+      newMap.set(agentId, 'dpc_agent');
+      return newMap;
+    });
+
+    // Store the mapping
+    agentChatToAgentId.set(agentId, agentId);
+
+    // Switch to the new chat
+    activeChatId = agentId;
+    console.log('Created new agent chat:', agentId);
+  }
+
+  async function handleDeleteAgent(agentId: string) {
+    console.log('Delete agent:', agentId);
+
+    let shouldDelete = false;
+    if (ask) {
+      shouldDelete = await ask(
+        "Delete this agent? This will permanently remove the agent's memory, knowledge, and all associated data.",
+        { title: "Confirm Agent Deletion", kind: "warning" }
+      );
+    } else {
+      shouldDelete = confirm("Delete this agent? This will permanently remove the agent's memory, knowledge, and all associated data.");
+    }
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    try {
+      // Delete from backend
+      const result = await deleteAgent(agentId);
+      if (result.status === 'error') {
+        console.error('Failed to delete agent:', result.message);
+        agentToastMessage = `Failed to delete agent: ${result.message}`;
+        agentToastType = 'error';
+        showAgentToast = true;
+        setTimeout(() => { showAgentToast = false; }, 5000);
+        return;
+      }
+
+      // Remove agent chat if exists
+      const chatId = `agent_${agentId}`;
+      if ($aiChats.has(chatId)) {
+        aiChats.update(chats => {
+          const newMap = new Map(chats);
+          newMap.delete(chatId);
+          return newMap;
+        });
+
+        chatProviders.update(map => {
+          const newMap = new Map(map);
+          newMap.delete(chatId);
+          return newMap;
+        });
+
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          newMap.delete(chatId);
+          return newMap;
+        });
+
+        if (activeChatId === chatId) {
+          activeChatId = 'local_ai';
+        }
+      }
+
+      // Show success toast
+      agentToastMessage = 'Agent deleted successfully';
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
+      console.log('Agent deleted successfully');
+    } catch (error) {
+      console.error('Error deleting agent:', error);
+      agentToastMessage = `Error deleting agent: ${error}`;
+      agentToastType = 'error';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 5000);
+    }
+  }
+
+  async function handleLinkAgentTelegram(agentId: string, config: {
+    bot_token: string;
+    chat_ids: string[];
+    event_filter?: string[];
+    max_events_per_minute?: number;
+    cooldown_seconds?: number;
+    transcription_enabled?: boolean;
+    unified_conversation?: boolean;
+  }) {
+    console.log('Link agent to Telegram:', agentId, 'config:', { ...config, bot_token: '***' });
+
+    try {
+      const result = await sendCommand('link_agent_telegram', {
+        agent_id: agentId,
+        bot_token: config.bot_token,
+        chat_ids: config.chat_ids,
+        event_filter: config.event_filter,
+        max_events_per_minute: config.max_events_per_minute || 20,
+        cooldown_seconds: config.cooldown_seconds || 3.0,
+        transcription_enabled: config.transcription_enabled !== false,
+        unified_conversation: config.unified_conversation === true,
+      });
+
+      if (result.status === 'error') {
+        console.error('Failed to link agent to Telegram:', result.message);
+        agentToastMessage = `Failed to link agent: ${result.message}`;
+        agentToastType = 'error';
+        showAgentToast = true;
+        setTimeout(() => { showAgentToast = false; }, 5000);
+        throw new Error(result.message);
+      }
+
+      // Show success toast
+      agentToastMessage = 'Agent Telegram configuration updated successfully';
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
+      // Refresh agent list to update Telegram status
+      try {
+        const agentsResult = await listAgents();
+        if (agentsResult?.status === 'success' && agentsResult.agents) {
+          agentsList.set(agentsResult.agents);
+        }
+      } catch (error) {
+        console.error('Failed to refresh agents list:', error);
+      }
+
+      console.log('Agent Telegram configuration updated successfully');
+    } catch (error) {
+      console.error('Error linking agent to Telegram:', error);
+      agentToastMessage = `Error linking agent: ${error}`;
+      agentToastType = 'error';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 5000);
+      throw error;
+    }
+  }
+
+  async function handleUnlinkAgentTelegram(agentId: string) {
+    console.log('Unlink agent from Telegram:', agentId);
+
+    try {
+      const result = await sendCommand('unlink_agent_telegram', { agent_id: agentId });
+
+      if (result.status === 'error') {
+        console.error('Failed to unlink agent from Telegram:', result.message);
+        agentToastMessage = `Failed to unlink agent: ${result.message}`;
+        agentToastType = 'error';
+        showAgentToast = true;
+        setTimeout(() => { showAgentToast = false; }, 5000);
+        return;
+      }
+
+      // Show success toast
+      agentToastMessage = 'Agent unlinked from Telegram successfully';
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 3000);
+
+      // Refresh agent list to update Telegram status
+      try {
+        const agentsResult = await listAgents();
+        if (agentsResult?.status === 'success' && agentsResult.agents) {
+          agentsList.set(agentsResult.agents);
+        }
+      } catch (error) {
+        console.error('Failed to refresh agents list:', error);
+      }
+
+      console.log('Agent unlinked from Telegram successfully');
+    } catch (error) {
+      console.error('Error unlinking agent from Telegram:', error);
+      agentToastMessage = `Error unlinking agent: ${error}`;
+      agentToastType = 'error';
+      showAgentToast = true;
+      setTimeout(() => { showAgentToast = false; }, 5000);
+    }
   }
 
   // File transfer handlers (Week 1)
@@ -3738,6 +4246,7 @@
       onOpenInstructionsEditor={openInstructionsEditor}
       onOpenFirewallEditor={openFirewallEditor}
       onOpenProvidersEditor={openProvidersEditor}
+      onOpenAgentBoard={openAgentBoard}
       onToggleAutoKnowledgeDetection={toggleAutoKnowledgeDetection}
       onConnectPeer={handleConnectPeer}
       onResetUnreadCount={resetUnreadCount}
@@ -3751,6 +4260,11 @@
       onLeaveGroup={handleLeaveGroup}
       onDeleteGroup={handleDeleteGroup}
       selfNodeId={$nodeStatus?.node_id || ""}
+      agents={$agentsList}
+      onSelectAgent={handleSelectAgent}
+      onDeleteAgent={handleDeleteAgent}
+      onLinkAgentTelegram={handleLinkAgentTelegram}
+      onUnlinkAgentTelegram={handleUnlinkAgentTelegram}
     />
 
 
@@ -4019,6 +4533,15 @@
         />
 
         <div class="input-row">
+          <!-- Knowledge Integrity Warning Banner (shown on startup if tampered/corrupted commits detected) -->
+          {#if $integrityWarnings && $integrityWarnings.count > 0 && !$integrityWarnings.dismissed}
+            <IntegrityWarningBanner
+              count={$integrityWarnings.count}
+              warnings={$integrityWarnings.warnings}
+              onDismiss={() => integrityWarnings.update(w => w ? { ...w, dismissed: true } : w)}
+            />
+          {/if}
+
           <!-- Token Warning Banner (90% and 100% warnings) -->
           {#if showTokenBanner}
             <TokenWarningBanner
@@ -4049,8 +4572,8 @@
               }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
-                // Send if: peer connected, OR local AI chat, OR Telegram chat, OR AI_xxx chat AND (has text OR has pending image)
-                if ((isPeerConnected || isTelegramChat || activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) && (currentInput.trim() || pendingImage)) {
+                // Send if: peer connected, OR local AI chat, OR Telegram chat, OR AI_xxx chat, OR agent chat (including 'default') AND (has text OR has pending image)
+                if ((isPeerConnected || isTelegramChat || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_') || activeChatId === 'default') && (currentInput.trim() || pendingImage)) {
                   handleSendMessage();
                 }
               }
@@ -4068,15 +4591,15 @@
           <button
             class="file-button"
             onclick={handleSendFile}
-            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || (!isPeerConnected && !isTelegramChat)}
-            title={isPeerConnected || isTelegramChat ? "Send file" : "Peer disconnected"}
+            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_') || activeChatId === 'default' || (!isPeerConnected && !isTelegramChat)}
+            title={isPeerConnected || isTelegramChat || activeChatId.startsWith('agent_') || activeChatId === 'default' ? "Send file" : "Peer disconnected"}
           >
             📎
           </button>
           <button
             onclick={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || (!isPeerConnected && !isTelegramChat)}
-            title={!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') ? "Peer disconnected" : ""}
+            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || (!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') && activeChatId !== 'default')}
+            title={!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') && activeChatId !== 'default' ? "Peer disconnected" : ""}
           >
             {#if isLoading}Sending...{:else}Send{/if}
           </button>
@@ -4220,6 +4743,20 @@
   on:close={() => showContextViewer = false}
 />
 
+<AgentTaskBoard
+  bind:open={showAgentBoard}
+  agentId={activeChatId && agentChatToAgentId.has(activeChatId)
+    ? (agentChatToAgentId.get(activeChatId) ?? 'agent_001')
+    : 'agent_001'}
+  onSendToAgent={(msg) => {
+    if (activeChatId && agentChatToAgentId.has(activeChatId)) {
+      currentInput = msg;
+      handleSendMessage();
+    }
+  }}
+  on:close={() => showAgentBoard = false}
+/>
+
 <!-- Mention Autocomplete (Group Chats) -->
 <MentionAutocomplete
   visible={mentionAutocompleteVisible}
@@ -4320,6 +4857,15 @@
   />
 {/if}
 
+<!-- Agent Operation Toast (v0.19.0+) -->
+{#if showAgentToast}
+  <Toast
+    message={agentToastMessage}
+    type={agentToastType}
+    duration={agentToastType === 'error' ? 5000 : 3000}
+  />
+{/if}
+
 <!-- Vote Result Details Dialog -->
 <VoteResultDialog
   result={currentVoteResult}
@@ -4353,35 +4899,81 @@
       <p>Select an AI provider for the new chat:</p>
 
       <div class="dialog-provider-selector">
-        <label for="new-chat-provider">Provider:</label>
+        <label for="new-chat-provider">Chat Type:</label>
         <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
           {#each $availableProviders.providers as provider}
             <option value={provider.alias}>
               {#if provider.alias === 'dpc_agent'}
-                Agent (uses {$availableProviders?.agent_provider || $availableProviders?.default_provider || 'default'})
+                🤖 DPC Agent (Autonomous AI with tools)
               {:else}
                 {provider.alias} - {provider.model}
               {/if}
             </option>
           {/each}
         </select>
+        <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+          {#if selectedProviderForNewChat === 'dpc_agent'}
+            Agents are autonomous AI assistants with tool access (file system, web search, etc.)
+          {:else}
+            Standard AI chat using the selected provider
+          {/if}
+        </p>
       </div>
 
-      <div class="dialog-provider-selector">
-        <label for="new-chat-instruction-set">Instruction Set:</label>
-        <select id="new-chat-instruction-set" bind:value={selectedInstructionSetForNewChat}>
-          <option value="none">None (No Instructions)</option>
-          {#if availableInstructionSets}
-            {#each Object.entries(availableInstructionSets.sets) as [key, set]}
-              <option value={key}>
-                {set.name} {availableInstructionSets.default === key ? '⭐' : ''}
+      {#if selectedProviderForNewChat === 'dpc_agent'}
+        <!-- Agent-specific fields -->
+        <div class="dialog-provider-selector">
+          <label for="new-agent-name">Agent Name:</label>
+          <input type="text" id="new-agent-name" bind:value={newAgentName} placeholder="e.g., Coding Assistant, Research Bot..." style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;" />
+        </div>
+
+        <div class="dialog-provider-selector">
+          <label for="new-chat-llm-provider">AI Model (LLM):</label>
+          <select id="new-chat-llm-provider" bind:value={selectedAgentLLMProvider}>
+            {#each $availableProviders.providers as provider}
+              {#if provider.alias !== 'dpc_agent'}
+                <option value={provider.alias}>
+                  {provider.alias} - {provider.model}
+                </option>
+              {/if}
+            {/each}
+          </select>
+          <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+            The underlying AI model this agent will use for reasoning.
+          </p>
+        </div>
+
+        <div class="dialog-provider-selector">
+          <label for="new-chat-profile">Permission Profile:</label>
+          <select id="new-chat-profile" bind:value={selectedProfileForNewAgent}>
+            {#each availableAgentProfiles as profile}
+              <option value={profile}>
+                {profile}
               </option>
             {/each}
-          {:else}
-            <option value="general">General Purpose</option>
-          {/if}
-        </select>
-      </div>
+          </select>
+          <p class="dialog-hint" style="font-size: 0.85em; color: #888; margin-top: 4px;">
+            Controls what tools and data this agent can access. Configure in Firewall → Agent Profiles.
+          </p>
+        </div>
+      {:else}
+        <!-- Non-agent fields: Instruction Set -->
+        <div class="dialog-provider-selector">
+          <label for="new-chat-instruction-set">Instruction Set:</label>
+          <select id="new-chat-instruction-set" bind:value={selectedInstructionSetForNewChat}>
+            <option value="none">None (No Instructions)</option>
+            {#if availableInstructionSets}
+              {#each Object.entries(availableInstructionSets.sets) as [key, set]}
+                <option value={key}>
+                  {set.name} {availableInstructionSets.default === key ? '⭐' : ''}
+                </option>
+              {/each}
+            {:else}
+              <option value="general">General Purpose</option>
+            {/if}
+          </select>
+        </div>
+      {/if}
 
       <div class="dialog-actions">
         <button class="btn-cancel" onclick={cancelAddAIChat}>Cancel</button>

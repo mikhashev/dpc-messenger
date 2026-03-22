@@ -120,26 +120,64 @@ class TelegramBridge:
         except Exception as e:
             logger.error(f"Failed to save conversation links: {e}")
 
-    def _get_or_create_conversation_id(self, telegram_chat_id: str) -> str:
+    def _get_agent_for_chat(self, chat_id: str) -> Optional[str]:
+        """
+        Check if a Telegram chat is linked to an agent.
+
+        Args:
+            chat_id: Telegram chat ID
+
+        Returns:
+            Agent ID if linked, None otherwise
+        """
+        try:
+            from ..dpc_agent.utils import AgentRegistry
+
+            registry = AgentRegistry()
+            # Check all agents to see if any have this chat_id linked
+            for agent in registry.list_agents():
+                if agent.get("telegram_enabled") and agent.get("telegram_chat_id") == chat_id:
+                    return agent.get("agent_id")
+
+            return None
+        except Exception as e:
+            logger.error(f"Failed to get agent for chat {chat_id}: {e}", exc_info=True)
+            return None
+
+    def _get_or_create_conversation_id(self, telegram_chat_id: str, agent_id: Optional[str] = None) -> str:
         """
         Get or create DPC conversation ID for a Telegram chat.
 
+        This method is agent-aware: if the chat_id is linked to an agent,
+        it returns an agent-specific conversation ID (agent-{agent_id}).
+        Otherwise, it returns a standard Telegram conversation ID (telegram-{chat_id}).
+
         Args:
             telegram_chat_id: Telegram chat ID
+            agent_id: Optional agent ID (for explicit agent routing)
 
         Returns:
-            DPC conversation ID (format: telegram-{chat_id})
+            DPC conversation ID (format: agent-{agent_id} or telegram-{chat_id})
         """
         # Check if we have a mapping
         if telegram_chat_id in self.conversation_map:
             return self.conversation_map[telegram_chat_id]
 
-        # Create new conversation ID
-        conversation_id = f"telegram-{telegram_chat_id}"
+        # Check if this chat is linked to an agent
+        linked_agent_id = agent_id or self._get_agent_for_chat(telegram_chat_id)
+
+        if linked_agent_id:
+            # Use agent-specific conversation ID
+            conversation_id = f"agent-{linked_agent_id}"
+            logger.info(f"Using agent conversation ID: {telegram_chat_id} → {conversation_id} (agent: {linked_agent_id})")
+        else:
+            # Use standard Telegram conversation ID
+            conversation_id = f"telegram-{telegram_chat_id}"
+            logger.info(f"Using telegram conversation ID: {telegram_chat_id} → {conversation_id}")
+
         self.conversation_map[telegram_chat_id] = conversation_id
         self._save_conversation_links()
 
-        logger.info(f"Created conversation link: {telegram_chat_id} → {conversation_id}")
         return conversation_id
 
     def _get_linked_chat_id(self, conversation_id: str) -> Optional[str]:
@@ -162,6 +200,65 @@ class TelegramBridge:
                 return chat_id
 
         return None
+
+    def remove_conversation_link(self, telegram_chat_id: str) -> bool:
+        """
+        Remove a conversation link from the backend conversation_map.
+
+        Called when user deletes a Telegram chat in the UI to prevent
+        the chat from reappearing on restart.
+
+        Args:
+            telegram_chat_id: Telegram chat ID to remove
+
+        Returns:
+            True if removed, False if not found
+        """
+        if telegram_chat_id not in self.conversation_map:
+            logger.warning(f"Conversation link {telegram_chat_id} not found, cannot remove")
+            return False
+
+        del self.conversation_map[telegram_chat_id]
+
+        # Clean up last_update_id to prevent stale entries in config.ini
+        self.service.settings.remove_telegram_last_update_id(telegram_chat_id)
+
+        self._save_conversation_links()
+
+        logger.info(f"Removed conversation link: {telegram_chat_id}")
+        return True
+
+    def _load_agent_context(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Load agent's memory and context files.
+
+        Args:
+            agent_id: Agent ID
+
+        Returns:
+            Dict with agent context (identity, scratchpad, etc.)
+        """
+        try:
+            from ..dpc_agent.utils import get_agent_root
+            from ..dpc_agent.memory import Memory
+
+            agent_root = get_agent_root(agent_id)
+            memory = Memory(agent_root=agent_root)
+
+            # Load agent's memory files
+            context = {
+                "agent_id": agent_id,
+                "identity": memory.read_file("memory/identity.md") or "",
+                "scratchpad": memory.read_file("memory/scratchpad.md") or "",
+                "dialogue_summary": memory.read_file("memory/dialogue_summary.md") or "",
+            }
+
+            logger.debug(f"Loaded context for agent {agent_id}")
+            return context
+
+        except Exception as e:
+            logger.error(f"Failed to load agent context for {agent_id}: {e}", exc_info=True)
+            return {}
 
     async def _send_unknown_user_info(self, chat_id: str, from_user):
         """Send helpful message to unknown user with their chat_id (v0.15.0)."""
@@ -245,8 +342,15 @@ class TelegramBridge:
             # Get sender info
             sender_name = from_user.full_name or from_user.username or f"User_{chat_id}"
 
-            # Get or create conversation
+            # Get or create conversation (agent-aware)
             conversation_id = self._get_or_create_conversation_id(chat_id)
+
+            # Check if this is an agent conversation
+            agent_context = None
+            if conversation_id.startswith("agent-"):
+                agent_id = conversation_id.replace("agent-", "")
+                agent_context = self._load_agent_context(agent_id)
+                logger.info(f"Routing message to agent {agent_id} with context")
 
             # Convert to DPC message format
             dpc_message = {
@@ -258,6 +362,10 @@ class TelegramBridge:
                 "telegram_chat_id": chat_id,
                 "telegram_message_id": message_id
             }
+
+            # Add agent context if available
+            if agent_context:
+                dpc_message["agent_context"] = agent_context
 
             # Get or create conversation monitor
             from ..conversation_monitor import ConversationMonitor, Message as ConvMessage
@@ -305,6 +413,32 @@ class TelegramBridge:
             # Forward to P2P peers if enabled
             if self.telegram.bridge_to_p2p:
                 await self._forward_to_p2p_peers(conversation_id, dpc_message)
+
+            # If this conversation is linked to a DPC agent, process the message
+            # through the agent and send the response back to Telegram.
+            if conversation_id.startswith("agent-"):
+                agent_id = conversation_id[len("agent-"):]  # e.g. "agent_001"
+                try:
+                    dpc_agent_provider = self.service.llm_manager.providers.get("dpc_agent")
+                    if dpc_agent_provider:
+                        await dpc_agent_provider._ensure_manager(agent_id=agent_id)
+                        agent_manager = dpc_agent_provider.get_manager(agent_id)
+                        if agent_manager:
+                            logger.info(f"Forwarding Telegram message to agent {agent_id}")
+                            response = await agent_manager.process_message(
+                                message=text,
+                                conversation_id=agent_id,
+                                include_context=True,
+                            )
+                            if response:
+                                await self.telegram.send_message(chat_id, response)
+                        else:
+                            logger.warning(f"Agent manager not available for {agent_id}")
+                    else:
+                        logger.warning("dpc_agent provider not configured — cannot route to agent")
+                except Exception as agent_err:
+                    logger.error(f"Error forwarding Telegram message to agent {agent_id}: {agent_err}", exc_info=True)
+                    await self.telegram.send_message(chat_id, f"⚠️ Agent error: {agent_err}")
 
             logger.info(f"Processed Telegram text message from {chat_id}: {text[:50]}...")
 

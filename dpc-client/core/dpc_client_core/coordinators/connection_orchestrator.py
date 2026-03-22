@@ -168,11 +168,11 @@ class ConnectionOrchestrator:
 
         # Step 2: Try strategies in priority order
         last_error = None
-        start_time = asyncio.get_event_loop().time()
+        start_time = asyncio.get_running_loop().time()
 
         for strategy in self.strategies:
             # Check timeout
-            elapsed = asyncio.get_event_loop().time() - start_time
+            elapsed = asyncio.get_running_loop().time() - start_time
             remaining = timeout - elapsed
 
             if remaining <= 0:

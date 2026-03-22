@@ -128,3 +128,143 @@ class KnowledgeCommitResultHandler(MessageHandler):
         await self.service.local_api.broadcast_event("knowledge_commit_result", payload)
 
         return None
+
+
+class CommitSignedHandler(MessageHandler):
+    """Handles COMMIT_SIGNED messages — a peer broadcasting their signature for an applied commit."""
+
+    @property
+    def command_name(self) -> str:
+        return "COMMIT_SIGNED"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        """
+        A remote peer has applied the same commit and is sharing their RSA-PSS signature.
+
+        Payload fields:
+            commit_id   (str) — the commit this signature covers
+            commit_hash (str) — deterministic hash the signature was made over
+            node_id     (str) — signer's node_id (should match sender_node_id)
+            signature   (str) — base64-encoded RSA-PSS signature
+
+        The handler verifies the signature and, if valid, appends it to the
+        markdown frontmatter so the file accumulates multi-party attestations.
+        """
+        commit_id = payload.get("commit_id", "")
+        commit_hash = payload.get("commit_hash", "")
+        signer_node_id = payload.get("node_id", sender_node_id)
+        signature_b64 = payload.get("signature", "")
+
+        if not all([commit_id, commit_hash, signature_b64]):
+            self.logger.warning("COMMIT_SIGNED from %s missing fields", sender_node_id[:20])
+            return None
+
+        if not hasattr(self.service, 'consensus_manager') or self.service.consensus_manager is None:
+            return None
+
+        ok = await self.service.consensus_manager.record_commit_signature(
+            commit_id, commit_hash, signer_node_id, signature_b64
+        )
+        if ok:
+            self.logger.info(
+                "Stored COMMIT_SIGNED from %s for commit %s",
+                signer_node_id[:20], commit_id[:12]
+            )
+
+        return None
+
+
+class CommitAckHandler(MessageHandler):
+    """Handles COMMIT_ACK — a peer confirming they successfully applied a commit.
+
+    This closes Gap 3: _apply_commit failures are no longer silent.  Each node
+    broadcasts COMMIT_ACK after a successful apply; the proposer (and all peers)
+    track which participants have confirmed convergence.
+    """
+
+    @property
+    def command_name(self) -> str:
+        return "COMMIT_ACK"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        """
+        Payload fields:
+            commit_id    (str)       — commit that was applied
+            node_id      (str)       — node that applied it (should match sender_node_id)
+            participants (List[str]) — expected participants (for completion tracking)
+        """
+        commit_id = payload.get("commit_id", "")
+        ack_node_id = payload.get("node_id", sender_node_id)
+        participants = payload.get("participants", [])
+
+        if not commit_id:
+            self.logger.warning("COMMIT_ACK from %s missing commit_id", sender_node_id[:20])
+            return None
+
+        if not hasattr(self.service, 'consensus_manager') or self.service.consensus_manager is None:
+            return None
+
+        self.service.consensus_manager.record_commit_ack(commit_id, ack_node_id, participants)
+        return None
+
+
+class ApplyKnowledgeCommitHandler(MessageHandler):
+    """Handles APPLY_KNOWLEDGE_COMMIT — the recovery/retransmit path (Gap 3 + Gap 5).
+
+    Previously a dead protocol message, now wired as the explicit recovery mechanism:
+    if a node failed to apply a commit during finalization (disk error, crash, power
+    loss, etc.) and subsequently misses the COMMIT_ACK window, a peer can retransmit
+    the finalized commit object via APPLY_KNOWLEDGE_COMMIT.
+
+    This handler applies the commit idempotently — it first checks whether the commit
+    is already present in the local commit history, and only applies if missing.
+
+    Future enhancement: after a COMMIT_ACK timeout, the proposer can automatically
+    retransmit via this command to nodes that did not ACK.
+    """
+
+    @property
+    def command_name(self) -> str:
+        return "APPLY_KNOWLEDGE_COMMIT"
+
+    async def handle(self, sender_node_id: str, payload: Dict[str, Any]) -> Optional[Any]:
+        """
+        Payload: serialized KnowledgeCommit dict (from KnowledgeCommit.to_dict()).
+        """
+        from dpc_protocol.knowledge_commit import KnowledgeCommit
+
+        commit_id = payload.get("commit_id", "")
+        if not commit_id:
+            self.logger.warning("APPLY_KNOWLEDGE_COMMIT from %s missing commit_id", sender_node_id[:20])
+            return None
+
+        if not hasattr(self.service, 'consensus_manager') or self.service.consensus_manager is None:
+            return None
+
+        # Idempotency check: skip if already in commit history
+        try:
+            context = self.service.pcm_core.load_context()
+            for entry in context.commit_history:
+                if entry.get('commit_id') == commit_id:
+                    self.logger.debug(
+                        "APPLY_KNOWLEDGE_COMMIT: commit %s already applied locally, ignoring",
+                        commit_id[:12]
+                    )
+                    return None
+        except Exception:
+            pass  # If context unreadable, proceed to apply attempt
+
+        try:
+            commit = KnowledgeCommit.from_dict(payload)
+            await self.service.consensus_manager._apply_commit(commit)
+            self.logger.info(
+                "Applied commit %s via APPLY_KNOWLEDGE_COMMIT recovery path (sent by %s)",
+                commit_id[:12], sender_node_id[:20]
+            )
+        except Exception as e:
+            self.logger.error(
+                "Failed to apply commit %s via recovery path: %s",
+                commit_id[:12], e, exc_info=True
+            )
+
+        return None

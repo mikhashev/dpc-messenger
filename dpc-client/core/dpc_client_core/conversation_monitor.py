@@ -1463,15 +1463,110 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         if node_id in self.peer_context_hashes:
             del self.peer_context_hashes[node_id]
 
-    # --- Group Chat History Persistence (v0.20.0) ---
+    # --- Conversation History Persistence (v0.21.0: Unified storage) ---
+
+    def _get_conversation_dir(self) -> Path:
+        """Get the conversation folder path.
+
+        Returns:
+            Path to ~/.dpc/conversations/{conversation_id}/
+        """
+        return Path.home() / ".dpc" / "conversations" / self.conversation_id
 
     def _get_history_path(self) -> Path:
         """Get path to history file for this conversation
 
         Returns:
-            Path to ~/.dpc/groups/{conversation_id}_history.json
+            Path to ~/.dpc/conversations/{conversation_id}/history.json
         """
-        return Path.home() / ".dpc" / "groups" / f"{self.conversation_id}_history.json"
+        return self._get_conversation_dir() / "history.json"
+
+    def _get_settings_path(self) -> Path:
+        """Get path to per-conversation settings file.
+
+        Returns:
+            Path to ~/.dpc/conversations/{conversation_id}/settings.json
+        """
+        return self._get_conversation_dir() / "settings.json"
+
+    def _is_group_conversation(self) -> bool:
+        """Check if this is a group conversation.
+
+        Returns:
+            True if conversation_id starts with 'group-' or 'agent_' (both persist history)
+        """
+        return self.conversation_id.startswith("group-") or self.conversation_id.startswith("agent_")
+
+    def _load_conversation_settings(self) -> Dict[str, Any]:
+        """Load per-conversation settings from disk.
+
+        Returns:
+            Settings dict with defaults if file doesn't exist
+        """
+        settings_path = self._get_settings_path()
+        defaults = {
+            "conversation_id": self.conversation_id,
+            "conversation_type": "group" if self._is_group_conversation() else "p2p",
+            "persist_history": self._is_group_conversation(),  # Groups persist by default, P2P don't
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "peer_display_name": None
+        }
+
+        if not settings_path.exists():
+            return defaults
+
+        try:
+            with open(settings_path, encoding="utf-8") as f:
+                data = json.load(f)
+            # Merge with defaults (defaults provide missing keys)
+            return {**defaults, **data}
+        except Exception as e:
+            logger.warning(f"Failed to load conversation settings: {e}, using defaults")
+            return defaults
+
+    def _save_conversation_settings(self, settings: Dict[str, Any]) -> bool:
+        """Save per-conversation settings to disk.
+
+        Args:
+            settings: Settings dict to save
+
+        Returns:
+            True if saved successfully
+        """
+        settings_path = self._get_settings_path()
+        try:
+            settings_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(settings_path, "w", encoding="utf-8") as f:
+                json.dump(settings, f, indent=2)
+            logger.debug(f"Saved conversation settings to {settings_path}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to save conversation settings: {e}")
+            return False
+
+    @property
+    def persist_history(self) -> bool:
+        """Check if history should be persisted for this conversation.
+
+        Returns:
+            True if history should be saved to disk
+        """
+        settings = self._load_conversation_settings()
+        return settings.get("persist_history", self._is_group_conversation())
+
+    def set_persist_history(self, persist: bool) -> bool:
+        """Set whether history should be persisted for this conversation.
+
+        Args:
+            persist: True to persist history, False for ephemeral
+
+        Returns:
+            True if setting was saved successfully
+        """
+        settings = self._load_conversation_settings()
+        settings["persist_history"] = persist
+        settings["last_modified"] = datetime.now(timezone.utc).isoformat()
+        return self._save_conversation_settings(settings)
 
     def compute_history_hash(self) -> str:
         """Compute SHA256 hash of current message history
@@ -1500,11 +1595,17 @@ PARTICIPANTS' CULTURAL CONTEXTS:
     def save_history(self) -> bool:
         """Persist message history to disk
 
-        Saves to ~/.dpc/groups/{conversation_id}_history.json
+        Saves to ~/.dpc/conversations/{conversation_id}/history.json
+        Only saves if persist_history setting is True for this conversation.
 
         Returns:
-            True if saved successfully, False on error
+            True if saved successfully (or skipped due to settings), False on error
         """
+        # Check if history should be persisted for this conversation
+        if not self.persist_history:
+            logger.debug(f"Skipping history save for {self.conversation_id} (persist_history=False)")
+            return True  # Not an error, just skipped
+
         path = self._get_history_path()
         try:
             # Ensure directory exists
@@ -1533,12 +1634,28 @@ PARTICIPANTS' CULTURAL CONTEXTS:
     def load_history(self) -> bool:
         """Load message history from disk
 
-        Loads from ~/.dpc/groups/{conversation_id}_history.json
+        Loads from ~/.dpc/conversations/{conversation_id}/history.json
+        Also checks legacy path ~/.dpc/groups/{conversation_id}_history.json for migration.
 
         Returns:
             True if loaded successfully, False if file doesn't exist or on error
         """
         path = self._get_history_path()
+
+        # Check for legacy path (migration support)
+        legacy_path = Path.home() / ".dpc" / "groups" / f"{self.conversation_id}_history.json"
+        if not path.exists() and legacy_path.exists():
+            logger.info(f"Migrating history from legacy path: {legacy_path}")
+            try:
+                # Ensure new directory exists
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # Move file to new location
+                legacy_path.rename(path)
+                logger.info(f"Migrated history to {path}")
+            except Exception as e:
+                logger.warning(f"Failed to migrate history, reading from legacy path: {e}")
+                path = legacy_path
+
         if not path.exists():
             logger.debug(f"No history file found at {path}")
             return False
@@ -1637,6 +1754,29 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 logger.info(f"Deleted history file: {path}")
             except Exception as e:
                 logger.error(f"Failed to delete history file {path}: {e}")
+
+    def delete_conversation_folder(self) -> bool:
+        """Delete the entire conversation folder including history, settings, and files.
+
+        This is a complete deletion - used when leaving a group or deleting a conversation.
+
+        Returns:
+            True if folder was deleted or didn't exist, False on error
+        """
+        import shutil
+
+        conv_dir = self._get_conversation_dir()
+        if not conv_dir.exists():
+            logger.debug(f"Conversation folder doesn't exist: {conv_dir}")
+            return True
+
+        try:
+            shutil.rmtree(conv_dir)
+            logger.info(f"Deleted conversation folder: {conv_dir}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to delete conversation folder {conv_dir}: {e}")
+            return False
 
 
 # Example usage

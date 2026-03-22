@@ -43,25 +43,30 @@ class DpcAgentManager:
     - Telegram notifications for agent monitoring
     """
 
-    def __init__(self, service: "CoreService", config: Dict[str, Any]):
+    def __init__(self, service: "CoreService", config: Dict[str, Any], agent_id: Optional[str] = None):
         """
         Initialize the agent manager.
 
         Args:
             service: DPC CoreService instance
             config: Agent configuration from settings
+            agent_id: Optional agent ID for this manager (used for per-agent Telegram config)
         """
         self.service = service
         self.config = config
+        self.agent_id = agent_id  # Store agent_id for per-agent configuration
 
         # Get firewall reference from CoreService
         self.firewall = getattr(service, "firewall", None)
 
         # Storage paths
-        self.agent_root = get_agent_root()
-        ensure_agent_dirs()
+        self.agent_root = get_agent_root(agent_id)
+        ensure_agent_dirs(agent_id)
 
-        # Agent instance (lazy initialization)
+        # Agent instances (Phase 3: per-provider agents)
+        # Key: provider_alias, Value: DpcAgent instance
+        self._agents: Dict[str, DpcAgent] = {}
+        # Default agent for backward compatibility
         self._agent: Optional[DpcAgent] = None
 
         # Telegram bridge for notifications
@@ -71,14 +76,76 @@ class DpcAgentManager:
         # Key: conversation_id, Value: ConversationMonitor instance
         self._agent_monitors: Dict[str, ConversationMonitor] = {}
 
-        log.info(f"DpcAgentManager initialized with storage at {self.agent_root}")
+        log.info(f"DpcAgentManager initialized (agent_id={agent_id or 'singleton'}) with storage at {self.agent_root}")
 
     @property
     def agent(self) -> DpcAgent:
-        """Get the agent instance, initializing if needed."""
+        """Get the default agent instance, initializing if needed."""
         if self._agent is None:
             raise RuntimeError("Agent not initialized. Call start() first.")
         return self._agent
+
+    def _get_or_create_agent_for_provider(self, provider_alias: str) -> DpcAgent:
+        """
+        Get or create an agent configured with a specific LLM provider.
+
+        Phase 3: Per-agent provider selection - allows different agents to use
+        different underlying LLM providers.
+
+        Args:
+            provider_alias: The LLM provider alias to configure the agent with
+
+        Returns:
+            DpcAgent instance configured with the specified provider
+        """
+        # Check if we already have an agent for this provider
+        if provider_alias in self._agents:
+            return self._agents[provider_alias]
+
+        # If no provider specified or same as default, use default agent
+        if not provider_alias or (self._agent and provider_alias == "dpc_agent"):
+            if self._agent is None:
+                raise RuntimeError("Default agent not initialized. Call start() first.")
+            return self._agent
+
+        # Create a new agent with the specified provider
+        log.info(f"Creating new agent with provider: {provider_alias}")
+
+        # Get LLMManager from CoreService
+        llm_manager = getattr(self.service, "llm_manager", None)
+        if llm_manager is None:
+            raise RuntimeError("CoreService does not have llm_manager")
+
+        # Build agent config (same as default but with different provider)
+        evolution_enabled = self.firewall.evolution_enabled if self.firewall else False
+        evolution_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
+        evolution_auto = self.firewall.evolution_auto_apply if self.firewall else False
+
+        agent_config = AgentConfig(
+            budget_usd=self.config.get("budget_usd", 50.0),
+            max_rounds=self.config.get("max_rounds", 200),
+            background_consciousness=False,  # Per-provider agents don't run background tasks
+            enable_task_queue=False,  # Per-provider agents don't run task queue
+            evolution_enabled=evolution_enabled,
+            evolution_interval_minutes=evolution_interval,
+            evolution_auto_apply=evolution_auto,
+            billing_model=self.config.get("billing_model", "subscription"),
+        )
+
+        # Create agent with specific provider
+        new_agent = DpcAgent(
+            llm_manager=llm_manager,
+            config=agent_config,
+            agent_root=self.agent_root,
+            firewall=self.firewall,
+            provider_alias=provider_alias,  # Phase 3: Use specific provider
+        )
+
+        # Cache for reuse
+        self._agents[provider_alias] = new_agent
+        log.info(f"Created and cached agent for provider: {provider_alias}")
+
+        return new_agent
 
     async def start(self) -> None:
         """Initialize the agent and Telegram bridge."""
@@ -141,42 +208,135 @@ class DpcAgentManager:
 
         log.info("DpcAgent started successfully")
 
+    async def ensure_started(self) -> "DpcAgentManager":
+        """
+        Ensure the agent is started, starting it if necessary.
+
+        This is a convenience method that allows lazy initialization.
+
+        Returns:
+            self (for method chaining)
+        """
+        if self._agent is None:
+            await self.start()
+        return self
+
     async def _start_telegram_bridge(self) -> None:
-        """Initialize and start the Telegram notification bridge."""
-        # Get Telegram config from settings
-        settings = getattr(self.service, "settings", None)
-        if settings is None:
-            log.debug("No settings available, skipping Telegram bridge")
-            return
+        """Initialize and start the Telegram notification bridge from per-agent configuration.
 
-        telegram_config = settings.get_dpc_agent_telegram_config()
+        Reads Telegram config from agent registry (_registry.json) with fallback
+        to global [dpc_agent_telegram] config for backwards compatibility.
+        """
+        from ..dpc_agent.utils import AgentRegistry
 
-        if not telegram_config.get("enabled", False):
-            log.debug("Telegram notifications for agent disabled")
-            return
+        # Handle missing agent_id gracefully (skip per-agent config, go directly to global)
+        if not self.agent_id:
+            log.debug("agent_id not set in DpcAgentManager, skipping per-agent Telegram config (will use global if available)")
+            # Initialize variables for global config fallback below
+            bot_token = None
+            chat_ids = None
+            event_filter = None
+            max_events_per_minute = 20
+            cooldown_seconds = 3.0
+            transcription_enabled = True
+            unified_conversation = False
+            skip_per_agent = True
+        else:
+            # First try to get per-agent Telegram config from registry
+            skip_per_agent = False
+            registry = AgentRegistry()
+            agent_meta = registry.get_agent(self.agent_id)
 
-        bot_token = telegram_config.get("bot_token", "")
-        chat_ids = telegram_config.get("allowed_chat_ids", [])
+            # Special case: local_ai should not use Telegram (built-in conversation)
+            if self.agent_id == 'local_ai':
+                log.debug(f"Telegram not enabled for local_ai (built-in conversation), skipping Telegram bridge")
+                return
 
+            if not agent_meta or not agent_meta.get("telegram_enabled", False):
+                log.debug(f"Telegram not enabled for agent {self.agent_id}, skipping Telegram bridge")
+                return
+
+            # Read per-agent Telegram config
+            bot_token = agent_meta.get("telegram_bot_token", "")
+            chat_ids = agent_meta.get("telegram_allowed_chat_ids", [])
+            event_filter = agent_meta.get("telegram_event_filter")
+            max_events_per_minute = agent_meta.get("telegram_max_events_per_minute", 20)
+            cooldown_seconds = agent_meta.get("telegram_cooldown_seconds", 3.0)
+            transcription_enabled = agent_meta.get("telegram_transcription_enabled", True)
+            unified_conversation = agent_meta.get("telegram_unified_conversation", False)
+
+        # Backwards compatibility: fall back to global config if per-agent config is incomplete
         if not bot_token or not chat_ids:
-            log.warning("Telegram bridge enabled but missing bot_token or allowed_chat_ids")
+            agent_desc = self.agent_id if self.agent_id else "singleton"
+            if not skip_per_agent:
+                log.info(f"Agent {agent_desc} has incomplete per-agent Telegram config, checking global config")
+
+            settings = getattr(self.service, "settings", None)
+            if settings is None:
+                log.debug(f"No settings available, skipping Telegram bridge for agent {agent_desc}")
+                return
+
+            global_config = settings.get_dpc_agent_telegram_config()
+
+            if not global_config.get("enabled", False):
+                log.debug(f"Global Telegram config not enabled, skipping Telegram bridge for agent {agent_desc}")
+                return
+
+            # Use global config as fallback
+            if not bot_token:
+                bot_token = global_config.get("bot_token", "")
+            if not chat_ids:
+                chat_ids = global_config.get("allowed_chat_ids", [])
+            if not event_filter:
+                event_filter = global_config.get("event_filter")
+            if transcription_enabled is True:  # Only use global default if not set
+                transcription_enabled = global_config.get("transcription_enabled", True)
+
+            # Log deprecation warning if using global config
+            if not skip_per_agent:
+                log.warning(
+                    f"DEPRECATED: Agent {agent_desc} is using global [dpc_agent_telegram] config. "
+                    f"Please migrate to per-agent Telegram configuration. "
+                    f"See docs/DPC_AGENT_TELEGRAM.md for migration guide. "
+                    f"Global config will be removed in v0.20.0."
+                )
+
+        # Validate required fields
+        if not bot_token or not chat_ids:
+            agent_desc = self.agent_id if self.agent_id else "singleton"
+            log.warning(f"Agent {agent_desc} has telegram_enabled=true but missing bot_token or allowed_chat_ids")
+            return
+
+        # Check for token conflict with main TelegramBotManager
+        main_telegram = getattr(self.service, "telegram_manager", None)
+        if main_telegram and getattr(main_telegram, "bot_token", None) == bot_token:
+            agent_desc = self.agent_id if self.agent_id else "singleton"
+            log.error(
+                f"Agent {agent_desc} Telegram bridge is configured with the same bot token as the main "
+                f"TelegramBotManager. This causes a Conflict error (two instances polling the same bot). "
+                f"Create a separate bot via @BotFather for the agent bridge. "
+                f"See docs/DPC_AGENT_TELEGRAM.md for setup instructions."
+            )
             return
 
         try:
-            from .agent_telegram_bridge import AgentTelegramBridge, create_telegram_bridge_callback
+            from .agent_telegram_bridge import AgentTelegramBridge, RateLimitConfig, create_telegram_bridge_callback
 
-            # Get event filter
-            event_filter = telegram_config.get("event_filter")
+            # Create rate limit config
+            rate_limit = RateLimitConfig(
+                max_events_per_minute=max_events_per_minute,
+                cooldown_seconds=cooldown_seconds
+            )
 
-            # Get transcription setting
-            transcription_enabled = telegram_config.get("transcription_enabled", True)
-
-            # Create bridge
+            # Create bridge with per-agent config
             self._telegram_bridge = AgentTelegramBridge(
                 bot_token=bot_token,
                 allowed_chat_ids=chat_ids,
                 event_filter=event_filter,
+                rate_limit=rate_limit,
                 transcription_enabled=transcription_enabled,
+                agent_id=self.agent_id or "",
+                unified_conversation=unified_conversation,
             )
 
             # Set message handler for two-way communication
@@ -188,7 +348,8 @@ class DpcAgentManager:
             # Start bridge
             success = await self._telegram_bridge.start()
             if not success:
-                log.warning("Failed to start Telegram bridge")
+                agent_desc = self.agent_id if self.agent_id else "singleton"
+                log.warning(f"Failed to start Telegram bridge for agent {agent_desc}")
                 self._telegram_bridge = None
                 return
 
@@ -196,12 +357,18 @@ class DpcAgentManager:
             emitter = get_event_emitter()
             emitter.add_listener(create_telegram_bridge_callback(self._telegram_bridge))
 
-            log.info(f"Telegram bridge started, connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events)")
+            agent_desc = self.agent_id if self.agent_id else "singleton"
+            log.info(
+                f"Telegram bridge started for agent {agent_desc}, "
+                f"connected to event emitter (filter={len(self._telegram_bridge.event_filter)} events, "
+                f"chat_ids={chat_ids})"
+            )
 
         except ImportError as e:
             log.warning(f"Telegram bridge not available: {e}")
         except Exception as e:
-            log.error(f"Failed to initialize Telegram bridge: {e}", exc_info=True)
+            agent_desc = self.agent_id if self.agent_id else "singleton"
+            log.error(f"Failed to initialize Telegram bridge for agent {agent_desc}: {e}", exc_info=True)
 
     async def stop(self) -> None:
         """Shutdown the agent and Telegram bridge."""
@@ -224,6 +391,12 @@ class DpcAgentManager:
         conversation_id: str,
         include_context: bool = True,
         on_stream_chunk=None,
+        # Image parameters for vision queries
+        image_base64: Optional[str] = None,
+        image_mime: str = "image/png",
+        image_caption: Optional[str] = None,
+        # Phase 3: Per-agent provider selection
+        agent_llm_provider: Optional[str] = None,
     ) -> str:
         """
         Process a user message through the agent.
@@ -233,6 +406,10 @@ class DpcAgentManager:
             conversation_id: Unique ID for this conversation
             include_context: Whether to include DPC personal/device context
             on_stream_chunk: Optional async callback for streaming text chunks: await on_stream_chunk(chunk, conversation_id)
+            image_base64: Optional base64-encoded image data for vision queries
+            image_mime: MIME type of the image (default: image/png)
+            image_caption: Optional caption for the image
+            agent_llm_provider: Optional underlying LLM provider for this agent (Phase 3: per-agent provider selection)
 
         Returns:
             Agent's response text
@@ -263,6 +440,10 @@ class DpcAgentManager:
             sender_node_id=node_id,
             sender_name="User"
         )
+        monitor.save_history()  # Save to disk immediately
+
+        # Use agent_id as sender name for better identification in chat UI
+        agent_display_name = self.agent_id or "DPC Agent"
 
         # Get DPC context if requested
         dpc_context = None
@@ -294,7 +475,10 @@ class DpcAgentManager:
             # Get session state for agent context (token usage, context window)
             session_state = self.get_session_state(conversation_id)
 
-            response = await self.agent.process(
+            # Phase 3: Get provider-specific agent if agent_llm_provider is specified
+            agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
+
+            response = await agent.process(
                 message=message,
                 conversation_id=conversation_id,
                 dpc_context=dpc_context,
@@ -302,29 +486,43 @@ class DpcAgentManager:
                 on_stream_chunk=emit_stream_chunk,
                 session_state=session_state,
                 conversation_monitor=monitor,  # For knowledge extraction tool
+                task_id=task_id,  # Unique per-message ID for event logging
+                # Pass image parameters for vision queries
+                image_base64=image_base64,
+                image_mime=image_mime,
+                image_caption=image_caption,
             )
 
-            # Track agent response in monitor (reuse existing method)
-            monitor.add_message(
-                role="assistant",
-                content=response,
-                timestamp=utc_now_iso(),
-                sender_node_id="dpc-agent",
-                sender_name="DPC Agent"
-            )
+            # Track agent response in monitor — skip thinking-only fallback responses
+            # since they contain no real content for knowledge extraction or continuity
+            _THINKING_FALLBACK = "(thinking completed - see reasoning for details)"
+            if response and response.strip() != _THINKING_FALLBACK:
+                monitor.add_message(
+                    role="assistant",
+                    content=response,
+                    timestamp=utc_now_iso(),
+                    sender_node_id=conversation_id,
+                    sender_name=agent_display_name
+                )
+                monitor.save_history()  # Save to disk immediately
 
-            # Update token count in monitor after agent response
-            # Get token usage from agent's last response
-            if hasattr(self._agent, '_last_usage') and self._agent._last_usage:
-                usage = self._agent._last_usage
-                if usage.get("prompt_tokens"):
-                    # Get context window from LLMManager (reuse existing)
-                    llm_manager = getattr(self.service, "llm_manager", None)
-                    if llm_manager:
-                        model = llm_manager.get_active_model_name()
-                        context_window = llm_manager.get_context_window(model)
-                        monitor.set_token_limit(context_window)
-                    monitor.set_token_count(usage["prompt_tokens"])
+            # Update token count in monitor after agent response.
+            # Count tokens directly from the conversation history (user + assistant messages)
+            # stored in the monitor — the same data that gets sent as input on every new request.
+            # This excludes constant overhead (system prompt, tool schemas, agent memory) so the
+            # counter reflects only the growing conversation portion, consistent with the intent
+            # of the local AI chat token counter.
+            conversation_tokens = sum(
+                len(msg.get("content", "") or "")
+                for msg in monitor.message_history
+            ) // 4
+            if conversation_tokens:
+                llm_manager = getattr(self.service, "llm_manager", None)
+                if llm_manager:
+                    model = llm_manager.get_active_model_name()
+                    context_window = llm_manager.get_context_window(model)
+                    monitor.set_token_limit(context_window)
+                monitor.set_token_count(conversation_tokens)
 
             # Emit TASK_COMPLETED event
             await emitter.emit(EventType.TASK_COMPLETED, {

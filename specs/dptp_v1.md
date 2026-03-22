@@ -834,6 +834,10 @@ Offers a file to the peer for transfer.
   - `channels` (integer, required): Number of audio channels (1 = mono, 2 = stereo)
   - `codec` (string, required): Audio codec used (e.g., "opus", "aac")
   - `recorded_at` (string, required): ISO 8601 timestamp when voice was recorded
+- `group_id` (string, optional): Group ID for group file transfers (v0.21.0)
+  - If present, indicates this file was sent in a group chat context
+  - Receiver stores file in group's conversation folder (`~/.dpc/conversations/{group_id}/files/`)
+  - If absent, file is stored in sender's peer folder (P2P transfer)
 
 **Response:** FILE_ACCEPT (if accepted) or FILE_CANCEL (if rejected)
 

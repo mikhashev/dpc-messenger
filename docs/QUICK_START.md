@@ -5,7 +5,8 @@
 This guide will help you set up D-PC Messenger for the first time. Choose your setup method based on your needs:
 
 - **Option A:** Local network testing (no Hub needed)
-- **Option B:** Internet-wide connections (requires Hub)
+- **Option B:** Internet-wide, zero infrastructure (no Hub, no VPS — works for teams)
+- **Option C:** Internet-wide with Hub (full WebRTC signaling)
 
 > **NEW in v0.10.0:** Automatic 6-tier connection fallback! The system tries IPv6 → IPv4 → WebRTC → Hole Punch → Relay → Gossip until one succeeds. Connections "just work" regardless of network conditions.
 
@@ -82,13 +83,14 @@ npm run tauri dev
   - `node.key` - Your private key
   - `node.crt` - Your certificate
   - `node.id` - Your node ID
-  - `providers.json` - AI provider config
-  - `privacy_rules.json` - Firewall rules
-  - `personal.json` - Your context
-  - `device_context.json` - Auto-generated device info
+  - `config.ini` - All settings with sensible defaults
+  - `providers.json` - AI provider config (defaults to Ollama — UI notifies if not installed)
+  - `privacy_rules.json` - Firewall rules (secure defaults: deny all sharing)
+  - `personal.json` - Your context (editable in-app)
+  - `device_context.json` - Auto-collected hardware/software info
   - `instructions.json` - AI instruction customizations
-  - `known_peers.json` - Known peer connections
   - `knowledge/` - Knowledge commits directory
+  - `known_peers.json` - Created automatically after your first peer connection
 
 **Note your connection URI** displayed in the terminal:
 ```
@@ -113,9 +115,98 @@ Repeat Step 2 on another computer on the same network.
 
 ---
 
-## Option B: Internet-Wide Connections (Recommended)
+## Option B: Internet-Wide, Zero Infrastructure (No Hub, No VPS)
 
-**Use this if:** You want to connect to anyone, anywhere.
+**Use this if:** You want to connect over the internet with friends or a small team — no servers, no accounts, no infrastructure required.
+
+**Requirements:** At least one person in the group needs either:
+- **IPv6 connectivity** — check by running:
+  ```bash
+  curl -6 ifconfig.me   # Returns your IPv6 address if you have it
+  ```
+  If it returns an IP address, you have IPv6 and are ready to go.
+- **Port forwarding** configured on their router (forward TCP port 8888 to their PC's local IP)
+
+If nobody in your group has IPv6 or port forwarding, use Option C (Hub) instead.
+
+### How It Works
+
+1. **One person shares their URI** out-of-band (Telegram, email, QR code, anything)
+2. **Others connect once** — after the first connection, addresses are cached automatically
+3. **No ongoing infrastructure** — the DHT keeps peers discoverable after that first handshake
+
+### Step 1: Start Each Client
+
+On every computer, run:
+
+```bash
+# Terminal 1: Backend
+cd dpc-client/core
+poetry install
+poetry run python run_service.py
+
+# Terminal 2: Frontend (in new terminal)
+cd dpc-client/ui
+npm install
+npm run tauri dev
+```
+
+### Step 2: Find the Person With IPv6 or Port Forwarding
+
+That person notes their connection URI from the terminal output:
+
+```
+Your Direct TLS URI: dpc://203.0.113.42:8888/dpc-node-abc123...
+```
+
+Or for IPv6:
+```
+Your Direct TLS URI: dpc://[2001:db8::1]:8888?node_id=dpc-node-abc123...
+```
+
+### Step 3: Share URI Out-of-Band
+
+The person with the public address shares their URI via any channel (Telegram, email, etc.). This is the **only** step that requires an external channel.
+
+### Step 4: Everyone Connects to That Person
+
+Each other member:
+1. Opens the UI → click "Connect to Peer"
+2. Pastes the shared `dpc://` URI
+3. Clicks "Connect"
+
+After connecting, that peer's address is saved to `~/.dpc/known_peers.json` automatically.
+
+### Step 5: (Optional) Pin the Seed Node for Reconnection
+
+If the group goes offline for an extended period, the DHT may lose track of peers. To ensure fresh bootstrapping, each member can add the public peer's address to their config:
+
+```bash
+# Edit ~/.dpc/config.ini
+# Add under [dht] section:
+```
+
+```ini
+[dht]
+seed_nodes = 203.0.113.42:8888
+```
+
+> **Tip:** If multiple people have public addresses, add them all comma-separated:
+> `seed_nodes = 203.0.113.42:8888, 198.51.100.7:8888`
+
+### Result
+
+- **No Hub** required
+- **No VPS** required
+- **No accounts** required
+- After the first handshake, the DHT maintains peer connectivity automatically
+- Works for groups where at least one member has IPv6 or port forwarding
+
+---
+
+## Option C: Internet-Wide Connections With Hub (Recommended for Teams)
+
+**Use this if:** You want to connect to anyone, anywhere, with the easiest setup and full WebRTC NAT traversal.
 
 **NEW in v0.10.0:** Hub is now **optional**! The system can establish connections without Hub using DHT-based hole punching and volunteer relay nodes.
 
@@ -348,9 +439,9 @@ npm install
 
 ### "Could not connect to Hub"
 
-**This is OK if you're using Option A (local network).**
+**This is OK if you're using Option A (local network) or Option B (zero infrastructure).**
 
-For Option B:
+For Option C (Hub):
 ```bash
 # Check Hub is running
 curl http://localhost:8000/health
@@ -402,10 +493,39 @@ poetry run python run_service.py
 
 ### For Users
 
-1. **Configure Context Firewall** - Edit `~/.dpc/privacy_rules.json`
+1. **Configure Context Firewall** - Edit `~/.dpc/privacy_rules.json` or use 🛡️ Firewall Rules in the sidebar
 2. **Add AI Providers** - Edit `~/.dpc/providers.json`
-3. **Customize Profile** - Edit `~/.dpc/personal.json`
+3. **Customize Profile** - Click 📚 Personal Context in the sidebar
 4. **Read the Whitepaper** - Understand the vision
+
+### Optional Features
+
+#### DPC Agent (AI Assistant with Tools)
+
+An autonomous AI agent is **pre-configured by default** — no setup needed. Select `dpc_agent` as your AI provider in the UI to start using it.
+
+The agent has 45+ tools (web search, file read, git, memory, scheduling), runs in a sandbox (`~/.dpc/agents/`), and can be given different permission profiles via the Firewall Rules editor.
+
+- Full guide: [DPC Agent Guide](./DPC_AGENT_GUIDE.md)
+- Telegram integration: [Agent Telegram](./DPC_AGENT_TELEGRAM.md)
+
+#### Telegram Bot Integration
+
+Connect DPC Messenger to Telegram for two-way messaging, voice transcription, and agent interaction from your phone. **Disabled by default** — requires a bot token.
+
+**Setup (3 steps):**
+1. Create a bot: open Telegram → search **@BotFather** → `/newbot` → copy the token
+2. Get your Chat ID: search **@userinfobot** → send any message → copy the number
+3. Edit `~/.dpc/config.ini`:
+   ```ini
+   [telegram]
+   enabled = true
+   bot_token = 123456789:ABCdefGHIjklMNOpqrsTUVwxyz
+   allowed_chat_ids = ["123456789"]
+   ```
+4. Restart the backend — you'll see `Telegram bot started` in the logs
+
+- Full guide: [Telegram Setup](./TELEGRAM_SETUP.md)
 
 ### For Developers
 
@@ -447,7 +567,8 @@ poetry run python run_service.py
 **No.** You can:
 - Use a public Hub (when available)
 - Use local network only (Option A)
-- Run your own Hub for privacy (Option B)
+- Connect zero-infrastructure with your team (Option B)
+- Run your own Hub for privacy (Option C)
 
 ### Is my data private?
 
@@ -505,7 +626,7 @@ You know everything is working when:
 
 **You've learned:**
 - How to set up D-PC Messenger
-- Two connection methods (local and Hub)
+- Three connection methods (local, zero-infrastructure, and Hub)
 - How to configure AI providers
 - How to troubleshoot common issues
 

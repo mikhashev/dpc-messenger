@@ -24,24 +24,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class VotingSession:
-    """Active voting session for a commit proposal
-
-    KNOWN ISSUE: Proposal Editing During Voting
-    ============================================
-    Currently, there is no locking mechanism to prevent proposal edits during voting.
-    If a peer edits the proposal while voting is in progress, the following issues can occur:
-
-    1. Votes are cast on the OLD version of the proposal
-    2. The NEW version receives those votes without re-review
-    3. Could result in approving content that voters didn't see
-
-    RECOMMENDED FIX (Future Enhancement):
-    - Option A: Lock proposal during voting (prevent edits)
-    - Option B: Invalidate all votes when proposal is edited (force re-vote)
-    - Option C: Version proposals and track which version each vote is for
-
-    This issue was identified during v0.9.2 testing (2025-12-02).
-    """
+    """Active voting session for a commit proposal"""
     proposal: KnowledgeCommitProposal
     votes: Dict[str, CommitVote] = None  # node_id -> vote
     required_dissenter: Optional[str] = None
@@ -92,8 +75,15 @@ class ConsensusManager:
         self.on_vote_received: Optional[Callable] = None
         self.on_commit_approved: Optional[Callable] = None
         self.on_commit_rejected: Optional[Callable] = None
+        self.on_commit_revision_needed: Optional[Callable] = None  # Called when revision requested; arg: (proposal, votes)
         self.on_commit_applied: Optional[Callable] = None  # Called after commit is applied to personal.json
         self.on_result_broadcast: Optional[Callable] = None  # Broadcast voting results to participants
+        self.on_commit_signed: Optional[Callable] = None    # Called after apply so service can sign+broadcast COMMIT_SIGNED
+        self.on_commit_ack: Optional[Callable] = None       # Called after apply so service can broadcast COMMIT_ACK
+        self.on_commit_apply_failed: Optional[Callable] = None  # Called when _apply_commit fails (disk error etc); arg: (commit, error_msg)
+
+        # Tracks which nodes confirmed successful apply per commit_id (Gap 3 observability)
+        self.commit_acks: Dict[str, set] = {}  # commit_id -> set of node_ids that sent COMMIT_ACK
 
     async def propose_commit(
         self,
@@ -113,6 +103,16 @@ class ConsensusManager:
         if len(proposal.participants) >= 3:
             # Randomly assign one person as devil's advocate
             proposal.required_dissenter = random.choice(proposal.participants)
+
+        # Anchor parent commit to proposer's current HEAD so all nodes hash identically.
+        # Without this, each node sets parent_commit_id from its own local state at apply
+        # time, causing divergent commit_id values for the same logical commit.
+        if proposal.parent_commit_id is None:
+            try:
+                context = self.pcm_core.load_context()
+                proposal.parent_commit_id = context.last_commit_id
+            except Exception:
+                pass  # Leave as None for the first-ever commit
 
         # Set deadline
         deadline = datetime.now(timezone.utc) + timedelta(minutes=self.vote_timeout_minutes)
@@ -162,6 +162,11 @@ class ConsensusManager:
 
         session = self.sessions[proposal_id]
 
+        if session.status not in ("voting",):
+            logger.debug("cast_vote: session %s is in status '%s', ignoring late vote",
+                         proposal_id, session.status)
+            return False
+
         # Check if this voter is required dissenter
         is_required_dissent = (self.node_id == session.required_dissenter)
 
@@ -194,6 +199,75 @@ class ConsensusManager:
 
         return True
 
+    async def revise_proposal(
+        self,
+        proposal_id: str,
+        updated_summary: Optional[str],
+        updated_entries: Optional[List],
+        broadcast_func: Callable
+    ) -> bool:
+        """Restart voting on a revised proposal after a revision_needed outcome.
+
+        Clears all previous votes, resets the deadline, applies content updates,
+        and re-broadcasts PROPOSE_KNOWLEDGE_COMMIT to all participants so they
+        can vote on the revised version.
+
+        On the receiver side, handle_proposal_message already overwrites the
+        existing session when the same proposal_id is received, so no receiver-side
+        changes are required.
+
+        Args:
+            proposal_id: ID of the proposal to revise (must be in revision_needed state)
+            updated_summary: New summary text, or None to keep existing
+            updated_entries: New entries list, or None to keep existing
+            broadcast_func: Async function to broadcast revised proposal to peers
+
+        Returns:
+            True if revision round started, False if session not found or wrong state
+        """
+        if proposal_id not in self.sessions:
+            logger.warning("revise_proposal: unknown proposal %s", proposal_id)
+            return False
+
+        session = self.sessions[proposal_id]
+
+        if session.status != "revision_needed":
+            logger.warning(
+                "revise_proposal: session %s is in status '%s', expected 'revision_needed'",
+                proposal_id, session.status
+            )
+            return False
+
+        # Apply content updates to the proposal
+        if updated_summary is not None:
+            session.proposal.summary = updated_summary
+        if updated_entries is not None:
+            session.proposal.entries = updated_entries
+
+        # Clear all votes for a fresh round
+        session.votes = {}
+
+        # Reset deadline
+        deadline = datetime.now(timezone.utc) + timedelta(minutes=self.vote_timeout_minutes)
+        session.deadline = deadline
+        session.proposal.vote_deadline = deadline.isoformat()
+
+        # Restore voting state
+        session.status = "voting"
+        session.proposal.status = "voting"
+
+        # Re-broadcast the revised proposal (receivers overwrite their existing session)
+        await broadcast_func({
+            'command': 'PROPOSE_KNOWLEDGE_COMMIT',
+            'payload': session.proposal.to_dict()
+        })
+
+        # Start a new deadline timer for this revision round
+        asyncio.create_task(self._handle_vote_deadline(proposal_id))
+
+        logger.info("Restarted voting on revised proposal %s", proposal_id)
+        return True
+
     async def receive_vote(
         self,
         vote: CommitVote
@@ -210,6 +284,11 @@ class ConsensusManager:
             return
 
         session = self.sessions[proposal_id]
+
+        if session.status not in ("voting",):
+            logger.debug("receive_vote: session %s is in status '%s', ignoring late vote from %s",
+                         proposal_id, session.status, vote.voter_node_id)
+            return
 
         # Record vote
         session.votes[vote.voter_node_id] = vote
@@ -228,6 +307,20 @@ class ConsensusManager:
         Args:
             session: VotingSession to finalize
         """
+        # Guard: prevent double-finalize if called concurrently.
+        # Two valid entry states:
+        #   "voting"  — vote count reached (cast_vote / receive_vote path)
+        #   "timeout" — deadline fired (_handle_vote_deadline sets this before calling us)
+        # Any other status means we're already finalizing or done — skip.
+        if session.status not in ("voting", "timeout"):
+            logger.debug("_finalize_vote called but session %s already in status '%s' — skipping",
+                         session.proposal.proposal_id, session.status)
+            return
+        # Mark as finalizing immediately (before any awaits) to block re-entry from the
+        # other path. No await between this line and the check above — asyncio guarantees
+        # no task switch between consecutive synchronous statements.
+        session.status = "finalizing"
+
         proposal = session.proposal
         votes = session.votes
 
@@ -261,11 +354,21 @@ class ConsensusManager:
                 sources_cited=[],  # Could extract from entries
                 dissenting_opinion=proposal.devil_advocate,
                 extraction_model=proposal.extraction_model,  # Track which model extracted this knowledge
-                extraction_host=proposal.extraction_host  # Track which compute host was used
+                extraction_host=proposal.extraction_host,  # Track which compute host was used
+                # Use the proposer's HEAD anchored in the proposal so all nodes compute
+                # the same commit_hash (parent_commit_id is part of the hash input).
+                parent_commit_id=proposal.parent_commit_id
             )
 
-            # Apply commit to local context
-            await self._apply_commit(commit)
+            # Apply commit to local context; only fire success callbacks if write succeeded
+            apply_ok = await self._apply_commit(commit)
+
+            if not apply_ok:
+                # Disk write failed — mark session as failed so peers can detect missing ACK,
+                # but do NOT broadcast success. on_commit_apply_failed already fired inside
+                # _apply_commit to surface the error to the UI.
+                session.status = "apply_failed"
+                return
 
             # Trigger callback
             if self.on_commit_approved:
@@ -280,11 +383,12 @@ class ConsensusManager:
                 await self.on_commit_rejected(proposal, votes)
 
         else:
-            # Changes requested
+            # Changes requested — fire callback so proposer can revise and call revise_proposal()
             session.status = "revision_needed"
             proposal.status = "revised"
 
-            # Could trigger revision workflow here
+            if self.on_commit_revision_needed:
+                await self.on_commit_revision_needed(proposal, votes)
 
         # Prepare result notification payload
         result_payload = {
@@ -321,11 +425,14 @@ class ConsensusManager:
             await self.on_result_broadcast(result_payload, proposal.participants)
             logger.info("Broadcasted KNOWLEDGE_COMMIT_RESULT for proposal %s", proposal.proposal_id)
 
-    async def _apply_commit(self, commit: KnowledgeCommit) -> None:
+    async def _apply_commit(self, commit: KnowledgeCommit) -> bool:
         """Apply approved commit to local PCM with cryptographic integrity
 
         Args:
             commit: KnowledgeCommit to apply
+
+        Returns:
+            True if commit was successfully written to disk, False on any error.
         """
         try:
             import hashlib
@@ -335,8 +442,11 @@ class ConsensusManager:
             # Load current context
             context = self.pcm_core.load_context()
 
-            # 1. Set parent commit (chain of trust)
-            commit.parent_commit_id = context.last_commit_id
+            # 1. parent_commit_id is already set from the proposal (anchored by the proposer
+            # at propose time so all nodes compute the same commit_hash). Only fall back to
+            # local context.last_commit_id if the proposal pre-dates this fix.
+            if commit.parent_commit_id is None:
+                commit.parent_commit_id = context.last_commit_id
 
             # 2. Compute hash-based commit ID
             commit.compute_hash()  # Sets commit_hash and commit_id
@@ -404,6 +514,15 @@ class ConsensusManager:
             markdown_content = markdown_manager.topic_to_markdown_content(topic)
             content_hash = hashlib.sha256(markdown_content.encode('utf-8')).hexdigest()[:16]
 
+            # Compute canonical_json (the exact bytes used to produce commit_hash).
+            # Stored in frontmatter so any node can independently re-derive the hash
+            # and detect tampering without needing RSA peer certificates.
+            from dpc_protocol.commit_integrity import compute_canonical_json
+            import base64 as _b64
+            canonical_json_b64 = _b64.b64encode(
+                compute_canonical_json(commit).encode('utf-8')
+            ).decode('ascii')
+
             # Create markdown with frontmatter
             safe_topic_name = markdown_manager.sanitize_filename(topic_name)
             markdown_filename = f"{safe_topic_name}_{commit.commit_id}.md"
@@ -415,6 +534,7 @@ class ConsensusManager:
                 'commit_hash': commit.commit_hash,
                 'parent_commit': commit.parent_commit_id or "",
                 'content_hash': content_hash,
+                'canonical_json': canonical_json_b64,
                 'timestamp': commit.timestamp,
                 'version': topic.version,
                 'author': node_id,
@@ -452,8 +572,130 @@ class ConsensusManager:
             if self.on_commit_applied:
                 await self.on_commit_applied(commit)
 
+            # 10. Let service sign our own copy and broadcast COMMIT_SIGNED to peers
+            if self.on_commit_signed:
+                await self.on_commit_signed(commit)
+
+            # 11. Broadcast COMMIT_ACK so peers know we successfully applied the commit
+            if self.on_commit_ack:
+                await self.on_commit_ack(commit)
+
+            return True
+
         except Exception as e:
             logger.error("Error applying commit: %s", e, exc_info=True)
+            if self.on_commit_apply_failed:
+                await self.on_commit_apply_failed(commit, str(e))
+            return False
+
+    async def record_commit_signature(
+        self,
+        commit_id: str,
+        commit_hash: str,
+        signer_node_id: str,
+        signature_b64: str
+    ) -> bool:
+        """Record a peer's signature for an already-applied commit.
+
+        Verifies the signature, then updates the markdown frontmatter so the
+        file accumulates multi-party signatures over time.
+
+        Args:
+            commit_id: Commit the signature covers.
+            commit_hash: Hash the signature was made over (must match frontmatter).
+            signer_node_id: Node that produced the signature.
+            signature_b64: Base64-encoded RSA-PSS signature.
+
+        Returns:
+            True if signature was valid and stored, False otherwise.
+        """
+        from dpc_protocol.commit_integrity import CommitSigner
+        from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+
+        # Verify signature before touching the file.
+        # None = peer cert not cached (unverifiable); False = signature invalid (reject).
+        sig_result = CommitSigner.verify_signature(signer_node_id, commit_hash, signature_b64)
+        if sig_result is False:
+            logger.warning(
+                "Rejected invalid COMMIT_SIGNED from %s for commit %s",
+                signer_node_id, commit_id[:12]
+            )
+            return False
+        if sig_result is None:
+            logger.info(
+                "Storing unverified COMMIT_SIGNED from %s for commit %s (peer cert not cached)",
+                signer_node_id, commit_id[:12]
+            )
+
+        # Locate the markdown file (filename: {topic}_{commit_id}.md)
+        markdown_manager = MarkdownKnowledgeManager()
+        candidates = list(markdown_manager.knowledge_dir.glob(f"*_{commit_id}.md"))
+        if not candidates:
+            logger.debug("record_commit_signature: no markdown file found for commit %s", commit_id[:12])
+            return False
+
+        markdown_path = candidates[0]
+
+        try:
+            frontmatter, content = markdown_manager.parse_markdown_with_frontmatter(markdown_path)
+
+            # Confirm commit_hash matches what's in the file
+            stored_hash = frontmatter.get('commit_hash', '')
+            if stored_hash and stored_hash != commit_hash:
+                logger.warning(
+                    "record_commit_signature: commit_hash mismatch for %s (stored=%s, received=%s)",
+                    commit_id[:12], stored_hash[:12], commit_hash[:12]
+                )
+                return False
+
+            # Add signature (skip if already recorded)
+            signatures = frontmatter.get('signatures', {})
+            if signer_node_id in signatures:
+                return True  # already have it
+
+            signatures[signer_node_id] = signature_b64
+            frontmatter['signatures'] = signatures
+
+            markdown_manager.write_markdown_with_frontmatter(markdown_path, frontmatter, content)
+            logger.info(
+                "Recorded signature from %s for commit %s (%d total)",
+                signer_node_id, commit_id[:12], len(signatures)
+            )
+            return True
+
+        except Exception as e:
+            logger.error("record_commit_signature error for %s: %s", commit_id[:12], e, exc_info=True)
+            return False
+
+    def record_commit_ack(self, commit_id: str, ack_node_id: str, participants: List[str]) -> None:
+        """Track that a participant successfully applied a commit (Gap 3 observability).
+
+        Args:
+            commit_id: The commit that was applied.
+            ack_node_id: Node ID reporting success.
+            participants: Expected set of participating nodes (for completion check).
+        """
+        if commit_id not in self.commit_acks:
+            self.commit_acks[commit_id] = set()
+
+        self.commit_acks[commit_id].add(ack_node_id)
+        acked = self.commit_acks[commit_id]
+        expected = set(participants)
+
+        logger.info(
+            "COMMIT_ACK from %s for commit %s (%d/%d participants confirmed)",
+            ack_node_id[:20], commit_id[:12], len(acked), len(expected)
+        )
+
+        if expected and expected.issubset(acked):
+            logger.info(
+                "All %d participants confirmed commit %s — convergence complete",
+                len(expected), commit_id[:12]
+            )
+            # Prune old ack set to avoid unbounded memory growth
+            if len(self.commit_acks) > 200:
+                oldest = next(iter(self.commit_acks))
+                del self.commit_acks[oldest]
 
     async def _handle_vote_deadline(self, proposal_id: str) -> None:
         """Handle vote deadline timeout
@@ -513,7 +755,7 @@ class ConsensusManager:
 
         for pid, session in self.sessions.items():
             if session.deadline and session.deadline < cutoff:
-                if session.status in ["approved", "rejected", "timeout"]:
+                if session.status in ["approved", "rejected", "timeout", "revision_needed"]:
                     to_remove.append(pid)
 
         for pid in to_remove:
@@ -571,14 +813,10 @@ class ConsensusManager:
                 is_required_dissent=payload.get('is_required_dissent', False)
             )
 
-            # Process vote
+            # Process vote (receive_vote internally triggers on_vote_received callback)
             await self.receive_vote(vote)
 
             logger.info("Received vote from %s: %s", sender_node_id, vote.vote)
-
-            # Notify callback if registered
-            if self.on_vote_received:
-                await self.on_vote_received(vote)
 
         except Exception as e:
             logger.error("Error handling vote message from %s: %s", sender_node_id, e, exc_info=True)

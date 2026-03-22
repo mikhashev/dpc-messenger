@@ -33,14 +33,20 @@ class DpcLlmAdapter:
     the embedded agent to use DPC's configured AI providers.
     """
 
-    def __init__(self, llm_manager: "LLMManager"):
+    def __init__(
+        self,
+        llm_manager: "LLMManager",
+        provider_alias: Optional[str] = None,
+    ):
         """
         Initialize the adapter.
 
         Args:
             llm_manager: DPC's LLMManager instance (injected from CoreService)
+            provider_alias: Specific provider to use (overrides agent_provider/default_provider)
         """
         self._llm_manager = llm_manager
+        self._provider_alias = provider_alias  # Per-agent provider override
         self._default_model: Optional[str] = None
         # Reuse existing TokenCountManager for accurate token counting
         self._token_counter = getattr(llm_manager, 'token_count_manager', None)
@@ -52,12 +58,18 @@ class DpcLlmAdapter:
         Get the provider alias to use for agent inference.
 
         Priority:
-        1. agent_provider (if configured)
-        2. default_provider (fallback)
+        1. Per-agent provider_alias (if set via constructor)
+        2. agent_provider (if configured in LLMManager)
+        3. default_provider (fallback)
 
         Returns:
             Provider alias string, or None if no provider configured
         """
+        # v0.19.0+: Per-agent provider override (Phase 3)
+        if self._provider_alias and self._provider_alias in self._llm_manager.providers:
+            log.debug(f"Using per-agent provider: {self._provider_alias}")
+            return self._provider_alias
+
         # v0.18.0+: Use agent_provider if configured
         agent_provider = getattr(self._llm_manager, 'agent_provider', None)
         if agent_provider and agent_provider in self._llm_manager.providers:
@@ -71,6 +83,25 @@ class DpcLlmAdapter:
             return default_provider
 
         return None
+
+    def _get_agent_provider(self) -> Optional[Any]:
+        """Get the agent's provider instance."""
+        alias = self._get_agent_provider_alias()
+        if alias:
+            return self._llm_manager.providers.get(alias)
+        return None
+
+    def _agent_provider_supports_vision(self) -> bool:
+        """
+        Check if the agent's configured provider supports vision natively.
+
+        Returns:
+            True if provider supports vision, False otherwise
+        """
+        provider = self._get_agent_provider()
+        if provider and hasattr(provider, 'supports_vision'):
+            return provider.supports_vision()
+        return False
 
     def default_model(self) -> str:
         """Return the current DPC provider's model name."""
@@ -108,6 +139,37 @@ class DpcLlmAdapter:
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
         """
+        # Check if user message contains images (vision query)
+        user_images = self._extract_images_from_messages(messages)
+        if user_images:
+            log.debug(f"Vision query with {len(user_images)} images")
+
+            # Two-tier vision handling:
+            # 1. If agent's provider supports vision → use native vision support
+            # 2. If not → pre-analyze with vision model, inject description
+            if self._agent_provider_supports_vision():
+                log.info("Agent provider supports vision - using native vision")
+                # Get the agent's provider for native vision call
+                alias = self._get_agent_provider_alias()
+                if not alias:
+                    raise RuntimeError("No AI provider configured in DPC Messenger")
+                provider = self._llm_manager.providers[alias]
+                # Use native vision support (passes images directly to provider)
+                return await self._chat_with_native_vision(
+                    provider, messages, user_images, tools, on_stream_chunk, conversation_id
+                )
+            else:
+                log.info("Agent provider does not support vision - pre-analyzing image")
+                # Get user's text message for context
+                user_text = self._extract_user_text(messages)
+                # Pre-analyze the image with a vision model
+                description = await self._pre_analyze_image_for_agent(
+                    user_images, user_text
+                )
+                # Inject description into messages as text context
+                messages = self._inject_image_description_into_messages(messages, description)
+                # Continue with normal text-based agent flow
+
         # Check if dpc_agent provider has peer_id (remote inference) - KISS approach
         dpc_agent_provider = self._llm_manager.providers.get("dpc_agent")
         if dpc_agent_provider and hasattr(dpc_agent_provider, 'peer_id') and dpc_agent_provider.peer_id:
@@ -116,7 +178,13 @@ class DpcLlmAdapter:
                 dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
             )
 
-        # Local inference - existing logic
+        # Get the agent's provider
+        alias = self._get_agent_provider_alias()
+        if not alias:
+            raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
+        provider = self._llm_manager.providers[alias]
+
+        # Local inference - text-only path (or pre-analyzed image description)
         # Convert message list to prompt string for DPC providers
         prompt = self._messages_to_prompt(messages)
 
@@ -125,13 +193,6 @@ class DpcLlmAdapter:
             log.debug(f"Injecting {len(tools)} tool descriptions into prompt")
             tool_descriptions = self._format_tools_for_prompt(tools)
             prompt = f"{tool_descriptions}\n\n{prompt}"
-
-        # Get response from DPC's LLMManager
-        # Use agent_provider if configured, otherwise fallback to default_provider
-        alias = self._get_agent_provider_alias()
-        if not alias:
-            raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
-        provider = self._llm_manager.providers[alias]
 
         # Call DPC provider - use streaming if available and callback provided
         try:
@@ -152,6 +213,12 @@ class DpcLlmAdapter:
                 "role": "assistant",
                 "content": response,
             }
+
+            # Capture thinking/reasoning if the provider produced it
+            if hasattr(provider, 'get_last_thinking'):
+                thinking = provider.get_last_thinking()
+                if thinking:
+                    response_msg["thinking"] = thinking
 
             # Parse for tool calls if tools were provided
             if tools:
@@ -185,6 +252,86 @@ class DpcLlmAdapter:
             log.error(f"DPC LLM error: {e}")
             raise
 
+    async def _chat_with_native_vision(
+        self,
+        provider: Any,
+        messages: List[Dict[str, Any]],
+        images: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Handle vision queries using the agent provider's native vision support.
+
+        This is used when the agent's provider supports vision (Anthropic Claude 3+,
+        Z.AI GLM-V models). Images are passed directly without pre-analysis.
+
+        Args:
+            provider: The vision-capable provider instance
+            messages: List of message dicts with role/content
+            images: List of image dicts with base64 and mime_type keys
+            tools: Optional list of tool schemas
+            on_stream_chunk: Optional streaming callback
+            conversation_id: Optional conversation ID
+
+        Returns:
+            (response_message, usage_dict) tuple in Ouroboros format
+        """
+        # Build text prompt from messages (for the text part)
+        prompt = self._messages_to_prompt(messages)
+
+        # Inject tools if provided
+        if tools:
+            log.debug(f"Injecting {len(tools)} tool descriptions into vision prompt")
+            tool_descriptions = self._format_tools_for_prompt(tools)
+            prompt = f"{tool_descriptions}\n\n{prompt}"
+
+        try:
+            log.info(f"Using native vision support from provider '{provider.alias}'")
+
+            # Call provider's generate_with_vision method
+            response = await provider.generate_with_vision(
+                prompt=prompt,
+                images=images,
+            )
+
+            # Build response message in Ouroboros format
+            response_msg: Dict[str, Any] = {
+                "role": "assistant",
+                "content": response,
+            }
+
+            # Parse for tool calls if tools were provided
+            if tools:
+                log.debug(f"Parsing tool calls from vision response (len={len(response)})")
+                tool_calls = self._parse_tool_calls(response)
+                if tool_calls:
+                    response_msg["tool_calls"] = tool_calls
+                    log.info(f"Found {len(tool_calls)} tool call(s) in vision response")
+
+            # Count tokens
+            model_name = self.default_model()
+            if self._token_counter:
+                prompt_tokens = self._token_counter.count_tokens(prompt, model_name)
+                completion_tokens = self._token_counter.count_tokens(response, model_name)
+            else:
+                prompt_tokens = len(prompt) // 4
+                completion_tokens = len(response) // 4
+
+            usage: Dict[str, Any] = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "cost": 0.0,
+            }
+
+            return response_msg, usage
+
+        except Exception as e:
+            log.error(f"Native vision query error: {e}")
+            raise
+
     async def _chat_via_remote_peer(
         self,
         dpc_agent_provider: Any,
@@ -192,6 +339,7 @@ class DpcLlmAdapter:
         tools: Optional[List[Dict[str, Any]]] = None,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
+        images: Optional[List[Dict[str, Any]]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Route inference to remote peer when dpc_agent.peer_id is set.
@@ -205,6 +353,7 @@ class DpcLlmAdapter:
             tools: Optional list of tool schemas
             on_stream_chunk: Optional streaming callback
             conversation_id: Optional conversation ID
+            images: Optional list of image dicts for vision queries
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -298,6 +447,166 @@ class DpcLlmAdapter:
         except Exception as e:
             log.error(f"Remote peer inference error: {e}")
             raise
+
+    def _extract_images_from_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Extract image data from user messages.
+
+        Parses multipart content to find image_url blocks and extracts
+        base64-encoded image data.
+
+        Args:
+            messages: List of message dicts with role/content
+
+        Returns:
+            List of image dicts with base64 and mime_type keys
+        """
+        images = []
+        for msg in messages:
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "image_url":
+                            # Parse data URL
+                            image_url = block.get("image_url", {}).get("url", "")
+                            if image_url.startswith("data:"):
+                                try:
+                                    header, data = image_url.split(",", 1)
+                                    # Extract mime type from header like "data:image/png;base64"
+                                    mime_type = header.split(";")[0].split(":")[1]
+                                    images.append({
+                                        "base64": data,
+                                        "mime_type": mime_type,
+                                    })
+                                except (ValueError, IndexError) as e:
+                                    log.warning(f"Failed to parse image data URL: {e}")
+        return images
+
+    def _extract_user_text(self, messages: List[Dict[str, Any]]) -> str:
+        """
+        Extract text content from the last user message.
+
+        Args:
+            messages: List of message dicts with role/content
+
+        Returns:
+            Text content of the last user message, or empty string
+        """
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str):
+                    return content
+                elif isinstance(content, list):
+                    # Extract text from multipart content
+                    text_parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                    return "\n".join(text_parts)
+        return ""
+
+    async def _pre_analyze_image_for_agent(
+        self,
+        images: List[Dict[str, Any]],
+        user_message: str,
+    ) -> str:
+        """
+        Pre-analyze images using a vision model and return description.
+
+        This is used when the agent's provider doesn't support vision natively.
+        The description is injected into the messages so the agent can reason
+        about visual content using its tools.
+
+        Args:
+            images: List of image dicts with base64 and mime_type keys
+            user_message: The user's text message (for context)
+
+        Returns:
+            Text description of the image content
+        """
+        try:
+            # Build analysis prompt
+            analysis_prompt = (
+                f"Analyze this image in detail. The user asked: {user_message}\n\n"
+                "Provide a comprehensive description that includes:\n"
+                "- What objects, text, or UI elements are visible\n"
+                "- Any error messages or important text\n"
+                "- Layout and structure if it's a screenshot\n"
+                "- Any other relevant details for understanding the image"
+            )
+
+            log.info(f"Pre-analyzing {len(images)} image(s) for non-vision agent provider")
+
+            # Use LLMManager.query() with images - auto-selects vision provider
+            response_metadata = await self._llm_manager.query(
+                prompt=analysis_prompt,
+                provider_alias=None,  # Auto-select vision provider
+                images=images,
+                return_metadata=True,
+            )
+
+            description = response_metadata.get("response", "")
+            log.debug(f"Image analysis complete ({len(description)} chars)")
+            return description
+
+        except Exception as e:
+            log.error(f"Image pre-analysis failed: {e}")
+            return f"[Image analysis failed: {e}]"
+
+    def _inject_image_description_into_messages(
+        self,
+        messages: List[Dict[str, Any]],
+        description: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        Inject image description into the last user message.
+
+        This is used when the agent's provider doesn't support vision.
+        The description is added as context so the agent can reason about it.
+
+        Args:
+            messages: List of message dicts
+            description: Text description of the image
+
+        Returns:
+            Modified messages list with description injected
+        """
+        # Make a copy to avoid modifying original
+        messages = list(messages)
+
+        # Find the last user message and inject description
+        for i in range(len(messages) - 1, -1, -1):
+            if messages[i].get("role") == "user":
+                content = messages[i].get("content")
+
+                # Build the enhanced content with image context
+                enhanced_text = (
+                    f"[The user has shared an image. Here is the visual analysis]:\n"
+                    f"{description}\n\n"
+                    f"[User's message]: "
+                )
+
+                if isinstance(content, str):
+                    messages[i] = {
+                        "role": "user",
+                        "content": enhanced_text + content
+                    }
+                elif isinstance(content, list):
+                    # Extract text from multipart content
+                    text_parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                    original_text = "\n".join(text_parts)
+                    messages[i] = {
+                        "role": "user",
+                        "content": enhanced_text + original_text
+                    }
+                break
+
+        return messages
 
     def _messages_to_prompt(self, messages: List[Dict[str, Any]]) -> str:
         """

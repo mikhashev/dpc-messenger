@@ -16,8 +16,9 @@ Modes:
 - Server mode: handle_relay_register() - volunteer as relay for others
 
 Privacy:
-- Relay sees encrypted payloads only (end-to-end encryption maintained)
-- No relay can decrypt message content
+- Messages are E2E encrypted by sender (AES-256-GCM + RSA-OAEP) before relay sees them
+- Relay forwards opaque base64 blobs — never parses or decodes content
+- Relay sees: peer IDs, blob sizes, session metadata, timing
 - Rate limiting prevents abuse
 
 Success Rate:
@@ -29,7 +30,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Optional, List, Dict, TYPE_CHECKING
+from typing import Any, Optional, List, Dict, TYPE_CHECKING
 from collections import defaultdict
 
 from ..models.relay_node import RelayNode, RelaySession
@@ -107,8 +108,16 @@ class RelayManager:
         # Server mode state
         self.sessions: Dict[str, RelaySession] = {}  # session_id -> RelaySession
         self.peer_to_session: Dict[str, str] = {}  # node_id -> session_id
-        self.peer_connections: Dict[str, any] = {}  # node_id -> PeerConnection (for forwarding)
+        self.peer_connections: Dict[str, Any] = {}  # node_id -> PeerConnection (for forwarding)
         self.rate_limits: Dict[str, List[float]] = defaultdict(list)  # node_id -> timestamps
+
+        # Client mode: pending session handshakes and active relayed connections
+        # _pending_relay_sessions: peer_id -> Future(session_id)
+        #   Resolved by RelayReadyHandler when relay sends RELAY_READY
+        self._pending_relay_sessions: Dict[str, asyncio.Future] = {}
+        # _active_relay_connections: peer_id -> RelayedPeerConnection
+        #   Used by RelayMessageHandler to dispatch incoming relay messages
+        self._active_relay_connections: Dict[str, "RelayedPeerConnection"] = {}
 
         # Client mode cache
         self._relay_cache: List[RelayNode] = []
@@ -318,7 +327,7 @@ class RelayManager:
         Example:
             >>> relay = await manager.find_relay()
             >>> connection = await manager.connect_via_relay("dpc-node-peer", relay)
-            >>> await connection.send_message({"command": "HELLO"})
+            >>> await connection.send_message({"command": "HELLO"})  # noqa: use send() on RelayedPeerConnection
         """
         logger.info(
             "Connecting to peer %s via relay %s",
@@ -328,90 +337,126 @@ class RelayManager:
         if not self.p2p_manager:
             raise ConnectionError("P2PManager not initialized")
 
+        # Register a Future that RelayReadyHandler will resolve with the session_id
+        loop = asyncio.get_running_loop()
+        ready_future: asyncio.Future = loop.create_future()
+        self._pending_relay_sessions[peer_id] = ready_future
+
         try:
-            # Step 1: Connect to relay via P2P manager (TLS)
-            relay_connection = await asyncio.wait_for(
-                self.p2p_manager.connect_to_peer(
+            # Step 1: Connect to relay (TLS + HELLO handshake, starts _listen_to_peer)
+            # All subsequent messages from relay go through MessageRouter — no raw .read()
+            await asyncio.wait_for(
+                self.p2p_manager.connect_directly(
                     relay_node.ip,
                     relay_node.port,
                     relay_node.node_id
                 ),
-                timeout=20.0  # Connection timeout
+                timeout=20.0
             )
+            relay_connection = self.p2p_manager.peers.get(relay_node.node_id)
+            if not relay_connection:
+                raise ConnectionError("Relay connection not found after connect_directly")
 
             logger.info("Connected to relay %s", relay_node.node_id[:20])
 
-            # Step 2: Send RELAY_REGISTER request
-            await relay_connection.send_message({
+            # Step 2: Send RELAY_REGISTER through normal message routing
+            await self.p2p_manager.send_message_to_peer(relay_node.node_id, {
                 "command": "RELAY_REGISTER",
                 "payload": {
-                    "peer_id": peer_id,  # Target peer we want to connect to
+                    "peer_id": peer_id,
                     "timeout": 30.0
                 }
             })
+            logger.debug("Sent RELAY_REGISTER for peer %s", peer_id[:20])
 
-            logger.debug("Sent RELAY_REGISTER to relay for peer %s", peer_id[:20])
+            # Step 3: Wait for RELAY_READY — resolved by RelayReadyHandler via MessageRouter
+            # (RELAY_WAITING is handled separately and just logs; we keep waiting)
+            session_id = await asyncio.wait_for(ready_future, timeout=60.0)
 
-            # Step 3: Wait for RELAY_READY or RELAY_WAITING response
-            response = await asyncio.wait_for(
-                relay_connection.receive_message(),
-                timeout=30.0
-            )
-
-            if not response:
-                raise ConnectionError("No response from relay")
-
-            # Handle different responses
-            if response.get("command") == "RELAY_WAITING":
-                # Relay is waiting for other peer - keep waiting for RELAY_READY
-                logger.debug("Relay waiting for peer %s to register", peer_id[:20])
-                response = await asyncio.wait_for(
-                    relay_connection.receive_message(),
-                    timeout=30.0  # Wait for other peer to register
-                )
-
-            if not response or response.get("command") != "RELAY_READY":
-                logger.warning("Invalid relay response: %s", response)
-                raise ConnectionError(f"Relay did not confirm session: {response}")
-
-            session_id = response.get("payload", {}).get("session_id")
             if not session_id:
-                raise ConnectionError("Relay did not provide session ID")
+                raise ConnectionError("Relay provided empty session ID")
 
             logger.info(
                 "Relay session established: %s (peer=%s, relay=%s)",
                 session_id, peer_id[:20], relay_node.node_id[:20]
             )
 
-            # Step 4: Wrap connection in RelayedPeerConnection
+            # Step 4: Wrap in RelayedPeerConnection and register for incoming dispatch
             from ..transports.relayed_connection import RelayedPeerConnection
 
             relayed_conn = RelayedPeerConnection(
                 peer_id=peer_id,
                 relay_node=relay_node,
                 relay_connection=relay_connection,
-                session_id=session_id
+                session_id=session_id,
+                own_node_id=self.dht_manager.node_id,
+                dht_manager=self.dht_manager,
             )
 
-            await relayed_conn.start()
+            # Register so RelayMessageHandler can dispatch incoming messages to it
+            self._active_relay_connections[peer_id] = relayed_conn
 
+            await relayed_conn.start()
             self.stats["relay_connections"] += 1
 
             logger.info("Relay connection established to %s", peer_id[:20])
             return relayed_conn
 
-        except asyncio.TimeoutError as e:
+        except asyncio.TimeoutError:
             logger.warning(
                 "Relay connection timeout to %s via %s",
                 peer_id[:20], relay_node.node_id[:20]
             )
-            raise ConnectionError(f"Relay timeout: {e}")
+            raise ConnectionError(f"Relay timeout waiting for RELAY_READY from {relay_node.node_id[:20]}")
         except Exception as e:
-            logger.error(
-                "Failed to connect via relay to %s: %s",
-                peer_id[:20], e
-            )
+            logger.error("Failed to connect via relay to %s: %s", peer_id[:20], e)
             raise ConnectionError(f"Relay connection failed: {e}")
+        finally:
+            # Always clean up the pending Future
+            self._pending_relay_sessions.pop(peer_id, None)
+
+    # ===== Client Mode: Incoming relay message dispatch =====
+
+    async def dispatch_incoming_relay_message(
+        self, from_peer: str, session_id: str, data_b64: str
+    ) -> bool:
+        """
+        Route an incoming RELAY_MESSAGE to the correct RelayedPeerConnection.
+
+        Called by RelayMessageHandler when this node is the destination
+        (not a relay volunteer). Finds the active connection for from_peer
+        and pushes the encrypted blob to it for decryption and queuing.
+
+        Args:
+            from_peer: Node ID of the original sender
+            session_id: Relay session identifier
+            data_b64: Base64-encoded E2E-encrypted blob
+
+        Returns:
+            True if dispatched, False if no matching active connection
+        """
+        conn = self._active_relay_connections.get(from_peer)
+        if not conn:
+            logger.warning(
+                "No active relay connection for incoming message from %s",
+                from_peer[:20]
+            )
+            return False
+
+        if conn.session_id != session_id:
+            logger.warning(
+                "Session ID mismatch for relay message from %s: expected %s, got %s",
+                from_peer[:20], conn.session_id, session_id
+            )
+            return False
+
+        await conn._dispatch_incoming(data_b64)
+        return True
+
+    def deregister_relay_connection(self, peer_id: str):
+        """Remove an active relay connection from the dispatch registry."""
+        self._active_relay_connections.pop(peer_id, None)
+        logger.debug("Deregistered relay connection for peer %s", peer_id[:20])
 
     # ===== Server Mode: Relay Volunteering =====
 
@@ -605,22 +650,21 @@ class RelayManager:
             # Get destination peer's connection
             dest_connection = self.peer_connections[to_peer]
 
-            # Decode message bytes to dict for protocol
-            import json
-            message_dict = json.loads(message.decode('utf-8'))
+            # Forward the opaque base64 blob — relay never parses message content
+            # message bytes are the base64 string as UTF-8 from relay_message_handler
+            data_b64 = message.decode('utf-8')
 
-            # Wrap in RELAY_MESSAGE protocol and forward
             relay_message = {
                 "command": "RELAY_MESSAGE",
                 "payload": {
                     "from": from_peer,
                     "to": to_peer,
                     "session_id": session_id,
-                    "message": message_dict
+                    "data": data_b64  # Opaque E2E-encrypted blob
                 }
             }
 
-            await dest_connection.send_message(relay_message)
+            await dest_connection.send(relay_message)
 
             logger.debug(
                 "Forwarded RELAY_MESSAGE: %s → %s (%d bytes, session=%s)",

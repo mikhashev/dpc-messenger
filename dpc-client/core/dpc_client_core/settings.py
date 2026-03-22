@@ -83,8 +83,18 @@ class Settings:
         }
 
         self._config['webrtc'] = {
-            # STUN servers for NAT traversal (discovering public IP)
-            'stun_servers': 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302,stun:global.stun.twilio.com:3478,stun:stun.rtc.yandex.net:3478'
+            # STUN servers for NAT traversal (discovering public IP).
+            # Hostname-based entries are tried first; IP-based entries are
+            # fallbacks for environments where DNS resolution is unreliable
+            # (e.g., Docker with a custom DNS resolver blocking external names).
+            'stun_servers': (
+                'stun:stun.l.google.com:19302,'
+                'stun:stun1.l.google.com:19302,'
+                'stun:global.stun.twilio.com:3478,'
+                'stun:stun.rtc.yandex.net:3478,'
+                'stun:74.125.250.129:19302,'   # stun.l.google.com resolved IP (DNS fallback)
+                'stun:74.125.250.127:19302'    # stun1.l.google.com resolved IP (DNS fallback)
+            )
         }
 
         self._config['system'] = {
@@ -175,6 +185,13 @@ class Settings:
             'preparation_progress_interval_chunks': '10000'  # Emit progress every N chunks during CRC32
         }
 
+        self._config['conversations'] = {
+            # Per-conversation storage settings (v0.21.0)
+            'default_persist_p2p_history': 'false',  # Persist P2P chat history by default (false = ephemeral, synced from peer)
+            'default_persist_telegram_history': 'true',  # Persist Telegram chat history by default
+            'storage_version': '2'  # Storage schema version (1 = legacy groups/, 2 = unified conversations/)
+        }
+
         self._config['voice_messages'] = {
             'enabled': 'true',  # Enable voice message recording and playback (v0.13.0+)
             'max_duration_seconds': '300',  # Maximum recording duration in seconds (5 minutes)
@@ -258,14 +275,19 @@ class Settings:
         # Security settings (enabled, tools, evolution) are configured via Firewall Rules UI
         # which writes to ~/.dpc/privacy_rules.json.
 
-        self._config['dpc_agent_telegram'] = {
-            'enabled': 'false',  # Enable Telegram notifications for agent events
-            'bot_token': '',  # Telegram bot token (separate from main DPC bot)
-            'allowed_chat_ids': '',  # JSON array of chat IDs: ["123456789"]
-            'event_filter': 'task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message',  # Events to forward
+        # NOTE: [dpc_agent_telegram] section removed in v0.15.0 — deprecated.
+        # Agent Telegram linking is now per-agent via ~/.dpc/agents/{id}/config.json.
+        # Use the main [telegram] bot (same token) and link agents via the UI.
+        # See docs/DPC_AGENT_TELEGRAM.md for migration guide.
+
+        # Agent-Telegram Chat Linking (v0.15.0+)
+        self._config['agent_telegram'] = {
+            'auto_link_on_create': 'false',  # Auto-link Telegram chat when creating agents
+            'require_confirmation': 'true',  # Require user confirmation before linking
+            'default_enabled': 'false'  # Default telegram_enabled state for new agents
         }
-        # NOTE: Create a separate Telegram bot for agent monitoring via @BotFather
-        # Get your chat ID via @userinfobot
+        # NOTE: This section controls agent-Telegram chat linking behavior
+        # Uses the main Telegram bot (from [telegram] section), not a separate bot
 
         self._config['logging'] = {
             'level': 'INFO',  # Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -916,6 +938,24 @@ class Settings:
             import logging
             logger = logging.getLogger(__name__)
             logger.error(f"Failed to save last_update_id: {e}")
+
+    def remove_telegram_last_update_id(self, chat_id: str):
+        """Remove last_update_id entry for a specific Telegram chat.
+
+        This should be called when a Telegram chat is unlinked/deleted to prevent
+        stale entries from accumulating in config.ini.
+        """
+        import json
+        import logging
+        logger = logging.getLogger(__name__)
+        try:
+            all_updates = json.loads(self.get('telegram', 'last_update_id', '{}'))
+            if chat_id in all_updates:
+                del all_updates[chat_id]
+                self.set('telegram', 'last_update_id', json.dumps(all_updates))
+                logger.info(f"Removed last_update_id for Telegram chat {chat_id}")
+        except Exception as e:
+            logger.error(f"Failed to remove last_update_id for chat {chat_id}: {e}")
 
     # DPC Agent Runtime Settings
     # Note: Security/permission settings (enabled, tools, evolution) are in privacy_rules.json

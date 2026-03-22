@@ -110,6 +110,8 @@ class AgentTelegramBridge:
         event_filter: Optional[List[str]] = None,
         rate_limit: Optional[RateLimitConfig] = None,
         transcription_enabled: bool = True,
+        agent_id: str = "",
+        unified_conversation: bool = False,
     ):
         """
         Initialize agent Telegram bridge.
@@ -120,12 +122,17 @@ class AgentTelegramBridge:
             event_filter: List of event types to forward (None = all important events)
             rate_limit: Rate limiting configuration
             transcription_enabled: Enable voice message transcription (default: True)
+            agent_id: Agent ID this bridge belongs to (used for unified conversation)
+            unified_conversation: When True, Telegram messages share conversation history
+                                  with the DPC chat UI (conversation_id = agent_id)
         """
         self.bot_token = bot_token
         self.allowed_chat_ids = [str(cid) for cid in allowed_chat_ids]  # Ensure strings
         self.event_filter = set(event_filter) if event_filter else self._default_event_filter()
         self.rate_limit = rate_limit or RateLimitConfig()
         self.transcription_enabled = transcription_enabled
+        self._agent_id = agent_id
+        self._unified_conversation = unified_conversation
 
         self._bot = None
         self._application = None  # telegram.ext.Application
@@ -139,6 +146,10 @@ class AgentTelegramBridge:
         # Message handler callback (set by agent_manager)
         self._message_handler: Optional[Callable] = None
         self._agent_manager: Optional["DpcAgentManager"] = None
+
+        # Pending knowledge commit proposals awaiting Telegram approval
+        # Maps proposal_id -> chat_id so vote callbacks can identify who to respond to
+        self._pending_proposals: Dict[str, str] = {}
 
         # Semaphore to limit concurrent Telegram API calls (prevents pool exhaustion)
         self._send_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent sends
@@ -197,7 +208,7 @@ class AgentTelegramBridge:
         try:
             # Import telegram library
             from telegram import Bot
-            from telegram.ext import Application, MessageHandler, filters, CommandHandler
+            from telegram.ext import Application, MessageHandler, filters, CommandHandler, CallbackQueryHandler
             from telegram.request import HTTPXRequest
 
             # Create session with timeout
@@ -217,6 +228,11 @@ class AgentTelegramBridge:
             self._application.add_handler(CommandHandler("help", self._handle_help_command))
             self._application.add_handler(CommandHandler("status", self._handle_status_command))
             self._application.add_handler(CommandHandler("clear", self._handle_clear_command))
+            self._application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
+            self._application.add_handler(CommandHandler("endsession", self._handle_endsession_command))
+
+            # Add handler for inline keyboard votes on knowledge commit proposals
+            self._application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
 
             # Add handler for regular messages (non-commands)
             self._application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message))
@@ -285,11 +301,13 @@ class AgentTelegramBridge:
 
         welcome = """🤖 *DPC Agent Bot*
 
-Welcome! You can send messages to the DPC Agent\\.
+Welcome\\! You can send messages to the DPC Agent\\.
 
 *Commands:*
-/help - Show available commands
-/status - Check agent status
+/help \\- Show available commands
+/status \\- Check agent status
+/newsession \\- Start a new session
+/endsession \\- End session and save knowledge
 
 *Usage:*
 Just send any message and the agent will process it\\.
@@ -297,7 +315,7 @@ You can also send voice messages for transcription\\.
 
 Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] section\\.
 """
-        await update.message.reply_text(welcome, parse_mode="Markdown")
+        await update.message.reply_text(welcome, parse_mode="MarkdownV2")
 
     async def _handle_help_command(self, update, context):
         """Handle /help command."""
@@ -306,13 +324,15 @@ Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] sectio
         if chat_id not in self.allowed_chat_ids:
             return
 
-        help_text = """🤖 *DPC Agent Bot - Help*
+        help_text = """🤖 *DPC Agent Bot \\- Help*
 
 *Commands:*
-/start - Initialize bot
-/help - Show this help
-/status - Check agent status
-/clear - Clear conversation history and reset context
+/start \\- Initialize bot
+/help \\- Show this help
+/status \\- Check agent status
+/clear \\- Clear conversation history and start fresh
+/newsession \\- Start a new session \\(clears history\\)
+/endsession \\- End session and extract knowledge to personal context
 
 *Sending Tasks:*
 Just type a message and the agent will process it\\.
@@ -327,13 +347,18 @@ You can also send voice messages for transcription\\.
 *Voice Messages:*
 Send a voice message and it will be transcribed and processed\\.
 
+*Session Management:*
+• /clear — instant history reset \\(no knowledge saved\\)
+• /newsession — same as /clear
+• /endsession — extracts knowledge, shows inline approve/reject buttons
+• You can approve or reject the knowledge proposal directly here
+
 *Tips:*
 • Be specific in your requests
 • The agent has access to configured tools
 • Check firewall rules if tools seem unavailable
-• Use /clear to start fresh when context gets full
 """
-        await update.message.reply_text(help_text, parse_mode="Markdown")
+        await update.message.reply_text(help_text, parse_mode="MarkdownV2")
 
     async def _handle_status_command(self, update, context):
         """Handle /status command."""
@@ -362,7 +387,7 @@ Send a voice message and it will be transcribed and processed\\.
         status_lines.append(f"\n📡 Bridge: `{'Online' if self._enabled else 'Offline'}`")
         status_lines.append(f"💬 Allowed chats: `{len(self.allowed_chat_ids)}`")
 
-        await update.message.reply_text("\n".join(status_lines), parse_mode="Markdown")
+        await update.message.reply_text("\n".join(status_lines), parse_mode="MarkdownV2")
 
     async def _handle_clear_command(self, update, context):
         """Handle /clear command - reset conversation context."""
@@ -371,7 +396,7 @@ Send a voice message and it will be transcribed and processed\\.
         if chat_id not in self.allowed_chat_ids:
             return
 
-        conversation_id = f"telegram-{chat_id}"
+        conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
 
         # Reset the conversation monitor
         if self._agent_manager:
@@ -381,17 +406,212 @@ Send a voice message and it will be transcribed and processed\\.
                     "✅ *Conversation Cleared*\n\n"
                     "Context and history have been reset\\. "
                     "You can start a fresh conversation now\\.",
-                    parse_mode="Markdown"
+                    parse_mode="MarkdownV2"
                 )
             else:
                 await update.message.reply_text(
                     "ℹ️ *No Conversation Found*\n\n"
                     "No existing conversation to clear\\. "
                     "Start chatting with the agent first\\.",
-                    parse_mode="Markdown"
+                    parse_mode="MarkdownV2"
                 )
         else:
             await update.message.reply_text("⚠️ Agent manager not available\\.")
+
+    async def _handle_newsession_command(self, update, context):
+        """Handle /newsession command — clear history and start a fresh session."""
+        chat_id = str(update.effective_chat.id)
+
+        if chat_id not in self.allowed_chat_ids:
+            return
+
+        conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+        service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
+
+        if not service:
+            await update.message.reply_text("⚠️ Service not available\\.", parse_mode="MarkdownV2")
+            return
+
+        try:
+            result = await service.propose_new_session(conversation_id)
+            if result.get("status") == "success":
+                await update.message.reply_text(
+                    "🔄 *New Session Started*\n\n"
+                    "Conversation history has been cleared\\. "
+                    "Start fresh\\!",
+                    parse_mode="MarkdownV2"
+                )
+                # Push empty history to DPC chat UI if unified
+                if self._unified_conversation:
+                    await self._broadcast_history_to_ui(conversation_id)
+            else:
+                msg = escape_markdown(result.get("message", "Unknown error"))
+                await update.message.reply_text(f"❌ Failed to start new session: {msg}", parse_mode="MarkdownV2")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+
+    async def _handle_endsession_command(self, update, context):
+        """Handle /endsession command — end session and trigger knowledge extraction."""
+        chat_id = str(update.effective_chat.id)
+
+        if chat_id not in self.allowed_chat_ids:
+            return
+
+        conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+        service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
+
+        if not service:
+            await update.message.reply_text("⚠️ Service not available\\.", parse_mode="MarkdownV2")
+            return
+
+        await update.message.reply_text(
+            "🧠 *Ending Session\\.\\.\\.*\n\nAnalyzing conversation for knowledge\\.\\.\\.",
+            parse_mode="MarkdownV2"
+        )
+
+        try:
+            result = await service.end_conversation_session(conversation_id)
+            status = result.get("status", "unknown")
+
+            if status == "success":
+                proposal_id = result.get("proposal_id")
+                if proposal_id:
+                    # Store pending proposal so vote callback can look it up
+                    self._pending_proposals[proposal_id] = chat_id
+
+                    # Send message with inline approve/reject keyboard
+                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                    keyboard = InlineKeyboardMarkup([
+                        [
+                            InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                            InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
+                        ]
+                    ])
+                    await update.message.reply_text(
+                        "✅ *Session Ended*\n\n"
+                        "📚 *Knowledge proposal created\\!*\n\n"
+                        "Review and vote on the knowledge commit:",
+                        parse_mode="MarkdownV2",
+                        reply_markup=keyboard,
+                    )
+                else:
+                    await update.message.reply_text(
+                        "✅ *Session Ended*\n\n"
+                        "No new knowledge found in this conversation\\.",
+                        parse_mode="MarkdownV2"
+                    )
+            else:
+                msg = escape_markdown(result.get("message", "Unknown error"))
+                await update.message.reply_text(f"❌ Failed to end session: {msg}", parse_mode="MarkdownV2")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+
+    async def _handle_vote_callback(self, update, context):
+        """
+        Handle inline keyboard vote callback for knowledge commit proposals.
+
+        Callback data format: "vote:{proposal_id}:{approve|reject}"
+        """
+        query = update.callback_query
+        await query.answer()  # Acknowledge the callback to stop the loading spinner
+
+        chat_id = str(query.message.chat.id)
+        if chat_id not in self.allowed_chat_ids:
+            await query.edit_message_text("⛔ Unauthorized.")
+            return
+
+        parts = (query.data or "").split(":", 2)
+        if len(parts) != 3:
+            await query.edit_message_text("❌ Invalid vote data.")
+            return
+
+        _, proposal_id, vote = parts
+        service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
+        if not service:
+            await query.edit_message_text("⚠️ Service not available.")
+            return
+
+        try:
+            result = await service.vote_knowledge_commit(proposal_id, vote)
+            status = result.get("status", "unknown")
+
+            if status == "success":
+                if vote == "approve":
+                    label = "✅ *Approved*"
+                    detail = "\n\nKnowledge will be saved to your personal context\\."
+                else:
+                    label = "❌ *Rejected*"
+                    detail = "\n\nKnowledge commit rejected\\."
+
+                await query.edit_message_text(
+                    f"{label}\n\nVote recorded\\."
+                    f"{detail}",
+                    parse_mode="MarkdownV2",
+                )
+            else:
+                msg = escape_markdown(result.get("message", "Unknown error"))
+                await query.edit_message_text(
+                    f"❌ *Vote failed:* {msg}",
+                    parse_mode="MarkdownV2",
+                )
+
+            # Clean up pending proposal
+            self._pending_proposals.pop(proposal_id, None)
+
+        except Exception as e:
+            log.error(f"Error handling vote callback: {e}", exc_info=True)
+            await query.edit_message_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+
+    async def notify_knowledge_proposal(
+        self,
+        proposal_id: str,
+        topic: str,
+        chat_ids: Optional[List[str]] = None,
+    ) -> None:
+        """
+        Send a Telegram notification for an auto-detected knowledge commit proposal.
+
+        Called by service.py when a ConversationMonitor auto-detects knowledge and creates
+        a proposal. Sends a message with inline [✅ Approve] [❌ Reject] buttons.
+
+        Args:
+            proposal_id: The proposal ID from consensus_manager
+            topic: Short topic description for the user
+            chat_ids: Optional list of chat IDs to notify (defaults to all allowed_chat_ids)
+        """
+        if not self._enabled or not self._bot:
+            return
+
+        targets = [str(c) for c in chat_ids] if chat_ids else self.allowed_chat_ids
+
+        try:
+            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                    InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
+                ]
+            ])
+            topic_escaped = escape_markdown(topic or "New knowledge detected")
+            text = (
+                "📚 *Knowledge Proposal*\n\n"
+                f"*Topic:* {topic_escaped}\n\n"
+                "Review and vote:"
+            )
+            for chat_id in targets:
+                if chat_id in self.allowed_chat_ids:
+                    self._pending_proposals[proposal_id] = chat_id
+                    try:
+                        await self._bot.send_message(
+                            chat_id=chat_id,
+                            text=text,
+                            parse_mode="MarkdownV2",
+                            reply_markup=keyboard,
+                        )
+                    except Exception as e:
+                        log.warning(f"Failed to notify chat {chat_id} of knowledge proposal: {e}")
+        except Exception as e:
+            log.error(f"notify_knowledge_proposal error: {e}", exc_info=True)
 
     async def _handle_message(self, update, context):
         """Handle incoming text message."""
@@ -415,22 +635,30 @@ Send a voice message and it will be transcribed and processed\\.
         log.info(f"Processing Telegram message from chat {chat_id}: {message_text[:50]}...")
 
         try:
+            # Use agent_id as conversation_id when unified_conversation is enabled,
+            # so Telegram messages share history with the DPC chat UI.
+            conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+
             # Call the message handler (agent_manager.process_message)
             response = await self._message_handler(
                 message=message_text,
-                conversation_id=f"telegram-{chat_id}",
+                conversation_id=conversation_id,
                 include_context=True,
             )
 
-            # Send response (truncate if needed, escape for Markdown)
+            # Send response (escape for MarkdownV2, split if needed)
             if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
                 # Split long messages
                 chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
                 for i, chunk in enumerate(chunks):
                     prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                    await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="Markdown")
+                    await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
             else:
-                await update.message.reply_text(escape_markdown(response), parse_mode="Markdown")
+                await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
+            # In unified_conversation mode, push updated history to DPC chat UI
+            if self._unified_conversation and self._agent_manager:
+                await self._broadcast_history_to_ui(conversation_id)
 
         except Exception as e:
             error_str = str(e)
@@ -442,10 +670,10 @@ Send a voice message and it will be transcribed and processed\\.
                     "⚠️ *Context Limit Reached*\n\n"
                     "The conversation has reached its token limit\\.\n\n"
                     "Use `/clear` to start a fresh conversation\\.",
-                    parse_mode="Markdown"
+                    parse_mode="MarkdownV2"
                 )
             else:
-                await update.message.reply_text(f"❌ Error processing message: {escape_markdown(error_str[:200])}", parse_mode="Markdown")
+                await update.message.reply_text(f"❌ Error processing message: {escape_markdown(error_str[:200])}", parse_mode="MarkdownV2")
 
     async def _handle_voice_message(self, update, context):
         """
@@ -485,7 +713,8 @@ Send a voice message and it will be transcribed and processed\\.
         try:
             # Download voice file
             voice_filename = f"agent_voice_{update.message.message_id}.ogg"
-            voice_dir = Path.home() / ".dpc" / "agent" / "voice"
+            # Use agent-specific storage instead of legacy ~/.dpc/agent/ path
+            voice_dir = self._agent_manager.agent_root / "voice"
             voice_dir.mkdir(parents=True, exist_ok=True)
             voice_path = voice_dir / voice_filename
 
@@ -526,7 +755,7 @@ Send a voice message and it will be transcribed and processed\\.
                             if transcription_text:
                                 await update.message.reply_text(
                                     f"📝 *Transcription:*\n{escape_markdown(transcription_text)}",
-                                    parse_mode="Markdown"
+                                    parse_mode="MarkdownV2"
                                 )
                             else:
                                 await update.message.reply_text("⚠️ No speech detected in voice message.")
@@ -555,22 +784,29 @@ Send a voice message and it will be transcribed and processed\\.
 
                 log.info(f"Processing transcribed voice message from chat {chat_id}: {transcription_text[:50]}...")
 
+                # Use agent_id as conversation_id when unified_conversation is enabled
+                conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+
                 # Call the message handler (agent_manager.process_message)
                 response = await self._message_handler(
                     message=transcription_text,
-                    conversation_id=f"telegram-{chat_id}",
+                    conversation_id=conversation_id,
                     include_context=True,
                 )
 
-                # Send response (truncate if needed, escape for Markdown)
+                # Send response (escape for MarkdownV2, split if needed)
                 if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
                     # Split long messages
                     chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
                     for i, chunk in enumerate(chunks):
                         prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="Markdown")
+                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
                 else:
-                    await update.message.reply_text(escape_markdown(response), parse_mode="Markdown")
+                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+
+                # In unified_conversation mode, push updated history to DPC chat UI
+                if self._unified_conversation and self._agent_manager:
+                    await self._broadcast_history_to_ui(conversation_id)
 
             # Clean up voice file
             try:
@@ -581,6 +817,48 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"Error processing voice message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing voice message: {str(e)[:200]}")
+
+    async def _broadcast_history_to_ui(self, conversation_id: str) -> None:
+        """
+        Broadcast updated conversation history to the DPC chat UI via WebSocket.
+
+        Called after processing a Telegram message in unified_conversation mode so
+        the DPC chat panel reflects the Telegram exchange in real time.
+        """
+        try:
+            service = getattr(self._agent_manager, 'service', None)
+            if not service:
+                return
+            history_result = await service.get_conversation_history(conversation_id)
+            messages = history_result.get("messages", [])
+
+            # Include token usage from agent manager's own monitor registry so the UI token counter updates
+            monitor = self._agent_manager._agent_monitors.get(conversation_id)
+            tokens_used = monitor.current_token_count if monitor else 0
+            token_limit = monitor.token_limit if monitor else 0
+
+            # Token warning — same threshold check as UI-triggered agent queries
+            if monitor and token_limit > 0 and monitor.should_suggest_extraction():
+                usage_percent = tokens_used / token_limit
+                await service.local_api.broadcast_event("token_limit_warning", {
+                    "conversation_id": conversation_id,
+                    "tokens_used": tokens_used,
+                    "token_limit": token_limit,
+                    "usage_percent": usage_percent
+                })
+                log.warning(f"[_broadcast_history_to_ui] Token Warning - {conversation_id}: "
+                            f"{usage_percent * 100:.1f}% of context window used ({tokens_used}/{token_limit})")
+
+            await service.local_api.broadcast_event("agent_history_updated", {
+                "conversation_id": conversation_id,
+                "messages": messages,
+                "message_count": len(messages),
+                "tokens_used": tokens_used,
+                "token_limit": token_limit,
+            })
+            log.debug(f"[_broadcast_history_to_ui] Pushed {len(messages)} messages for {conversation_id}")
+        except Exception as e:
+            log.warning(f"[_broadcast_history_to_ui] Failed to push history: {e}")
 
     def _split_message(self, text: str, max_length: int) -> List[str]:
         """Split a long message into chunks."""
@@ -741,7 +1019,7 @@ Send a voice message and it will be transcribed and processed\\.
                 result = await self._bot.send_message(
                     chat_id=chat_id,
                     text=text,
-                    parse_mode="Markdown",
+                    parse_mode="MarkdownV2",
                     disable_notification=False,
                 )
                 log.debug(f"[_send_message] Success! message_id={result.message_id}")
@@ -892,6 +1170,7 @@ Configure event types in `~/.dpc/config.ini` [dpc_agent_telegram] section.
             "chat_count": len(self.allowed_chat_ids),
             "event_filter": list(self.event_filter),
             "transcription_enabled": self.transcription_enabled,
+            "unified_conversation": self._unified_conversation,
             "rate_limit": {
                 "max_per_minute": self.rate_limit.max_events_per_minute,
                 "cooldown_seconds": self.rate_limit.cooldown_seconds,

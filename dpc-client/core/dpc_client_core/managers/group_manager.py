@@ -2,12 +2,14 @@
 Group chat manager for persistent group metadata.
 
 Handles create, join, leave, delete, and sync operations for group chats.
-Group metadata is stored as individual JSON files in ~/.dpc/groups/.
+Group metadata is stored as individual JSON files in ~/.dpc/conversations/{group_id}/.
+Legacy location ~/.dpc/groups/ is supported for migration.
 """
 
 import json
 import logging
 import uuid
+import shutil
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
@@ -47,7 +49,8 @@ class GroupManager:
     """
     Manages group chat metadata: create, join, leave, delete, sync, persist.
 
-    Storage: ~/.dpc/groups/{group_id}.json (one file per group)
+    Storage (v0.21.0): ~/.dpc/conversations/{group_id}/metadata.json
+    Legacy storage: ~/.dpc/groups/{group_id}.json (supported for migration)
     Deleted groups registry: ~/.dpc/groups/deleted_registry.json
     """
 
@@ -56,61 +59,166 @@ class GroupManager:
     def __init__(self, dpc_home: Path, node_id: str):
         self.dpc_home = dpc_home
         self.node_id = node_id
-        self.groups_dir = dpc_home / "groups"
+        self.groups_dir = dpc_home / "groups"  # Legacy, kept for deleted_registry
+        self.conversations_dir = dpc_home / "conversations"  # New unified location
         self._groups: Dict[str, GroupMetadata] = {}
         self._deleted_groups: Dict[str, Dict[str, str]] = {}  # group_id -> {deleted_at, deleted_by}
         self._deleted_registry_path = self.groups_dir / "deleted_registry.json"
 
-    def load_from_disk(self):
-        """Load all group metadata files from disk."""
-        if not self.groups_dir.exists():
-            logger.debug("Groups directory not found at %s, starting fresh", self.groups_dir)
-            return
+    def _get_conversation_dir(self, group_id: str) -> Path:
+        """Get the conversation folder path for a group.
 
+        Args:
+            group_id: Group ID
+
+        Returns:
+            Path to ~/.dpc/conversations/{group_id}/
+        """
+        return self.conversations_dir / group_id
+
+    def _get_group_metadata_path(self, group_id: str) -> Path:
+        """Get path to group metadata file.
+
+        Args:
+            group_id: Group ID
+
+        Returns:
+            Path to ~/.dpc/conversations/{group_id}/metadata.json
+        """
+        return self._get_conversation_dir(group_id) / "metadata.json"
+
+    def _get_legacy_group_path(self, group_id: str) -> Path:
+        """Get legacy path to group metadata file (for migration).
+
+        Args:
+            group_id: Group ID
+
+        Returns:
+            Path to ~/.dpc/groups/{group_id}.json
+        """
+        return self.groups_dir / f"{group_id}.json"
+
+    def load_from_disk(self):
+        """Load all group metadata files from disk.
+
+        Loads from new location (~/.dpc/conversations/{group_id}/metadata.json).
+        Also checks legacy location (~/.dpc/groups/{group_id}.json) and migrates.
+        """
         loaded = 0
-        for group_file in self.groups_dir.glob("*.json"):
-            # Skip the deleted registry file
-            if group_file.name == "deleted_registry.json":
-                continue
-            try:
-                with open(group_file, "r") as f:
-                    data = json.load(f)
-                group = GroupMetadata.from_dict(data)
-                self._groups[group.group_id] = group
-                loaded += 1
-            except Exception as e:
-                logger.error("Error loading group file %s: %s", group_file, e)
+        migrated = 0
+
+        # First, check for legacy groups that need migration
+        if self.groups_dir.exists():
+            for legacy_file in self.groups_dir.glob("*.json"):
+                # Skip the deleted registry file
+                if legacy_file.name == "deleted_registry.json":
+                    continue
+
+                try:
+                    # Extract group_id from filename (e.g., "group-abc123.json" -> "group-abc123")
+                    group_id = legacy_file.stem
+                    new_path = self._get_group_metadata_path(group_id)
+
+                    # If new location doesn't exist, migrate
+                    if not new_path.exists():
+                        logger.info("Migrating group %s from legacy location", group_id)
+                        new_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(legacy_file), str(new_path))
+                        migrated += 1
+
+                    # Also migrate history file if it exists
+                    legacy_history = self.groups_dir / f"{group_id}_history.json"
+                    if legacy_history.exists():
+                        new_history_path = self._get_conversation_dir(group_id) / "history.json"
+                        if not new_history_path.exists():
+                            shutil.move(str(legacy_history), str(new_history_path))
+                            logger.debug("Migrated history file for group %s", group_id)
+
+                except Exception as e:
+                    logger.error("Error migrating group file %s: %s", legacy_file, e)
+
+        # Load from new location
+        if self.conversations_dir.exists():
+            for conv_dir in self.conversations_dir.iterdir():
+                # Only process directories that look like group IDs.
+                # Exclude legacy _history-suffixed dirs (old conversation format).
+                if (
+                    not conv_dir.is_dir()
+                    or not conv_dir.name.startswith("group-")
+                    or conv_dir.name.endswith("_history")
+                ):
+                    continue
+
+                metadata_file = conv_dir / "metadata.json"
+                if not metadata_file.exists():
+                    continue
+
+                try:
+                    with open(metadata_file, "r") as f:
+                        data = json.load(f)
+                    if "group_id" not in data:
+                        logger.warning(
+                            "Skipping %s: not a valid group metadata file (missing group_id)",
+                            metadata_file
+                        )
+                        continue
+                    group = GroupMetadata.from_dict(data)
+                    self._groups[group.group_id] = group
+                    loaded += 1
+                except Exception as e:
+                    logger.error("Error loading group file %s: %s", metadata_file, e)
 
         if loaded:
             logger.info("Loaded %d groups from disk", loaded)
+        if migrated:
+            logger.info("Migrated %d groups from legacy location", migrated)
 
-        # Load deleted groups registry (v0.20.0)
+        # Load deleted groups registry (v0.20.0) - kept in groups dir
         self._load_deleted_registry()
 
     def _save_group(self, group_id: str):
-        """Save a single group metadata file to disk."""
+        """Save a single group metadata file to disk.
+
+        Saves to ~/.dpc/conversations/{group_id}/metadata.json
+        """
         group = self._groups.get(group_id)
         if not group:
             return
 
         try:
-            self.groups_dir.mkdir(parents=True, exist_ok=True)
-            group_file = self.groups_dir / f"{group_id}.json"
-            with open(group_file, "w") as f:
+            metadata_path = self._get_group_metadata_path(group_id)
+            metadata_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(metadata_path, "w") as f:
                 json.dump(group.to_dict(), f, indent=2)
-            logger.debug("Saved group %s to disk", group_id)
+            logger.debug("Saved group %s to %s", group_id, metadata_path)
         except Exception as e:
             logger.error("Error saving group %s: %s", group_id, e)
 
     def _delete_group_file(self, group_id: str):
-        """Delete a group metadata file from disk."""
+        """Delete entire conversation folder for a group.
+
+        This removes metadata, history, and all files received in this group.
+        """
         try:
-            group_file = self.groups_dir / f"{group_id}.json"
-            if group_file.exists():
-                group_file.unlink()
-                logger.debug("Deleted group file for %s", group_id)
+            # Delete entire conversation folder (v0.21.0)
+            conv_dir = self._get_conversation_dir(group_id)
+            if conv_dir.exists():
+                shutil.rmtree(conv_dir)
+                logger.info("Deleted conversation folder for group %s", group_id)
+
+            # Also clean up legacy files if they still exist (shouldn't after migration)
+            legacy_file = self._get_legacy_group_path(group_id)
+            if legacy_file.exists():
+                legacy_file.unlink()
+                logger.debug("Deleted legacy group file for %s", group_id)
+
+            legacy_history = self.groups_dir / f"{group_id}_history.json"
+            if legacy_history.exists():
+                legacy_history.unlink()
+                logger.debug("Deleted legacy history file for group %s", group_id)
+
         except Exception as e:
-            logger.error("Error deleting group file %s: %s", group_id, e)
+            logger.error("Error deleting group files for %s: %s", group_id, e)
 
     # --- Deleted Groups Registry (v0.20.0) ---
 

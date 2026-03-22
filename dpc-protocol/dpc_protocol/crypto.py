@@ -2,6 +2,8 @@
 
 import hashlib
 import logging
+import os
+import stat
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Tuple
@@ -76,6 +78,13 @@ def generate_identity():
             format=serialization.PrivateFormat.PKCS8,
             encryption_algorithm=serialization.NoEncryption(),
         ))
+    # Restrict private key to owner read/write only (Unix/macOS).
+    # On Windows os.chmod only controls the read-only flag (ACLs govern access),
+    # but setting it is still a best-practice signal.
+    try:
+        os.chmod(KEY_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    except OSError as e:
+        logger.warning("Could not set private key file permissions: %s", e)
     logger.info("Private key saved to %s", KEY_FILE)
 
     with open(CERT_FILE, "wb") as f:

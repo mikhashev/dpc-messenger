@@ -139,17 +139,29 @@ chore: maintenance tasks (dependencies, config)
 
 ### Example: Current State
 
-**Current Status (2026-03-02):**
-- `main`: Stable v0.19.1
+**Current Status (2026-03-22):**
+- `main`: Stable v0.20.0
 - `dev`: Active development (ready for new features)
 
-**Release v0.19.1 (Latest):**
+**Release v0.20.0 (Latest):**
+- Agent Progress Board panel + `get_task_board` tool
+- Task results persisted to `task_results/`
+- Agent reasoning surfaced as collapsible Thought block in chat UI
+- Unified Telegram↔DPC chat conversation with real-time UI sync
+- Inline vote buttons for knowledge proposals in Telegram
+- `/newsession` and `/endsession` Telegram bot commands
+- 5 security audit fixes (token blacklist, Whisper VRAM, local_api allowlist, firewall deny-wins, sandbox path traversal)
+- P2P HELLO spoofing hardening + DHT cert spoofing fix
+- Knowledge Layer 4 integrity fixes + agent history restore on restart
+- 52+ additional bug fixes
+
+**Release v0.19.1 (Previous):**
 - Group Chat history persistence with hash-based sync and offline deletion
 - @-mention support with autocomplete in group chats
 - Temperature parameter for model creativity control
 - Multiple group chat bug fixes and UI improvements
 
-**Release v0.19.0 (Previous):**
+**Release v0.19.0 (Older):**
 - Group Chat - Multi-participant conversations with decentralized fan-out architecture
 - Group text messaging with sender name display and message deduplication
 - Group file/voice/screenshot sharing via fan-out delivery

@@ -113,6 +113,11 @@ def setup_logging(settings):
     for module_name, level in settings.get_module_log_levels().items():
         logging.getLogger(module_name).setLevel(getattr(logging, level))
 
+    # Suppress verbose websocket debug logs (> TEXT, < TEXT, PING, PONG)
+    # These come from the websockets library's internal logging when DEBUG is enabled
+    for ws_logger in ['websockets.server', 'websockets.protocol', 'websockets']:
+        logging.getLogger(ws_logger).setLevel(logging.WARNING)
+
 
 def check_gpu_support():
     """

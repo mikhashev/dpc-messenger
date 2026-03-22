@@ -33,7 +33,8 @@ class InferenceOrchestrator:
         model: Optional[str] = None,
         provider: Optional[str] = None,
         images: Optional[list] = None,
-        conversation_id: Optional[str] = None
+        conversation_id: Optional[str] = None,
+        agent_llm_provider: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute AI inference (local or remote).
@@ -45,6 +46,7 @@ class InferenceOrchestrator:
             provider: Optional provider alias to use
             images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
             conversation_id: Optional conversation ID for progress tracking (DPC Agent)
+            agent_llm_provider: Optional underlying LLM provider for DPC Agent (Phase 3)
 
         Returns:
             Dict with 'response', 'model', 'provider', 'compute_host' keys
@@ -70,7 +72,8 @@ class InferenceOrchestrator:
                 prompt=prompt,
                 provider=provider,
                 images=images,
-                conversation_id=conversation_id
+                conversation_id=conversation_id,
+                agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
             )
 
     async def _execute_local_inference(
@@ -78,7 +81,8 @@ class InferenceOrchestrator:
         prompt: str,
         provider: Optional[str] = None,
         images: Optional[list] = None,
-        conversation_id: Optional[str] = None
+        conversation_id: Optional[str] = None,
+        agent_llm_provider: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Execute local inference using llm_manager.
@@ -88,6 +92,7 @@ class InferenceOrchestrator:
             provider: Optional provider alias to use
             images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
             conversation_id: Optional conversation ID for progress tracking (DPC Agent)
+            agent_llm_provider: Optional underlying LLM provider for DPC Agent (Phase 3)
 
         Returns:
             Dict with 'response', 'model', 'provider', 'compute_host', and token metadata
@@ -101,7 +106,8 @@ class InferenceOrchestrator:
                 provider_alias=provider,
                 images=images,
                 return_metadata=True,
-                conversation_id=conversation_id
+                conversation_id=conversation_id,
+                agent_llm_provider=agent_llm_provider  # Phase 3: per-agent provider selection
             )
             result['compute_host'] = 'local'
             return result

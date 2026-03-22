@@ -437,8 +437,23 @@ class GossipManager:
                         # Load certificate from PEM
                         from cryptography import x509
                         from cryptography.hazmat.primitives import serialization
+                        from dpc_protocol.crypto import generate_node_id
 
                         cert = x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
+
+                        # Verify the certificate's public key fingerprint matches the node_id
+                        # we requested. This prevents DHT poisoning attacks: an attacker
+                        # publishing a cert under a victim's key would need to find a
+                        # private key whose SHA256 matches the victim's node_id suffix,
+                        # which is computationally infeasible.
+                        derived_node_id = generate_node_id(cert.public_key())
+                        if derived_node_id != node_id:
+                            logger.warning(
+                                "DHT cert fingerprint mismatch for %s: cert public key "
+                                "hashes to %s — discarding (possible DHT poisoning attack)",
+                                node_id[:20], derived_node_id[:20]
+                            )
+                            continue
 
                         logger.info(
                             f"Retrieved certificate for {node_id[:20]} from DHT "

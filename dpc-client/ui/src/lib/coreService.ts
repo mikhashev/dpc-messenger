@@ -94,6 +94,18 @@ export const newSessionResult = writable<any>(null);  // {proposal_id, result, c
 // Conversation reset store (v0.11.3 - for AI chats and approved P2P session resets)
 export const conversationReset = writable<any>(null);  // {conversation_id}
 
+// Conversation settings store (v0.21.0 - per-conversation persistence settings)
+export const conversationSettings = writable<any>(null);  // {conversation_id, persist_history, ...}
+export const conversationSettingsChanged = writable<any>(null);  // {conversation_id, persist_history}
+export const conversationDeleted = writable<any>(null);  // {conversation_id}
+
+// Knowledge integrity warning store (v0.19.2 - startup tamper/corruption detection)
+// Populated from backend _startup_integrity_check() which runs verify_markdown_integrity()
+// on every ~/.dpc/knowledge/*_commit-*.md file and checks for orphaned personal.json refs.
+// Payload: { count: number, warnings: Array<{file, type, severity, message, ...}> }
+// Warning types: content_tampered | filename_mismatch | invalid_signature | missing_parent | missing_markdown
+export const integrityWarnings = writable<{count: number, warnings: any[], dismissed: boolean} | null>(null);
+
 // Voice message stores (v0.13.0 - voice recording and playback)
 export const voiceOfferReceived = writable<any>(null);  // {transfer_id, node_id, sender_name, filename, size_bytes, duration_seconds, ...voice_metadata}
 
@@ -112,6 +124,12 @@ export const telegramVoiceReceived = writable<any>(null);  // {conversation_id, 
 export const telegramImageReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes}
 export const telegramFileReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes, mime_type}
 export const telegramStatus = writable<any>(null);  // {enabled, connected, webhook_mode, whitelist_count, transcription_enabled, bridge_to_p2p, conversation_links}
+export const telegramError = writable<{ title: string; message: string; timestamp: string } | null>(null);  // {title, message, timestamp}
+
+// Agent Telegram linking events (v0.15.0+)
+export const agentTelegramLinked = writable<any>(null);  // {agent_id, chat_id, timestamp}
+export const agentTelegramUnlinked = writable<any>(null);  // {agent_id, timestamp}
+export const agentHistoryUpdated = writable<any>(null);  // {conversation_id, messages, message_count} - silent refresh from Telegram bridge
 
 // Whisper model loading stores (v0.13.3 - model pre-loading)
 export const whisperModelLoadingStarted = writable<any>(null);  // {provider}
@@ -258,7 +276,7 @@ export function connectToCoreService() {
             }
         });
 
-        socket.addEventListener('message', (event) => {
+        socket.addEventListener('message', async (event) => {
             try {
                 const message = JSON.parse(event.data);
                 coreMessages.set(message);
@@ -358,6 +376,16 @@ export function connectToCoreService() {
                     console.log("Conversation reset received:", message.payload);
                     conversationReset.set(message.payload);
                 }
+                // Conversation settings changed handler (v0.21.0 - persistence toggle)
+                else if (message.event === "conversation_settings_changed") {
+                    console.log("Conversation settings changed:", message.payload);
+                    conversationSettingsChanged.set(message.payload);
+                }
+                // Conversation deleted handler (v0.21.0 - full conversation deletion)
+                else if (message.event === "conversation_deleted") {
+                    console.log("Conversation deleted:", message.payload);
+                    conversationDeleted.set(message.payload);
+                }
                 // Handle token limit warning (Phase 2)
                 else if (message.event === "token_limit_warning") {
                     console.log("Token limit warning:", message.payload);
@@ -377,6 +405,11 @@ export function connectToCoreService() {
                 else if (message.event === "peer_context_updated") {
                     console.log("Peer context updated:", message.payload);
                     peerContextUpdated.set(message.payload);
+                }
+                // Knowledge integrity warnings (v0.19.2 - startup tamper/corruption detection)
+                else if (message.event === "integrity_warnings") {
+                    console.warn("Knowledge integrity issues detected:", message.payload);
+                    integrityWarnings.set({ ...message.payload, dismissed: false });
                 }
                 // Handle get_personal_context response
                 else if (message.command === "get_personal_context" && message.status === "OK") {
@@ -564,10 +597,33 @@ export function connectToCoreService() {
                     console.log("Telegram bot connected");
                     telegramConnected.set(true);
                     telegramEnabled.set(true);
+                    // Clear any previous errors on successful connection
+                    telegramError.set(null);
                 }
                 else if (message.event === "telegram_disconnected") {
                     console.log("Telegram bot disconnected");
                     telegramConnected.set(false);
+                }
+                else if (message.event === "telegram_error") {
+                    console.error("Telegram bot error:", message.payload);
+                    const { title, message: errorMsg, timestamp } = message.payload;
+                    telegramError.set({ title, message: errorMsg, timestamp });
+
+                    // Show error toast using Tauri or fallback
+                    if (import.meta.env.VITE_TAURI) {
+                        const { invoke } = await import('@tauri-apps/api/core');
+                        try {
+                            await invoke('show_error', {
+                                title: `Telegram: ${title}`,
+                                message: errorMsg
+                            });
+                        } catch (err) {
+                            console.error('Failed to show error toast:', err);
+                        }
+                    } else {
+                        // Fallback for browser dev mode
+                        console.error(`Telegram Error - ${title}: ${errorMsg}`);
+                    }
                 }
                 else if (message.event === "telegram_message_received") {
                     console.log("Telegram message received:", message.payload);
@@ -744,6 +800,19 @@ export function connectToCoreService() {
                     console.error("Whisper model download failed:", message.payload);
                     whisperModelDownloadFailed.set(message.payload);
                 }
+                // Agent Telegram linking events (v0.15.0+)
+                else if (message.event === "agent_telegram_linked") {
+                    console.log("Agent linked to Telegram:", message.payload);
+                    agentTelegramLinked.set(message.payload);
+                }
+                else if (message.event === "agent_telegram_unlinked") {
+                    console.log("Agent unlinked from Telegram:", message.payload);
+                    agentTelegramUnlinked.set(message.payload);
+                }
+                else if (message.event === "agent_history_updated") {
+                    // Telegram bridge sent a message in unified_conversation mode — silently refresh chat
+                    agentHistoryUpdated.set(message.payload);
+                }
                 // DPC Agent progress events (v0.15.0+ - real-time agent progress in chat)
                 else if (message.event === "agent_progress") {
                     // Progress update from agent during tool execution
@@ -868,6 +937,37 @@ export function connectToCoreService() {
                     historyRestored.set(message.payload);
                     console.log(`Chat history restored: ${message.payload.message_count} messages from ${message.payload.conversation_id}`);
                 }
+                // DPC Agent events (v0.19.0+ - per-agent isolation)
+                else if (message.event === "agent_created") {
+                    console.log("Agent created:", message.payload);
+                    agentCreated.set(message.payload);
+                    // Refresh agents list
+                    listAgents().then(result => {
+                        if (result.status === 'success') {
+                            agentsList.set(result.agents || []);
+                        }
+                    });
+                }
+                else if (message.event === "agent_updated") {
+                    console.log("Agent updated:", message.payload);
+                    agentUpdated.set(message.payload);
+                    // Refresh agents list
+                    listAgents().then(result => {
+                        if (result.status === 'success') {
+                            agentsList.set(result.agents || []);
+                        }
+                    });
+                }
+                else if (message.event === "agent_deleted") {
+                    console.log("Agent deleted:", message.payload);
+                    agentDeleted.set(message.payload);
+                    // Refresh agents list
+                    listAgents().then(result => {
+                        if (result.status === 'success') {
+                            agentsList.set(result.agents || []);
+                        }
+                    });
+                }
             } catch (error) {
                 console.error("Error parsing message:", error);
             }
@@ -954,6 +1054,7 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'toggle_auto_knowledge_detection',
             'send_file',
             'send_p2p_image',  // Screenshot sending
+            'send_image',  // Vision analysis (clipboard paste)
             'accept_file_transfer',
             'cancel_file_transfer',
             'get_conversation_history',  // v0.11.2 - backend→frontend sync
@@ -979,7 +1080,21 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_groups',  // v0.19.0 - group chat management
             'create_group_chat',  // v0.19.0 - group chat creation
             'leave_group',  // v0.19.0 - leave group
-            'delete_group'  // v0.19.0 - delete group
+            'delete_group',  // v0.19.0 - delete group
+            'get_conversation_settings',  // v0.21.0 - per-conversation settings
+            'set_conversation_persist_history',  // v0.21.0 - toggle history persistence
+            'delete_conversation',  // v0.21.0 - delete entire conversation
+            'create_agent',  // DPC Agent isolation - create agent with isolated storage
+            'list_agents',  // DPC Agent isolation - list all agents
+            'get_agent_config',  // DPC Agent isolation - get agent configuration
+            'update_agent_config',  // DPC Agent isolation - update agent configuration
+            'delete_agent',  // DPC Agent isolation - delete agent
+            'list_agent_profiles',  // DPC Agent isolation - list permission profiles
+            // Agent Task Board (v0.20.0)
+            'get_agent_tasks',
+            'get_agent_learning',
+            'get_agent_task_result',
+            'schedule_agent_task',
         ].includes(command);
 
         if (expectsResponse) {
@@ -997,6 +1112,10 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
                     // Voice transcription timeout: 240s (v0.13.1+)
                     // First use: model download (~3GB, 1-2min) + load (~20s) + compile (~30s) + transcribe (~5s)
                     // Subsequent uses: ~5-10s
+                    timeout = 240000;
+                } else if (command === 'send_image') {
+                    // Image vision analysis timeout: 240s (v0.20.0+)
+                    // Local vision models can be slow, especially on first load or with large images
                     timeout = 240000;
                 } else if (command === 'send_file') {
                     // Dynamic timeout based on file size (v0.11.2+)
@@ -1290,4 +1409,129 @@ export async function loadGroups(): Promise<void> {
     } catch (e) {
         console.error("Failed to load groups:", e);
     }
+}
+
+// Conversation settings (v0.21.0 - per-conversation persistence)
+export async function getConversationSettings(conversationId: string): Promise<any> {
+    return sendCommand('get_conversation_settings', {
+        conversation_id: conversationId
+    });
+}
+
+export async function setConversationPersistHistory(conversationId: string, persist: boolean): Promise<any> {
+    return sendCommand('set_conversation_persist_history', {
+        conversation_id: conversationId,
+        persist: persist
+    });
+}
+
+export async function deleteConversation(conversationId: string): Promise<any> {
+    return sendCommand('delete_conversation', {
+        conversation_id: conversationId
+    });
+}
+
+// --- DPC Agent Management (v0.19.0+) ---
+
+export interface AgentInfo {
+    agent_id: string;
+    name: string;
+    provider_alias: string;
+    profile_name: string;
+    instruction_set_name: string;
+    created_at: string;
+    updated_at?: string;
+    // Telegram integration fields (v0.22.0+)
+    telegram_enabled?: boolean;
+    telegram_bot_token?: string;
+    telegram_allowed_chat_ids?: string[];
+    telegram_event_filter?: string[];
+    telegram_max_events_per_minute?: number;
+    telegram_cooldown_seconds?: number;
+    telegram_transcription_enabled?: boolean;
+    telegram_linked_at?: string;
+    // Legacy field (deprecated in favor of telegram_allowed_chat_ids)
+    telegram_chat_id?: string;
+}
+
+export interface AgentConfig {
+    agent_id: string;
+    name: string;
+    provider_alias: string;
+    profile_name: string;
+    instruction_set_name: string;
+    created_at: string;
+    updated_at?: string;
+    budget_usd?: number;
+    max_rounds?: number;
+}
+
+// Agent stores
+export const agentsList = writable<AgentInfo[]>([]);
+export const agentCreated = writable<any>(null);
+export const agentUpdated = writable<any>(null);
+export const agentDeleted = writable<any>(null);
+export const agentProfiles = writable<string[]>([]);
+
+/**
+ * Create a new DPC Agent with isolated storage.
+ */
+export async function createAgent(
+    name: string,
+    providerAlias: string = "dpc_agent",
+    profileName: string = "default",
+    instructionSetName: string = "general",
+    budgetUsd: number = 50.0,
+    maxRounds: number = 200
+): Promise<any> {
+    return sendCommand('create_agent', {
+        name,
+        provider_alias: providerAlias,
+        profile_name: profileName,
+        instruction_set_name: instructionSetName,
+        budget_usd: budgetUsd,
+        max_rounds: maxRounds
+    });
+}
+
+/**
+ * List all registered DPC Agents.
+ */
+export async function listAgents(): Promise<any> {
+    return sendCommand('list_agents', {});
+}
+
+/**
+ * Get configuration for a specific agent.
+ */
+export async function getAgentConfig(agentId: string): Promise<any> {
+    return sendCommand('get_agent_config', {
+        agent_id: agentId
+    });
+}
+
+/**
+ * Update configuration for a specific agent.
+ */
+export async function updateAgentConfig(agentId: string, updates: Record<string, any>): Promise<any> {
+    return sendCommand('update_agent_config', {
+        agent_id: agentId,
+        updates
+    });
+}
+
+/**
+ * Delete a DPC Agent and its storage.
+ */
+export async function deleteAgent(agentId: string): Promise<any> {
+    return sendCommand('delete_agent', {
+        agent_id: agentId
+    });
+}
+
+/**
+ * List available agent permission profiles.
+ */
+export async function listAgentProfiles(): Promise<any> {
+    return sendCommand('list_agent_profiles', {});
 }

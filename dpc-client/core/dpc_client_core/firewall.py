@@ -3,7 +3,7 @@
 import json
 import logging
 from pathlib import Path
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Optional, Set
 import fnmatch
 from copy import deepcopy
 
@@ -124,6 +124,7 @@ class ContextFirewall:
             'knowledge_read': True,
             'knowledge_write': False,  # Controlled by knowledge_access
             'knowledge_list': True,
+            'get_task_board': True,     # Read task history + learning progress (Agent Progress Board)
             'extract_knowledge': True,  # Extract knowledge from conversation to knowledge base
             'deduplicate_identity': True,  # Clean up duplicate sections in identity
             # DPC integration
@@ -164,6 +165,10 @@ class ContextFirewall:
             'reject_evolution_change': True,  # Safe, just removes pending change
             # Messaging tools (v0.18.0+)
             'send_user_message': True,  # Agent-initiated Telegram messages
+            # Task type management tools (v0.18.0+)
+            'register_task_type': True,  # Register custom task types
+            'list_task_types': True,  # List registered task types (safe, read-only)
+            'unregister_task_type': True,  # Unregister custom task types
         }
 
         # Parse tool permissions from config, using defaults for missing tools
@@ -226,7 +231,7 @@ class ContextFirewall:
 
         # Check read_write paths first (they also allow read)
         for allowed_path in self.sandbox_read_write_paths:
-            if allowed_path and normalized.startswith(allowed_path):
+            if allowed_path and (normalized == allowed_path or normalized.startswith(allowed_path + "/")):
                 return True
 
         # If write is required, read_only paths are not sufficient
@@ -235,7 +240,7 @@ class ContextFirewall:
 
         # Check read_only paths
         for allowed_path in self.sandbox_read_only_paths:
-            if allowed_path and normalized.startswith(allowed_path):
+            if allowed_path and (normalized == allowed_path or normalized.startswith(allowed_path + "/")):
                 return True
 
         return False
@@ -303,6 +308,110 @@ class ContextFirewall:
 
         return allowed
 
+    def list_agent_profiles(self) -> List[str]:
+        """
+        List available agent permission profiles.
+
+        Returns:
+            List of profile names (e.g., ['default', 'coding_assistant', 'restricted'])
+        """
+        return list(self.rules.get('agent_profiles', {}).keys())
+
+    def get_agent_profile_settings(self, profile_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Get settings for a specific agent profile.
+
+        Args:
+            profile_name: Name of the profile to load
+
+        Returns:
+            Dict with profile settings, or None if profile not found
+        """
+        profiles = self.rules.get('agent_profiles', {})
+        if profile_name in profiles:
+            return profiles[profile_name].copy()
+        return None
+
+    def get_allowed_agent_tools_for_profile(self, profile_name: str) -> Set[str]:
+        """
+        Get allowed tools for a specific agent profile.
+
+        Args:
+            profile_name: Name of the profile to get tools for
+
+        Returns:
+            Set of allowed tool names based on profile configuration
+        """
+        profile = self.get_agent_profile_settings(profile_name)
+        if not profile:
+            # Fallback to global settings
+            return self.get_allowed_agent_tools()
+
+        if not profile.get('enabled', True):
+            return set()
+
+        tools_config = profile.get('tools', {})
+        allowed = set()
+
+        for tool_name, is_enabled in tools_config.items():
+            if is_enabled:
+                allowed.add(tool_name)
+
+        return allowed
+
+    def create_agent_profile(self, profile_name: str, copy_from_global: bool = True) -> bool:
+        """
+        Create a new agent profile with default settings.
+
+        Args:
+            profile_name: Name for the new profile (typically agent_id)
+            copy_from_global: If True, copy settings from dpc_agent; otherwise use safe defaults
+
+        Returns:
+            True if profile was created, False if it already exists
+        """
+        import json
+
+        # Check if profile already exists
+        if 'agent_profiles' not in self.rules:
+            self.rules['agent_profiles'] = {}
+        if profile_name in self.rules['agent_profiles']:
+            return False  # Already exists
+
+        if copy_from_global and 'dpc_agent' in self.rules:
+            # Copy from global dpc_agent settings
+            import copy
+            self.rules['agent_profiles'][profile_name] = copy.deepcopy(self.rules['dpc_agent'])
+        else:
+            # Create with safe defaults
+            self.rules['agent_profiles'][profile_name] = {
+                'enabled': True,
+                'personal_context_access': True,
+                'device_context_access': True,
+                'knowledge_access': 'read_only',
+                'tools': {
+                    'repo_read': True,
+                    'repo_list': True,
+                    'repo_write_commit': False,
+                    'update_scratchpad': True,
+                    'browse_page': True,
+                    'search_web': True,
+                    'search_files': True,
+                    'search_in_file': True,
+                },
+                'evolution': {
+                    'enabled': False,
+                    'interval_minutes': 60,
+                    'auto_apply': False,
+                },
+            }
+
+        # Save to file
+        rules_text = json.dumps(self.rules, indent=2)
+        self.access_file_path.write_text(rules_text)
+        logger.info("Created agent profile: %s", profile_name)
+        return True
+
     def _ensure_file_exists(self):
         """Creates a default, secure privacy_rules.json file if one doesn't exist."""
         if not self.access_file_path.exists():
@@ -328,9 +437,9 @@ class ContextFirewall:
                     "personal.json:profile.description": "allow"
                 },
                 "node_groups": {
-                    "_comment": "Define which nodes belong to which groups. Add your peers' actual node IDs here.",
-                    "friends": ["dpc-node-alice-123", "dpc-node-charlie-789"],
-                    "colleagues": ["dpc-node-bob-456"],
+                    "_comment": "Define which nodes belong to which groups. Add your peers' node IDs here (copy from their URI or HELLO handshake).",
+                    "friends": [],
+                    "colleagues": [],
                     "family": []
                 },
                 "file_groups": {
@@ -341,28 +450,19 @@ class ContextFirewall:
                 "compute": {
                     "_comment": "Compute sharing settings - Allow peers to run AI inference on your GPU/CPU",
                     "enabled": False,
-                    "allow_groups": ["friends"],
-                    "allow_nodes": ["dpc-node-alice-123"],
+                    "allow_groups": [],
+                    "allow_nodes": [],
                     "allowed_models": ["llama3.1:8b", "llama3:70b"]
                 },
                 "transcription": {
                     "_comment": "Transcription sharing settings - Allow peers to use your Whisper model for voice transcription",
                     "enabled": False,
-                    "allow_groups": ["friends"],
-                    "allow_nodes": ["dpc-node-alice-123"],
+                    "allow_groups": [],
+                    "allow_nodes": [],
                     "allowed_models": ["openai/whisper-large-v3", "openai/whisper-medium"]
                 },
                 "nodes": {
-                    "_comment": "Per-node access rules - Most specific, overrides group rules",
-                    "dpc-node-alice-123": {
-                        "personal.json:profile.*": "allow",
-                        "personal.json:knowledge.*": "allow",
-                        "device_context.json:software.*": "allow"
-                    },
-                    "dpc-node-bob-456": {
-                        "personal.json:profile.name": "allow",
-                        "personal.json:profile.description": "allow"
-                    }
+                    "_comment": "Per-node access rules - Most specific, overrides group rules. Add entries like: \"dpc-node-xxxx\": {\"personal.json:profile.*\": \"allow\"}"
                 },
                 "groups": {
                     "_comment": "Per-group access rules - Applied to all nodes in the group",
@@ -457,6 +557,7 @@ class ContextFirewall:
                         "knowledge_read": True,
                         "knowledge_write": False,
                         "knowledge_list": True,
+                        "get_task_board": True,
                         "get_dpc_context": True,
                         "browse_page": True,
                         "fetch_json": True,
@@ -619,14 +720,19 @@ class ContextFirewall:
             if rule:
                 return rule.lower() == 'allow'
 
-        # 2. Check for group rules
+        # 2. Check for group rules (deny-wins: if any group denies, access is denied)
         # Get all groups this node belongs to
         if requester_identity.startswith('dpc-node-'):
             groups = self._get_groups_for_node(requester_identity)
-            for group_name in groups:
-                rule = self._get_rule_for_resource('groups', group_name, resource_path)
-                if rule:
-                    return rule.lower() == 'allow'
+            group_rules = [
+                self._get_rule_for_resource('groups', gn, resource_path)
+                for gn in groups
+            ]
+            group_rules = [r.lower() for r in group_rules if r]
+            if 'deny' in group_rules:
+                return False
+            if 'allow' in group_rules:
+                return True
 
         # 3. Check for hub rule
         if requester_identity == "hub":
@@ -687,13 +793,18 @@ class ContextFirewall:
             # Try node-specific rule
             if peer_id.startswith('dpc-node-'):
                 specific_rule = self._get_rule_for_resource('nodes', peer_id, resource_path)
-                # Try group rules if no node rule
+                # Try group rules if no node rule (deny-wins across groups)
                 if not specific_rule:
                     groups = self._get_groups_for_node(peer_id)
-                    for group_name in groups:
-                        specific_rule = self._get_rule_for_resource('groups', group_name, resource_path)
-                        if specific_rule:
-                            break
+                    group_rules = [
+                        self._get_rule_for_resource('groups', gn, resource_path)
+                        for gn in groups
+                    ]
+                    group_rules = [r.lower() for r in group_rules if r]
+                    if 'deny' in group_rules:
+                        specific_rule = 'deny'
+                    elif 'allow' in group_rules:
+                        specific_rule = 'allow'
 
             # If there's a specific rule (allow or deny), use it - don't fall back to wildcard
             if specific_rule:
@@ -970,10 +1081,15 @@ class ContextFirewall:
                     specific_rule = self._get_rule_for_resource('nodes', peer_id, resource_path)
                     if not specific_rule:
                         groups = self._get_groups_for_node(peer_id)
-                        for group_name in groups:
-                            specific_rule = self._get_rule_for_resource('groups', group_name, resource_path)
-                            if specific_rule:
-                                break
+                        group_rules = [
+                            self._get_rule_for_resource('groups', gn, resource_path)
+                            for gn in groups
+                        ]
+                        group_rules = [r.lower() for r in group_rules if r]
+                        if 'deny' in group_rules:
+                            specific_rule = 'deny'
+                        elif 'allow' in group_rules:
+                            specific_rule = 'allow'
 
                 # If there's a specific rule, use it - don't fall back to wildcard
                 if specific_rule:
@@ -1021,10 +1137,15 @@ class ContextFirewall:
                 specific_rule = self._get_rule_for_resource('nodes', peer_id, resource_path)
                 if not specific_rule:
                     groups = self._get_groups_for_node(peer_id)
-                    for group_name in groups:
-                        specific_rule = self._get_rule_for_resource('groups', group_name, resource_path)
-                        if specific_rule:
-                            break
+                    group_rules = [
+                        self._get_rule_for_resource('groups', gn, resource_path)
+                        for gn in groups
+                    ]
+                    group_rules = [r.lower() for r in group_rules if r]
+                    if 'deny' in group_rules:
+                        specific_rule = 'deny'
+                    elif 'allow' in group_rules:
+                        specific_rule = 'allow'
 
             # If there's a specific rule, use it - don't fall back to wildcard
             if specific_rule:
@@ -1068,7 +1189,7 @@ class ContextFirewall:
 
         try:
             # Validate top-level structure
-            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', 'dpc_agent', '_comment']
+            valid_top_level_keys = ['hub', 'node_groups', 'file_groups', 'compute', 'transcription', 'nodes', 'groups', 'ai_scopes', 'device_sharing', 'file_transfer', 'image_transfer', 'notifications', 'dpc_agent', 'agent_profiles', '_comment']
 
             for key in config_dict.keys():
                 if key not in valid_top_level_keys:
@@ -1297,6 +1418,7 @@ class ContextFirewall:
                                 'update_scratchpad', 'update_identity', 'chat_history',
                                 # Knowledge
                                 'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                'get_task_board',
                                 # DPC integration
                                 'get_dpc_context',
                                 # Web tools
@@ -1320,6 +1442,10 @@ class ContextFirewall:
                                 'list_extended_sandbox_paths',
                                 # Messaging tools (v0.18.0+)
                                 'send_user_message',
+                                # Knowledge extraction tools (v0.18.0+)
+                                'extract_knowledge', 'deduplicate_identity',
+                                # Task type management tools (v0.18.0+)
+                                'register_task_type', 'list_task_types', 'unregister_task_type',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):
@@ -1344,6 +1470,66 @@ class ContextFirewall:
                                     errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
                             if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
                                 errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
+
+            # Validate agent_profiles section (v0.19.0+)
+            if 'agent_profiles' in config_dict:
+                agent_profiles = config_dict['agent_profiles']
+                if not isinstance(agent_profiles, dict):
+                    errors.append("'agent_profiles' section must be a dictionary")
+                else:
+                    for profile_name, profile_config in agent_profiles.items():
+                        if profile_name.startswith('_'):
+                            continue  # Skip comments
+                        if not isinstance(profile_config, dict):
+                            errors.append(f"Agent profile '{profile_name}' must be a dictionary")
+                        else:
+                            # Validate profile fields (inherit from dpc_agent structure)
+                            if 'enabled' in profile_config and not isinstance(profile_config['enabled'], bool):
+                                errors.append(f"'agent_profiles.{profile_name}.enabled' must be a boolean")
+                            if 'personal_context_access' in profile_config and not isinstance(profile_config['personal_context_access'], bool):
+                                errors.append(f"'agent_profiles.{profile_name}.personal_context_access' must be a boolean")
+                            if 'device_context_access' in profile_config and not isinstance(profile_config['device_context_access'], bool):
+                                errors.append(f"'agent_profiles.{profile_name}.device_context_access' must be a boolean")
+                            if 'knowledge_access' in profile_config:
+                                valid_access = ['none', 'read_only', 'read_write']
+                                if profile_config['knowledge_access'] not in valid_access:
+                                    errors.append(f"'agent_profiles.{profile_name}.knowledge_access' must be one of: {valid_access}")
+                            # Validate tools
+                            if 'tools' in profile_config:
+                                tools = profile_config['tools']
+                                if not isinstance(tools, dict):
+                                    errors.append(f"'agent_profiles.{profile_name}.tools' must be a dictionary")
+                                else:
+                                    # Use the same valid tools as dpc_agent
+                                    valid_tools = {
+                                        'repo_read', 'repo_list', 'repo_write_commit',
+                                        'drive_read', 'drive_list', 'drive_write',
+                                        'update_scratchpad', 'update_identity', 'chat_history',
+                                        'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                        'get_task_board',
+                                        'get_dpc_context',
+                                        'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
+                                        'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
+                                        'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
+                                        'repo_commit_push',
+                                        'run_shell', 'claude_code_edit',
+                                        'schedule_task', 'get_task_status',
+                                        'pause_evolution', 'resume_evolution', 'get_evolution_stats',
+                                        'approve_evolution_change', 'reject_evolution_change',
+                                        'search_files', 'search_in_file',
+                                        'extended_path_read', 'extended_path_list', 'extended_path_write',
+                                        'list_extended_sandbox_paths',
+                                        'send_user_message',
+                                        'extract_knowledge', 'deduplicate_identity',
+                                        'register_task_type', 'list_task_types', 'unregister_task_type',
+                                    }
+                                    for tool_name, tool_enabled in tools.items():
+                                        if tool_name.startswith('_'):
+                                            continue  # Skip comments
+                                        if tool_name not in valid_tools:
+                                            errors.append(f"Unknown tool in agent_profiles.{profile_name}.tools: '{tool_name}'")
+                                        if not isinstance(tool_enabled, bool):
+                                            errors.append(f"'agent_profiles.{profile_name}.tools.{tool_name}' must be a boolean")
 
             # Validate image_transfer section
             if 'image_transfer' in config_dict:

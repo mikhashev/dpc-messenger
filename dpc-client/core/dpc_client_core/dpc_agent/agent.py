@@ -80,6 +80,8 @@ class DpcAgent:
         config: Optional[AgentConfig] = None,
         agent_root: Optional[pathlib.Path] = None,
         firewall: Optional[Any] = None,  # ContextFirewall for tool control
+        provider_alias: Optional[str] = None,  # Per-agent provider override (Phase 3)
+        firewall_profile: Optional[str] = None,  # Per-agent permission profile (Phase 2)
     ):
         """
         Initialize the agent.
@@ -89,14 +91,18 @@ class DpcAgent:
             config: Agent configuration
             agent_root: Storage root (defaults to ~/.dpc/agent/)
             firewall: ContextFirewall instance for tool permissions
+            provider_alias: Specific LLM provider to use (overrides agent_provider)
+            firewall_profile: Permission profile name from privacy_rules.json
         """
         self.config = config or AgentConfig()
         self.agent_root = agent_root or get_agent_root()
         self._firewall = firewall  # Firewall controls tool access
-        ensure_agent_dirs()
+        self._provider_alias = provider_alias  # Store for LLM adapter
+        self._firewall_profile = firewall_profile  # Store for tool permission lookups
+        # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components
-        self.llm = DpcLlmAdapter(llm_manager)
+        self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias)
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
 
@@ -111,8 +117,9 @@ class DpcAgent:
         self._task_type_registry: Dict[str, TaskTypeDefinition] = {}
         self._load_task_type_registry()  # Load persisted task types
 
-        # Event emitter for notifications
-        self.events = get_event_emitter()
+        # Event emitter for notifications (per-agent instance with correct storage)
+        from .events import AgentEventEmitter
+        self.events = AgentEventEmitter(agent_root=self.agent_root, persist_events=True)
 
         # Budget tracker
         billing_model = BillingModel.SUBSCRIPTION if self.config.billing_model == "subscription" else BillingModel.PAY_PER_USE
@@ -145,6 +152,12 @@ class DpcAgent:
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         session_state: Optional[Dict[str, Any]] = None,
         conversation_monitor: Optional[Any] = None,
+        # Image parameters for vision queries
+        image_base64: Optional[str] = None,
+        image_mime: str = "image/png",
+        image_caption: Optional[str] = None,
+        # Unique per-message task ID (distinct from conversation_id)
+        task_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -159,6 +172,9 @@ class DpcAgent:
             session_state: Optional session state from ConversationMonitor
                           (tokens_used, tokens_limit, usage_percent, etc.)
             conversation_monitor: Optional ConversationMonitor for knowledge extraction
+            image_base64: Optional base64-encoded image data for vision queries
+            image_mime: MIME type of the image (default: image/png)
+            image_caption: Optional caption for the image
 
         Returns:
             Agent's response text
@@ -167,9 +183,20 @@ class DpcAgent:
             "id": conversation_id,
             "type": "chat",
             "text": message,
+            # Image fields for context.py:_build_user_content()
+            "image_base64": image_base64,
+            "image_mime": image_mime,
+            "image_caption": image_caption,
         }
 
-        # Build LLM context
+        # Build LLM context — pass prior conversation turns (all except current user msg,
+        # which was added to the monitor just before this call, so it's the last entry)
+        prior_history = None
+        if conversation_monitor is not None:
+            full_history = conversation_monitor.get_message_history()
+            if len(full_history) > 1:
+                prior_history = full_history[:-1]  # exclude the current user message
+
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
             memory=self.memory,
@@ -177,6 +204,7 @@ class DpcAgent:
             system_prompt=system_prompt,
             dpc_context=dpc_context,
             session_state=session_state,
+            conversation_history=prior_history,
         )
 
         # Set tool context with firewall-controlled tool access
@@ -193,11 +221,18 @@ class DpcAgent:
         ctx._agent = self  # Enable schedule_task and other agent-dependent tools
         self.tools.set_context(ctx)
 
+        # Use provided task_id or generate one; never use conversation_id as task identity
+        import uuid as _uuid
+        import json as _json
+        event_task_id = task_id or f"chat-{_uuid.uuid4().hex[:8]}"
+        started_at = utc_now_iso()
+
         # Log task start
         append_jsonl(self.agent_root / "logs" / "events.jsonl", {
-            "ts": utc_now_iso(),
+            "ts": started_at,
             "type": "task_start",
-            "task_id": conversation_id,
+            "task_id": event_task_id,
+            "conversation_id": conversation_id,
             "text_preview": message[:200] if message else "",
         })
 
@@ -218,15 +253,41 @@ class DpcAgent:
         # Store last usage for session state access by agent_manager
         self._last_usage = usage
 
+        completed_at = utc_now_iso()
+
         # Log task completion
         append_jsonl(self.agent_root / "logs" / "events.jsonl", {
-            "ts": utc_now_iso(),
+            "ts": completed_at,
             "type": "task_complete",
-            "task_id": conversation_id,
+            "task_id": event_task_id,
+            "conversation_id": conversation_id,
             "response_preview": response[:200] if response else "",
             "rounds": usage.get("rounds", 0),
             "cost_usd": usage.get("cost", 0),
         })
+
+        # Persist full task result to task_results/{task_id}.json
+        try:
+            results_dir = self.agent_root / "task_results"
+            results_dir.mkdir(exist_ok=True)
+            result_data = {
+                "task_id": event_task_id,
+                "conversation_id": conversation_id,
+                "task_type": "chat",
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "prompt": message[:2000] if message else "",
+                "response": response or "",
+                "rounds": usage.get("rounds", 0),
+                "cost_usd": usage.get("cost", 0),
+                "tokens": usage.get("tokens", {}),
+            }
+            (results_dir / f"{event_task_id}.json").write_text(
+                _json.dumps(result_data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as e:
+            log.warning("Failed to save task result file: %s", e)
 
         # Update budget
         self._update_budget(usage.get("cost", 0))
@@ -342,6 +403,27 @@ class DpcAgent:
                 "task_type": task.task_type,
                 "result": task.result[:500] if task.result else None,
             })
+            # Persist full result (scheduled tasks use task.id directly as task_id)
+            try:
+                import json as _json
+                results_dir = self.agent_root / "task_results"
+                results_dir.mkdir(exist_ok=True)
+                result_data = {
+                    "task_id": task.id,
+                    "task_type": task.task_type,
+                    "started_at": getattr(task, "started_at", None),
+                    "completed_at": utc_now_iso(),
+                    "prompt": str(task.data)[:2000] if task.data else "",
+                    "response": task.result or "",
+                    "rounds": 0,
+                    "cost_usd": 0.0,
+                }
+                (results_dir / f"{task.id}.json").write_text(
+                    _json.dumps(result_data, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            except Exception as e:
+                log.warning("Failed to save scheduled task result: %s", e)
 
         async def on_task_failed(task: Task) -> None:
             await self.events.emit(EventType.TASK_FAILED, {

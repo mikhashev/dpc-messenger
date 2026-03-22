@@ -421,6 +421,17 @@ class P2PManager:
             logger.info("Received a direct TLS connection attempt")
             await asyncio.sleep(0.01)
 
+            # Issue a challenge nonce so the client can prove private-key ownership.
+            # The client signs this nonce and returns it alongside their certificate
+            # in the HELLO payload, preventing HELLO spoofing attacks.
+            import os as _os, base64 as _b64
+            nonce = _os.urandom(32)
+            challenge = {
+                "command": "HELLO_CHALLENGE",
+                "payload": {"nonce": _b64.b64encode(nonce).decode()}
+            }
+            await write_message(writer, challenge)
+
             hello_msg = await read_message(reader)
             if not hello_msg or hello_msg.get("command") != "HELLO":
                 raise ConnectionError("Invalid HELLO message received.")
@@ -428,11 +439,25 @@ class P2PManager:
             payload = hello_msg.get("payload", {})
             peer_node_id = payload.get("node_id")
             peer_name = payload.get("name")
+            cert_pem = payload.get("cert_pem")
+            nonce_signature_b64 = payload.get("nonce_signature")
 
             if not peer_node_id:
                 raise ValueError("Peer did not provide a node_id.")
 
-            logger.info("Connection from node: %s", peer_node_id)
+            # Verify the peer owns the private key for their claimed node_id.
+            if not cert_pem or not nonce_signature_b64:
+                raise ConnectionError(
+                    f"Peer {peer_node_id} sent HELLO without cert_pem or nonce_signature "
+                    f"— rejecting (peer may be running an outdated version)"
+                )
+            if not self._verify_hello_identity(peer_node_id, cert_pem, nonce, nonce_signature_b64):
+                raise ConnectionError(
+                    f"HELLO identity verification failed for claimed node_id={peer_node_id} "
+                    f"— connection rejected"
+                )
+
+            logger.info("Connection from node: %s (identity verified)", peer_node_id)
             if peer_name:
                 logger.info("Peer name: %s", peer_name)
                 if hasattr(self, '_core_service_ref') and self._core_service_ref:
@@ -622,11 +647,34 @@ class P2PManager:
 
             logger.info("TLS certificate validated successfully for %s", target_node_id)
 
+            # Read the server's challenge nonce (new in authenticated HELLO protocol).
+            import base64 as _b64
+            challenge_msg = await read_message(reader)
+            if not challenge_msg or challenge_msg.get("command") != "HELLO_CHALLENGE":
+                error_msg = (
+                    f"Expected HELLO_CHALLENGE from {target_node_id} but got "
+                    f"{challenge_msg.get('command') if challenge_msg else 'nothing'} "
+                    f"— peer may be running an outdated version"
+                )
+                logger.error(error_msg)
+                writer.close()
+                await writer.wait_closed()
+                raise ConnectionError(error_msg)
+
+            nonce = _b64.b64decode(challenge_msg["payload"]["nonce"])
+            nonce_signature = self._sign_challenge_nonce(nonce)
+
+            # Read own certificate PEM to include in HELLO
+            with open(self.cert_file, 'r') as _cf:
+                own_cert_pem = _cf.read()
+
             hello = {
                 "command": "HELLO",
                 "payload": {
                     "node_id": self.node_id,
-                    "name": self.display_name
+                    "name": self.display_name,
+                    "cert_pem": own_cert_pem,
+                    "nonce_signature": _b64.b64encode(nonce_signature).decode()
                 }
             }
             await write_message(writer, hello)
@@ -794,6 +842,114 @@ class P2PManager:
 
         except Exception as e:
             logger.error("Certificate validation error: %s", e)
+            return False
+
+    def _sign_challenge_nonce(self, nonce: bytes) -> bytes:
+        """
+        Sign a server-issued nonce with this node's RSA private key.
+
+        Used during HELLO handshake so the server can verify the connecting
+        client actually controls the private key for their claimed node_id.
+
+        Args:
+            nonce: 32 random bytes issued by the server as a challenge
+
+        Returns:
+            RSA-PSS signature over the nonce (SHA-256)
+        """
+        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+        from cryptography.hazmat.primitives import hashes as crypto_hashes
+        from cryptography.hazmat.primitives import serialization as crypto_ser
+
+        with open(self.key_file, 'rb') as f:
+            private_key = crypto_ser.load_pem_private_key(f.read(), password=None)
+
+        return private_key.sign(
+            nonce,
+            asym_padding.PSS(
+                mgf=asym_padding.MGF1(crypto_hashes.SHA256()),
+                salt_length=asym_padding.PSS.MAX_LENGTH
+            ),
+            crypto_hashes.SHA256()
+        )
+
+    def _verify_hello_identity(
+        self,
+        peer_node_id: str,
+        cert_pem: str,
+        nonce: bytes,
+        nonce_signature_b64: str
+    ) -> bool:
+        """
+        Verify that the connecting peer owns the private key for their claimed node_id.
+
+        Three checks must all pass:
+        1. cert CN == claimed node_id (cert is for this identity)
+        2. generate_node_id(cert.public_key()) == node_id (public key binds to node_id)
+        3. RSA-PSS.verify(nonce, signature, cert.public_key()) (key ownership proof)
+
+        Check 2 prevents an attacker from forging a cert with CN == victim node_id.
+        Check 3 prevents an attacker who holds only the victim's public cert from
+        impersonating them (they must also control the matching private key).
+
+        Args:
+            peer_node_id: node_id claimed in HELLO payload
+            cert_pem: PEM-encoded X.509 certificate included in HELLO payload
+            nonce: 32-byte random nonce sent in HELLO_CHALLENGE
+            nonce_signature_b64: Base64-encoded RSA-PSS signature over nonce
+
+        Returns:
+            True if all checks pass, False otherwise
+        """
+        import base64
+        from cryptography import x509 as _x509
+        from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
+        from cryptography.hazmat.primitives import hashes as crypto_hashes
+
+        try:
+            # Parse the certificate
+            cert = _x509.load_pem_x509_certificate(cert_pem.encode('utf-8'))
+
+            # Check 1: cert CN == claimed node_id
+            cn = None
+            for attr in cert.subject:
+                if attr.oid == _x509.oid.NameOID.COMMON_NAME:
+                    cn = attr.value
+                    break
+            if cn != peer_node_id:
+                logger.warning(
+                    "HELLO identity check 1 failed: cert CN='%s' != claimed node_id='%s'",
+                    cn, peer_node_id
+                )
+                return False
+
+            # Check 2: public key fingerprint == claimed node_id (self-certifying identity)
+            derived_id = generate_node_id(cert.public_key())
+            if derived_id != peer_node_id:
+                logger.warning(
+                    "HELLO identity check 2 failed: cert public key hashes to '%s' "
+                    "but claimed node_id is '%s' — cert is forged",
+                    derived_id, peer_node_id
+                )
+                return False
+
+            # Check 3: verify signature over nonce (proof of private key ownership)
+            sig = base64.b64decode(nonce_signature_b64)
+            cert.public_key().verify(
+                sig,
+                nonce,
+                asym_padding.PSS(
+                    mgf=asym_padding.MGF1(crypto_hashes.SHA256()),
+                    salt_length=asym_padding.PSS.MAX_LENGTH
+                ),
+                crypto_hashes.SHA256()
+            )
+            # verify() raises on failure; reaching here means success
+            logger.debug("HELLO identity verified for %s (all 3 checks passed)", peer_node_id)
+            return True
+
+        except Exception as e:
+            logger.warning("HELLO identity verification failed for %s: %s", peer_node_id, e)
             return False
 
     async def _listen_to_peer(self, peer: PeerConnection):

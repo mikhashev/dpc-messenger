@@ -2,18 +2,19 @@
 Relay Message Handler - Server-side message forwarding
 
 Handles RELAY_MESSAGE commands from clients, forwarding encrypted
-messages between relay sessions. Relay cannot decrypt message content
-(end-to-end encryption maintained).
+messages between relay sessions. The relay never parses or decodes
+message content — it forwards the opaque base64 blob as-is.
 
 Protocol Flow:
-1. Peer A sends RELAY_MESSAGE(to=Peer B, message={encrypted})
-2. Relay verifies session exists
-3. Relay forwards to Peer B via active connection
-4. Peer B receives RELAY_MESSAGE(from=Peer A, message={encrypted})
+1. Peer A sends RELAY_MESSAGE(to=Peer B, data="<base64 E2E-encrypted blob>")
+2. Relay verifies session exists (reads only "from", "to", "session_id")
+3. Relay forwards the blob to Peer B via active connection
+4. Peer B receives RELAY_MESSAGE(from=Peer A, data="<same blob>")
+5. Peer B decrypts with own private key
 
 Privacy:
-- Relay sees: peer IDs, message sizes, timing
-- Relay does NOT see: message content (E2E encrypted)
+- Relay sees: peer IDs, blob sizes, timing
+- Relay does NOT see: message content ("data" field is opaque base64)
 """
 
 import logging
@@ -35,17 +36,17 @@ class RelayMessageHandler(MessageHandler):
     Maintains end-to-end encryption (relay cannot decrypt content).
 
     Example:
-        >>> # Peer A sends message to Peer B via relay
+        >>> # Peer A sends E2E-encrypted message to Peer B via relay
         >>> handler.handle(
         ...     "dpc-node-alice",
         ...     {
         ...         "from": "dpc-node-alice",
         ...         "to": "dpc-node-bob",
         ...         "session_id": "...",
-        ...         "message": {"command": "SEND_TEXT", "payload": {...}}  # Encrypted
+        ...         "data": "base64(AES-GCM encrypted payload)"  # Opaque — relay cannot read
         ...     }
         ... )
-        >>> # Relay forwards to Peer B's connection
+        >>> # Relay forwards blob to Peer B's connection without parsing
     """
 
     @property
@@ -56,9 +57,12 @@ class RelayMessageHandler(MessageHandler):
         """
         Handle RELAY_MESSAGE forwarding.
 
+        The relay reads only routing metadata (from/to/session_id) and
+        forwards the "data" blob without parsing or decoding it.
+
         Args:
             sender_node_id: Node ID of message sender
-            payload: Contains "from", "to", "session_id", and "message" (encrypted)
+            payload: Contains "from", "to", "session_id", and "data" (base64 E2E blob)
 
         Protocol:
             Request payload:
@@ -66,7 +70,7 @@ class RelayMessageHandler(MessageHandler):
                     "from": "dpc-node-sender",
                     "to": "dpc-node-receiver",
                     "session_id": "...",
-                    "message": {...}  # Encrypted message
+                    "data": "<base64 AES-GCM+RSA-OAEP encrypted blob>"
                 }
 
             Response (on error):
@@ -80,12 +84,12 @@ class RelayMessageHandler(MessageHandler):
         from_peer = payload.get("from")
         to_peer = payload.get("to")
         session_id = payload.get("session_id")
-        encrypted_message = payload.get("message")
+        encrypted_data = payload.get("data")  # Opaque base64 blob — relay never parses this
 
-        # Validate payload
-        if not all([from_peer, to_peer, session_id, encrypted_message]):
+        # Validate payload — "data" must be a non-empty string (base64 blob)
+        if not all([from_peer, to_peer, session_id]) or not isinstance(encrypted_data, str) or not encrypted_data:
             logger.warning("Invalid RELAY_MESSAGE payload from %s", sender_node_id[:20])
-            await connection.send_message({
+            await connection.send({
                 "command": "ERROR",
                 "payload": {
                     "error": "invalid_request",
@@ -100,7 +104,7 @@ class RelayMessageHandler(MessageHandler):
                 "RELAY_MESSAGE from field mismatch: connection=%s, from=%s",
                 sender_node_id[:20], from_peer[:20]
             )
-            await connection.send_message({
+            await connection.send({
                 "command": "ERROR",
                 "payload": {
                     "error": "invalid_sender",
@@ -109,41 +113,43 @@ class RelayMessageHandler(MessageHandler):
             })
             return
 
-        # Check if relay_manager is initialized and volunteering
-        if not hasattr(self.service, 'relay_manager') or not self.service.relay_manager:
-            logger.warning("RelayManager not initialized - cannot forward message")
-            await connection.send_message({
-                "command": "ERROR",
-                "payload": {
-                    "error": "not_volunteering",
-                    "message": "This node is not volunteering as a relay"
-                }
-            })
+        relay_manager = getattr(self.service, 'relay_manager', None)
+        if not relay_manager:
+            logger.warning("RelayManager not initialized - cannot handle RELAY_MESSAGE")
             return
 
-        if not self.service.relay_manager.volunteer:
-            logger.warning("Not volunteering as relay - cannot forward message")
-            await connection.send_message({
-                "command": "ERROR",
-                "payload": {
-                    "error": "not_volunteering",
-                    "message": "This node is not volunteering as a relay"
-                }
-            })
+        # Client mode: message is addressed TO US (we are the destination)
+        # Dispatch to the active RelayedPeerConnection for this sender
+        if from_peer in relay_manager._active_relay_connections:
+            logger.debug(
+                "Client-side RELAY_MESSAGE from %s (session=%s, blob=%d bytes)",
+                from_peer[:20], session_id, len(encrypted_data)
+            )
+            await relay_manager.dispatch_incoming_relay_message(
+                from_peer=from_peer,
+                session_id=session_id,
+                data_b64=encrypted_data
+            )
+            return
+
+        # Server mode: we are the relay, forward to destination peer
+        if not relay_manager.volunteer:
+            logger.warning(
+                "RELAY_MESSAGE from %s but not volunteering as relay and no active "
+                "client connection for sender — dropping",
+                from_peer[:20]
+            )
             return
 
         logger.debug(
-            "Forwarding RELAY_MESSAGE: %s → %s (session=%s, size=%d bytes)",
-            from_peer[:20], to_peer[:20], session_id,
-            len(str(encrypted_message).encode())
+            "Relay-server forwarding RELAY_MESSAGE: %s → %s (session=%s, blob=%d bytes)",
+            from_peer[:20], to_peer[:20], session_id, len(encrypted_data)
         )
 
-        # Convert message dict to bytes for relaying
-        import json
-        message_bytes = json.dumps(encrypted_message).encode('utf-8')
+        # Pass the raw base64 string as bytes — relay never decodes the blob
+        message_bytes = encrypted_data.encode('utf-8')
 
-        # Forward via RelayManager
-        success = await self.service.relay_manager.handle_relay_message(
+        success = await relay_manager.handle_relay_message(
             from_peer=from_peer,
             to_peer=to_peer,
             message=message_bytes
@@ -151,10 +157,10 @@ class RelayMessageHandler(MessageHandler):
 
         if not success:
             logger.warning(
-                "Failed to forward RELAY_MESSAGE: %s → %s",
+                "Failed to relay RELAY_MESSAGE: %s → %s",
                 from_peer[:20], to_peer[:20]
             )
-            await connection.send_message({
+            await connection.send({
                 "command": "ERROR",
                 "payload": {
                     "error": "forward_failed",

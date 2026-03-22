@@ -131,7 +131,12 @@ class AgentEventEmitter:
             max_log_size: Maximum number of events to keep in memory
             persist_events: Whether to persist events to disk
         """
-        self.agent_root = agent_root or get_agent_root()
+        # Only set agent_root if we're persisting events or if it's provided
+        # This avoids creating legacy ~/.dpc/agent/ folder for global emitter
+        if persist_events:
+            self.agent_root = agent_root or get_agent_root()
+        else:
+            self.agent_root = None
         self._listeners: List[Callable[[AgentEvent], Any]] = []
         self._event_log: List[AgentEvent] = []
         self._max_log_size = max_log_size
@@ -198,7 +203,7 @@ class AgentEventEmitter:
             self._event_log.pop(0)
 
         # Persist to disk if enabled
-        if self._persist_events:
+        if self._persist_events and self.agent_root:
             try:
                 events_log = self.agent_root / "logs" / "events.jsonl"
                 append_jsonl(events_log, event.to_dict())
@@ -250,7 +255,7 @@ class AgentEventEmitter:
             self._event_log.pop(0)
 
         # Persist to disk if enabled
-        if self._persist_events:
+        if self._persist_events and self.agent_root:
             try:
                 events_log = self.agent_root / "logs" / "events.jsonl"
                 append_jsonl(events_log, event.to_dict())
@@ -321,10 +326,14 @@ def get_event_emitter() -> AgentEventEmitter:
     Get the global event emitter instance.
 
     Creates a new instance on first call.
+
+    Note: This is a fallback emitter for non-agent contexts.
+    Individual agents create their own emitters with agent_root for persistence.
+    Global emitter doesn't persist to disk to avoid creating legacy ~/.dpc/agent/ folder.
     """
     global _emitter
     if _emitter is None:
-        _emitter = AgentEventEmitter()
+        _emitter = AgentEventEmitter(persist_events=False)
     return _emitter
 
 
