@@ -68,29 +68,31 @@
 </script>
 
 {#if $telegramEnabled && $telegramConnected}
-  <div class="telegram-status">
-    <span class="badge telegram-badge">📱 Telegram</span>
-    {#if linkedChatId}
+  {#if linkedChatId}
+    <!-- Linked: show full status bar -->
+    <div class="telegram-status">
+      <span class="badge telegram-badge">📱 Telegram</span>
       <span class="linked">✅ Linked to {linkedChatId}</span>
       <button
         class="btn-link"
         onclick={handleLinkClick}
-        title="Link different chat"
+        title="Link different Telegram chat"
         type="button"
       >
         Change
       </button>
-    {:else}
-      <button
-        class="btn-link"
-        onclick={handleLinkClick}
-        title="Link Telegram chat"
-        type="button"
-      >
-        Link Chat
-      </button>
-    {/if}
-  </div>
+    </div>
+  {:else}
+    <!-- Not linked: show small icon-only button so it doesn't dominate the header -->
+    <button
+      class="btn-link-telegram"
+      onclick={handleLinkClick}
+      title="Link Telegram chat"
+      type="button"
+    >
+      📱
+    </button>
+  {/if}
 
   {#if showLinkDialog}
     <div
@@ -177,6 +179,24 @@
 
   .linked {
     opacity: 0.9;
+  }
+
+  .btn-link-telegram {
+    padding: 0.2rem 0.4rem;
+    background: transparent;
+    color: #0088cc;
+    border: 1px solid #0088cc;
+    border-radius: 3px;
+    font-size: 0.85rem;
+    cursor: pointer;
+    opacity: 0.6;
+    transition: opacity 0.2s;
+    width: fit-content;
+    align-self: center;
+  }
+
+  .btn-link-telegram:hover {
+    opacity: 1;
   }
 
   .btn-link {

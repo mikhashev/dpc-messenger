@@ -4404,28 +4404,30 @@
             <div class="group-topic">{$groupChats.get(activeChatId)?.topic}</div>
           {/if}
 
-          <!-- Auto Transcribe toggle (P2P and Telegram chats, NOT AI chats) -->
+          <!-- Auto Transcribe toggle + Telegram link (P2P and Telegram chats, NOT AI chats) -->
           {#if !$aiChats.has(activeChatId) && activeChatId !== 'local_ai'}
-            <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
-              <input
-                type="checkbox"
-                bind:checked={autoTranscribeEnabled}
-                onchange={saveAutoTranscribeSetting}
-                disabled={whisperModelLoading}
-              />
-              <span>Auto Transcribe</span>
-              {#if whisperModelLoading}
-                <span class="whisper-loading-indicator" title="Loading Whisper model...">⏳</span>
-              {/if}
-              {#if whisperModelLoadError}
-                <span class="whisper-error-indicator" title={whisperModelLoadError}>⚠️</span>
-              {/if}
-            </label>
-          {/if}
+            <div class="chat-header-inline-controls">
+              <label class="auto-transcribe-toggle" title="Automatically transcribe received voice messages">
+                <input
+                  type="checkbox"
+                  bind:checked={autoTranscribeEnabled}
+                  onchange={saveAutoTranscribeSetting}
+                  disabled={whisperModelLoading}
+                />
+                <span>Auto Transcribe</span>
+                {#if whisperModelLoading}
+                  <span class="whisper-loading-indicator" title="Loading Whisper model...">⏳</span>
+                {/if}
+                {#if whisperModelLoadError}
+                  <span class="whisper-error-indicator" title={whisperModelLoadError}>⚠️</span>
+                {/if}
+              </label>
 
-          <!-- Telegram bot integration status (v0.14.0+) - P2P chats only -->
-          {#if isP2PChat}
-            <TelegramStatus conversationId={activeChatId} />
+              <!-- Telegram bot integration status (v0.14.0+) - P2P chats only -->
+              {#if isP2PChat}
+                <TelegramStatus conversationId={activeChatId} />
+              {/if}
+            </div>
           {/if}
         </div>
 
@@ -5130,6 +5132,13 @@
     gap: 0.75rem;  /* Add spacing between wrapped items */
     padding: 1rem;
     border-bottom: 1px solid #eee;
+  }
+
+  .chat-header-inline-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
   }
 
   .chat-title-section {
