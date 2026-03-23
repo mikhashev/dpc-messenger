@@ -745,6 +745,8 @@ class P2PManager:
             except Exception as e:
                 logger.warning("Failed to request providers from %s: %s", target_node_id, e)
 
+            return peer
+
         except asyncio.TimeoutError:
             error_msg = (
                 f"Connection to {host}:{port} timed out after {timeout} seconds.\n"
