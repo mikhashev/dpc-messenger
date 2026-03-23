@@ -225,8 +225,15 @@ class TokenCountManager:
             # Find matching tokenizer
             for family, hf_model in self.OLLAMA_TOKENIZER_MAP.items():
                 if model_family.startswith(family):
-                    logger.info("Loading tokenizer for %s: %s", model, hf_model)
-                    tokenizer = AutoTokenizer.from_pretrained(hf_model)
+                    # Try local cache first — avoids 23s+ DNS retry loop when
+                    # huggingface.co is unreachable (blocks the asyncio event loop).
+                    # Falls back to network download only on a genuine cache miss.
+                    try:
+                        logger.info("Loading tokenizer for %s: %s (local cache)", model, hf_model)
+                        tokenizer = AutoTokenizer.from_pretrained(hf_model, local_files_only=True)
+                    except Exception:
+                        logger.info("Loading tokenizer for %s: %s (downloading)", model, hf_model)
+                        tokenizer = AutoTokenizer.from_pretrained(hf_model)
                     self._tokenizer_cache[model] = tokenizer
                     return tokenizer
 
