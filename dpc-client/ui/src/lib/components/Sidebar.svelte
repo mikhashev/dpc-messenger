@@ -517,7 +517,7 @@
         <div class="connection-help-content">
           <p class="small">
             🔍 <strong>Auto-Discovery (DHT):</strong> <code>dpc-node-abc123...</code><br/>
-            <span class="small-detail">Tries: DHT → Cache → Hub</span>
+            <span class="small-detail">Tries: DHT → Cache → IPv4 → Hub → Relay → Gossip</span>
           </p>
           <p class="small">
             🏠 <strong>Direct TLS (Local):</strong> <code>dpc://192.168.1.100:8888?node_id=...</code>

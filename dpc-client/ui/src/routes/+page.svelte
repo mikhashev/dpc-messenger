@@ -2593,7 +2593,7 @@
         result = await sendCommand("connect_to_peer", { uri: input });
       } else {
         // DHT-first connection (automatic discovery)
-        // Tries: DHT lookup → Peer cache → Hub WebRTC
+        // Tries: DHT → Peer cache → IPv4/IPv6 direct → Hub WebRTC → Relay → Gossip
         console.log("Using DHT-first discovery strategy");
         result = await sendCommand("connect_via_dht", { node_id: input });
       }
