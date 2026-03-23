@@ -4917,10 +4917,20 @@ Respond in JSON format:
                                             data = _json.load(f)
                                         messages = data.get("messages", [])
                                         logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
+                                        tokens_used = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                                        token_limit = 0
+                                        if self.llm_manager:
+                                            try:
+                                                _model = self.llm_manager.get_active_model_name()
+                                                token_limit = self.llm_manager.get_context_window(_model) or 0
+                                            except Exception:
+                                                pass
                                         return {
                                             "status": "success",
                                             "messages": messages,
-                                            "message_count": len(messages)
+                                            "message_count": len(messages),
+                                            "tokens_used": tokens_used,
+                                            "token_limit": token_limit
                                         }
                                     except Exception as e:
                                         logger.error("Failed to load agent history from disk: %s", e)
@@ -4937,11 +4947,21 @@ Respond in JSON format:
                                     data = json.load(f)
                                 messages = data.get("messages", [])
                                 logger.info("Loaded %d messages from disk for %s (agent manager not created yet)", len(messages), conversation_id)
+                                tokens_used = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                                token_limit = 0
+                                if self.llm_manager:
+                                    try:
+                                        _model = self.llm_manager.get_active_model_name()
+                                        token_limit = self.llm_manager.get_context_window(_model) or 0
+                                    except Exception:
+                                        pass
                                 # Return early with the loaded messages
                                 return {
                                     "status": "success",
                                     "messages": messages,
-                                    "message_count": len(messages)
+                                    "message_count": len(messages),
+                                    "tokens_used": tokens_used,
+                                    "token_limit": token_limit
                                 }
                             except Exception as e:
                                 logger.error("Failed to load agent history from disk: %s", e)
@@ -5004,10 +5024,13 @@ Respond in JSON format:
 
             logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
 
+            token_usage = monitor.get_token_usage()
             return {
                 "status": "success",
                 "messages": messages,
-                "message_count": len(messages)
+                "message_count": len(messages),
+                "tokens_used": token_usage.get("tokens_used", 0),
+                "token_limit": token_usage.get("token_limit", 0)
             }
 
         except Exception as e:
