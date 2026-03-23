@@ -11,6 +11,14 @@ if TYPE_CHECKING:
     from .service import CoreService
 
 logger = logging.getLogger(__name__)
+ui_logger = logging.getLogger("dpc_ui")
+
+_UI_LOG_LEVELS = {
+    "debug": ui_logger.debug,
+    "info":  ui_logger.info,
+    "warn":  ui_logger.warning,
+    "error": ui_logger.error,
+}
 
 # Explicit allowlist of commands the UI is permitted to invoke.
 # Any command not listed here is rejected, regardless of whether a method
@@ -111,6 +119,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_agent_learning",
     "get_agent_task_result",
     "schedule_agent_task",
+    # Frontend logging relay
+    "ui_log",
 })
 
 
@@ -174,6 +184,16 @@ class LocalApiServer:
                     if command not in ALLOWED_COMMANDS:
                         logger.warning("Rejected disallowed command: '%s'", command)
                         raise ValueError(f"Unknown or non-async command: {command}")
+
+                    # ui_log is handled directly here — never dispatched to CoreService
+                    if command == "ui_log":
+                        level = payload.get("level", "info").lower()
+                        context = payload.get("context", "ui")
+                        msg = payload.get("message", "")
+                        log_fn = _UI_LOG_LEVELS.get(level, ui_logger.info)
+                        log_fn("[%s] %s", context, msg)
+                        await websocket.send(json.dumps({"id": command_id, "command": command, "status": "OK", "payload": {}}))
+                        continue
 
                     handler_method = getattr(self.core_service, command, None)
 

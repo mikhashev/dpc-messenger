@@ -231,6 +231,7 @@ async def run_llm_loop(
     # If the same call is repeated MAX_DUPLICATE_CALLS times without new information,
     # break the loop to prevent infinite repetition.
     MAX_DUPLICATE_CALLS = 5
+    MAX_TOOL_CALLS_PER_TURN = 25  # Hard cap: if LLM emits more than this in one shot, it's looping
     _tool_call_counts: Dict[str, int] = {}
 
     round_idx = 0
@@ -293,14 +294,53 @@ async def run_llm_loop(
             log.debug(f"LLM response: tool_calls={len(tool_calls)}, content_len={len(content) if content else 0}")
             if tool_calls:
                 log.info(f"Processing {len(tool_calls)} tool call(s)")
+                if len(tool_calls) > MAX_TOOL_CALLS_PER_TURN:
+                    log.warning(
+                        "LLM generated %d tool calls in one turn (limit: %d) — injecting stop signal",
+                        len(tool_calls), MAX_TOOL_CALLS_PER_TURN,
+                    )
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"[TOOL_LIMIT] You generated {len(tool_calls)} tool calls in a single turn, "
+                            f"which exceeds the limit of {MAX_TOOL_CALLS_PER_TURN}. "
+                            "Stop calling tools. Summarise what you know and give your final answer now."
+                        ),
+                    })
+                    try:
+                        final_msg, _ = await llm.chat(
+                            messages,
+                            tools=None,
+                            on_stream_chunk=on_stream_chunk,
+                            conversation_id=conversation_id,
+                        )
+                        if final_msg and final_msg.get("content"):
+                            return final_msg["content"], accumulated_usage, llm_trace
+                    except Exception:
+                        log.warning("Failed to get response after tool-call-per-turn limit", exc_info=True)
+                    return (
+                        f"⚠️ Agent generated too many tool calls ({len(tool_calls)}) in one turn and was stopped.",
+                        accumulated_usage,
+                        llm_trace,
+                    )
             elif content and "tool_call" in content.lower():
                 log.warning(f"No tool_calls parsed but 'tool_call' found in content: {content[:200]!r}")
 
-            # No tool calls — final response
+            # No tool calls — final response or empty-response retry
             if not tool_calls:
                 if content and content.strip():
                     llm_trace["assistant_notes"].append(content.strip()[:320])
-                return content or "", accumulated_usage, llm_trace
+                    return content, accumulated_usage, llm_trace
+                # LLM returned empty content (e.g. GLM thinking-only with no text).
+                # Inject a re-prompt and retry once so the user gets a real answer.
+                if round_idx == 1:
+                    log.warning("LLM returned empty content with no tool calls — re-prompting for text response")
+                    messages.append({
+                        "role": "user",
+                        "content": "Please provide your answer as text. Your previous response was empty.",
+                    })
+                    continue
+                return "", accumulated_usage, llm_trace
 
             # Process tool calls
             messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
