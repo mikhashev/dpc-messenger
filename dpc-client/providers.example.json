@@ -211,6 +211,58 @@
       }
     },
 
+    "gemini": {
+      "_comment": "Google Gemini / AI Studio - All models are natively multimodal (vision), 1M context",
+      "alias": "gemini_flash",
+      "type": "gemini",
+      "model": "gemini-2.0-flash",
+      "api_key_env": "GEMINI_API_KEY",
+      "context_window": 1000000,
+      "_setup": "Get free API key at https://aistudio.google.com — set: export GEMINI_API_KEY='AIza...'",
+      "_available_models": ["gemini-2.0-flash", "gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.0-flash-thinking-exp"],
+      "_thinking": "Set model to 'gemini-2.0-flash-thinking-exp' to enable thinking/reasoning mode",
+      "_vision": "All Gemini models support image input natively"
+    },
+
+    "github_models": {
+      "_comment": "GitHub Models - Free access to GPT-4o, Llama, Phi, Mistral using GitHub token",
+      "alias": "github_gpt4o",
+      "type": "github_models",
+      "model": "gpt-4o",
+      "api_key_env": "GITHUB_TOKEN",
+      "context_window": 128000,
+      "_setup": "Create GitHub PAT with 'models:read' permission at https://github.com/settings/tokens — set: export GITHUB_TOKEN='ghp_...'",
+      "_endpoint": "https://models.inference.ai.azure.com (automatically configured)",
+      "_rate_limits": "Free: 15 RPM / 150 RPD (low-complexity), 10 RPM / 50 RPD (high-complexity)",
+      "_available_models": ["gpt-4o", "gpt-4o-mini", "llama-3.3-70b", "phi-4", "mistral-large-2407", "mistral-nemo"]
+    },
+
+    "gigachat": {
+      "_comment": "GigaChat by Sberbank - 1M free tokens, 128K context, strong Russian language support",
+      "alias": "gigachat_pro",
+      "type": "gigachat",
+      "model": "GigaChat-2-Pro",
+      "api_key_env": "GIGACHAT_CREDENTIALS",
+      "context_window": 128000,
+      "scope": "GIGACHAT_API_PERS",
+      "verify_ssl": true,
+      "ca_bundle_file": "",
+      "_setup": [
+        "1. Get credentials at https://developers.sber.ru/studio",
+        "2. Set: export GIGACHAT_CREDENTIALS='your_authorization_key'",
+        "3. Install Russian CA cert (once per virtualenv):",
+        "   curl -k 'https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt' -w '\\n' >> $(python -m certifi)"
+      ],
+      "_scope": "GIGACHAT_API_PERS=personal(free), GIGACHAT_API_B2B=business, GIGACHAT_API_CORP=corporate",
+      "_available_models": {
+        "GigaChat-2-Max": "Most capable, 128K context, supports vision + function calling",
+        "GigaChat-2-Pro": "Balanced quality/efficiency, 128K context",
+        "GigaChat-2-Lite": "Fastest/cheapest, 128K context, no vision"
+      },
+      "_free_tier": "1,000,000 tokens free for personal accounts",
+      "_verify_ssl": "Set to false only for dev/testing. For production: install the CA cert or set ca_bundle_file path"
+    },
+
     "apple_whisper_mlx": {
       "alias": "apple_whisper_mlx",
       "type": "local_whisper",
@@ -232,7 +284,7 @@
     "_comment": "Reference guide for provider configuration fields",
     "common_fields": {
       "alias": "User-friendly name for the provider (must be unique)",
-      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', or 'local_whisper'",
+      "type": "Provider type: 'ollama', 'openai_compatible', 'anthropic', 'zai', 'local_whisper', 'gemini', 'github_models', or 'gigachat'",
       "model": "Model identifier (e.g., 'llama3.1:8b', 'gpt-4o', 'claude-3-5-sonnet-20240620', 'glm-4.7', 'openai/whisper-large-v3')",
       "context_window": "Optional: Override default context window size in tokens",
       "temperature": "Optional: Model creativity/randomness (0.0-2.0, default: 0.7). Lower = deterministic, higher = creative"
@@ -254,6 +306,19 @@
       "base_url": "API endpoint URL (default: https://api.z.ai/api/anthropic)",
       "max_tokens": "Maximum tokens in response (default: 8192)",
       "thinking": "Object with 'enabled' (bool) and 'budget_tokens' (int, default: 10000) for extended thinking"
+    },
+    "gemini_fields": {
+      "api_key_env": "Environment variable containing Google AI Studio API key (default: GEMINI_API_KEY)"
+    },
+    "github_models_fields": {
+      "api_key_env": "Environment variable containing GitHub PAT with models:read permission (default: GITHUB_TOKEN)",
+      "_note": "Endpoint https://models.inference.ai.azure.com is always used automatically"
+    },
+    "gigachat_fields": {
+      "api_key_env": "Environment variable containing GigaChat authorization key (default: GIGACHAT_CREDENTIALS)",
+      "scope": "API scope: GIGACHAT_API_PERS (personal, default), GIGACHAT_API_B2B, GIGACHAT_API_CORP",
+      "verify_ssl": "Verify Sberbank TLS certificate (true by default; requires CA cert installed)",
+      "ca_bundle_file": "Optional path to russian_trusted_root_ca_pem.crt if not installed via certifi"
     },
     "local_whisper_fields": {
       "device": "Device to use: 'cuda', 'cpu', 'mps' (macOS), or 'auto' (auto-detects best device)",

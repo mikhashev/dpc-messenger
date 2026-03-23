@@ -1955,6 +1955,309 @@ class DpcAgentProvider(AIProvider):
             logger.info(f"DpcAgentProvider '{self.alias}': Agent manager stopped")
 
 
+class GeminiProvider(AIProvider):
+    """
+    Google Gemini provider using the google-genai SDK.
+
+    Supports all Gemini models (gemini-2.0-flash, gemini-1.5-pro, etc.)
+    with native vision (all models are multimodal) and thinking support
+    for gemini-2.0-flash-thinking-exp.
+
+    Auth: GEMINI_API_KEY environment variable (Google AI Studio key).
+    """
+
+    THINKING_MODELS = ["gemini-2.0-flash-thinking-exp"]
+
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        super().__init__(alias, config)
+        try:
+            from google import genai
+            from google.genai import types as genai_types
+        except ImportError:
+            raise RuntimeError(
+                f"GeminiProvider '{alias}': Install google-genai — "
+                "run: poetry add google-genai"
+            )
+        api_key = config.get("api_key")
+        if not api_key:
+            api_key_env = config.get("api_key_env", "GEMINI_API_KEY")
+            api_key = os.getenv(api_key_env)
+        if not api_key:
+            raise ValueError(
+                f"GeminiProvider '{alias}': No API key found. "
+                "Set GEMINI_API_KEY or specify api_key_env in config."
+            )
+        self._genai = genai
+        self._types = genai_types
+        self.client = genai.Client(api_key=api_key)
+        logger.info(f"GeminiProvider '{alias}': Initialized with model '{self.model}'")
+
+    def supports_vision(self) -> bool:
+        return True  # All Gemini models are natively multimodal
+
+    def supports_thinking(self) -> bool:
+        return any(m in self.model for m in self.THINKING_MODELS)
+
+    async def generate_response(self, prompt: str, **kwargs) -> str:
+        loop = asyncio.get_event_loop()
+        try:
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                )
+            )
+            return response.text
+        except Exception as e:
+            raise RuntimeError(f"GeminiProvider '{self.alias}' failed: {e}") from e
+
+    async def generate_response_stream(
+        self,
+        prompt: str,
+        on_chunk: callable,
+        conversation_id: str = None,
+    ) -> str:
+        loop = asyncio.get_event_loop()
+        try:
+            chunks = await loop.run_in_executor(
+                None,
+                lambda: list(self.client.models.generate_content_stream(
+                    model=self.model,
+                    contents=prompt,
+                ))
+            )
+            full_text = ""
+            for chunk in chunks:
+                text = chunk.text or ""
+                full_text += text
+                if on_chunk and text:
+                    await on_chunk(text, conversation_id)
+            return full_text
+        except Exception as e:
+            raise RuntimeError(f"GeminiProvider '{self.alias}' streaming failed: {e}") from e
+
+    async def generate_with_vision(
+        self,
+        prompt: str,
+        images: List[Dict[str, Any]],
+        **kwargs,
+    ) -> str:
+        parts = []
+        for img in images:
+            parts.append(
+                self._types.Part.from_bytes(
+                    data=img["data"],
+                    mime_type=img.get("media_type", "image/jpeg"),
+                )
+            )
+        parts.append(prompt)
+        loop = asyncio.get_event_loop()
+        try:
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.client.models.generate_content(
+                    model=self.model,
+                    contents=parts,
+                )
+            )
+            return response.text
+        except Exception as e:
+            raise RuntimeError(f"GeminiProvider '{self.alias}' vision failed: {e}") from e
+
+
+class GitHubModelsProvider(AIProvider):
+    """
+    GitHub Models provider using the azure-ai-inference SDK.
+
+    Provides access to GPT-4o, Llama, Phi, Mistral and other models
+    hosted at https://models.inference.ai.azure.com using a GitHub
+    Personal Access Token (models:read permission required).
+
+    Free tier: 15 RPM / 150 RPD (low-complexity models),
+               10 RPM / 50 RPD (high-complexity models).
+
+    Auth: GITHUB_TOKEN environment variable.
+    """
+
+    ENDPOINT = "https://models.inference.ai.azure.com"
+    VISION_MODELS = ["gpt-4o", "llama-3.2-11b-vision"]
+
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        super().__init__(alias, config)
+        try:
+            from azure.ai.inference import ChatCompletionsClient
+            from azure.core.credentials import AzureKeyCredential
+            self._UserMessage = None  # lazy import in methods
+        except ImportError:
+            raise RuntimeError(
+                f"GitHubModelsProvider '{alias}': Install azure-ai-inference — "
+                "run: poetry add azure-ai-inference"
+            )
+        token = config.get("api_key")
+        if not token:
+            token = os.getenv(config.get("api_key_env", "GITHUB_TOKEN"))
+        if not token:
+            raise ValueError(
+                f"GitHubModelsProvider '{alias}': No token found. "
+                "Set GITHUB_TOKEN or specify api_key_env in config."
+            )
+        self.client = ChatCompletionsClient(
+            endpoint=self.ENDPOINT,
+            credential=AzureKeyCredential(token),
+        )
+        logger.info(
+            f"GitHubModelsProvider '{alias}': Initialized with model '{self.model}' "
+            f"at {self.ENDPOINT}"
+        )
+
+    def supports_vision(self) -> bool:
+        return any(m in self.model for m in self.VISION_MODELS)
+
+    async def generate_response(self, prompt: str, **kwargs) -> str:
+        from azure.ai.inference.models import UserMessage
+        loop = asyncio.get_event_loop()
+        try:
+            response = await loop.run_in_executor(
+                None,
+                lambda: self.client.complete(
+                    messages=[UserMessage(prompt)],
+                    model=self.model,
+                    temperature=self.temperature,
+                )
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise RuntimeError(f"GitHubModelsProvider '{self.alias}' failed: {e}") from e
+
+    async def generate_response_stream(
+        self,
+        prompt: str,
+        on_chunk: callable,
+        conversation_id: str = None,
+    ) -> str:
+        from azure.ai.inference.models import UserMessage
+
+        def _stream():
+            result = []
+            with self.client.complete(
+                messages=[UserMessage(prompt)],
+                model=self.model,
+                temperature=self.temperature,
+                stream=True,
+            ) as stream:
+                for update in stream:
+                    if update.choices and update.choices[0].delta:
+                        result.append(update.choices[0].delta.content or "")
+            return result
+
+        loop = asyncio.get_event_loop()
+        try:
+            chunks = await loop.run_in_executor(None, _stream)
+            full_text = ""
+            for text in chunks:
+                full_text += text
+                if on_chunk and text:
+                    await on_chunk(text, conversation_id)
+            return full_text
+        except Exception as e:
+            raise RuntimeError(
+                f"GitHubModelsProvider '{self.alias}' streaming failed: {e}"
+            ) from e
+
+    async def close(self) -> None:
+        self.client.close()
+        logger.debug(f"GitHubModelsProvider '{self.alias}': Client closed")
+
+
+class GigaChatProvider(AIProvider):
+    """
+    GigaChat provider by Sberbank using the official gigachat SDK.
+
+    Supports GigaChat-2-Pro, GigaChat-2-Max (vision), GigaChat-2-Lite.
+    All models have 128K context window.
+
+    SSL Certificate: Sberbank requires the Russian НУЦ Минцифры CA cert.
+    Install once into the virtualenv's certifi bundle:
+        curl -k "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt" -w "\\n" >> $(python -m certifi)
+    Or set ca_bundle_file in provider config to the cert path.
+
+    Auth: GIGACHAT_CREDENTIALS environment variable (authorization key
+    from https://developers.sber.ru/studio).
+
+    Scope values:
+        GIGACHAT_API_PERS  — personal/individual (free tier, default)
+        GIGACHAT_API_B2B   — business
+        GIGACHAT_API_CORP  — corporate
+    """
+
+    def __init__(self, alias: str, config: Dict[str, Any]):
+        super().__init__(alias, config)
+        try:
+            from gigachat import GigaChat
+            self._GigaChat = GigaChat
+        except ImportError:
+            raise RuntimeError(
+                f"GigaChatProvider '{alias}': Install gigachat — "
+                "run: poetry add gigachat"
+            )
+        credentials = config.get("api_key")
+        if not credentials:
+            credentials = os.getenv(config.get("api_key_env", "GIGACHAT_CREDENTIALS"))
+        if not credentials:
+            raise ValueError(
+                f"GigaChatProvider '{alias}': No credentials found. "
+                "Set GIGACHAT_CREDENTIALS or specify api_key_env in config."
+            )
+        self._client_kwargs: Dict[str, Any] = dict(
+            credentials=credentials,
+            scope=config.get("scope", "GIGACHAT_API_PERS"),
+            model=self.model,
+            verify_ssl_certs=config.get("verify_ssl", True),
+        )
+        ca_bundle = config.get("ca_bundle_file", "")
+        if ca_bundle:
+            self._client_kwargs["ca_bundle_file"] = ca_bundle
+        logger.info(
+            f"GigaChatProvider '{alias}': Initialized with model '{self.model}', "
+            f"scope={self._client_kwargs['scope']}"
+        )
+
+    def supports_vision(self) -> bool:
+        return "Max" in self.model  # Only GigaChat-2-Max supports vision
+
+    async def generate_response(self, prompt: str, **kwargs) -> str:
+        try:
+            async with self._GigaChat(**self._client_kwargs) as client:
+                response = await client.achat(prompt)
+                return response.choices[0].message.content
+        except Exception as e:
+            raise RuntimeError(f"GigaChatProvider '{self.alias}' failed: {e}") from e
+
+    async def generate_response_stream(
+        self,
+        prompt: str,
+        on_chunk: callable,
+        conversation_id: str = None,
+    ) -> str:
+        try:
+            full_text = ""
+            async with self._GigaChat(**self._client_kwargs) as client:
+                async for chunk in client.astream(prompt):
+                    text = chunk.choices[0].delta.content or ""
+                    full_text += text
+                    if on_chunk and text:
+                        await on_chunk(text, conversation_id)
+            return full_text
+        except Exception as e:
+            raise RuntimeError(
+                f"GigaChatProvider '{self.alias}' streaming failed: {e}"
+            ) from e
+
+    async def close(self) -> None:
+        pass  # Context manager handles cleanup per-request
+
+
 # --- The Manager Class ---
 
 PROVIDER_MAP = {
@@ -1965,6 +2268,10 @@ PROVIDER_MAP = {
     "local_whisper": LocalWhisperProvider,  # v0.13.1+: Local Whisper transcription
     "dpc_agent": DpcAgentProvider,  # Embedded autonomous AI agent
     "remote_peer": RemotePeerProvider,  # v0.18.0+: Remote peer inference
+    # Subscription plan providers (v0.21.0+)
+    "gemini": GeminiProvider,          # Google Gemini / AI Studio
+    "github_models": GitHubModelsProvider,  # GitHub Models (free/Pro)
+    "gigachat": GigaChatProvider,      # GigaChat by Sberbank
 }
 
 # Default context window sizes for common models (in tokens)
