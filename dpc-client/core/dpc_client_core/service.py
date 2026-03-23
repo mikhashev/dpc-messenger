@@ -7700,7 +7700,7 @@ Respond in JSON format:
         """
         return await self.context_coordinator.request_device_context(peer_id)
 
-    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 60.0) -> str:
+    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 240.0) -> str:
         """
         Request remote inference from a specific peer.
         Uses async request-response pattern with Future.
@@ -7711,7 +7711,7 @@ Respond in JSON format:
             model: Optional model name to use
             provider: Optional provider alias to use
             images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
-            timeout: Timeout in seconds (default 60s for inference)
+            timeout: Timeout in seconds (default 240s for inference)
 
         Returns:
             The inference result as a string

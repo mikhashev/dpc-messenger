@@ -6,6 +6,7 @@ import ssl
 import json
 import logging
 import platform
+import socket as _socket_module
 from typing import Dict, Any, Callable, Tuple, Union, Optional
 
 from cryptography import x509
@@ -53,6 +54,35 @@ class PeerConnection:
             except Exception as e:
                 # Gracefully handle SSL errors during shutdown (race conditions)
                 logger.debug("Error during SSL shutdown for peer %s: %s", self.node_id, e)
+
+
+def _enable_tcp_keepalive(writer: asyncio.StreamWriter) -> None:
+    """
+    Enable TCP keepalive on the underlying socket of an asyncio StreamWriter.
+
+    Without keepalive, a half-open (zombie) TCP connection appears alive to both
+    sides indefinitely. The OS will send periodic probes and close the connection
+    if the peer stops ACKing, triggering the normal disconnect handler.
+
+    Timing (applied where supported):
+      - idle:  60s  — start probing after 60s of inactivity
+      - intvl: 10s  — probe every 10s
+      - count:  5   — close after 5 unanswered probes (~110s total detection)
+    """
+    sock = writer.get_extra_info('socket')
+    if sock is None:
+        return
+    try:
+        sock.setsockopt(_socket_module.SOL_SOCKET, _socket_module.SO_KEEPALIVE, 1)
+        # Fine-grained control (Linux, macOS, Windows 10 1703+)
+        if hasattr(_socket_module, 'TCP_KEEPIDLE'):
+            sock.setsockopt(_socket_module.IPPROTO_TCP, _socket_module.TCP_KEEPIDLE, 60)
+        if hasattr(_socket_module, 'TCP_KEEPINTVL'):
+            sock.setsockopt(_socket_module.IPPROTO_TCP, _socket_module.TCP_KEEPINTVL, 10)
+        if hasattr(_socket_module, 'TCP_KEEPCNT'):
+            sock.setsockopt(_socket_module.IPPROTO_TCP, _socket_module.TCP_KEEPCNT, 5)
+    except Exception as e:
+        logger.debug("Could not set TCP keepalive: %s", e)
 
 
 class P2PManager:
@@ -473,11 +503,13 @@ class P2PManager:
 
             peer = PeerConnection(node_id=peer_node_id, reader=reader, writer=writer)
 
+            # Enable TCP keepalive on accepted connections to detect zombie connections.
+            _enable_tcp_keepalive(writer)
+
             # Set strategy_used for incoming connections (for UI display)
             sock = writer.get_extra_info('socket')
             if sock:
-                import socket as socket_module
-                if sock.family == socket_module.AF_INET6:
+                if sock.family == _socket_module.AF_INET6:
                     peer.strategy_used = "ipv6_direct"
                 else:
                     peer.strategy_used = "ipv4_direct"
@@ -616,6 +648,11 @@ class P2PManager:
                 timeout=timeout
             )
 
+            # Enable TCP keepalive to detect zombie connections (half-open TCP)
+            # Without this, a dead connection appears alive indefinitely and causes
+            # inference/context requests to hang until the 240s timeout fires.
+            _enable_tcp_keepalive(writer)
+
             # Extract and validate peer certificate (TLS layer security)
             ssl_object = writer.get_extra_info('ssl_object')
             if not ssl_object:
@@ -727,18 +764,16 @@ class P2PManager:
                 peer.strategy_used = "ipv4_direct"  # Default fallback
 
             self.peers[target_node_id] = peer
-            await self._notify_peer_change()
             logger.info("Direct connection established with %s", target_node_id)
 
-            # Persist successful endpoint so cache fallback works on next restart
-            self.peer_cache.add_or_update_peer(
-                node_id=target_node_id,
-                direct_ip=host,
-                direct_port=port,
-                supports_direct=True
-            )
+            # Start listener task FIRST so it survives any timeout during post-connection
+            # callbacks (e.g. _notify_peer_change runs get_status/ip-addr which can be slow).
+            # If the strategy timeout fires during _notify_peer_change, the peer is already
+            # in self.peers and the listener is running, so request-response patterns work.
+            task = asyncio.create_task(self._listen_to_peer(peer))
+            self._peer_listener_tasks[target_node_id] = task
 
-            # Persist the successful endpoint to peer cache for future reconnections
+            # Persist successful endpoint to peer cache
             self.peer_cache.add_or_update_peer(
                 node_id=target_node_id,
                 direct_ip=host,
@@ -749,9 +784,9 @@ class P2PManager:
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())
 
-            # Start listener task and track it for graceful shutdown
-            task = asyncio.create_task(self._listen_to_peer(peer))
-            self._peer_listener_tasks[target_node_id] = task
+            # Fire peer-change notification as a background task so it doesn't
+            # block the strategy timeout window (it runs get_status + ip addr).
+            asyncio.create_task(self._notify_peer_change())
 
             # Auto-discover peer's available AI providers
             from dpc_protocol.protocol import create_get_providers_message
