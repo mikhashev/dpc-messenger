@@ -446,43 +446,33 @@ This file tracks the agent's self-understanding and evolving identity.
 
 def chat_history(ctx: ToolContext, limit: int = 10) -> str:
     """
-    Read recent chat history from the logs.
+    Read recent conversation messages (user and assistant turns).
 
     Args:
         ctx: Tool context
-        limit: Maximum number of entries to return
+        limit: Maximum number of messages to return (most recent)
 
     Returns:
-        Recent chat history
+        Recent conversation messages with role, sender, and content
     """
     try:
-        events_path = ctx.logs_path("events.jsonl")
+        monitor = getattr(ctx, 'conversation_monitor', None)
+        if not monitor:
+            return "No conversation monitor available for this session"
 
-        if not events_path.exists():
-            return "No chat history available"
+        history = monitor.message_history
+        if not history:
+            return "No conversation history yet"
 
-        entries = []
-        with open(events_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
-
-        if not entries:
-            return "No chat history available"
-
-        # Get most recent entries
-        recent = entries[-limit:]
-
-        output_lines = [f"Recent chat history ({len(recent)} entries):\n"]
-        for entry in recent:
-            ts = entry.get("ts", "unknown time")
-            event_type = entry.get("type", "unknown")
-            text = entry.get("text", "")[:100]
-            output_lines.append(f"[{ts}] {event_type}: {text}...")
+        recent = history[-limit:]
+        output_lines = [f"Recent conversation ({len(recent)} of {len(history)} total messages):\n"]
+        for msg in recent:
+            role = msg.get("role", "unknown")
+            sender = msg.get("sender_name", role)
+            ts = msg.get("timestamp", "")
+            content = msg.get("content", "")
+            ts_str = f" [{ts[:19]}]" if ts else ""
+            output_lines.append(f"{sender}{ts_str}: {content}")
 
         return "\n".join(output_lines)
 
@@ -1886,7 +1876,7 @@ def get_tools() -> List[ToolEntry]:
             name="chat_history",
             schema={
                 "name": "chat_history",
-                "description": "Read recent chat history from agent logs",
+                "description": "Read recent conversation messages (user and assistant turns) from the current session's history",
                 "parameters": {
                     "type": "object",
                     "properties": {
