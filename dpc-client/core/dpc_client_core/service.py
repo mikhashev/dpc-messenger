@@ -24,7 +24,7 @@ from .file_server import FileServer
 from .context_cache import ContextCache
 from .settings import Settings
 from .token_cache import TokenCache
-from .peer_cache import PeerCache
+
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
@@ -97,7 +97,7 @@ DPC_HOME_DIR = Path.home() / ".dpc"
 PROVIDERS_CONFIG = "providers.json"
 PRIVACY_RULES = "privacy_rules.json"
 PERSONAL_CONTEXT = "personal.json"
-KNOWN_PEERS = "known_peers.json"
+
 NODE_KEY = "node.key"
 
 class CoreService:
@@ -118,7 +118,6 @@ class CoreService:
             cache_dir=DPC_HOME_DIR,
             node_key_path=DPC_HOME_DIR / NODE_KEY
         )
-        self.peer_cache = PeerCache(DPC_HOME_DIR / KNOWN_PEERS)
         self.connection_status = ConnectionStatus()
 
         # Set up status change callback
@@ -493,7 +492,7 @@ class CoreService:
                 "operation_mode": mode.value,
                 "connection_status": self.connection_status.get_status_message(),
                 "available_features": self.connection_status.get_available_features(),
-                "cached_peers_count": len(self.peer_cache.get_all_peers())
+                "cached_peers_count": len(self.p2p_manager.peer_cache.get_all_peers())
             }
 
             # Send to UI via local API
@@ -1091,7 +1090,7 @@ class CoreService:
                     pass
 
             # Update peer cache
-            self.peer_cache.add_or_update_peer(
+            self.p2p_manager.peer_cache.add_or_update_peer(
                 node_id=peer_id,
                 display_name=display_name,
                 direct_ip=direct_ip,
@@ -1513,7 +1512,7 @@ class CoreService:
             "operation_mode": self.connection_status.get_operation_mode().value,
             "connection_status": self.connection_status.get_status_message(),
             "available_features": self.connection_status.get_available_features(),
-            "cached_peers_count": len(self.peer_cache.get_all_peers()),
+            "cached_peers_count": len(self.p2p_manager.peer_cache.get_all_peers()),
             # Direct TLS connection URIs
             "local_ips": local_ips,
             "dpc_uris": dpc_uris,

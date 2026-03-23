@@ -730,6 +730,22 @@ class P2PManager:
             await self._notify_peer_change()
             logger.info("Direct connection established with %s", target_node_id)
 
+            # Persist successful endpoint so cache fallback works on next restart
+            self.peer_cache.add_or_update_peer(
+                node_id=target_node_id,
+                direct_ip=host,
+                direct_port=port,
+                supports_direct=True
+            )
+
+            # Persist the successful endpoint to peer cache for future reconnections
+            self.peer_cache.add_or_update_peer(
+                node_id=target_node_id,
+                direct_ip=host,
+                direct_port=port,
+                supports_direct=True
+            )
+
             # Announce to DHT after successful connection
             asyncio.create_task(self.announce_to_dht())
 
