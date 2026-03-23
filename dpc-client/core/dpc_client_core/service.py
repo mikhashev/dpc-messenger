@@ -32,7 +32,7 @@ from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
 from .p2p_coordinator import P2PCoordinator
-from .coordinators.connection_orchestrator import ConnectionOrchestrator
+from .coordinators.connection_orchestrator import ConnectionOrchestrator, ConnectionFailedError
 from .message_router import MessageRouter
 from .managers.hole_punch_manager import HolePunchManager
 from .managers.relay_manager import RelayManager
@@ -6594,27 +6594,36 @@ Respond in JSON format:
             # {"status": "success", "method": "dht", "message": "Connected via DHT"}
         """
         try:
-            # Attempt connection using DHT-first strategy
-            success = await self.p2p_manager.connect_via_node_id(node_id)
-
-            if success:
-                # Determine which method was used
-                # Check if peer is now in connected peers
-                if node_id in self.p2p_manager.peers:
-                    # Try to determine discovery method from logs/state
-                    # For now, assume DHT if it succeeded
+            if self.connection_orchestrator:
+                # Use full 6-tier fallback hierarchy (IPv6 → IPv4 → WebRTC → hole punch → relay → gossip)
+                connection = await self.connection_orchestrator.connect(node_id)
+                return {
+                    "status": "success",
+                    "method": getattr(connection, "strategy_used", "unknown"),
+                    "message": f"Connected to {node_id}"
+                }
+            else:
+                # Fallback if orchestrator not yet initialized (early startup)
+                success = await self.p2p_manager.connect_via_node_id(node_id)
+                if success and node_id in self.p2p_manager.peers:
                     return {
                         "status": "success",
-                        "method": "dht",  # Could be "dht", "cache", or "hub"
+                        "method": "direct",
                         "message": f"Connected to {node_id}"
                     }
+                return {
+                    "status": "error",
+                    "method": None,
+                    "message": f"Failed to connect to {node_id} - peer not found"
+                }
 
+        except ConnectionFailedError as e:
+            logger.error("All connection strategies failed for %s: %s", node_id, e)
             return {
                 "status": "error",
                 "method": None,
-                "message": f"Failed to connect to {node_id} - peer not found via DHT, cache, or Hub"
+                "message": str(e)
             }
-
         except Exception as e:
             logger.error("DHT connection error for %s: %s", node_id, e, exc_info=True)
             return {

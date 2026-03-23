@@ -583,7 +583,8 @@ class P2PManager:
         # Pre-flight check: Test basic port connectivity before SSL handshake
         # This provides clearer error messages than cryptic SSL errors (e.g., WinError 121)
         logger.debug("Running pre-flight port connectivity check for %s:%d", host, port)
-        preflight_timeout = 60.0  # Increased for high-latency networks (mobile carriers, CGNAT)
+        # Respect caller's timeout (e.g., 5s for quick cache probes) up to 60s max for slow networks
+        preflight_timeout = min(timeout, 60.0)
         port_accessible, port_message = await self.test_port_connectivity(host, port, preflight_timeout)
 
         if not port_accessible:
