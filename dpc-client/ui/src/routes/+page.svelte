@@ -1417,6 +1417,12 @@
                 return newMap;
               });
 
+              // Update token counter with restored history token counts
+              if (result.tokens_used !== undefined && result.token_limit !== undefined && result.token_limit > 0) {
+                tokenUsageMap = new Map(tokenUsageMap);
+                tokenUsageMap.set(activeChatId, { used: result.tokens_used, limit: result.token_limit });
+              }
+
               // Remove from loading AFTER chatHistories update completes
               loadingHistory.delete(activeChatId);
 

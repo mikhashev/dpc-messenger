@@ -1104,9 +1104,9 @@ Send a voice message and it will be transcribed and processed\\.
         if "description" in data:
             desc = escape_markdown(str(data["description"])[:500])  # Increased from 200
             lines.append(f"📝 {desc}")
-        if "result" in data and data["result"]:
-            result = escape_markdown(str(data["result"])[:1000])  # Increased from 200
-            lines.append(f"📄 Result: {result}")
+        # Note: result is intentionally not included in the task_completed notification.
+        # The full response is already sent directly via reply_text before this notification,
+        # so including a truncated copy here would be confusing and redundant.
 
         # Error
         if "error" in data:

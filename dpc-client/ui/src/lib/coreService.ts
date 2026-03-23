@@ -2,6 +2,7 @@
 // PRODUCTION VERSION - Clean, no excessive logging
 
 import { writable, get } from 'svelte/store';
+import { setLogSender } from '$lib/logger';
 
 // TypeScript types for dual provider system
 export interface ProviderInfo {
@@ -262,6 +263,12 @@ export function connectToCoreService() {
             console.log("✅ WebSocket opened via event");
             connectionStatus.set('connected');
             reconnectAttempts = 0;
+
+            // Wire the frontend logger to relay messages to ui.log via the backend.
+            setLogSender((level, context, message) => {
+                sendCommand('ui_log', { level, context, message });
+            });
+
             sendCommand("get_status");
             sendCommand("list_providers");
             sendCommand("get_default_providers");  // Fetch default text/vision providers

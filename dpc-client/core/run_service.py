@@ -113,6 +113,23 @@ def setup_logging(settings):
     for module_name, level in settings.get_module_log_levels().items():
         logging.getLogger(module_name).setLevel(getattr(logging, level))
 
+    # Separate UI (frontend) logger → ~/.dpc/logs/ui.log
+    ui_log_file = log_file.parent / "ui.log"
+    ui_file_handler = RotatingFileHandler(
+        ui_log_file,
+        maxBytes=settings.get_log_max_bytes(),
+        backupCount=settings.get_log_backup_count(),
+        encoding='utf-8'
+    )
+    ui_file_handler.setLevel(logging.DEBUG)
+    ui_file_handler.setFormatter(logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s'
+    ))
+    ui_logger = logging.getLogger("dpc_ui")
+    ui_logger.setLevel(logging.DEBUG)
+    ui_logger.addHandler(ui_file_handler)
+    ui_logger.propagate = False  # Don't bubble up to root (keep backend log clean)
+
     # Suppress verbose websocket debug logs (> TEXT, < TEXT, PING, PONG)
     # These come from the websockets library's internal logging when DEBUG is enabled
     for ws_logger in ['websockets.server', 'websockets.protocol', 'websockets']:

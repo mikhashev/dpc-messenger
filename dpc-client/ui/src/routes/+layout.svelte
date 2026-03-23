@@ -3,6 +3,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { connectToCoreService } from '$lib/coreService';
+  import { setupConsoleRelay } from '$lib/logger';
+
+  // Install global console intercept immediately — captures all subsequent console.*
+  // calls (including pre-connection startup logs) and relays them to ~/.dpc/logs/ui.log.
+  setupConsoleRelay();
 
   console.log("LAYOUT: Script loading");
 

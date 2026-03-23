@@ -802,12 +802,12 @@ class ZaiProvider(AIProvider):
                     except Exception as e:
                         logger.debug(f"Could not get final message for thinking: {e}")
 
-            # If no text produced but thinking was done, return a summary
+            # If no text produced but thinking was done, return empty string so the
+            # agent loop can detect and retry with a re-prompt instead of sending
+            # the useless placeholder to the user.
             if not full_text and thinking_text:
-                logger.warning("GLM extended thinking produced no text output, using thinking summary")
-                # Return a brief indication that thinking occurred
-                # The actual thinking is stored in _last_thinking for retrieval
-                full_text = "(thinking completed - see reasoning for details)"
+                logger.warning("GLM extended thinking produced no text output, will retry for text response")
+                full_text = ""
             elif not full_text:
                 logger.warning("GLM streaming produced no output")
 
