@@ -8731,7 +8731,12 @@ Respond in JSON format:
                         entry = {
                             "id": t.get("id", ""),
                             "type": t.get("task_type", "chat"),
-                            "preview": (t.get("data", {}) or {}).get("message", "")[:120],
+                            "preview": (
+                                (t.get("data", {}) or {}).get("message") or
+                                (t.get("data", {}) or {}).get("task") or
+                                (t.get("data", {}) or {}).get("prompt") or
+                                ""
+                            )[:200],
                             "status": t.get("status", "pending"),
                             "started_at": t.get("started_at"),
                             "completed_at": t.get("completed_at"),
@@ -9077,6 +9082,53 @@ Respond in JSON format:
 
         except Exception as e:
             logger.error("Error in schedule_agent_task: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def cancel_agent_task(self, agent_id: str = "agent_001", task_id: str = "") -> Dict[str, Any]:
+        """Cancel a pending or running agent task.
+
+        For pending tasks: removes from queue via TaskQueue.cancel().
+        For running tasks: cancels the processor asyncio.Task, which propagates
+        CancelledError to the executor and marks the task as failed.
+        """
+        if not task_id:
+            return {"status": "error", "message": "task_id required"}
+        try:
+            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+            if not dpc_agent_provider or not hasattr(dpc_agent_provider, '_managers'):
+                return {"status": "error", "message": "Agent provider not available"}
+
+            agent_manager = dpc_agent_provider._managers.get(agent_id)
+            if not agent_manager:
+                return {"status": "error", "message": f"Agent {agent_id} not found"}
+
+            agent = getattr(agent_manager, '_agent', None)
+            if not agent or not hasattr(agent, 'queue'):
+                return {"status": "error", "message": "Agent queue not available"}
+
+            queue = agent.queue
+
+            # Try pending cancellation first
+            if queue.cancel(task_id):
+                logger.info("Cancelled pending task %s for agent %s", task_id, agent_id)
+                return {"status": "success", "message": "Task cancelled"}
+
+            # For running tasks: cancel the processor asyncio.Task
+            proc_task = getattr(queue, '_processor_task', None)
+            if proc_task and not proc_task.done():
+                running_task = next(
+                    (t for t in queue._queue if t.id == task_id and t.status == "running"),
+                    None,
+                )
+                if running_task:
+                    proc_task.cancel()
+                    logger.info("Cancelled running task %s for agent %s", task_id, agent_id)
+                    return {"status": "success", "message": "Running task cancelled"}
+
+            return {"status": "error", "message": "Task not found or already completed"}
+
+        except Exception as e:
+            logger.exception("cancel_agent_task error: %s", e)
             return {"status": "error", "message": str(e)}
 
     def _get_iso_timestamp(self) -> str:

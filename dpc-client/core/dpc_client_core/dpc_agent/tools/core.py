@@ -835,7 +835,7 @@ def schedule_task(
             return "⚠️ Task queue not available"
 
         # Check if task type can be handled
-        builtin_types = {"chat", "improvement", "review"}
+        builtin_types = {"chat", "improvement", "review", "reminder"}
         custom_handlers = getattr(ctx._agent, '_task_handlers', {})
         if task_type not in builtin_types and task_type not in custom_handlers:
             available = list(builtin_types) + list(custom_handlers.keys())
@@ -856,6 +856,16 @@ def schedule_task(
             "low": TaskPriority.LOW,
         }
         task_priority = priority_map.get(priority.lower(), TaskPriority.NORMAL)
+
+        # Inject reply routing so the executor knows where to send the result.
+        # _reply_conversation_id: the conversation that triggered this schedule call,
+        #   so streaming progress and the final result appear in the right chat.
+        # _reply_telegram_chat_id: set when the trigger came from Telegram,
+        #   so the result is sent back to that Telegram chat automatically.
+        if "_reply_conversation_id" not in data and ctx.current_task_id:
+            data["_reply_conversation_id"] = ctx.current_task_id
+        if "_reply_telegram_chat_id" not in data and getattr(ctx, "reply_telegram_chat_id", None):
+            data["_reply_telegram_chat_id"] = ctx.reply_telegram_chat_id
 
         # Schedule task
         task = ctx._agent.schedule_task(
@@ -2031,17 +2041,17 @@ def get_tools() -> List[ToolEntry]:
             name="schedule_task",
             schema={
                 "name": "schedule_task",
-                "description": "Schedule a task for future or background execution. For custom tasks: 1) First call register_task_type to define execution instructions, 2) Then call schedule_task. For 'chat' tasks: task_data must include 'text' field with the message to process.",
+                "description": "Schedule a task for future or background execution. For custom tasks: 1) First call register_task_type to define execution instructions, 2) Then call schedule_task. For 'chat' tasks: task_data must include 'text' field with the message to process. For reminders: use task_type='reminder' with task_data={\"message\": \"...\"} — this sends the message directly WITHOUT going through the LLM, preventing accidental re-scheduling loops.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task_type": {
                             "type": "string",
-                            "description": "Type of task. Built-in: 'chat' (conversation), 'improvement' (self-improvement), 'review' (code review). Custom: any type registered via register_task_type."
+                            "description": "Type of task. Built-in: 'chat' (LLM conversation), 'reminder' (direct message delivery, no LLM — use for notifications/alerts), 'improvement' (self-improvement), 'review' (code review). Custom: any type registered via register_task_type."
                         },
                         "task_data": {
                             "type": "string",
-                            "description": "JSON string with task payload. For 'chat' tasks: {\"text\": \"your message here\"}. For custom types: match the input_schema defined in register_task_type."
+                            "description": "JSON string with task payload. For 'chat' tasks: {\"text\": \"your message here\"}. For 'reminder' tasks: {\"message\": \"reminder text\"}. For custom types: match the input_schema defined in register_task_type."
                         },
                         "delay_seconds": {
                             "type": "integer",

@@ -133,6 +133,9 @@ class DpcAgent:
         self._evolution: Optional[Any] = None  # EvolutionManager
         self._evolution_enabled = self.config.evolution_enabled
 
+        # Callback set by agent_manager to deliver scheduled task results to Telegram
+        self._telegram_send_fn: Optional[Any] = None
+
         # Background consciousness (optional)
         self._consciousness: Optional["BackgroundConsciousness"] = None
         self._consciousness_enabled = self.config.background_consciousness
@@ -158,6 +161,9 @@ class DpcAgent:
         image_caption: Optional[str] = None,
         # Unique per-message task ID (distinct from conversation_id)
         task_id: Optional[str] = None,
+        # Reply routing: when set, injected into ToolContext so schedule_task
+        # can propagate it into task data for automatic result delivery.
+        reply_telegram_chat_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -217,6 +223,7 @@ class DpcAgent:
             emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None: None),
             firewall=self._firewall,  # For extended sandbox paths
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
+            reply_telegram_chat_id=reply_telegram_chat_id,
         )
         ctx._agent = self  # Enable schedule_task and other agent-dependent tools
         self.tools.set_context(ctx)
@@ -722,11 +729,55 @@ class DpcAgent:
                 # This handles cases where agent passes structured data to chat task
                 text = self._convert_task_data_to_prompt(task.data)
 
-            return await self.process(
+            # Use the originating conversation_id so streaming progress and the
+            # final history update appear in the correct chat (not a dead task.id).
+            reply_conversation_id = task.data.get("_reply_conversation_id") or task.id
+            reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
+
+            result = await self.process(
                 text,
-                conversation_id=task.id,
+                conversation_id=reply_conversation_id,
                 dpc_context=task.data.get("dpc_context"),
+                reply_telegram_chat_id=reply_telegram_chat_id,
             )
+
+            # Deliver result back to Telegram if the task originated from there
+            if reply_telegram_chat_id:
+                send_fn = getattr(self, "_telegram_send_fn", None)
+                if send_fn:
+                    try:
+                        await send_fn(reply_telegram_chat_id, result)
+                    except Exception as e:
+                        log.warning("Failed to deliver task result to Telegram: %s", e)
+
+            return result
+        elif task.task_type == "reminder":
+            # Deliver reminder message directly — no LLM call to prevent scheduling loops
+            message = task.data.get("message", task.data.get("text", ""))
+            if not message:
+                return "Reminder task has no message"
+
+            reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
+            formatted = f"⏰ Reminder: {message}"
+
+            # Send to Telegram chat if available
+            if reply_telegram_chat_id:
+                send_fn = getattr(self, "_telegram_send_fn", None)
+                if send_fn:
+                    try:
+                        await send_fn(reply_telegram_chat_id, formatted)
+                    except Exception as e:
+                        log.warning("Failed to deliver reminder to Telegram: %s", e)
+
+            # Also broadcast via event system (e.g. DPC UI notifications)
+            try:
+                from .events import emit_agent_message
+                await emit_agent_message(formatted, priority="high")
+            except Exception as e:
+                log.warning("Failed to emit reminder event: %s", e)
+
+            log.info("Reminder delivered for task %s: %s", task.id, message[:80])
+            return f"Reminder sent: {message}"
         elif task.task_type == "improvement":
             # Execute planned improvement via evolution
             if self._evolution:
@@ -763,11 +814,11 @@ class DpcAgent:
         Returns:
             Scheduled task
         """
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
         scheduled_at = None
         if delay_seconds > 0:
-            scheduled_at = datetime.utcnow() + timedelta(seconds=delay_seconds)
+            scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
 
         task = self.queue.schedule(
             task_type=task_type,

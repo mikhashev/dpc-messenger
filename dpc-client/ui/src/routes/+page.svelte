@@ -342,6 +342,13 @@
         agentProgressMessage = message || null;
         agentProgressTool = tool_name || null;
         agentProgressRound = round || 0;
+
+        // Append tool call activity to streaming buffer so it appears in Raw output
+        if (tool_name) {
+          streamingBuffer += `\n⚙ ${tool_name}…\n`;
+        } else if (message && (message.startsWith('✓') || message.startsWith('❌'))) {
+          streamingBuffer += `${message}\n`;
+        }
       } else {
         console.log(`[AgentProgress] SKIPPED - conversation_id mismatch`);
       }
@@ -370,7 +377,11 @@
         agentProgressMessage = null;
         agentProgressTool = null;
         agentProgressRound = 0;
-        clearAgentStreaming();
+        // NOTE: Do NOT call clearAgentStreaming() here — the streaming buffer
+        // needs to survive until the final response handler captures it as
+        // capturedStreamingText. Clearing here would wipe the Raw output before
+        // the final answer renders it. clearAgentStreaming() is called by the
+        // chat-switch effect above when the user changes conversations.
       }
     }
   });
@@ -472,6 +483,22 @@
       const { conversation_id, messages, tokens_used, token_limit, thinking } = $agentHistoryUpdated;
       console.log(`[AgentTelegramMsg] Refreshing chat history for ${conversation_id} (${messages?.length} messages)`);
 
+      // Capture accumulated streaming text NOW (before untrack/clearAgentStreaming).
+      // agentStreamingText holds tool-call traces + LLM chunks accumulated during this
+      // task. Because _execute_task now uses reply_conversation_id (e.g. "agent_001"),
+      // streaming events arrive with the correct conversation_id and populate this buffer.
+      let capturedAgentStreaming = "";
+      if (activeChatId === conversation_id) {
+        // Flush any pending buffer content that hasn't been moved to agentStreamingText yet
+        if (streamingBuffer) {
+          agentStreamingText += streamingBuffer;
+          streamingBuffer = "";
+          if (streamingFlushTimeout) { clearTimeout(streamingFlushTimeout); streamingFlushTimeout = null; }
+        }
+        capturedAgentStreaming = agentStreamingText;
+        if (capturedAgentStreaming) clearAgentStreaming();
+      }
+
       // All side-effects are wrapped in untrack() to ensure this effect ONLY re-runs when
       // $agentHistoryUpdated changes (i.e., a new Telegram message arrives).
       // Without untrack():
@@ -501,19 +528,14 @@
             };
             return mapped;
           });
-          // Attach streamingRaw and thinking to the last assistant message so "Raw output"
-          // and "Thoughts" collapsibles appear — same fields as the execute_ai_query path.
-          // streamingRaw = the full response text (equivalent to what streaming accumulated).
-          // thinking comes from agent._last_usage["thinking"] via the backend payload.
-          // We can't capture agentStreamingText here because:
-          //   (a) chunks are dropped when activeChatId !== conversation_id, and
-          //   (b) clearAgentStreaming() fires on agentProgressClear before this event arrives.
+          // Attach streamingRaw and thinking to the last assistant message.
+          // Prefer capturedAgentStreaming (tool calls + LLM chunks) over plain text.
           const lastAssistantIdx = [...mappedMessages].reverse().findIndex(m => m.sender !== 'user');
           if (lastAssistantIdx !== -1) {
             const idx = mappedMessages.length - 1 - lastAssistantIdx;
             mappedMessages[idx] = {
               ...mappedMessages[idx],
-              streamingRaw: mappedMessages[idx].text || undefined,
+              streamingRaw: capturedAgentStreaming || mappedMessages[idx].text || undefined,
               thinking: thinking || undefined,
             };
           }

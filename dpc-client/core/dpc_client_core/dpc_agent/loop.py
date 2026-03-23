@@ -415,6 +415,15 @@ async def run_llm_loop(
                     "is_error": exec_result["is_error"],
                 })
 
+                # Emit tool result so frontend can show it in Raw output
+                status_icon = "❌" if exec_result["is_error"] else "✓"
+                result_preview = truncate_for_log(exec_result["result"], 200)
+                emit_progress(
+                    f"{status_icon} {exec_result['fn_name']}: {result_preview}",
+                    None,
+                    round_idx,
+                )
+
             # --- Budget guard ---
             if budget_remaining_usd is not None:
                 task_cost = accumulated_usage.get("cost", 0)

@@ -650,6 +650,7 @@ Send a voice message and it will be transcribed and processed\\.
                 conversation_id=conversation_id,
                 include_context=True,
                 sender_name=sender_name,
+                telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
             )
 
             # Send response (escape for MarkdownV2, split if needed)
@@ -808,6 +809,7 @@ Send a voice message and it will be transcribed and processed\\.
                     conversation_id=conversation_id,
                     include_context=True,
                     sender_name=sender_name,
+                    telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
                 )
 
                 # Send response (escape for MarkdownV2, split if needed)

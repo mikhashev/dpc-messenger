@@ -206,6 +206,9 @@ class DpcAgentManager:
         # Initialize Telegram bridge for agent notifications
         await self._start_telegram_bridge()
 
+        # Wire Telegram send-back so scheduled tasks can deliver their results
+        self._agent._telegram_send_fn = self._deliver_telegram_result
+
         log.info("DpcAgent started successfully")
 
     async def ensure_started(self) -> "DpcAgentManager":
@@ -370,6 +373,21 @@ class DpcAgentManager:
             agent_desc = self.agent_id if self.agent_id else "singleton"
             log.error(f"Failed to initialize Telegram bridge for agent {agent_desc}: {e}", exc_info=True)
 
+    async def _deliver_telegram_result(self, chat_id: str, text: str) -> None:
+        """Send a scheduled task result back to a Telegram chat.
+
+        Called by _execute_task when task.data contains _reply_telegram_chat_id.
+        Uses the existing _telegram_bridge._send_message so all escaping/retry
+        logic is reused.
+        """
+        if not self._telegram_bridge or not text:
+            return
+        try:
+            await self._telegram_bridge._send_message(chat_id, text)
+            log.info("Delivered task result to Telegram chat %s", chat_id)
+        except Exception as e:
+            log.warning("Failed to deliver task result to Telegram chat %s: %s", chat_id, e)
+
     async def stop(self) -> None:
         """Shutdown the agent and Telegram bridge."""
         # Stop Telegram bridge first
@@ -399,6 +417,9 @@ class DpcAgentManager:
         agent_llm_provider: Optional[str] = None,
         # Sender attribution (e.g. "mike (Telegram)" vs "User")
         sender_name: str = "User",
+        # When set, injected into ToolContext so schedule_task auto-fills
+        # _reply_telegram_chat_id in task data for later result delivery.
+        telegram_chat_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message through the agent.
@@ -493,6 +514,7 @@ class DpcAgentManager:
                 image_base64=image_base64,
                 image_mime=image_mime,
                 image_caption=image_caption,
+                reply_telegram_chat_id=telegram_chat_id,
             )
 
             # Track agent response in monitor — skip thinking-only fallback responses

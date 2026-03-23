@@ -3,7 +3,7 @@
 <!-- v0.20.0 - Layer 5 Agent System -->
 
 <script lang="ts">
-  import { createEventDispatcher } from 'svelte';
+  import { createEventDispatcher, onDestroy } from 'svelte';
   import { sendCommand } from '$lib/coreService';
 
   export let open: boolean = false;
@@ -73,6 +73,41 @@
 
   // Task expand state: task_id -> { loading, response }
   let expandedTasks: Record<string, { loading: boolean; response: string | null }> = {};
+
+  let cancellingTask: string | null = null;
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
+  let collapsedSections: Record<string, boolean> = {};
+
+  function toggleSection(name: string) {
+    collapsedSections = { ...collapsedSections, [name]: !collapsedSections[name] };
+  }
+
+  function formatScheduledDate(iso: string | null): string {
+    if (!iso) return 'Pending';
+    try {
+      const d = new Date(iso);
+      const diffMs = d.getTime() - Date.now();
+      if (diffMs < -60000) return `Overdue · ${formatDateTime(iso)}`;
+      if (diffMs < 60000) return 'In <1 min';
+      const mins = Math.round(diffMs / 60000);
+      if (mins < 60) return `In ${mins} min`;
+      return formatDateTime(iso);
+    } catch { return iso ?? 'Pending'; }
+  }
+
+  function managePoll() {
+    const hasActive = (taskData?.running.length ?? 0) + (taskData?.scheduled.length ?? 0) > 0;
+    if (hasActive && !pollInterval) {
+      pollInterval = setInterval(() => loadTasks(), 3000);
+    } else if (!hasActive && pollInterval) {
+      clearInterval(pollInterval);
+      pollInterval = null;
+    }
+  }
+
+  onDestroy(() => {
+    if (pollInterval) clearInterval(pollInterval);
+  });
 
   async function toggleExpand(task: TaskEntry) {
     if (!task.has_full_result) return;
@@ -148,6 +183,7 @@
           completed: result.completed ?? [],
           failed: result.failed ?? [],
         };
+        managePoll();
       } else {
         tasksError = result?.message || 'Failed to load tasks';
       }
@@ -209,7 +245,24 @@
     close();
   }
 
+  async function cancelTask(task: TaskEntry) {
+    if (cancellingTask) return;
+    cancellingTask = task.id;
+    try {
+      await sendCommand('cancel_agent_task', {
+        agent_id: selectedAgentId,
+        task_id: task.id,
+      });
+      await loadTasks();
+    } catch (e: any) {
+      console.error('Failed to cancel task:', e);
+    } finally {
+      cancellingTask = null;
+    }
+  }
+
   function close() {
+    if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
     dispatch('close');
   }
 
@@ -304,97 +357,145 @@
             <div class="error-msg">{tasksError}</div>
           {:else if taskData}
 
-            {#if taskData.running.length > 0}
-              <div class="task-section">
-                <div class="section-label">Running ({taskData.running.length})</div>
-                {#each taskData.running as task}
-                  <div class="task-row running">
-                    <span class="task-type">{task.type}</span>
-                    {#if task.preview}
-                      <span class="task-preview">{task.preview}</span>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {/if}
-
-            {#if taskData.scheduled.length > 0}
-              <div class="task-section">
-                <div class="section-label">Scheduled ({taskData.scheduled.length})</div>
-                {#each taskData.scheduled as task}
-                  <div class="task-row scheduled">
-                    <div class="task-row-main">
-                      <span class="task-type">{task.type}</span>
-                      {#if task.scheduled_at}
-                        <span class="task-date">{formatDateTime(task.scheduled_at)}</span>
+            <!-- RUNNING -->
+            <div class="task-section">
+              <button class="section-header" on:click={() => toggleSection('running')}>
+                <span class="section-chevron">{collapsedSections['running'] ? '▶' : '▼'}</span>
+                <span class="section-label-text">Running ({taskData.running.length})</span>
+              </button>
+              {#if !collapsedSections['running']}
+                {#if taskData.running.length === 0}
+                  <div class="empty-hint">No running tasks</div>
+                {:else}
+                  {#each taskData.running as task}
+                    <div class="task-row running">
+                      <div class="task-row-main">
+                        <span class="task-type">{task.type}</span>
+                        <div class="task-row-right">
+                          {#if task.started_at}
+                            <span class="task-date">Started {formatDateTime(task.started_at)}</span>
+                          {/if}
+                          <button class="btn-cancel-task" on:click={() => cancelTask(task)} disabled={cancellingTask === task.id} title="Cancel task">
+                            {cancellingTask === task.id ? '…' : '✕'}
+                          </button>
+                        </div>
+                      </div>
+                      <div class="task-id-row">
+                        <span class="task-id">{task.id}</span>
+                      </div>
+                      {#if task.preview}
+                        <div class="task-preview">{task.preview}</div>
                       {/if}
                     </div>
-                    {#if task.preview}
-                      <div class="task-preview">{task.preview}</div>
-                    {/if}
-                  </div>
-                {/each}
-              </div>
-            {/if}
-
-            <div class="task-section">
-              <div class="section-label">
-                Completed ({taskData.completed.length})
-              </div>
-              {#if taskData.completed.length === 0}
-                <div class="empty-hint">No completed tasks yet</div>
-              {:else}
-                {#each taskData.completed as task}
-                  <div class="task-row completed" class:expanded={!!expandedTasks[task.id]}>
-                    <div class="task-row-main">
-                      <span class="task-type">{task.type}</span>
-                      <div class="task-row-right">
-                        {#if task.completed_at}
-                          <span class="task-date">{formatDateTime(task.completed_at)}</span>
-                        {/if}
-                        {#if task.has_full_result}
-                          <button
-                            class="btn-expand"
-                            on:click={() => toggleExpand(task)}
-                            title={expandedTasks[task.id] ? 'Collapse' : 'Expand'}
-                          >
-                            {expandedTasks[task.id] ? '▲' : '▼'}
-                          </button>
-                        {/if}
-                      </div>
-                    </div>
-                    {#if task.preview}
-                      <div class="task-preview">{task.preview}</div>
-                    {/if}
-                    {#if expandedTasks[task.id]}
-                      <div class="task-full-result">
-                        {#if expandedTasks[task.id].loading}
-                          <span class="result-loading">Loading...</span>
-                        {:else}
-                          <pre class="result-text">{expandedTasks[task.id].response}</pre>
-                        {/if}
-                      </div>
-                    {/if}
-                  </div>
-                {/each}
+                  {/each}
+                {/if}
               {/if}
             </div>
 
-            {#if taskData.failed.length > 0}
-              <div class="task-section">
-                <div class="section-label">Failed ({taskData.failed.length})</div>
-                {#each taskData.failed as task}
-                  <div class="task-row failed">
-                    <div class="task-row-main">
-                      <span class="task-type">{task.type}</span>
-                      {#if task.completed_at}
-                        <span class="task-date">{formatDateTime(task.completed_at)}</span>
+            <!-- SCHEDULED -->
+            <div class="task-section">
+              <button class="section-header" on:click={() => toggleSection('scheduled')}>
+                <span class="section-chevron">{collapsedSections['scheduled'] ? '▶' : '▼'}</span>
+                <span class="section-label-text">Scheduled ({taskData.scheduled.length})</span>
+              </button>
+              {#if !collapsedSections['scheduled']}
+                {#if taskData.scheduled.length === 0}
+                  <div class="empty-hint">No scheduled tasks</div>
+                {:else}
+                  {#each taskData.scheduled as task}
+                    <div class="task-row scheduled">
+                      <div class="task-row-main">
+                        <span class="task-type">{task.type}</span>
+                        <div class="task-row-right">
+                          <span class="task-date">{formatScheduledDate(task.scheduled_at)}</span>
+                          <button class="btn-cancel-task" on:click={() => cancelTask(task)} disabled={cancellingTask === task.id} title="Cancel task">
+                            {cancellingTask === task.id ? '…' : '✕'}
+                          </button>
+                        </div>
+                      </div>
+                      <div class="task-id-row">
+                        <span class="task-id">{task.id}</span>
+                      </div>
+                      {#if task.preview}
+                        <div class="task-preview">{task.preview}</div>
                       {/if}
                     </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
+                  {/each}
+                {/if}
+              {/if}
+            </div>
+
+            <!-- COMPLETED -->
+            <div class="task-section">
+              <button class="section-header" on:click={() => toggleSection('completed')}>
+                <span class="section-chevron">{collapsedSections['completed'] ? '▶' : '▼'}</span>
+                <span class="section-label-text">Completed ({taskData.completed.length})</span>
+              </button>
+              {#if !collapsedSections['completed']}
+                {#if taskData.completed.length === 0}
+                  <div class="empty-hint">No completed tasks yet</div>
+                {:else}
+                  {#each taskData.completed as task}
+                    <div class="task-row completed" class:expanded={!!expandedTasks[task.id]}>
+                      <div class="task-row-main">
+                        <span class="task-type">{task.type}</span>
+                        <div class="task-row-right">
+                          {#if task.completed_at}
+                            <span class="task-date">{formatDateTime(task.completed_at)}</span>
+                          {/if}
+                          {#if task.has_full_result}
+                            <button class="btn-expand" on:click={() => toggleExpand(task)} title={expandedTasks[task.id] ? 'Collapse' : 'Expand'}>
+                              {expandedTasks[task.id] ? '▲' : '▼'}
+                            </button>
+                          {/if}
+                        </div>
+                      </div>
+                      {#if task.preview}
+                        <div class="task-preview">{task.preview}</div>
+                      {/if}
+                      {#if expandedTasks[task.id]}
+                        <div class="task-full-result">
+                          {#if expandedTasks[task.id].loading}
+                            <span class="result-loading">Loading...</span>
+                          {:else}
+                            <pre class="result-text">{expandedTasks[task.id].response}</pre>
+                          {/if}
+                        </div>
+                      {/if}
+                    </div>
+                  {/each}
+                {/if}
+              {/if}
+            </div>
+
+            <!-- FAILED -->
+            <div class="task-section">
+              <button class="section-header" on:click={() => toggleSection('failed')}>
+                <span class="section-chevron">{collapsedSections['failed'] ? '▶' : '▼'}</span>
+                <span class="section-label-text">Failed ({taskData.failed.length})</span>
+              </button>
+              {#if !collapsedSections['failed']}
+                {#if taskData.failed.length === 0}
+                  <div class="empty-hint">No failed tasks</div>
+                {:else}
+                  {#each taskData.failed as task}
+                    <div class="task-row failed">
+                      <div class="task-row-main">
+                        <span class="task-type">{task.type}</span>
+                        <div class="task-row-right">
+                          {#if task.completed_at}
+                            <span class="task-date">{formatDateTime(task.completed_at)}</span>
+                          {/if}
+                        </div>
+                      </div>
+                      {#if task.preview}
+                        <div class="task-preview">{task.preview}</div>
+                      {/if}
+                    </div>
+                  {/each}
+                {/if}
+              {/if}
+            </div>
 
           {:else}
             <div class="empty-hint">No task data available</div>
@@ -652,15 +753,38 @@
     margin-bottom: 12px;
   }
 
-  .section-label {
+  .section-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    background: none;
+    border: none;
+    border-bottom: 1px solid var(--border-color, #333);
+    padding: 0 0 4px 0;
+    margin-bottom: 6px;
+    cursor: pointer;
+    text-align: left;
+  }
+
+  .section-chevron {
+    font-size: 9px;
+    color: var(--text-muted, #6c7086);
+    flex-shrink: 0;
+    line-height: 1;
+  }
+
+  .section-label-text {
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
     color: var(--text-muted, #6c7086);
-    margin-bottom: 6px;
-    padding-bottom: 4px;
-    border-bottom: 1px solid var(--border-color, #333);
+  }
+
+  .section-header:hover .section-label-text,
+  .section-header:hover .section-chevron {
+    color: var(--text-secondary, #a6adc8);
   }
 
   .task-row {
@@ -689,6 +813,25 @@
 
   .btn-expand:hover {
     color: var(--text-primary, #cdd6f4);
+  }
+
+  .btn-cancel-task {
+    background: none;
+    border: 1px solid #c0392b;
+    color: #c0392b;
+    border-radius: 3px;
+    padding: 1px 5px;
+    font-size: 10px;
+    cursor: pointer;
+    line-height: 1.4;
+    flex-shrink: 0;
+  }
+  .btn-cancel-task:hover:not(:disabled) {
+    background: rgba(192, 57, 43, 0.15);
+  }
+  .btn-cancel-task:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 
   .task-full-result {
@@ -749,6 +892,16 @@
     text-overflow: ellipsis;
     white-space: nowrap;
     max-width: 100%;
+  }
+
+  .task-id-row {
+    margin-top: 1px;
+  }
+  .task-id {
+    font-size: 10px;
+    font-family: monospace;
+    color: var(--text-secondary, #585b70);
+    opacity: 0.7;
   }
 
   .task-row.running .task-type { color: var(--yellow, #f9e2af); }

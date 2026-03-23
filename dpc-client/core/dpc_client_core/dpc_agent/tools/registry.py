@@ -59,6 +59,10 @@ class ToolContext:
     # Firewall reference for extended sandbox paths (v0.16.0+)
     firewall: Optional[Any] = None
 
+    # Reply routing for scheduled tasks: set by agent_manager when processing
+    # a Telegram message so that schedule_task can propagate it into task data.
+    reply_telegram_chat_id: Optional[str] = None
+
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)
     # -----------------------------------------------------------------------

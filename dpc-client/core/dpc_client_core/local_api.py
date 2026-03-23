@@ -119,6 +119,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "get_agent_learning",
     "get_agent_task_result",
     "schedule_agent_task",
+    "cancel_agent_task",
     # Frontend logging relay
     "ui_log",
 })
