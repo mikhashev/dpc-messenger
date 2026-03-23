@@ -397,6 +397,8 @@ class DpcAgentManager:
         image_caption: Optional[str] = None,
         # Phase 3: Per-agent provider selection
         agent_llm_provider: Optional[str] = None,
+        # Sender attribution (e.g. "mike (Telegram)" vs "User")
+        sender_name: str = "User",
     ) -> str:
         """
         Process a user message through the agent.
@@ -438,7 +440,7 @@ class DpcAgentManager:
             content=message,
             timestamp=utc_now_iso(),
             sender_node_id=node_id,
-            sender_name="User"
+            sender_name=sender_name
         )
         monitor.save_history()  # Save to disk immediately
 
@@ -620,7 +622,7 @@ class DpcAgentManager:
             llm_manager = getattr(self.service, "llm_manager", None)
 
             # Create monitor with same settings as P2P conversations
-            self._agent_monitors[conversation_id] = ConversationMonitor(
+            monitor = ConversationMonitor(
                 conversation_id=conversation_id,
                 participants=participants,
                 llm_manager=llm_manager,
@@ -631,6 +633,16 @@ class DpcAgentManager:
                 instruction_set_name="general"
             )
 
+            # Load history from disk immediately so existing messages are preserved
+            # when Telegram (or any other caller) sends the first message after a restart.
+            # Without this, process_message() would start with an empty monitor and
+            # save_history() would overwrite the disk file with only the new messages.
+            history_path = monitor._get_history_path()
+            if history_path.exists():
+                monitor.load_history()
+                log.debug(f"Loaded {len(monitor.message_history)} messages from disk for {conversation_id}")
+
+            self._agent_monitors[conversation_id] = monitor
             log.debug(f"Created ConversationMonitor for agent conversation: {conversation_id}")
 
         return self._agent_monitors[conversation_id]

@@ -2,7 +2,7 @@
 <!-- FIXED VERSION - Proper URI detection for Direct TLS vs WebRTC -->
 
 <script lang="ts">
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
   import { writable } from "svelte/store";
   import { connectionStatus, nodeStatus, coreMessages, p2pMessages, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, firewallRulesUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, sendFile, acceptFileTransfer, cancelFileTransfer, sendVoiceMessage, filePreparationStarted, filePreparationProgress, filePreparationCompleted, historyRestored, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, aiResponseWithImage, defaultProviders, providersList, voiceTranscriptionComplete, voiceTranscriptionReceived, setConversationTranscription, getConversationTranscription, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, preloadWhisperModel, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed, telegramEnabled, telegramConnected, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, telegramLinkedChats, telegramMessages, sendToTelegram, agentProgress, agentProgressClear, agentTextChunk, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated, groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced, createGroupChat, sendGroupMessage, sendGroupImage, sendGroupVoiceMessage, sendGroupFile, addGroupMember, removeGroupMember, leaveGroup, deleteGroup, loadGroups, createAgent, listAgents, listAgentProfiles, deleteAgent, agentCreated, agentsList, integrityWarnings } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
@@ -469,35 +469,65 @@
   // Silently refreshes the agent chat history when Telegram bridge processes a message
   $effect(() => {
     if ($agentHistoryUpdated) {
-      const { conversation_id, messages, tokens_used, token_limit } = $agentHistoryUpdated;
+      const { conversation_id, messages, tokens_used, token_limit, thinking } = $agentHistoryUpdated;
       console.log(`[AgentTelegramMsg] Refreshing chat history for ${conversation_id} (${messages?.length} messages)`);
 
-      // Update token usage map so the token counter reflects the agent's LLM usage
-      if (tokens_used !== undefined && token_limit !== undefined && token_limit > 0) {
-        tokenUsageMap = new Map(tokenUsageMap);
-        tokenUsageMap.set(conversation_id, { used: tokens_used, limit: token_limit });
-      }
+      // All side-effects are wrapped in untrack() to ensure this effect ONLY re-runs when
+      // $agentHistoryUpdated changes (i.e., a new Telegram message arrives).
+      // Without untrack():
+      //   - chatHistories.update() makes Svelte track chatHistories as a dependency
+      //     (store access inside $effect creates a subscription), causing this effect
+      //     to re-run every time chatHistories changes → [ChatHistory] effect loops
+      //   - activeChatId read tracks it as a dependency, causing re-run on chat switch
+      //     while $agentHistoryUpdated still holds the old payload → same loop
+      untrack(() => {
+        // Update token usage map so the token counter reflects the agent's LLM usage
+        if (tokens_used !== undefined && token_limit !== undefined && token_limit > 0) {
+          tokenUsageMap = new Map(tokenUsageMap);
+          tokenUsageMap.set(conversation_id, { used: tokens_used, limit: token_limit });
+        }
 
-      chatHistories.update(map => {
-        const newMap = new Map(map);
-        const updatedMessages = (messages || []).map((msg: any, index: number) => ({
-          id: `tg-${index}-${Date.now()}`,
-          sender: msg.role === 'user' ? 'user' : conversation_id,
-          senderName: msg.role === 'user' ? 'Telegram' : getPeerDisplayName(conversation_id),
-          text: msg.content,
-          timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
-          attachments: msg.attachments || []
-        }));
-        newMap.set(conversation_id, updatedMessages);
-        return newMap;
+        chatHistories.update(map => {
+          const newMap = new Map(map);
+          const mappedMessages = (messages || []).map((msg: any, index: number) => {
+            const isUser = msg.role === 'user';
+            const mapped: any = {
+              id: `tg-${index}-${Date.now()}`,
+              sender: isUser ? 'user' : conversation_id,
+              senderName: isUser ? (msg.sender_name || 'User') : getPeerDisplayName(conversation_id),
+              text: msg.content,
+              timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
+              attachments: msg.attachments || []
+            };
+            return mapped;
+          });
+          // Attach streamingRaw and thinking to the last assistant message so "Raw output"
+          // and "Thoughts" collapsibles appear — same fields as the execute_ai_query path.
+          // streamingRaw = the full response text (equivalent to what streaming accumulated).
+          // thinking comes from agent._last_usage["thinking"] via the backend payload.
+          // We can't capture agentStreamingText here because:
+          //   (a) chunks are dropped when activeChatId !== conversation_id, and
+          //   (b) clearAgentStreaming() fires on agentProgressClear before this event arrives.
+          const lastAssistantIdx = [...mappedMessages].reverse().findIndex(m => m.sender !== 'user');
+          if (lastAssistantIdx !== -1) {
+            const idx = mappedMessages.length - 1 - lastAssistantIdx;
+            mappedMessages[idx] = {
+              ...mappedMessages[idx],
+              streamingRaw: mappedMessages[idx].text || undefined,
+              thinking: thinking || undefined,
+            };
+          }
+          newMap.set(conversation_id, mappedMessages);
+          return newMap;
+        });
+
+        // Scroll to bottom if this is the active chat
+        if (activeChatId === conversation_id) {
+          setTimeout(() => {
+            if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+          }, 50);
+        }
       });
-
-      // Scroll to bottom if this is the active chat
-      if (activeChatId === conversation_id) {
-        setTimeout(() => {
-          if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
-        }, 50);
-      }
     }
   });
 
@@ -548,10 +578,10 @@
     // Debounce save by 500ms
     chatHistoriesSaveTimeout = setTimeout(() => {
       try {
-        // Only save histories for AI chats (excluding Telegram)
+        // Only save histories for AI chats and agent chats (excluding Telegram)
         const historiesToSave = Object.fromEntries(
           Array.from($chatHistories.entries())
-            .filter(([id, _]) => id.startsWith('ai_') && !id.startsWith('telegram-'))
+            .filter(([id, _]) => (id.startsWith('ai_') || id.startsWith('agent_')) && !id.startsWith('telegram-'))
         );
         localStorage.setItem('dpc-ai-chat-histories', JSON.stringify(historiesToSave));
       } catch (error) {
@@ -1074,6 +1104,34 @@
       if (agentsResult?.status === 'success' && agentsResult.agents) {
         agentsList.set(agentsResult.agents);
         console.log(`[Agents] Loaded ${agentsResult.agents.length} agents from backend`);
+
+        // Proactively fetch each agent's conversation history from the backend.
+        // The backend is authoritative (includes Telegram messages received while app was closed).
+        // Without this, history only loads when the user clicks on the agent chat.
+        for (const agent of agentsResult.agents) {
+          const conv_id = agent.agent_id;
+          try {
+            const histResult = await sendCommand('get_conversation_history', { conversation_id: conv_id });
+            if (histResult?.status === 'success' && histResult.messages?.length > 0) {
+              chatHistories.update(map => {
+                const newMap = new Map(map);
+                const msgs = histResult.messages.map((msg: any, index: number) => ({
+                  id: `agent-init-${index}-${Date.now()}`,
+                  sender: msg.role === 'user' ? 'user' : conv_id,
+                  senderName: msg.role === 'user' ? (msg.sender_name || 'You') : (agent.name || conv_id),
+                  text: msg.content,
+                  timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (histResult.messages.length - index) * 1000,
+                  attachments: msg.attachments || []
+                }));
+                newMap.set(conv_id, msgs);
+                return newMap;
+              });
+              console.log(`[Agents] Restored ${histResult.message_count} messages for ${conv_id}`);
+            }
+          } catch (err) {
+            console.warn(`[Agents] Failed to load history for ${conv_id}:`, err);
+          }
+        }
       }
     } catch (error) {
       console.error('[Agents] Failed to load agents:', error);
@@ -3842,6 +3900,16 @@
       }
       processedMessageIds.add(messageId);
 
+      // Flush any pending streaming buffer before capturing (handles batch-mode single-chunk delivery
+      // where the chunk and final response arrive within milliseconds — before the 100ms throttle fires)
+      if (streamingBuffer) {
+        if (streamingFlushTimeout) {
+          clearTimeout(streamingFlushTimeout);
+          streamingFlushTimeout = null;
+        }
+        agentStreamingText += streamingBuffer;
+        streamingBuffer = "";
+      }
       // Capture streaming text before clearing (for collapsible raw output)
       const capturedStreamingText = agentStreamingText;
       clearAgentStreaming();  // Clear streaming text when final response arrives

@@ -726,6 +726,20 @@ class ZaiProvider(AIProvider):
                 return ""
 
         except Exception as e:
+            is_overloaded = "1305" in str(e) or "overloaded" in str(e).lower()
+            if is_overloaded:
+                logger.warning(f"Z.AI batch overloaded (1305), retrying in 3s: {e}")
+                await asyncio.sleep(3)
+                try:
+                    message = await self.client.messages.create(**api_params)
+                    final_text = next(
+                        (getattr(b, 'text', None) for b in message.content
+                         if hasattr(b, 'type') and b.type == "text"),
+                        ""
+                    )
+                    return final_text or ""
+                except Exception as retry_e:
+                    raise RuntimeError(f"Z.AI provider '{self.alias}' failed after retry: {retry_e}") from retry_e
             raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {e}") from e
 
     async def generate_response_stream(
@@ -821,6 +835,17 @@ class ZaiProvider(AIProvider):
                 return full_text  # Return what we have
             raise
         except Exception as e:
+            is_overloaded = "1305" in str(e) or "overloaded" in str(e).lower()
+            if is_overloaded:
+                logger.warning(f"Z.AI streaming overloaded (1305), falling back to batch mode: {e}")
+                # Brief backoff before retrying — Z.AI uses HTTP 429 for overload (1305) as well
+                # as rate limiting; a short wait improves batch success rate on an overloaded server
+                await asyncio.sleep(2)
+                result = await self.generate_response(prompt)
+                # Emit full result as one chunk so UI streaming display and Raw output still work
+                if on_chunk and result:
+                    await on_chunk(result, conversation_id)
+                return result
             logger.error(f"Z.AI streaming failed: {e}", exc_info=True)
             raise RuntimeError(f"Z.AI streaming provider '{self.alias}' failed: {e}") from e
 

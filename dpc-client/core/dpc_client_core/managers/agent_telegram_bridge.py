@@ -632,7 +632,12 @@ Send a voice message and it will be transcribed and processed\\.
         # Send "processing" indicator
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-        log.info(f"Processing Telegram message from chat {chat_id}: {message_text[:50]}...")
+        # Build sender attribution for history (shown in DPC chat UI)
+        tg_user = update.effective_user
+        tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
+        sender_name = f"{tg_display_name} (Telegram)"
+
+        log.info(f"Processing Telegram message from chat {chat_id} ({sender_name}): {message_text[:50]}...")
 
         try:
             # Use agent_id as conversation_id when unified_conversation is enabled,
@@ -644,21 +649,26 @@ Send a voice message and it will be transcribed and processed\\.
                 message=message_text,
                 conversation_id=conversation_id,
                 include_context=True,
+                sender_name=sender_name,
             )
 
             # Send response (escape for MarkdownV2, split if needed)
-            if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
-                # Split long messages
-                chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
-                for i, chunk in enumerate(chunks):
-                    prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                    await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
-            else:
-                await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
-
-            # In unified_conversation mode, push updated history to DPC chat UI
-            if self._unified_conversation and self._agent_manager:
-                await self._broadcast_history_to_ui(conversation_id)
+            try:
+                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
+                    # Split long messages
+                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
+                    for i, chunk in enumerate(chunks):
+                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
+                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
+                else:
+                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+            except Exception as send_err:
+                log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
+                await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+            finally:
+                # Always push updated history to DPC chat UI in unified_conversation mode
+                if self._unified_conversation and self._agent_manager:
+                    await self._broadcast_history_to_ui(conversation_id)
 
         except Exception as e:
             error_str = str(e)
@@ -782,7 +792,12 @@ Send a voice message and it will be transcribed and processed\\.
                 # Send "typing" action
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-                log.info(f"Processing transcribed voice message from chat {chat_id}: {transcription_text[:50]}...")
+                # Build sender attribution for history
+                tg_user = update.effective_user
+                tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
+                sender_name = f"{tg_display_name} (Telegram)"
+
+                log.info(f"Processing transcribed voice message from chat {chat_id} ({sender_name}): {transcription_text[:50]}...")
 
                 # Use agent_id as conversation_id when unified_conversation is enabled
                 conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
@@ -792,21 +807,26 @@ Send a voice message and it will be transcribed and processed\\.
                     message=transcription_text,
                     conversation_id=conversation_id,
                     include_context=True,
+                    sender_name=sender_name,
                 )
 
                 # Send response (escape for MarkdownV2, split if needed)
-                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
-                    # Split long messages
-                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
-                    for i, chunk in enumerate(chunks):
-                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
-                else:
-                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
-
-                # In unified_conversation mode, push updated history to DPC chat UI
-                if self._unified_conversation and self._agent_manager:
-                    await self._broadcast_history_to_ui(conversation_id)
+                try:
+                    if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
+                        # Split long messages
+                        chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
+                        for i, chunk in enumerate(chunks):
+                            prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
+                            await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
+                    else:
+                        await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+                except Exception as send_err:
+                    log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
+                    await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+                finally:
+                    # Always push updated history to DPC chat UI in unified_conversation mode
+                    if self._unified_conversation and self._agent_manager:
+                        await self._broadcast_history_to_ui(conversation_id)
 
             # Clean up voice file
             try:
@@ -849,12 +869,24 @@ Send a voice message and it will be transcribed and processed\\.
                 log.warning(f"[_broadcast_history_to_ui] Token Warning - {conversation_id}: "
                             f"{usage_percent * 100:.1f}% of context window used ({tokens_used}/{token_limit})")
 
+            # Include thinking content from the last LLM response so the UI can show
+            # the "Thoughts" collapsible (same as execute_ai_query direct path).
+            # thinking lives in agent._last_usage["thinking"] after process() returns.
+            thinking = None
+            try:
+                agent = self._agent_manager.agent  # property — may raise RuntimeError
+                last_usage = getattr(agent, '_last_usage', {}) or {}
+                thinking = last_usage.get('thinking')
+            except Exception:
+                pass  # thinking is optional; don't block the broadcast
+
             await service.local_api.broadcast_event("agent_history_updated", {
                 "conversation_id": conversation_id,
                 "messages": messages,
                 "message_count": len(messages),
                 "tokens_used": tokens_used,
                 "token_limit": token_limit,
+                "thinking": thinking,
             })
             log.debug(f"[_broadcast_history_to_ui] Pushed {len(messages)} messages for {conversation_id}")
         except Exception as e:

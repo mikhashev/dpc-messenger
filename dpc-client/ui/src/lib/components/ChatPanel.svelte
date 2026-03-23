@@ -93,6 +93,11 @@
     selfName?: string;
   } = $props();
 
+  // A sender counts as "AI" if it's the canonical 'ai' string (direct DPC queries) or
+  // starts with 'agent_' (Telegram-bridged, history-loaded, or proactively-fetched agent messages).
+  // These senders get markdown rendering, thinking block, and raw output collapsible.
+  const isAiSender = (sender: string) => sender === 'ai' || sender?.startsWith('agent_');
+
   // Debug: Log when progress props change
   $effect(() => {
     if (agentProgressTool || agentProgressMessage) {
@@ -155,7 +160,7 @@
                 <!-- Group chat: Show own name instead of "You" -->
                 {selfName} | {selfNodeId}
               {:else}
-                You
+                {msg.senderName || 'You'}
               {/if}
             {:else if msg.sender === 'ai'}
               {msg.model ? `AI (${msg.model})` : 'AI Assistant'}
@@ -171,13 +176,13 @@
           <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
         <!-- Thinking block (v1.4+): Display AI reasoning before main response -->
-        {#if msg.sender === 'ai' && msg.thinking}
+        {#if isAiSender(msg.sender) && msg.thinking}
           <ThinkingBlock thinking={msg.thinking} tokenCount={msg.thinkingTokens} />
         {/if}
 
         <!-- Message text (hidden for voice attachments with transcription to avoid duplication, v0.15.1+) -->
         {#if msg.text && msg.text !== '[Image]' && !msg.attachments?.some(a => a.type === 'voice' && a.transcription)}
-          {#if msg.sender === 'ai' && enableMarkdown}
+          {#if isAiSender(msg.sender) && enableMarkdown}
             <MarkdownMessage content={msg.text} />
           {:else if msg.mentions && msg.mentions.length > 0}
             <!-- Group chat message with @-mentions -->
@@ -188,7 +193,7 @@
         {/if}
 
         <!-- Raw streaming output (v0.16.0+): Collapsible section showing incremental text -->
-        {#if msg.sender === 'ai' && msg.streamingRaw && msg.streamingRaw.length > 50}
+        {#if isAiSender(msg.sender) && msg.streamingRaw && msg.streamingRaw.length > 50}
           <details class="streaming-raw-details">
             <summary class="streaming-raw-summary">
               <span class="streaming-raw-icon">📝</span>
