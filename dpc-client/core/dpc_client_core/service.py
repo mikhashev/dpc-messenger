@@ -6774,15 +6774,15 @@ Respond in JSON format:
             # Check if this is a Dpc_agent conversation (chat_provider from frontend)
             # Note: agent_manager is on the DpcAgentProvider, not CoreService
             dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            # The manager is stored as _manager on DpcAgentProvider
-            agent_manager = getattr(dpc_agent_provider, '_manager', None) if dpc_agent_provider else None
+            # Extract agent_id from conversation_id (e.g. "agent_001") for per-agent manager lookup
+            _vision_agent_id = conversation_id if (conversation_id and conversation_id.startswith("agent_")) else None
+            agent_manager = None
 
             if chat_provider == 'dpc_agent' and dpc_agent_provider:
-                # Ensure agent is initialized
-                if not agent_manager:
-                    logger.info("Initializing DPC Agent for vision query...")
-                    await dpc_agent_provider._ensure_manager()
-                    agent_manager = getattr(dpc_agent_provider, '_manager', None)
+                # Use _ensure_manager which handles both per-agent and singleton cases,
+                # and avoids starting a duplicate Telegram bridge for the same token.
+                logger.info("Initializing DPC Agent for vision query...")
+                agent_manager = await dpc_agent_provider._ensure_manager(agent_id=_vision_agent_id)
 
                 if agent_manager:
                     # Route to DPC Agent for vision analysis
