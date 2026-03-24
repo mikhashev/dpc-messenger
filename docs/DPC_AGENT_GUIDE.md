@@ -6,7 +6,7 @@ This guide explains how to configure, test, and use the embedded autonomous AI a
 
 The embedded agent is a self-modifying AI agent adapted from the [Ouroboros project](https://github.com/razzant/ouroboros), integrated directly into DPC Messenger's codebase. It provides:
 
-- **45+ Tools**: File operations, web search, memory management, git, task scheduling, evolution control
+- **50+ Tools**: File operations, web search, memory management, git, task scheduling, evolution control, skill execution
 - **Background Consciousness**: Proactive thinking between tasks (optional)
 - **Persistent Memory**: Scratchpad, identity, and knowledge base
 - **Self-Modification**: Can modify files within its sandbox (`~/.dpc/agent/`)
@@ -259,6 +259,10 @@ Agent settings are configured in `~/.dpc/privacy_rules.json`:
 | `evolution_interval_minutes` | int | `60` | Evolution cycle interval |
 | `evolution_auto_apply` | bool | `false` | Auto-apply evolution changes |
 | `extended_sandbox_paths` | object | `{}` | Paths outside sandbox (read_only, read_write) |
+| `skills.self_modify` | bool | `true` | Allow agent to append improvements to skill files |
+| `skills.create_new` | bool | `true` | Allow agent to create new skill files |
+| `skills.rewrite_existing` | bool | `false` | Allow full skill rewrites (not just appends) |
+| `skills.accept_peer_skills` | bool | `false` | Accept skills received from peers (Phase 5) |
 
 ### Agent Profiles Configuration
 
@@ -389,6 +393,7 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 | `knowledge_write` | Write to knowledge base | ✅ |
 | `knowledge_list` | List knowledge topics | ✅ |
 | `extract_knowledge` | Extract knowledge from conversations | ✅ |
+| `execute_skill` | Load a skill strategy by name (Memento-Skills router) | ✅ |
 | `get_dpc_context` | Get DPC personal/device context | ✅ |
 
 ### Task Scheduling Tools
@@ -490,6 +495,14 @@ All agent data is stored in `~/.dpc/agents/{agent_id}/`:
 │   ├── knowledge/                 # Knowledge base
 │   │   ├── _index.md             # Topic index
 │   │   └── [topic].md            # Topic files
+│   ├── skills/                    # Memento-Skills (v0.20.0+)
+│   │   ├── _stats.json           # Per-skill performance tracking
+│   │   ├── skill-creator/SKILL.md
+│   │   ├── code-analysis/SKILL.md
+│   │   ├── knowledge-extraction/SKILL.md
+│   │   ├── p2p-research/SKILL.md
+│   │   ├── web-research/SKILL.md
+│   │   └── pending_improvements.jsonl  # Shadow-mode queue
 │   ├── logs/
 │   │   ├── events.jsonl          # Event log
 │   │   ├── tools.jsonl           # Tool execution log
@@ -1162,10 +1175,24 @@ await service.reset_agent_to_global(agent_id="agent_abc123")
 1. **Add Custom Tools**: Create new tool modules in `dpc_agent/tools/`
 
 
-2. **Extend Memory**: Add new memory types or knowledge structures
+2. **Write Custom Skills**: Add `~/.dpc/agents/{id}/skills/{name}/SKILL.md` — see [DPC Agent Skills Guide](DPC_AGENT_SKILLS.md)
 
 
-3. **Custom Consciousness**: Modify thought types in `consciousness.py`
+3. **Extend Memory**: Add new memory types or knowledge structures
 
 
-4. **UI Integration**: Add agent status/controls to DPC UI
+4. **Custom Consciousness**: Modify thought types in `consciousness.py`
+
+
+5. **UI Integration**: Add agent status/controls to DPC UI
+
+## Memento-Skills System
+
+The agent implements a Memento-Skills style Read-Write Reflective Learning loop (v0.20.0+):
+
+- **Skills** are markdown strategy files that teach the agent *how to combine tools* for a class of tasks
+- **Read phase**: before each task, the agent sees all skill descriptions and calls `execute_skill()` to load the relevant strategy
+- **Write phase**: after tasks with ≥5 LLM rounds, the agent reflects on whether the skill had gaps and appends improvements
+- **Evolution integration**: `evolution.py` reads skill performance stats (`_stats.json`) and targets underperforming skills
+
+See **[DPC Agent Skills Guide](DPC_AGENT_SKILLS.md)** for full documentation including skill format, reflection loop, firewall permissions, and how to write custom skills.
