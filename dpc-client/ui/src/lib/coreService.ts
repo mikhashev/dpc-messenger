@@ -2,7 +2,7 @@
 // PRODUCTION VERSION - Clean, no excessive logging
 
 import { writable, get } from 'svelte/store';
-import { setLogSender } from '$lib/logger';
+import { setLogSender, clearLogSender } from '$lib/logger';
 
 // TypeScript types for dual provider system
 export interface ProviderInfo {
@@ -981,11 +981,13 @@ export function connectToCoreService() {
         });
 
         socket.addEventListener('error', (error) => {
+            clearLogSender();
             console.error("WebSocket error:", error);
             connectionStatus.set('error');
         });
 
         socket.addEventListener('close', (event) => {
+            clearLogSender();
             console.log("WebSocket closed:", event.code, event.reason);
         });
 
