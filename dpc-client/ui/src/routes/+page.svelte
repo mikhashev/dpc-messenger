@@ -267,6 +267,13 @@
   // Map: AI chat ID -> backend agent_id (for agent chats)
   let agentChatToAgentId = $state<Map<string, string>>(new Map());
 
+  // Returns true if the given backend conversation_id matches the active chat.
+  // Handles the case where activeChatId is ai_chat_XXX but the backend uses agent_XXX.
+  function isActiveChatConv(conversation_id: string): boolean {
+    return activeChatId === conversation_id ||
+           agentChatToAgentId.get(activeChatId) === conversation_id;
+  }
+
   // Instruction Sets state
   type InstructionSets = {
     schema_version: string;
@@ -334,10 +341,10 @@
     if ($agentProgress) {
       const { conversation_id, message, round, tool_name, ts } = $agentProgress;
       console.log(`[AgentProgress] Conv: ${conversation_id}, Tool: ${tool_name}, Round: ${round}`);
-      console.log(`[AgentProgress] activeChatId: ${activeChatId}, match: ${activeChatId === conversation_id}`);
+      console.log(`[AgentProgress] activeChatId: ${activeChatId}, match: ${isActiveChatConv(conversation_id)}`);
 
       // Only show progress for the active AI chat
-      if (activeChatId === conversation_id) {
+      if (isActiveChatConv(conversation_id)) {
         console.log(`[AgentProgress] Setting progress: tool=${tool_name}, round=${round}`);
         agentProgressMessage = message || null;
         agentProgressTool = tool_name || null;
@@ -373,7 +380,7 @@
     if ($agentProgressClear) {
       const { conversation_id } = $agentProgressClear;
       // Clear progress when task completes/fails
-      if (activeChatId === conversation_id) {
+      if (isActiveChatConv(conversation_id)) {
         agentProgressMessage = null;
         agentProgressTool = null;
         agentProgressRound = 0;
@@ -392,7 +399,7 @@
     if ($agentTextChunk) {
       const { conversation_id, chunk } = $agentTextChunk;
       // Only accumulate chunks for the active AI chat
-      if (activeChatId === conversation_id) {
+      if (isActiveChatConv(conversation_id)) {
         // Add to non-reactive buffer
         streamingBuffer += chunk;
 
@@ -488,7 +495,7 @@
       // task. Because _execute_task now uses reply_conversation_id (e.g. "agent_001"),
       // streaming events arrive with the correct conversation_id and populate this buffer.
       let capturedAgentStreaming = "";
-      if (activeChatId === conversation_id) {
+      if (isActiveChatConv(conversation_id)) {
         // Flush any pending buffer content that hasn't been moved to agentStreamingText yet
         if (streamingBuffer) {
           agentStreamingText += streamingBuffer;
@@ -544,7 +551,7 @@
         });
 
         // Scroll to bottom if this is the active chat
-        if (activeChatId === conversation_id) {
+        if (isActiveChatConv(conversation_id)) {
           setTimeout(() => {
             if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
           }, 50);
@@ -2283,7 +2290,7 @@
           const visionProvider = parseProviderSelection(selectedVisionProvider);
 
           const payload: any = {
-            conversation_id: activeChatId,
+            conversation_id: agentChatToAgentId.get(activeChatId) ?? activeChatId,
             image_base64: imageData.dataUrl,
             filename: imageData.filename,
             caption: text,
@@ -2520,10 +2527,13 @@
       const chatMetadata = $aiChats.get(activeChatId);
 
       // Prepare AI query payload with optional compute host and provider/model
+      // For agent chats created via "New Chat", activeChatId is ai_chat_XXX but the backend
+      // needs the real agent_XXX ID so it uses the correct per-agent storage folder.
+      const backendConversationId = agentChatToAgentId.get(activeChatId) ?? activeChatId;
       const payload: any = {
         prompt: text,
         include_context: includePersonalContext,  // Add context inclusion flag
-        conversation_id: activeChatId,  // Phase 7: Pass conversation ID for history tracking
+        conversation_id: backendConversationId,  // Phase 7: Pass conversation ID for history tracking
         ai_scope: selectedAIScope || null,  // AI Scope for filtering (null = no filtering)
         instruction_set_name: chatMetadata?.instruction_set_name || 'general'  // Instruction set for this conversation
       };
