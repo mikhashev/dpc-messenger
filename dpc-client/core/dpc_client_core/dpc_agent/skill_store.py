@@ -131,6 +131,31 @@ class SkillStore:
                 })
         return result
 
+    def list_shareable_skills(self, tags: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """
+        Return [{name, description, tags, version}] for skills where sharing.shareable == True.
+
+        Used by inter-agent and P2P skill sharing to expose what this agent is willing to share.
+        Optionally filtered by tags (any match).
+        """
+        result = []
+        for name in self.list_skill_names():
+            manifest = self.load_manifest(name)
+            if manifest is None:
+                continue
+            if not (manifest.sharing and manifest.sharing.shareable):
+                continue
+            skill_tags = list(manifest.metadata.tags) if manifest.metadata else []
+            if tags and not any(t in skill_tags for t in tags):
+                continue
+            result.append({
+                "name": manifest.name or name,
+                "description": manifest.description or "",
+                "tags": skill_tags,
+                "version": manifest.version or 1,
+            })
+        return result
+
     def load_manifest(self, name: str) -> Optional[SkillManifest]:
         """Parse SKILL.md frontmatter for a skill. Returns None if not found."""
         path = self.skill_path(name)

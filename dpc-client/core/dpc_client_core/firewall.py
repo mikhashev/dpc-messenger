@@ -130,6 +130,10 @@ class ContextFirewall:
             'deduplicate_identity': True,  # Clean up duplicate sections in identity
             # Memento-Skills tools (v0.20.0+)
             'execute_skill': True,  # Load skill strategy by name (Read phase)
+            # Inter-agent skill sharing tools (v0.21.0+)
+            'list_local_agents': True,   # Read-only: list registered agents
+            'list_agent_skills': True,   # Read-only: list another agent's shareable skills
+            'import_skill_from_agent': False,  # Opt-in: copy skill from another agent (needs accept_peer_skills)
             # DPC integration
             'get_dpc_context': True,
             # Web tools
@@ -332,6 +336,10 @@ class ContextFirewall:
         # Override: knowledge_write requires read_write access
         if self.dpc_agent_knowledge_access != 'read_write':
             allowed.discard('knowledge_write')
+
+        # Override: import_skill_from_agent requires accept_peer_skills
+        if not self.get_agent_skill_permission('accept_peer_skills'):
+            allowed.discard('import_skill_from_agent')
 
         return allowed
 
@@ -1475,6 +1483,8 @@ class ContextFirewall:
                                 'register_task_type', 'list_task_types', 'unregister_task_type',
                                 # Memento-Skills tools (v0.20.0+)
                                 'execute_skill',
+                                # Inter-agent skill sharing tools (v0.21.0+)
+                                'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):
@@ -1565,6 +1575,8 @@ class ContextFirewall:
                                         'register_task_type', 'list_task_types', 'unregister_task_type',
                                         # Memento-Skills tools (v0.20.0+)
                                         'execute_skill',
+                                        # Inter-agent skill sharing tools (v0.21.0+)
+                                        'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
                                     }
                                     for tool_name, tool_enabled in tools.items():
                                         if tool_name.startswith('_'):

@@ -814,9 +814,37 @@ class DpcAgent:
             return f"Unknown task type: {task.task_type}. Register a handler with register_task_handler('{task.task_type}', handler)"
 
     async def _execute_review(self, data: Dict[str, Any]) -> str:
-        """Execute a code review task."""
-        # TODO: Implement review logic
-        return "Review not implemented"
+        """Execute a code review task using self_review + request_critique tools."""
+        target = data.get("target", data.get("text", ""))
+        focus = data.get("focus", "")
+        reply_conversation_id = data.get("_reply_conversation_id") or "review_task"
+        reply_telegram_chat_id = data.get("_reply_telegram_chat_id")
+
+        if not target:
+            return "Review task requires a 'target' field (file path, code snippet, or description)"
+
+        focus_clause = f" Focus on: {focus}." if focus else ""
+        prompt = (
+            f"Please review the following:{focus_clause}\n\n"
+            f"{target}\n\n"
+            f"Use your self_review and request_critique tools to produce a thorough review "
+            f"covering correctness, quality, edge cases, and any improvements."
+        )
+
+        result = await self.process(
+            prompt,
+            conversation_id=reply_conversation_id,
+        )
+
+        if reply_telegram_chat_id:
+            send_fn = getattr(self, "_telegram_send_fn", None)
+            if send_fn:
+                try:
+                    await send_fn(reply_telegram_chat_id, result)
+                except Exception as e:
+                    log.warning("Failed to deliver review result to Telegram: %s", e)
+
+        return result
 
     def schedule_task(
         self,
