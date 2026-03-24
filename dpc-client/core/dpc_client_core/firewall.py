@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Dict, Tuple, Any, Optional, Set
 import fnmatch
@@ -231,7 +232,11 @@ class ContextFirewall:
 
         # Check read_write paths first (they also allow read)
         for allowed_path in self.sandbox_read_write_paths:
-            if allowed_path and (normalized == allowed_path or normalized.startswith(allowed_path + "/")):
+            if allowed_path and (
+                normalized == allowed_path
+                or normalized.startswith(allowed_path + os.sep)
+                or normalized.startswith(allowed_path + "/")
+            ):
                 return True
 
         # If write is required, read_only paths are not sufficient
@@ -240,7 +245,11 @@ class ContextFirewall:
 
         # Check read_only paths
         for allowed_path in self.sandbox_read_only_paths:
-            if allowed_path and (normalized == allowed_path or normalized.startswith(allowed_path + "/")):
+            if allowed_path and (
+                normalized == allowed_path
+                or normalized.startswith(allowed_path + os.sep)
+                or normalized.startswith(allowed_path + "/")
+            ):
                 return True
 
         return False

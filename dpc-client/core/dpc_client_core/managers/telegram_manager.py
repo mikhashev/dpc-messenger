@@ -166,7 +166,7 @@ class TelegramBotManager:
                 # Import telegram library (lazy import for optional dependency)
                 from telegram import Update
                 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-                from telegram.error import InvalidToken, NetworkError
+                from telegram.error import InvalidToken, NetworkError, Conflict
 
                 # Build bot application
                 self.application = (
@@ -238,6 +238,25 @@ class TelegramBotManager:
                     # Polling mode (development)
                     await self.application.initialize()
                     await self.application.start()
+
+                    # Stop bot immediately when a Conflict error is detected (another instance running)
+                    async def _conflict_error_handler(update, context):
+                        if isinstance(context.error, Conflict):
+                            logger.error(
+                                "Telegram bot conflict: another instance is already running. "
+                                "Stop the other DPC Messenger process and restart."
+                            )
+                            await self._broadcast_error_event(
+                                "Bot Already Running",
+                                "Another DPC Messenger instance is already using this Telegram bot. "
+                                "Stop the other instance first."
+                            )
+                            # Stop polling to avoid infinite conflict loop
+                            asyncio.create_task(self.stop())
+                            return
+                        raise context.error
+
+                    self.application.add_error_handler(_conflict_error_handler)
 
                     # Determine if we should drop pending updates
                     # Only drop if history fetching is disabled (to avoid duplicates)

@@ -296,6 +296,41 @@ class DpcLlmAdapter:
                 images=images,
             )
 
+            # Detect silent vision failure: some Anthropic-compatible endpoints (e.g. Z.AI)
+            # accept base64 images, convert them to CDN URLs internally, but the underlying
+            # model receives the JSON URL reference as text and cannot process it visually.
+            # In that case the model explicitly says it cannot see the image.
+            _vision_failure_phrases = [
+                "cannot see image",
+                "can't see image",
+                "json objects",
+                "json format",
+                "image as json",
+                "passed as json",
+                "image as a url",
+                "provided as a url",
+                "image was provided as",
+                "no tool for image",
+                "cannot analyze image",
+                "cannot directly analyze",
+                "no image analysis",
+            ]
+            response_lower = response.lower()
+            if any(phrase in response_lower for phrase in _vision_failure_phrases):
+                log.warning(
+                    f"Native vision for provider '{provider.alias}' appears to have failed "
+                    f"(model cannot process the image). Falling back to pre-analysis."
+                )
+                user_text = self._extract_user_text(messages)
+                description = await self._pre_analyze_image_for_agent(images, user_text)
+                messages = self._inject_image_description_into_messages(messages, description)
+                # Re-build prompt with injected description and continue as text-only
+                prompt = self._messages_to_prompt(messages)
+                if tools:
+                    tool_descriptions = self._format_tools_for_prompt(tools)
+                    prompt = f"{tool_descriptions}\n\n{prompt}"
+                response = await provider.generate_response(prompt)
+
             # Build response message in Ouroboros format
             response_msg: Dict[str, Any] = {
                 "role": "assistant",

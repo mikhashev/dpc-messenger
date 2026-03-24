@@ -240,6 +240,9 @@ class AgentTelegramBridge:
             # Add handler for voice messages
             self._application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
 
+            # Add handler for photo messages (vision analysis)
+            self._application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message))
+
             # Initialize application (creates bot instance internally)
             await self._application.initialize()
 
@@ -839,6 +842,81 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"Error processing voice message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing voice message: {str(e)[:200]}")
+
+    async def _handle_photo_message(self, update, context):
+        """
+        Handle incoming photo message from Telegram.
+
+        Downloads the highest-resolution photo, encodes it as base64, and passes
+        it to the agent via process_message(). The agent's llm_adapter will use
+        native vision if the configured provider supports it, or pre-analyze the
+        image with an auto-selected vision model and inject the description as text.
+        """
+        chat_id = str(update.effective_chat.id)
+
+        # Check authorization
+        if chat_id not in self.allowed_chat_ids:
+            log.warning(f"Unauthorized photo from chat_id={chat_id}")
+            await update.message.reply_text("⛔ Unauthorized. Your chat ID is not in the allowed list.")
+            return
+
+        if not self._message_handler:
+            await update.message.reply_text("⚠️ Message handler not configured. Cannot process photo.")
+            return
+
+        # Telegram sends multiple sizes; pick the largest (last in the list)
+        photo = update.message.photo[-1]
+        caption = update.message.caption or ""
+
+        log.info(f"Processing photo from chat {chat_id} (file_id={photo.file_id}, caption={caption[:50]!r})")
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+        try:
+            # Download photo from Telegram
+            file = await self._bot.get_file(photo.file_id)
+            photo_bytes = await file.download_as_bytearray()
+            image_base64 = base64.b64encode(bytes(photo_bytes)).decode("utf-8")
+
+            # Build sender attribution
+            tg_user = update.effective_user
+            tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
+            sender_name = f"{tg_display_name} (Telegram)"
+
+            # Use caption as message text; fall back to a generic prompt
+            message_text = caption if caption else "Please analyze this image."
+
+            conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+
+            response = await self._message_handler(
+                message=message_text,
+                conversation_id=conversation_id,
+                include_context=True,
+                sender_name=sender_name,
+                telegram_chat_id=chat_id,
+                image_base64=image_base64,
+                image_mime="image/jpeg",
+                image_caption=caption or None,
+            )
+
+            # Send response
+            try:
+                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
+                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
+                    for i, chunk in enumerate(chunks):
+                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
+                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
+                else:
+                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+            except Exception as send_err:
+                log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
+                await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+            finally:
+                if self._unified_conversation and self._agent_manager:
+                    await self._broadcast_history_to_ui(conversation_id)
+
+        except Exception as e:
+            log.error(f"Error processing photo message: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error processing photo: {str(e)[:200]}")
 
     async def _broadcast_history_to_ui(self, conversation_id: str) -> None:
         """
