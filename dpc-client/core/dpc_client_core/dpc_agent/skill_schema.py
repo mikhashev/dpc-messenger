@@ -102,7 +102,7 @@ class SkillManifest:
     def from_dict(cls, d: Dict[str, Any]) -> "SkillManifest":
         return cls(
             name=str(d.get("name", "")),
-            version=int(d.get("version", 1)),
+            version=int(str(d.get("version", 1)).split(".")[0]),
             description=str(d.get("description", "")).strip(),
             provenance=SkillProvenance.from_dict(d.get("provenance") or {}),
             sharing=SkillSharing.from_dict(d.get("sharing") or {}),
