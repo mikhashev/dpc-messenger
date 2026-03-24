@@ -196,6 +196,37 @@ class SkillStore:
         write_text(path, content)
         log.info(f"Saved skill: {name}")
 
+    def mark_as_shared(self, name: str) -> bool:
+        """
+        Mark a skill as shareable (sharing.shareable = true).
+
+        Called when the user explicitly opts a skill into P2P/local sharing.
+        Returns True if the skill was found and updated.
+        """
+        content = self.load_skill_content(name)
+        if content is None:
+            return False
+        # Patch the shareable field in the YAML sharing block
+        import re
+        if not content.lstrip().startswith("---"):
+            return False
+        end = content.find("\n---", 3)
+        if end == -1:
+            return False
+        fm = content[:end + 4]
+        body = content[end + 4:]
+        pattern = re.compile(r"^(\s+shareable\s*:).*$", re.MULTILINE)
+        if pattern.search(fm):
+            fm = pattern.sub(r"\1 true", fm)
+        else:
+            # Append sharing block if absent
+            insert_at = end
+            fm = content[:insert_at] + "\nsharing:\n  shareable: true" + content[insert_at:end + 4]
+            body = content[end + 4:]
+        write_text(self.skill_path(name), fm + body)
+        log.info(f"Marked skill as shareable: {name}")
+        return True
+
     # --- Stats ---
 
     def get_stats(self) -> Dict[str, Any]:

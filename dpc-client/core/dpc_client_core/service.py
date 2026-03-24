@@ -31,6 +31,7 @@ from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
+from .skill_coordinator import SkillCoordinator
 from .p2p_coordinator import P2PCoordinator
 from .coordinators.connection_orchestrator import ConnectionOrchestrator, ConnectionFailedError
 from .message_router import MessageRouter
@@ -77,6 +78,10 @@ from .message_handlers.group_handler import (  # v0.19.0+ Group chat
     GroupSyncHandler, GroupHistoryRequestHandler, GroupHistoryResponseHandler,
     GroupHistoryStatusHandler,  # v0.20.0 hash-based sync
     GroupDeletedStatusHandler,  # v0.20.0 offline deletion notification
+)
+from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
+    SkillSearchHandler, SkillsCatalogHandler, SkillRequestHandler,
+    SkillDataHandler, SkillOfferHandler,
 )
 from .managers.file_transfer_manager import FileTransferManager
 from .managers.group_manager import GroupManager
@@ -240,6 +245,9 @@ class CoreService:
 
         # Context coordinator (coordinates context requests and responses)
         self.context_coordinator = ContextCoordinator(self)
+
+        # Skill coordinator (coordinates P2P skill sharing — Phase 5a Memento-Skills)
+        self.skill_coordinator = SkillCoordinator(self)
 
         # P2P coordinator (coordinates P2P connection lifecycle)
         self.p2p_coordinator = P2PCoordinator(self)
@@ -448,6 +456,13 @@ class CoreService:
         self.message_router.register_handler(GroupHistoryResponseHandler(self))
         self.message_router.register_handler(GroupHistoryStatusHandler(self))  # v0.20.0 hash-based sync
         self.message_router.register_handler(GroupDeletedStatusHandler(self))  # v0.20.0 offline deletion notification
+
+        # P2P skill sharing (v0.21.0+ Phase 5a Memento-Skills)
+        self.message_router.register_handler(SkillSearchHandler(self))
+        self.message_router.register_handler(SkillsCatalogHandler(self))
+        self.message_router.register_handler(SkillRequestHandler(self))
+        self.message_router.register_handler(SkillDataHandler(self))
+        self.message_router.register_handler(SkillOfferHandler(self))
 
         # Telegram bot integration (v0.14.0+)
         if self.telegram_manager:
@@ -3103,9 +3118,10 @@ class CoreService:
 
     async def transcribe_audio(
         self,
-        audio_base64: str,
+        audio_base64: str = "",
         mime_type: str = "audio/webm",
-        provider_alias: str | None = None
+        provider_alias: str | None = None,
+        file_path: str | None = None
     ) -> dict:
         """
         Transcribe audio to text using local Whisper (primary), OpenAI API (fallback), or remote peer.
@@ -3173,25 +3189,39 @@ class CoreService:
         if provider_alias and provider_alias.startswith("local:"):
             provider_alias = provider_alias[6:]  # Remove "local:" prefix
 
-        # 1. Decode audio data
-        try:
-            audio_data = base64.b64decode(audio_base64)
-        except Exception as e:
-            raise ValueError(f"Failed to decode base64 audio data: {e}")
-
-        # 2. Validate size
+        # 1. Resolve audio to a local file path
         max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
-        size_mb = len(audio_data) / (1024 * 1024)
-        if size_mb > max_size_mb:
-            raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+        _temp_path_to_delete = None  # track temp files we created so we can clean up
 
-        # 3. Save to temporary file
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=f".{mime_type.split('/')[-1]}"
-        ) as temp_file:
-            temp_file.write(audio_data)
-            temp_path = temp_file.name
+        if file_path:
+            # File already on disk (Tauri mode) — validate and use directly
+            resolved = Path(file_path)
+            if not resolved.exists():
+                raise ValueError(f"Audio file not found: {file_path}")
+            size_mb = resolved.stat().st_size / (1024 * 1024)
+            if size_mb > max_size_mb:
+                raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+            temp_path = str(resolved)
+        else:
+            # Decode base64 payload
+            if not audio_base64:
+                raise ValueError("Either file_path or audio_base64 must be provided")
+            try:
+                audio_data = base64.b64decode(audio_base64)
+            except Exception as e:
+                raise ValueError(f"Failed to decode base64 audio data: {e}")
+
+            size_mb = len(audio_data) / (1024 * 1024)
+            if size_mb > max_size_mb:
+                raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=f".{mime_type.split('/')[-1]}"
+            ) as temp_file:
+                temp_file.write(audio_data)
+                temp_path = temp_file.name
+            _temp_path_to_delete = temp_path
 
         try:
             # 4. Determine transcription method (local vs cloud)
@@ -3340,11 +3370,12 @@ class CoreService:
                 "error": str(e)
             }
         finally:
-            # Clean up temp file
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+            # Only delete the temp file if we created it (not if the caller passed file_path)
+            if _temp_path_to_delete:
+                try:
+                    Path(_temp_path_to_delete).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     async def preload_whisper_model(self, provider_alias: str | None = None) -> dict:
         """
@@ -7699,6 +7730,60 @@ Respond in JSON format:
             Dict containing filtered device context, or None if request fails
         """
         return await self.context_coordinator.request_device_context(peer_id)
+
+    async def search_peer_skills(
+        self,
+        peer_id: str,
+        tags: Optional[List[str]] = None,
+        query: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Search a connected peer's shareable skill catalog.
+
+        WebSocket command: {"command": "search_peer_skills", "peer_id": "...", "tags": [...], "query": "..."}
+
+        Returns {"status": "success", "skills": [...]} or {"status": "error", "message": "..."}
+        """
+        try:
+            skills = await self.skill_coordinator.search_peer_skills(
+                peer_id, tags=tags, query=query
+            )
+            return {"status": "success", "peer_id": peer_id, "skills": skills}
+        except Exception as e:
+            logger.error("search_peer_skills error: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def request_skill_from_peer(
+        self,
+        peer_id: str,
+        skill_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Request and save a specific skill from a connected peer.
+
+        WebSocket command: {"command": "request_skill_from_peer", "peer_id": "...", "skill_name": "..."}
+
+        Firewall `accept_peer_skills` must be True.
+        Returns {"status": "success"|"error", "message": "..."}
+        """
+        try:
+            content = await self.skill_coordinator.request_skill_from_peer(peer_id, skill_name)
+            if content is None:
+                return {
+                    "status": "error",
+                    "message": f"Could not retrieve skill '{skill_name}' from {peer_id} (timeout, not found, or firewall blocked)",
+                }
+            status_msg = await self.skill_coordinator.save_received_skill(
+                peer_id, skill_name, content
+            )
+            success = status_msg.startswith("✓")
+            return {
+                "status": "success" if success else "error",
+                "message": status_msg,
+            }
+        except Exception as e:
+            logger.error("request_skill_from_peer error: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
 
     async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 240.0) -> str:
         """

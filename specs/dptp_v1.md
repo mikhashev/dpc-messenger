@@ -1591,6 +1591,158 @@ Returns conversation history to requesting peer.
 
 ---
 
+### 3.16 Skill Sharing Messages (v0.21.0)
+
+Enables agents to discover and exchange procedural skills (SKILL.md strategies) directly
+over P2P connections without involving a central server.
+
+Firewall permission `dpc_agent.skills.accept_peer_skills` gates all inbound skill receipt.
+Only skills with `sharing.shareable: true` in their frontmatter are ever sent to peers.
+
+---
+
+#### SKILL_SEARCH
+
+Request a peer's shareable skill catalog. Optionally filter by tags or freetext query.
+
+**Format:**
+```json
+{
+  "command": "SKILL_SEARCH",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "tags": ["code", "analysis"],
+    "query": "analyze repository"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): UUID used to match the SKILLS_CATALOG response
+- `tags` (array of strings, optional): Only return skills matching any of these tags
+- `query` (string, optional): Freetext filter on skill name and description
+
+**Response:** SKILLS_CATALOG
+
+---
+
+#### SKILLS_CATALOG
+
+Peer's response to SKILL_SEARCH; contains metadata only (no strategy content).
+
+**Format:**
+```json
+{
+  "command": "SKILLS_CATALOG",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "skills": [
+      {
+        "name": "code-analysis",
+        "description": "Systematic codebase analysis strategy",
+        "tags": ["code", "analysis"],
+        "version": 3
+      }
+    ]
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): Echoed from SKILL_SEARCH for Future resolution
+- `skills` (array): List of shareable skill metadata objects
+  - `name` (string): Kebab-case skill identifier
+  - `description` (string): Human-readable summary
+  - `tags` (array of strings): Classification tags
+  - `version` (integer): Monotonically increasing version counter
+
+---
+
+#### SKILL_REQUEST
+
+Request the full SKILL.md content for a specific skill.
+
+**Format:**
+```json
+{
+  "command": "SKILL_REQUEST",
+  "payload": {
+    "request_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "skill_name": "code-analysis"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): UUID for response matching
+- `skill_name` (string, required): Name of the skill to retrieve
+
+**Response:** SKILL_DATA
+
+---
+
+#### SKILL_DATA
+
+Peer's response to SKILL_REQUEST; contains the full SKILL.md text.
+Empty `content` indicates the skill is not available or not shareable.
+
+**Format:**
+```json
+{
+  "command": "SKILL_DATA",
+  "payload": {
+    "request_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "skill_name": "code-analysis",
+    "content": "---\nname: code-analysis\nversion: 3\n...\n---\n\n## Strategy\n..."
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): Echoed from SKILL_REQUEST
+- `skill_name` (string, required): Name of the skill
+- `content` (string): Full SKILL.md text including YAML frontmatter; empty string if unavailable
+
+**Provenance patching on receipt:**
+The receiving node automatically patches the following frontmatter fields before saving:
+- `provenance.source` → `"peer"`
+- `provenance.origin_peer` → sender's `node_id`
+- `provenance.created_at` → current UTC timestamp
+- `sharing.shareable` → `false` (received skills not re-shared by default)
+
+---
+
+#### SKILL_OFFER
+
+Peer proactively pushes a skill without a preceding SKILL_REQUEST.
+The receiver may accept or silently discard based on firewall settings.
+
+**Format:**
+```json
+{
+  "command": "SKILL_OFFER",
+  "payload": {
+    "skill_name": "web-research",
+    "description": "Efficient web research and source evaluation strategy",
+    "tags": ["web", "research"],
+    "version": 2,
+    "content": "---\nname: web-research\n...\n---\n\n## Strategy\n..."
+  }
+}
+```
+
+**Fields:**
+- `skill_name` (string, required): Kebab-case identifier
+- `description` (string): Human-readable summary shown in UI notification
+- `tags` (array of strings): Classification tags
+- `version` (integer): Skill version number
+- `content` (string, required): Full SKILL.md text
+
+**Firewall:** Receiver silently discards if `accept_peer_skills` is disabled.
+A `skill_received` WebSocket event is broadcast to the UI on successful save.
+
+---
+
 ## 4. Node Identity System
 
 ### Node ID Format
@@ -1845,6 +1997,15 @@ DPTP is designed to be extensible. New commands can be added by:
 - **Privacy Rules Format**: Firewall configuration - See `~/.dpc/privacy_rules.json`
 
 ## 9. Changelog
+
+### v1.5 (March 2026)
+- **New message types: P2P Skill Sharing (v0.21.0 Phase 5a Memento-Skills)**
+  - SKILL_SEARCH / SKILLS_CATALOG — discover shareable skills from a connected peer
+  - SKILL_REQUEST / SKILL_DATA — retrieve full SKILL.md strategy content from a peer
+  - SKILL_OFFER — peer proactively pushes a skill without a preceding request
+  - Firewall-gated: `accept_peer_skills` controls all inbound skill receipt
+  - Provenance patched on receipt: `source=peer`, `origin_peer=<node_id>`, `shareable=false`
+  - UI notification: `skill_received` WebSocket event on successful save
 
 ### v1.4 (February 2026)
 - **Thinking Mode Support:**
