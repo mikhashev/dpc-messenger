@@ -3162,6 +3162,12 @@ class CoreService:
 
             logger.info(f"Remote transcription requested from peer {node_id[:20]}... using provider '{remote_alias}'")
 
+            # If caller passed a file path, read and encode it for the remote peer
+            if file_path and not audio_base64:
+                import base64 as _b64
+                from pathlib import Path as _Path
+                audio_base64 = _b64.b64encode(_Path(file_path).read_bytes()).decode()
+
             try:
                 # Call remote peer for transcription
                 result = await self._request_transcription_from_peer(
@@ -3278,7 +3284,7 @@ class CoreService:
                     "Recommended: Add a local_whisper provider for privacy, with OpenAI as fallback."
                 )
 
-            logger.info(f"Transcribing audio using {transcription_method}: {len(audio_data)} bytes, mime_type={mime_type}")
+            logger.info(f"Transcribing audio using {transcription_method}: {temp_path}, mime_type={mime_type}")
 
             # 5. Perform transcription
             result = None

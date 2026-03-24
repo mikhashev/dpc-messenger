@@ -131,7 +131,7 @@
   let chatDraftInputs = $state(new Map<string, string>());
 
   // Voice message state (v0.13.0 - Voice Messages)
-  let voicePreview = $state<{ blob: Blob; duration: number } | null>(null);
+  let voicePreview = $state<{ blob: Blob; duration: number; filePath?: string } | null>(null);
 
   // Auto-transcribe toggle state (v0.13.2+ Auto-Transcription)
   let autoTranscribeEnabled = $state(true);  // Default ON
@@ -3745,8 +3745,8 @@
   }
 
   // Voice message handlers (v0.13.0 - Voice Messages)
-  async function handleRecordingComplete(blob: Blob, duration: number) {
-    voicePreview = { blob, duration };
+  async function handleRecordingComplete(blob: Blob, duration: number, filePath?: string) {
+    voicePreview = { blob, duration, filePath };
   }
 
   async function handleSendVoiceMessage() {
@@ -3845,19 +3845,6 @@
     if (!voicePreview) return;
 
     try {
-      // Convert blob to base64
-      const arrayBuffer = await voicePreview.blob.arrayBuffer();
-      const uint8Array = new Uint8Array(arrayBuffer);
-
-      // Convert to base64 in chunks to avoid "Maximum call stack size exceeded"
-      let binaryString = '';
-      const chunkSize = 8192;
-      for (let i = 0; i < uint8Array.length; i += chunkSize) {
-        const chunk = uint8Array.subarray(i, i + chunkSize);
-        binaryString += String.fromCharCode(...chunk);
-      }
-      const base64Audio = btoa(binaryString);
-
       // Show loading state
       fileOfferToastMessage = 'Transcribing voice message...';
       showFileOfferToast = true;
@@ -3865,12 +3852,33 @@
       // Get selected voice provider (v0.15.1+: Pass full provider ID for remote support)
       const selectedProviderId = selectedVoiceProvider || selectedTextProvider;
 
+      // Prefer file path (Tauri mode) — avoids sending large audio data over the local WebSocket
+      let transcribeArgs: Record<string, string>;
+      if (voicePreview.filePath) {
+        transcribeArgs = {
+          file_path: voicePreview.filePath,
+          mime_type: voicePreview.blob.type || 'audio/wav',
+          provider_alias: selectedProviderId
+        };
+      } else {
+        // Browser fallback: encode blob as base64
+        const arrayBuffer = await voicePreview.blob.arrayBuffer();
+        const uint8Array = new Uint8Array(arrayBuffer);
+        let binaryString = '';
+        const chunkSize = 8192;
+        for (let i = 0; i < uint8Array.length; i += chunkSize) {
+          const chunk = uint8Array.subarray(i, i + chunkSize);
+          binaryString += String.fromCharCode(...chunk);
+        }
+        transcribeArgs = {
+          audio_base64: btoa(binaryString),
+          mime_type: voicePreview.blob.type || 'audio/webm',
+          provider_alias: selectedProviderId
+        };
+      }
+
       // Call backend for transcription
-      const response = await sendCommand('transcribe_audio', {
-        audio_base64: base64Audio,
-        mime_type: voicePreview.blob.type || 'audio/webm',
-        provider_alias: selectedProviderId  // v0.15.1+: Pass full ID (supports "remote:" and "local:" prefixes)
-      });
+      const response = await sendCommand('transcribe_audio', transcribeArgs);
 
       if (response.error) {
         throw new Error(response.error);
