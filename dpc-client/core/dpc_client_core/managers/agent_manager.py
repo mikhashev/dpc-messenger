@@ -356,9 +356,9 @@ class DpcAgentManager:
                 self._telegram_bridge = None
                 return
 
-            # Connect to event emitter
+            # Connect to event emitter, scoped to this agent's conversation_id
             emitter = get_event_emitter()
-            emitter.add_listener(create_telegram_bridge_callback(self._telegram_bridge))
+            emitter.add_listener(create_telegram_bridge_callback(self._telegram_bridge, agent_id=self.agent_id))
 
             agent_desc = self.agent_id if self.agent_id else "singleton"
             log.info(

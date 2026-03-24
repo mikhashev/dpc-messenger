@@ -1290,22 +1290,34 @@ Configure event types in `~/.dpc/config.ini` [dpc_agent_telegram] section.
         }
 
 
-def create_telegram_bridge_callback(bridge: AgentTelegramBridge):
+def create_telegram_bridge_callback(bridge: AgentTelegramBridge, agent_id: Optional[str] = None):
     """
     Create a callback function for AgentEventEmitter.
 
     Usage:
         bridge = AgentTelegramBridge(bot_token, chat_ids)
         await bridge.start()
-        emitter.add_listener(create_telegram_bridge_callback(bridge))
+        emitter.add_listener(create_telegram_bridge_callback(bridge, agent_id="agent_001"))
 
     Args:
         bridge: The AgentTelegramBridge instance
+        agent_id: If set, only handle events whose conversation_id matches this agent.
+                  Events without a conversation_id (e.g. evolution, lifecycle) are always handled.
 
     Returns:
         Callback function suitable for add_listener()
     """
     async def callback(event: AgentEvent) -> None:
+        # Filter out events that belong to a different agent conversation
+        if agent_id is not None:
+            event_conv_id = event.data.get("conversation_id")
+            if event_conv_id is not None and event_conv_id != agent_id:
+                log.debug(
+                    f"[TelegramBridge Callback] Skipping event {event.type.value} "
+                    f"for conversation '{event_conv_id}' (bridge owns '{agent_id}')"
+                )
+                return
+
         log.debug(f"[TelegramBridge Callback] Received event: {event.type.value}, bridge_enabled={bridge._enabled}")
         try:
             result = await bridge.handle_event(event)
