@@ -134,7 +134,7 @@ class AgentEventEmitter:
         # Only set agent_root if we're persisting events or if it's provided
         # This avoids creating legacy ~/.dpc/agent/ folder for global emitter
         if persist_events:
-            self.agent_root = agent_root or get_agent_root()
+            self.agent_root = agent_root or get_agent_root("default")
         else:
             self.agent_root = None
         self._listeners: List[Callable[[AgentEvent], Any]] = []

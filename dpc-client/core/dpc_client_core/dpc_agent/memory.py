@@ -46,7 +46,7 @@ class Memory:
         Args:
             agent_root: Root directory for agent storage (defaults to ~/.dpc/agent/)
         """
-        self.agent_root = agent_root or get_agent_root()
+        self.agent_root = agent_root or get_agent_root("default")
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
     # --- Paths ---

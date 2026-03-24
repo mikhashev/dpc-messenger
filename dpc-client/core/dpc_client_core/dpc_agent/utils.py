@@ -3,7 +3,7 @@ DPC Agent — Shared utilities.
 
 Adapted from Ouroboros utils.py for DPC Messenger integration.
 Key changes:
-- Added get_agent_root() and ensure_agent_dirs() for ~/.dpc/agent/ storage
+- Added get_agent_root() and ensure_agent_dirs() for ~/.dpc/agents/{id}/ storage
 - Removed Google Drive / Colab references
 - No OpenRouter pricing functions (DPC handles pricing separately)
 
@@ -30,23 +30,14 @@ log = logging.getLogger(__name__)
 # Agent Storage
 # ---------------------------------------------------------------------------
 
-def get_agent_root(agent_id: Optional[str] = None) -> pathlib.Path:
+def get_agent_root(agent_id: str) -> pathlib.Path:
     """
-    Get the agent's storage root directory.
-
-    Args:
-        agent_id: Optional agent ID. If provided, returns path to ~/.dpc/agents/{agent_id}/
-                  If None, returns path to ~/.dpc/agent/ (legacy/default location)
+    Get the agent's storage root directory: ~/.dpc/agents/{agent_id}/
 
     All agent files (memory, logs, state, knowledge) are stored here.
     This is sandboxed to prevent the agent from accessing other DPC files.
     """
-    if agent_id:
-        # Per-agent isolation: ~/.dpc/agents/{agent_id}/
-        agent_root = pathlib.Path.home() / ".dpc" / "agents" / agent_id
-    else:
-        # Legacy/default location: ~/.dpc/agent/
-        agent_root = pathlib.Path.home() / ".dpc" / "agent"
+    agent_root = pathlib.Path.home() / ".dpc" / "agents" / agent_id
     agent_root.mkdir(parents=True, exist_ok=True)
     return agent_root
 
@@ -412,47 +403,6 @@ def generate_agent_id(name: str = "") -> str:
         return f"agent_{slug}_{uuid_short}"
     else:
         return f"agent_{uuid_short}"
-
-
-def migrate_legacy_agent() -> bool:
-    """
-    Migrate legacy ~/.dpc/agent/ folder to ~/.dpc/agents/default/.
-
-    Returns:
-        True if migration was performed, False if not needed
-    """
-    legacy_path = pathlib.Path.home() / ".dpc" / "agent"
-    new_path = get_agent_root("default")
-
-    # Check if migration is needed
-    if not legacy_path.exists():
-        return False
-
-    # Check if already migrated
-    if new_path.exists():
-        log.debug("Legacy agent already migrated")
-        return False
-
-    # Perform migration
-    try:
-        import shutil
-        shutil.move(str(legacy_path), str(new_path))
-        log.info(f"Migrated legacy agent from {legacy_path} to {new_path}")
-
-        # Register default agent in registry
-        registry = AgentRegistry()
-        if not registry.get_agent("default"):
-            registry.register_agent(
-                agent_id="default",
-                name="Default Agent",
-                provider_alias="dpc_agent",
-                profile_name="default",
-            )
-
-        return True
-    except Exception as e:
-        log.error(f"Failed to migrate legacy agent: {e}")
-        return False
 
 
 def migrate_global_telegram_to_agents() -> Dict[str, Any]:

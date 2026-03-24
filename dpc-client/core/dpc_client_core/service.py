@@ -8446,13 +8446,9 @@ Respond in JSON format:
             generate_agent_id,
             create_agent_storage,
             AgentRegistry,
-            migrate_legacy_agent,
         )
 
         try:
-            # Perform migration if needed (legacy ~/.dpc/agent/ -> ~/.dpc/agents/default/)
-            migrate_legacy_agent()
-
             # Generate unique agent ID with name slug
             agent_id = generate_agent_id(name)
 
@@ -8501,12 +8497,9 @@ Respond in JSON format:
         Returns:
             Dict with status and list of agents
         """
-        from .dpc_agent.utils import AgentRegistry, migrate_legacy_agent
+        from .dpc_agent.utils import AgentRegistry
 
         try:
-            # Ensure migration has occurred
-            migrate_legacy_agent()
-
             registry = AgentRegistry()
             agents = registry.list_agents()
 

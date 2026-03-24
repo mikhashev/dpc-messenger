@@ -253,7 +253,7 @@ class ToolRegistry:
             agent_root: Root directory for agent storage (defaults to ~/.dpc/agent/)
         """
         self._entries: Dict[str, ToolEntry] = {}
-        self._agent_root = agent_root or get_agent_root()
+        self._agent_root = agent_root or get_agent_root("default")
         self._ctx = ToolContext(agent_root=self._agent_root)
         self._load_modules()
 

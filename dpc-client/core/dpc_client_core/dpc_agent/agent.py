@@ -97,7 +97,7 @@ class DpcAgent:
             firewall_profile: Permission profile name from privacy_rules.json
         """
         self.config = config or AgentConfig()
-        self.agent_root = agent_root or get_agent_root()
+        self.agent_root = agent_root or get_agent_root("default")
         self._firewall = firewall  # Firewall controls tool access
         self._provider_alias = provider_alias  # Store for LLM adapter
         self._firewall_profile = firewall_profile  # Store for tool permission lookups

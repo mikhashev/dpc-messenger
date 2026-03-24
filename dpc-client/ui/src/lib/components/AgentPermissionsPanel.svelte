@@ -108,6 +108,9 @@
       tools: [
         { key: 'schedule_task', label: 'Schedule Task', desc: 'Schedule tasks for future execution' },
         { key: 'get_task_status', label: 'Task Status', desc: 'Check status of scheduled tasks' },
+        { key: 'register_task_type', label: 'Register Task Type', desc: 'Register new task type handlers (restricted)' },
+        { key: 'list_task_types', label: 'List Task Types', desc: 'List all registered task types' },
+        { key: 'unregister_task_type', label: 'Unregister Task Type', desc: 'Remove a registered task type handler (restricted)' },
       ]
     },
     {
@@ -179,6 +182,7 @@
         create_new: true,
         rewrite_existing: false,
         accept_peer_skills: false,
+        auto_announce_to_dht: false,
       };
     }
   }
@@ -365,6 +369,7 @@
             { key: 'create_new', label: 'Create New Skills', desc: 'Allow agent to create new skill strategies it discovers' },
             { key: 'rewrite_existing', label: 'Rewrite Existing Skills', desc: 'Allow full skill rewrites (not just appends) — higher risk', isDanger: true },
             { key: 'accept_peer_skills', label: 'Accept Peer Skills', desc: 'Allow receiving skill files shared from connected peers', isDanger: true },
+            { key: 'auto_announce_to_dht', label: 'Auto-Announce to DHT', desc: 'Automatically announce shareable skills to the DHT network (requires accept_peer_skills)', isDanger: true },
           ] as skillPerm}
             <div class="setting-item">
               <label>
