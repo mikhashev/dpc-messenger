@@ -602,7 +602,6 @@
                 }}
                 title="{agent.name} (Profile: {agent.profile_name}, LLM: {agent.provider_alias})"
               >
-                <span class="agent-icon">🤖</span>
                 <span class="agent-name">{agent.name}</span>
                 <span class="agent-provider">{agent.provider_alias}</span>
                 {#if agent.telegram_enabled}
@@ -1407,10 +1406,6 @@
     align-items: center;
     gap: 0.5rem;
     width: 100%;
-  }
-
-  .agent-button .agent-icon {
-    font-size: 1rem;
   }
 
   .agent-button .agent-name {

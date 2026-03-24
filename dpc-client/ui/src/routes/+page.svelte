@@ -1539,6 +1539,26 @@
             loadingHistory.delete(activeChatId);
           }
         })();
+      } else if (activeChatId.startsWith('agent_') && !loadingHistory.has(activeChatId) && untrack(() => !tokenUsageMap.has(activeChatId))) {
+        // History was restored from localStorage but token counter needs refreshing.
+        // This happens after a full app restart: localStorage provides the messages but
+        // tokenUsageMap is empty, so the counter stays at 0 unless we fetch token data.
+        console.log(`[ChatHistory] Agent history cached but no token data - fetching from backend for ${activeChatId.slice(0,20)}`);
+        loadingHistory.add(activeChatId);
+        (async () => {
+          try {
+            const result = await sendCommand('get_conversation_history', { conversation_id: activeChatId });
+            if (result.tokens_used !== undefined && result.token_limit !== undefined && result.token_limit > 0) {
+              tokenUsageMap = new Map(tokenUsageMap);
+              tokenUsageMap.set(activeChatId, { used: result.tokens_used, limit: result.token_limit });
+              console.log(`[ChatHistory] Token counter refreshed for ${activeChatId.slice(0,20)}: ${result.tokens_used}/${result.token_limit}`);
+            }
+          } catch (e) {
+            console.error(`[ChatHistory] Error fetching token usage for ${activeChatId.slice(0,20)}:`, e);
+          } finally {
+            loadingHistory.delete(activeChatId);
+          }
+        })();
       } else {
         console.log(`[ChatHistory] Skipping load - already have ${currentHistory.length} messages`);
       }
@@ -5007,7 +5027,7 @@
           {#each $availableProviders.providers as provider}
             <option value={provider.alias}>
               {#if provider.alias === 'dpc_agent'}
-                🤖 DPC Agent (Autonomous AI with tools)
+                DPC Agent (Autonomous AI with tools)
               {:else}
                 {provider.alias} - {provider.model}
               {/if}
