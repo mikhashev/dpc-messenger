@@ -3818,11 +3818,11 @@
         }
         const base64Audio = btoa(binaryString);
         await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm');
-      } else if (activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_')) {
+      } else if (activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_')) {
         // For P2P chats, send via file transfer
         await sendVoiceMessage(activeChatId, blob, duration);
       }
-      // For AI chats, voice messages must be transcribed first (use handleTranscribeVoiceMessage instead)
+      // For AI/agent chats, voice messages must be transcribed first (use handleTranscribeVoiceMessage instead)
 
       // Clear preview
       voicePreview = null;
