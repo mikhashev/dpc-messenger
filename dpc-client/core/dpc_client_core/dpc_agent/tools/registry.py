@@ -63,6 +63,9 @@ class ToolContext:
     # a Telegram message so that schedule_task can propagate it into task data.
     reply_telegram_chat_id: Optional[str] = None
 
+    # Skill store for execute_skill tool (set by DpcAgent.process())
+    skill_store: Optional[Any] = None
+
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)
     # -----------------------------------------------------------------------
@@ -212,6 +215,8 @@ CORE_TOOL_NAMES = {
     "self_review", "request_critique", "compare_approaches", "quality_checklist", "consensus_check",
     # Messaging tools (agent-to-user communication)
     "send_user_message",
+    # Skill router (Read phase of Memento-Skills loop)
+    "execute_skill",
 }
 
 # Restricted tools (require explicit enable in config)

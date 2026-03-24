@@ -22,8 +22,9 @@ import copy
 import json
 import logging
 import pathlib
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
+from typing import Any
 from .utils import (
     utc_now_iso, read_text, clip_text, estimate_tokens, get_agent_root
 )
@@ -149,6 +150,32 @@ def _build_recent_sections(memory: Memory, task_id: str = "") -> List[str]:
     return sections
 
 
+def _build_skills_section(skill_store: Optional[Any]) -> str:
+    """Build the Available Skills section for the system prompt semi-stable block."""
+    if skill_store is None:
+        return ""
+    try:
+        skills = skill_store.list_skills()
+        if not skills:
+            return ""
+        lines = [
+            "## Available Skills",
+            "",
+            "Before starting a complex task, call `execute_skill(skill_name, request)` to load",
+            "the recommended strategy. Choose the skill whose description best matches your task.",
+            "",
+        ]
+        for s in skills:
+            desc = s.get("description", "").replace("\n", " ").strip()
+            if len(desc) > 160:
+                desc = desc[:160].rsplit(" ", 1)[0] + "..."
+            lines.append(f"- **{s['name']}**: {desc}")
+        return "\n".join(lines)
+    except Exception:
+        log.debug("Failed to build skills section", exc_info=True)
+        return ""
+
+
 def build_llm_messages(
     agent_root: pathlib.Path,
     memory: Memory,
@@ -157,6 +184,7 @@ def build_llm_messages(
     dpc_context: Optional[Dict[str, Any]] = None,
     session_state: Optional[Dict[str, Any]] = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
+    skill_store: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -198,6 +226,11 @@ def build_llm_messages(
         kb_index = read_text(kb_index_path)
         if kb_index.strip():
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
+
+    # Available skills (skill router — Read phase of Memento-Skills loop)
+    skills_section = _build_skills_section(skill_store)
+    if skills_section:
+        semi_stable_parts.append(skills_section)
 
     semi_stable_text = "\n\n".join(semi_stable_parts)
 

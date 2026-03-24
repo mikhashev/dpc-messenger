@@ -213,6 +213,7 @@ class DpcAgent:
             dpc_context=dpc_context,
             session_state=session_state,
             conversation_history=prior_history,
+            skill_store=self.skill_store,
         )
 
         # Set tool context with firewall-controlled tool access
@@ -226,6 +227,7 @@ class DpcAgent:
             firewall=self._firewall,  # For extended sandbox paths
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
+            skill_store=self.skill_store,  # For execute_skill tool
         )
         ctx._agent = self  # Enable schedule_task and other agent-dependent tools
         self.tools.set_context(ctx)
