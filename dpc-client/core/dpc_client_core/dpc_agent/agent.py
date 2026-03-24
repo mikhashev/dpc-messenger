@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from .llm_adapter import DpcLlmAdapter
 from .tools.registry import ToolRegistry, ToolContext
 from .memory import Memory
+from .skill_store import SkillStore
 from .context import build_llm_messages
 from .loop import run_llm_loop
 from .utils import (
@@ -105,6 +106,7 @@ class DpcAgent:
         self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias)
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
+        self.skill_store = SkillStore(agent_root=self.agent_root)
 
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)

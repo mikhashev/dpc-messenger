@@ -72,6 +72,7 @@ def ensure_agent_dirs(agent_id: Optional[str] = None) -> None:
     (root / "knowledge").mkdir(exist_ok=True)
     (root / "task_results").mkdir(exist_ok=True)
     (root / "logs" / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "skills").mkdir(exist_ok=True)
 
 
 # ---------------------------------------------------------------------------
@@ -650,6 +651,11 @@ def create_agent_storage(
     from .memory import Memory
     memory = Memory(agent_root=get_agent_root(agent_id))
     memory.ensure_files()
+
+    # Bootstrap starter skills (5 strategy files in skills/)
+    from .skill_store import SkillStore
+    skill_store = SkillStore(agent_root=get_agent_root(agent_id))
+    skill_store.ensure_starter_skills()
 
     # Create config
     config = {
