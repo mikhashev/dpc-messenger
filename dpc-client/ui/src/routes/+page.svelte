@@ -4032,10 +4032,14 @@
           const found = hist.some(m => m.commandId === responseCommandId);
           console.log(`[execute_ai_query] Found matching message: ${found}`);
 
+          // For agent chats, use the agent's display name as senderName
+          const agentSenderName = chatId?.startsWith('agent_') ? ($aiChats.get(chatId)?.name || undefined) : undefined;
+
           newMap.set(chatId, hist.map(m =>
             m.commandId === responseCommandId ? {
               ...m,
               sender: newSender,
+              senderName: agentSenderName,
               text: newText,
               model: modelName,
               thinking: thinkingContent,  // v1.4+: Thinking/reasoning content

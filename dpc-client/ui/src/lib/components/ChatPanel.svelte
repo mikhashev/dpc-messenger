@@ -163,7 +163,7 @@
                 {msg.senderName || 'You'}
               {/if}
             {:else if msg.sender === 'ai'}
-              {msg.model ? `AI (${msg.model})` : 'AI Assistant'}
+              {msg.senderName || (msg.model ? `AI (${msg.model})` : 'AI Assistant')}
             {:else}
               {#if conversationId.startsWith('group-')}
                 <!-- Group chat: Use peerDisplayNames or senderName (no truncation) -->
