@@ -60,6 +60,7 @@
         { key: 'knowledge_list', label: 'List Knowledge', desc: 'List knowledge topics' },
         { key: 'get_task_board', label: 'Progress Board', desc: 'Read task history and learning progress from the shared Agent Progress Board' },
         { key: 'extract_knowledge', label: 'Extract Knowledge', desc: 'Extract knowledge from conversation' },
+        { key: 'execute_skill', label: 'Execute Skill', desc: 'Load and follow skill strategies (Memento-Skills router — Read phase)' },
         { key: 'get_dpc_context', label: 'Get DPC Context', desc: 'Access DPC personal/device context' },
       ]
     },
@@ -160,6 +161,24 @@
         enabled: false,
         interval_minutes: 60,
         auto_apply: false
+      };
+    }
+  }
+
+  // Auto-initialize skills when entering edit mode so bind:checked doesn't crash
+  $: if (editMode && editSettings && !editSettings.skills) {
+    ensureSkillsSettings();
+  }
+
+  // Initialize skills object if missing
+  function ensureSkillsSettings() {
+    if (!editSettings) return;
+    if (!editSettings.skills) {
+      editSettings.skills = {
+        self_modify: true,
+        create_new: true,
+        rewrite_existing: false,
+        accept_peer_skills: false,
       };
     }
   }
@@ -335,6 +354,49 @@
         </div>
       {/if}
 
+      {#if !isGlobal}
+        <!-- Skills Settings Section (per-agent) -->
+        <div class="subsection">
+          <h4>Skills Settings</h4>
+          <p class="help-text-small">Configure Memento-Skills self-modification behavior (write phase)</p>
+
+          {#each [
+            { key: 'self_modify', label: 'Self-Modify Skills', desc: 'Allow agent to append improvements to its skill files after tasks' },
+            { key: 'create_new', label: 'Create New Skills', desc: 'Allow agent to create new skill strategies it discovers' },
+            { key: 'rewrite_existing', label: 'Rewrite Existing Skills', desc: 'Allow full skill rewrites (not just appends) — higher risk', isDanger: true },
+            { key: 'accept_peer_skills', label: 'Accept Peer Skills', desc: 'Allow receiving skill files shared from connected peers', isDanger: true },
+          ] as skillPerm}
+            <div class="setting-item">
+              <label>
+                {#if editMode && editSettings}
+                  <input
+                    type="checkbox"
+                    id="agent-skills-{skillPerm.key}"
+                    bind:checked={editSettings.skills[skillPerm.key]}
+                  />
+                {:else}
+                  <input
+                    type="checkbox"
+                    checked={displaySettings.skills?.[skillPerm.key] || false}
+                    disabled
+                  />
+                {/if}
+                <span style={skillPerm.isDanger ? 'color: var(--danger);' : ''}>{skillPerm.label}</span>
+              </label>
+              <p class="help-text-small">{skillPerm.desc}</p>
+            </div>
+          {/each}
+
+          {#if !editMode}
+            <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
+              <strong>Skills</strong> are markdown strategy files the agent learns to use better over time.
+              Self-modify allows appending "Lessons Learned" sections after tasks with ≥5 LLM rounds.
+              Peer skills require explicit opt-in and are sandboxed to the agent's storage.
+            </div>
+          {/if}
+        </div>
+      {/if}
+
       <!-- Tool Permissions Section -->
       <div class="subsection">
         <h4>Tool Permissions</h4>
@@ -386,57 +448,71 @@
           {#if editMode && editSettings}
             <div class="sandbox-paths-config">
               <!-- Read-Only Paths -->
-              <div class="path-section">
-                <span class="path-label">📖 Read-Only Paths</span>
+              <div class="path-group-card">
+                <div class="path-group-header">
+                  <span class="path-label">📖 Read-Only Paths</span>
+                  <button
+                    type="button"
+                    class="btn-path-add"
+                    on:click={() => addPath('read_only')}
+                  >+ Add Path</button>
+                </div>
                 <p class="help-text-small">Agent can read but not modify files in these directories</p>
 
-                {#each getSandboxExtensions(editSettings, 'read_only') as path, i}
-                  <div class="path-entry">
-                    <input
-                      type="text"
-                      class="path-input"
-                      bind:value={editSettings.sandbox_extensions.read_only[i]}
-                      placeholder="C:\Users\you\Documents\notes"
-                    />
-                    <button
-                      type="button"
-                      class="remove-path-btn"
-                      on:click={() => removePath('read_only', i)}
-                    >✕</button>
-                  </div>
-                {/each}
-                <button
-                  type="button"
-                  class="add-path-btn"
-                  on:click={() => addPath('read_only')}
-                >+ Add Read-Only Path</button>
+                <div class="path-list-edit">
+                  {#each getSandboxExtensions(editSettings, 'read_only') as path, i}
+                    <div class="path-entry">
+                      <input
+                        type="text"
+                        class="path-input"
+                        bind:value={editSettings.sandbox_extensions.read_only[i]}
+                        placeholder="C:\Users\you\Documents\notes"
+                      />
+                      <button
+                        type="button"
+                        class="btn-path-remove"
+                        on:click={() => removePath('read_only', i)}
+                        title="Remove path"
+                      >×</button>
+                    </div>
+                  {:else}
+                    <p class="empty-small">No paths configured</p>
+                  {/each}
+                </div>
               </div>
 
               <!-- Read-Write Paths -->
-              <div class="path-section" style="margin-top: 1rem;">
-                <span class="path-label">✏️ Read-Write Paths</span>
+              <div class="path-group-card">
+                <div class="path-group-header">
+                  <span class="path-label">✏️ Read-Write Paths</span>
+                  <button
+                    type="button"
+                    class="btn-path-add"
+                    on:click={() => addPath('read_write')}
+                  >+ Add Path</button>
+                </div>
                 <p class="help-text-small">Agent can read and modify files in these directories</p>
 
-                {#each getSandboxExtensions(editSettings, 'read_write') as path, i}
-                  <div class="path-entry">
-                    <input
-                      type="text"
-                      class="path-input"
-                      bind:value={editSettings.sandbox_extensions.read_write[i]}
-                      placeholder="C:\Users\you\projects\myapp"
-                    />
-                    <button
-                      type="button"
-                      class="remove-path-btn"
-                      on:click={() => removePath('read_write', i)}
-                    >✕</button>
-                  </div>
-                {/each}
-                <button
-                  type="button"
-                  class="add-path-btn"
-                  on:click={() => addPath('read_write')}
-                >+ Add Read-Write Path</button>
+                <div class="path-list-edit">
+                  {#each getSandboxExtensions(editSettings, 'read_write') as path, i}
+                    <div class="path-entry">
+                      <input
+                        type="text"
+                        class="path-input"
+                        bind:value={editSettings.sandbox_extensions.read_write[i]}
+                        placeholder="C:\Users\you\projects\myapp"
+                      />
+                      <button
+                        type="button"
+                        class="btn-path-remove"
+                        on:click={() => removePath('read_write', i)}
+                        title="Remove path"
+                      >×</button>
+                    </div>
+                  {:else}
+                    <p class="empty-small">No paths configured</p>
+                  {/each}
+                </div>
               </div>
             </div>
           {:else if displaySettings?.sandbox_extensions}
@@ -595,84 +671,125 @@
     border-radius: 4px;
   }
 
-  /* Sandbox path styles */
+  /* Sandbox path styles — mirrors FirewallEditor Node Groups pattern */
   .sandbox-paths-config {
-    background: var(--bg-primary);
-    padding: 1rem;
-    border-radius: 8px;
-    border: 1px solid var(--border-color);
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
     margin-top: 0.5rem;
   }
 
-  .path-section {
-    margin-bottom: 1rem;
+  .path-group-card {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+    background: var(--bg-primary);
+  }
+
+  .path-group-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.25rem;
   }
 
   .path-label {
     font-weight: 600;
-    display: block;
-    margin-bottom: 0.25rem;
+  }
+
+  .path-list-edit {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    margin-top: 0.5rem;
   }
 
   .path-entry {
     display: flex;
-    gap: 0.5rem;
-    margin-bottom: 0.5rem;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.4rem 0.5rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
   }
 
   .path-input {
     flex: 1;
-    padding: 0.5rem;
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    background: var(--bg-secondary);
+    background: transparent;
+    border: none;
+    outline: none;
+    font-family: monospace;
+    font-size: 0.85rem;
     color: var(--text-primary);
+    min-width: 0;
   }
 
-  .add-path-btn {
-    padding: 0.5rem 1rem;
-    background: var(--primary);
+  .btn-path-add {
+    padding: 0.2rem 0.6rem;
+    font-size: 0.82rem;
+    background: var(--primary, #2196F3);
     color: white;
     border: none;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 0.9rem;
+    white-space: nowrap;
   }
 
-  .add-path-btn:hover {
-    background: var(--primary-dark);
+  .btn-path-add:hover {
+    opacity: 0.85;
   }
 
-  .remove-path-btn {
-    padding: 0.5rem;
-    background: var(--danger);
-    color: white;
+  .btn-path-remove {
+    background: none;
     border: none;
-    border-radius: 4px;
     cursor: pointer;
+    font-size: 1.3rem;
+    line-height: 1;
+    color: var(--text-secondary, #999);
+    padding: 0 0.2rem;
+    flex-shrink: 0;
   }
 
-  .remove-path-btn:hover {
-    opacity: 0.8;
+  .btn-path-remove:hover {
+    color: var(--danger, #f44336);
+  }
+
+  .empty-small {
+    font-size: 0.82rem;
+    color: var(--text-secondary);
+    font-style: italic;
+    margin: 0.25rem 0 0 0;
   }
 
   .sandbox-paths-display {
     background: var(--bg-primary);
-    padding: 1rem;
+    padding: 0.75rem;
     border-radius: 8px;
     border: 1px solid var(--border-color);
     margin-top: 0.5rem;
   }
 
   .path-list {
-    margin: 0.5rem 0 0 1.5rem;
+    list-style: none;
+    margin: 0.25rem 0 0 0;
     padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
   }
 
   .path-list li {
-    margin-bottom: 0.25rem;
     font-family: monospace;
-    font-size: 0.9rem;
+    font-size: 0.8rem;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    padding: 0.2rem 0.5rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   select {

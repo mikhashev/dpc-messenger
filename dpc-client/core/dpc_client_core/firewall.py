@@ -128,6 +128,8 @@ class ContextFirewall:
             'get_task_board': True,     # Read task history + learning progress (Agent Progress Board)
             'extract_knowledge': True,  # Extract knowledge from conversation to knowledge base
             'deduplicate_identity': True,  # Clean up duplicate sections in identity
+            # Memento-Skills tools (v0.20.0+)
+            'execute_skill': True,  # Load skill strategy by name (Read phase)
             # DPC integration
             'get_dpc_context': True,
             # Web tools
@@ -1471,6 +1473,8 @@ class ContextFirewall:
                                 'extract_knowledge', 'deduplicate_identity',
                                 # Task type management tools (v0.18.0+)
                                 'register_task_type', 'list_task_types', 'unregister_task_type',
+                                # Memento-Skills tools (v0.20.0+)
+                                'execute_skill',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):
@@ -1495,6 +1499,18 @@ class ContextFirewall:
                                     errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
                             if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
                                 errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
+
+                    # Validate skills settings (v0.20.0+)
+                    if 'skills' in dpc_agent:
+                        skills = dpc_agent['skills']
+                        if not isinstance(skills, dict):
+                            errors.append("'dpc_agent.skills' must be a dictionary")
+                        else:
+                            bool_fields = ('self_modify', 'create_new', 'rewrite_existing',
+                                           'accept_peer_skills', 'auto_announce_to_dht')
+                            for field in bool_fields:
+                                if field in skills and not isinstance(skills[field], bool):
+                                    errors.append(f"'dpc_agent.skills.{field}' must be a boolean")
 
             # Validate agent_profiles section (v0.19.0+)
             if 'agent_profiles' in config_dict:
@@ -1547,6 +1563,8 @@ class ContextFirewall:
                                         'send_user_message',
                                         'extract_knowledge', 'deduplicate_identity',
                                         'register_task_type', 'list_task_types', 'unregister_task_type',
+                                        # Memento-Skills tools (v0.20.0+)
+                                        'execute_skill',
                                     }
                                     for tool_name, tool_enabled in tools.items():
                                         if tool_name.startswith('_'):

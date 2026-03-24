@@ -192,7 +192,9 @@ class LocalApiServer:
                         context = payload.get("context", "ui")
                         msg = payload.get("message", "")
                         log_fn = _UI_LOG_LEVELS.get(level, ui_logger.info)
-                        log_fn("[%s] %s", context, msg)
+                        # Sanitize surrogates — emojis from JS UTF-16 can produce lone surrogates
+                        safe_msg = msg.encode("utf-8", errors="replace").decode("utf-8")
+                        log_fn("[%s] %s", context, safe_msg)
                         await websocket.send(json.dumps({"id": command_id, "command": command, "status": "OK", "payload": {}}))
                         continue
 
