@@ -619,7 +619,7 @@
       console.log(`[Telegram] Adding message to chat ${conversation_id}: ${text}`);
 
       // Auto-create conversation in aiChats if it doesn't exist
-      if (!$aiChats.has(conversation_id)) {
+      if (!$aiChats.has(conversation_id) && !conversation_id.startsWith('dpc-node-')) {
         aiChats.update(chats => {
           const newMap = new Map(chats);
           newMap.set(conversation_id, {
@@ -684,7 +684,7 @@
       console.log(`[Telegram] Adding voice message to chat ${conversation_id}: ${filename}`);
 
       // Auto-create conversation in aiChats if it doesn't exist
-      if (!$aiChats.has(conversation_id)) {
+      if (!$aiChats.has(conversation_id) && !conversation_id.startsWith('dpc-node-')) {
         aiChats.update(chats => {
           const newMap = new Map(chats);
           newMap.set(conversation_id, {
@@ -767,7 +767,7 @@
       console.log(`[Telegram] Adding image to chat ${conversation_id}: ${filename}`);
 
       // Auto-create conversation in aiChats if it doesn't exist
-      if (!$aiChats.has(conversation_id)) {
+      if (!$aiChats.has(conversation_id) && !conversation_id.startsWith('dpc-node-')) {
         aiChats.update(chats => {
           const newMap = new Map(chats);
           newMap.set(conversation_id, {
@@ -837,7 +837,7 @@
       console.log(`[Telegram] Adding file to chat ${conversation_id}: ${filename}`);
 
       // Auto-create conversation in aiChats if it doesn't exist
-      if (!$aiChats.has(conversation_id)) {
+      if (!$aiChats.has(conversation_id) && !conversation_id.startsWith('dpc-node-')) {
         aiChats.update(chats => {
           const newMap = new Map(chats);
           newMap.set(conversation_id, {
@@ -1055,9 +1055,16 @@
 
         aiChats.update(chats => {
           const newMap = new Map(chats);
+          // Remove any stale entries where a P2P node_id was mistakenly stored as an AI/Telegram chat
+          for (const id of newMap.keys()) {
+            if (id.startsWith('dpc-node-')) {
+              newMap.delete(id);
+              console.warn(`[AI Chats] Removed stale P2P node entry from aiChats: ${id}`);
+            }
+          }
           for (const [id, info] of Object.entries(aiChatsData)) {
-            // Only restore if not already in aiChats (excluding telegram chats)
-            if (!newMap.has(id) && !id.startsWith('telegram-')) {
+            // Only restore if not already in aiChats (excluding telegram chats and P2P node IDs)
+            if (!newMap.has(id) && !id.startsWith('telegram-') && !id.startsWith('dpc-node-')) {
               newMap.set(id, info as { name: string; provider: string; instruction_set_name?: string });
               restoredCount++;
             }
@@ -1074,7 +1081,7 @@
           const newMap = new Map(map);
           for (const [id, info] of Object.entries(aiChatsData)) {
             const chatInfo = info as { name: string; provider: string; instruction_set_name?: string };
-            if (chatInfo.provider && !id.startsWith('telegram-')) {
+            if (chatInfo.provider && !id.startsWith('telegram-') && !id.startsWith('dpc-node-')) {
               newMap.set(id, chatInfo.provider);
             }
           }
