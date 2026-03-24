@@ -100,7 +100,12 @@ class EvolutionManager:
         "memory/scratchpad.md",
         "memory/knowledge/",
         "config/agent.json",
+        "skills/",  # Skill strategies (SKILL.md files under skills/*/SKILL.md)
     }
+
+    # Skill appends are auto-approved even when auto_apply=False.
+    # Only memory/identity changes require manual approval.
+    SKILL_AUTO_APPROVE_PATH_PREFIX = "skills/"
 
     # Patterns that are NEVER allowed in paths
     FORBIDDEN_PATTERNS = [
@@ -227,7 +232,16 @@ class EvolutionManager:
                     log.warning(f"Skipping proposal with forbidden path: {proposal['path']}")
                     continue
 
-                if self.auto_apply:
+                # Skill appends are auto-approved even when auto_apply=False.
+                # They only add content (never rewrite) so the risk is low and
+                # they fix measured performance gaps. Memory/identity changes
+                # still require explicit approval via the standard queue.
+                is_skill_append = (
+                    proposal["path"].startswith(self.SKILL_AUTO_APPROVE_PATH_PREFIX)
+                    and proposal.get("change_type") == "append"
+                )
+
+                if self.auto_apply or is_skill_append:
                     success = await self._apply_change(proposal)
                     if success:
                         cycle.changes_applied += 1
@@ -238,7 +252,7 @@ class EvolutionManager:
                             "description": proposal["description"][:200],
                         })
                 else:
-                    # Queue for human approval
+                    # Queue for human approval (memory/identity changes)
                     self._queue_for_approval(proposal)
 
             # Step 4: Update identity with learnings
@@ -287,55 +301,103 @@ class EvolutionManager:
         # Count knowledge topics
         knowledge_topics = memory.list_knowledge_topics()
 
+        # Read skill performance data (_stats.json) — primary signal for improvement
+        skill_stats: Dict[str, Any] = {}
+        underperforming_skills: List[Dict[str, Any]] = []
+        try:
+            skill_store = getattr(self.agent, "skill_store", None)
+            if skill_store is not None:
+                skill_stats = skill_store.get_stats()
+                available_skills = skill_store.list_skill_names()
+                for skill_name in available_skills:
+                    stats = skill_stats.get(skill_name, {})
+                    total = stats.get("success_count", 0) + stats.get("failure_count", 0)
+                    if total < 3:
+                        continue  # Not enough data yet
+                    failure_rate = stats.get("failure_count", 0) / total
+                    avg_rounds = stats.get("avg_rounds", 0)
+                    # Flag as underperforming if >30% failure rate or avg rounds > 10
+                    if failure_rate > 0.30 or avg_rounds > 10:
+                        underperforming_skills.append({
+                            "name": skill_name,
+                            "failure_rate": round(failure_rate, 2),
+                            "avg_rounds": avg_rounds,
+                            "total_uses": total,
+                            "improvement_count": len(stats.get("improvement_log", [])),
+                        })
+        except Exception as e:
+            log.debug(f"Failed to read skill stats: {e}")
+
         return {
-            "files_examined": 4,
+            "files_examined": 5,
             "tool_calls_count": len(tools_log),
             "thoughts_count": len(thoughts_log),
             "identity_length": len(identity),
             "scratchpad_length": len(scratchpad),
             "knowledge_topics": len(knowledge_topics),
+            "underperforming_skills": underperforming_skills,
+            "total_skill_stats": len(skill_stats),
             "improvement_areas": [],  # Will be populated by LLM
         }
 
     async def _generate_proposals(self, analysis: Dict) -> List[Dict]:
         """Generate improvement proposals using LLM."""
-        prompt = f"""Analyze the agent state and propose specific improvements.
+        underperforming = analysis.get("underperforming_skills", [])
 
-Current state:
-- Tool calls made recently: {analysis['tool_calls_count']}
-- Background thoughts completed: {analysis['thoughts_count']}
-- Identity document length: {analysis['identity_length']} chars
-- Scratchpad length: {analysis['scratchpad_length']} chars
+        # Build the skill-focused section of the prompt
+        if underperforming:
+            skill_section = "## Underperforming Skills (primary improvement target)\n"
+            for s in underperforming[:3]:
+                skill_section += (
+                    f"\n- **{s['name']}**: failure_rate={s['failure_rate']:.0%}, "
+                    f"avg_rounds={s['avg_rounds']:.1f}, uses={s['total_uses']}, "
+                    f"prior_improvements={s['improvement_count']}"
+                )
+            skill_section += (
+                "\n\nFor each underperforming skill, propose an APPEND to "
+                "skills/{skill-name}/SKILL.md that adds a missing step or "
+                "common-failure entry. Path format: skills/{name}/SKILL.md"
+            )
+        else:
+            skill_section = (
+                "No skills are underperforming right now. "
+                "Consider memory/identity.md or memory/knowledge/ improvements only."
+            )
+
+        prompt = f"""You are an evolution cycle for an AI agent. Propose targeted improvements based on performance data.
+
+## Performance Data
+- Recent tool calls: {analysis['tool_calls_count']}
 - Knowledge topics: {analysis['knowledge_topics']}
+- Skills tracked: {analysis['total_skill_stats']}
 
-Sandbox constraints - you can ONLY modify these files under ~/.dpc/agent/:
-- memory/identity.md (your self-understanding)
-- memory/scratchpad.md (your working notes)
-- memory/knowledge/*.md (your knowledge base)
+{skill_section}
 
-You CANNOT access:
-- DPC Messenger code
-- ~/.dpc/personal.json (user's personal data)
-- ~/.dpc/config.ini (user configuration)
+## Sandbox — ONLY these paths are allowed:
+- skills/{{name}}/SKILL.md  (append only — fix underperforming skills)
+- memory/identity.md        (append only — add new self-understanding)
+- memory/knowledge/{{topic}}.md  (append — add new knowledge)
 
-Propose 1-3 specific, actionable improvements. Focus on:
-1. Learning from recent mistakes or successes
-2. Consolidating insights into knowledge
-3. Updating your identity with new understanding
+## Rules
+1. Prefer skill improvements when underperforming skills exist — they have measurable impact
+2. Skill changes MUST be "append" only — never replace full SKILL.md
+3. Content for skill appends should go under a new markdown section heading
+4. Only propose changes that address a specific observed gap, not hypothetical improvements
+5. Propose at most 2 changes total
 
-Respond with a JSON object in this exact format:
+Respond with JSON only:
 {{
   "proposals": [
     {{
-      "path": "memory/identity.md",
+      "path": "skills/code-analysis/SKILL.md",
       "change_type": "append",
-      "content": "## Recent Learning\\n\\n...",
-      "description": "Brief description of what this adds"
+      "content": "## Additional Tips\\n\\n- Always check X before Y...",
+      "description": "Add missing step for handling monorepos"
     }}
   ]
 }}
 
-If no improvements are needed, respond with: {{"proposals": []}}
+If no improvements are warranted: {{"proposals": []}}
 """
 
         try:
