@@ -108,6 +108,7 @@ class DpcAgent:
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
         self.skill_store = SkillStore(agent_root=self.agent_root)
+        self.skill_store.ensure_starter_skills()  # bootstrap for existing agents on first run
         self.skill_reflector = SkillReflector(
             skill_store=self.skill_store,
             llm=self.llm,
