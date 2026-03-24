@@ -3822,11 +3822,14 @@
         }
         const base64Audio = btoa(binaryString);
         await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm');
-      } else if (activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_')) {
+      } else if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_')) {
+        // For AI/agent chats, transcribe audio into the input field
+        await handleTranscribeVoiceMessage();
+        return; // handleTranscribeVoiceMessage clears voicePreview itself
+      } else {
         // For P2P chats, send via file transfer
         await sendVoiceMessage(activeChatId, blob, duration);
       }
-      // For AI/agent chats, voice messages must be transcribed first (use handleTranscribeVoiceMessage instead)
 
       // Clear preview
       voicePreview = null;
