@@ -2963,9 +2963,6 @@
       return;
     }
 
-    // Create new AI chat ID
-    const chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
-
     // Determine chat name
     let chatName: string;
     if (selectedProviderForNewChat === 'dpc_agent') {
@@ -2974,6 +2971,11 @@
     } else {
       chatName = `${provider.alias} (${provider.model})`;
     }
+
+    // For agent chats, use the backend agent_id as chatId so activeChatId starts
+    // with 'agent_' and all agent-specific UI checks work correctly from the start.
+    // For regular AI chats, generate a temporary ai_chat_XXX id as before.
+    let chatId = `ai_chat_${crypto.randomUUID().slice(0, 8)}`;
 
     // If creating a DPC Agent, also create backend agent storage (v0.19.0+)
     if (selectedProviderForNewChat === 'dpc_agent') {
@@ -2986,8 +2988,10 @@
         );
         if (result?.status === 'success') {
           console.log('[DPC Agent] Created agent storage:', result.agent_id);
-          // Store agent_id in chat metadata for later reference
-          agentChatToAgentId.set(chatId, result.agent_id);
+          // Use the backend agent_id as the chat ID — makes this chat
+          // indistinguishable from one opened via the Sidebar agent list.
+          chatId = result.agent_id;
+          agentChatToAgentId.set(chatId, chatId);
 
           // Show success toast
           agentToastMessage = `Agent "${chatName}" created successfully`;
