@@ -290,6 +290,22 @@ class ContextFirewall:
             return False
         return self.dpc_agent_knowledge_access == 'read_write'
 
+    def get_agent_skill_permission(self, operation: str) -> bool:
+        """
+        Check if agent has permission for a skill self-modification operation.
+
+        Args:
+            operation: One of: 'self_modify', 'create_new', 'rewrite_existing',
+                       'accept_peer_skills', 'auto_announce_to_dht'
+
+        Returns:
+            True if permitted, False otherwise (defaults to False = safe)
+        """
+        if not self.dpc_agent_enabled:
+            return False
+        skills_config = self.rules.get('dpc_agent', {}).get('skills', {})
+        return bool(skills_config.get(operation, False))
+
     def get_allowed_agent_tools(self) -> set:
         """
         Get the set of tools the agent is allowed to use.

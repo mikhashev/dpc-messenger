@@ -29,6 +29,7 @@ from .llm_adapter import DpcLlmAdapter
 from .tools.registry import ToolRegistry, ToolContext
 from .memory import Memory
 from .skill_store import SkillStore
+from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
 from .loop import run_llm_loop
 from .utils import (
@@ -107,6 +108,11 @@ class DpcAgent:
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
         self.skill_store = SkillStore(agent_root=self.agent_root)
+        self.skill_reflector = SkillReflector(
+            skill_store=self.skill_store,
+            llm=self.llm,
+            firewall=firewall,
+        )
 
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)
@@ -263,6 +269,18 @@ class DpcAgent:
 
         # Store last usage for session state access by agent_manager
         self._last_usage = usage
+
+        # Phase 3: Skill Write phase — record outcomes, optionally reflect
+        used_skills = self.skill_reflector.record_outcome(trace, usage)
+        if used_skills and usage.get("rounds", 0) >= REFLECTION_ROUNDS_THRESHOLD:
+            asyncio.ensure_future(
+                self.skill_reflector.reflect_async(
+                    skill_name=used_skills[0],
+                    task_text=message,
+                    llm_trace=trace,
+                    usage=usage,
+                )
+            )
 
         completed_at = utc_now_iso()
 
