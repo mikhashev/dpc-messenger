@@ -407,6 +407,11 @@ async def run_llm_loop(
             for tc in tool_calls:
                 try:
                     raw_args = tc["function"].get("arguments", {})
+                    if isinstance(raw_args, str):
+                        try:
+                            raw_args = json.loads(raw_args)
+                        except Exception:
+                            pass
                     args_key = json.dumps(raw_args, sort_keys=True) if isinstance(raw_args, dict) else str(raw_args)
                     fingerprint = f"{tc['function']['name']}::{args_key}"
                     _tool_call_counts[fingerprint] = _tool_call_counts.get(fingerprint, 0) + 1
