@@ -502,7 +502,7 @@
   $: effectiveEditProfile = editedRules
     ? (selectedAgentId === 'default'
         ? editedRules.dpc_agent || null
-        : editedRules.agent_profiles?.[selectedAgentId] || editedRules.dpc_agent || null)
+        : editedRules.agent_profiles?.[selectedAgentId] || null)
     : null;
 
   // Track whether current agent uses inherited (global) settings
@@ -510,6 +510,12 @@
   $: agentUsesInheritedSettings = selectedAgentId !== 'default'
     && editedRules
     && (!editedRules.agent_profiles?.[selectedAgentId] || getSelectedAgentProfile() === 'default');
+
+  // Auto-create per-agent profile (copy-on-write from global) when entering edit mode.
+  // This ensures edits never mutate the shared dpc_agent object.
+  $: if (editMode && selectedAgentId && selectedAgentId !== 'default' && editedRules) {
+    ensureAgentProfileExists();
+  }
 
   // Create agent profile as copy of global settings (copy-on-write)
   function ensureAgentProfileExists(): void {
