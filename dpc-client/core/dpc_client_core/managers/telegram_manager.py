@@ -40,6 +40,53 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class _TelegramNetworkErrorFilter(logging.Filter):
+    """
+    Suppress repetitive Telegram NetworkError log spam.
+
+    The telegram library's network_retry_loop retries polling indefinitely,
+    logging an ERROR-level traceback for every failure. When Telegram is
+    unavailable this produces hundreds of error lines per minute.
+
+    This filter passes the first `threshold` occurrences, then suppresses
+    subsequent messages and emits a summary every `report_every` occurrences.
+    """
+
+    def __init__(self, threshold: int = 3, report_every: int = 50):
+        super().__init__()
+        self._threshold = threshold
+        self._report_every = report_every
+        self._count = 0
+
+    def reset(self) -> None:
+        self._count = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        is_network_noise = (
+            'Exception happened while polling' in msg
+            or 'Network Retry Loop' in msg
+            or 'NetworkError' in msg
+            or 'httpx.ReadError' in msg
+            or 'httpcore.ReadError' in msg
+        )
+        if not is_network_noise:
+            self._count = 0
+            return True
+
+        self._count += 1
+        if self._count <= self._threshold:
+            return True
+        if self._count % self._report_every == 0:
+            # Emit a single summary at WARNING so it's visible but not noisy
+            logger.warning(
+                "Telegram polling: %d consecutive network errors "
+                "(Telegram may be unreachable). Continuing to retry silently.",
+                self._count,
+            )
+        return False
+
 # Telegram Bot API limits
 TELEGRAM_MESSAGE_MAX_LENGTH = 4096  # Text messages
 TELEGRAM_CAPTION_MAX_LENGTH = 1024  # Caption for media (voice, photo, document)
@@ -120,6 +167,10 @@ class TelegramBotManager:
         # Message queue for outgoing messages (rate limiting)
         self._outgoing_queue: asyncio.Queue = asyncio.Queue()
         self._sender_task: Optional[asyncio.Task] = None
+
+        # Network error log filter (installed on polling start, removed on stop)
+        self._network_filter = _TelegramNetworkErrorFilter(threshold=3, report_every=50)
+        self._filtered_loggers: list[logging.Logger] = []
 
         logger.info(
             f"TelegramBotManager initialized (webhook={self.use_webhook}, "
@@ -273,6 +324,18 @@ class TelegramBotManager:
                             drop_updates = True  # Fallback to prevent duplicates
                             logger.warning("Falling back to drop_pending_updates=True to prevent duplicates")
 
+                    # Install network error filter to suppress log spam when
+                    # Telegram is unreachable (library retries indefinitely).
+                    self._network_filter.reset()
+                    self._filtered_loggers = [
+                        logging.getLogger('telegram.ext._updater'),
+                        logging.getLogger('telegram.ext._utils.networkloop'),
+                        logging.getLogger('httpcore'),
+                        logging.getLogger('httpx'),
+                    ]
+                    for _lg in self._filtered_loggers:
+                        _lg.addFilter(self._network_filter)
+
                     await self.application.updater.start_polling(drop_pending_updates=drop_updates)
                     logger.info(f"Telegram bot started (polling mode, drop_updates={drop_updates})")
 
@@ -336,6 +399,11 @@ class TelegramBotManager:
                     await self._sender_task
                 except asyncio.CancelledError:
                     pass
+
+            # Remove network error filter from all loggers
+            for _lg in self._filtered_loggers:
+                _lg.removeFilter(self._network_filter)
+            self._filtered_loggers.clear()
 
             # Stop bot application
             if self.application:
