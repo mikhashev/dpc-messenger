@@ -663,6 +663,11 @@ class DpcAgentManager:
             if history_path.exists():
                 monitor.load_history()
                 log.debug(f"Loaded {len(monitor.message_history)} messages from disk for {conversation_id}")
+                # Also restore full_conversation/message_buffer for knowledge extraction.
+                # load_history() only fills message_history (the dict store); without this
+                # rebuild, end_session would only analyze messages from the current
+                # in-memory session and miss all historical context.
+                monitor.rebuild_extraction_buffers_from_history()
 
             self._agent_monitors[conversation_id] = monitor
             log.debug(f"Created ConversationMonitor for agent conversation: {conversation_id}")

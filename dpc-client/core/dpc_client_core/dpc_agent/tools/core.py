@@ -2010,7 +2010,7 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=extract_knowledge,
-            timeout_sec=60,  # May need time for LLM-based extraction
+            timeout_sec=300,  # GLM-4.7 extended thinking can take 2-5 min
         ),
 
         # DPC integration

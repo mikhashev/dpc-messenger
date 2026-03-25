@@ -83,6 +83,11 @@ class ConversationMonitor:
         self.full_conversation: List[Message] = []  # Never cleared (for manual "End Session" extraction)
         self.knowledge_score: float = 0.0
 
+        # Flag to prevent concurrent knowledge extraction (e.g., tool + end_session running simultaneously).
+        # Note: not a proper lock — just a best-effort guard since the background thread that runs
+        # extract_knowledge uses a separate event loop and can't share an asyncio.Lock.
+        self._extracting: bool = False
+
         # Tracking
         self.proposals_created: int = 0
         self.last_analysis_time: Optional[str] = None
@@ -200,29 +205,43 @@ class ConversationMonitor:
         if not self.message_buffer:
             return None
 
-        # Calculate score if not already done
-        if self.knowledge_score == 0.0:
-            self.knowledge_score = await self._calculate_knowledge_score()
-            self.last_analysis_time = datetime.now(timezone.utc).isoformat()
+        # Best-effort guard against concurrent extractions (e.g., extract_knowledge tool
+        # background thread racing with end_session).  Not a hard lock because the tool
+        # runs asyncio.run() in a separate thread/event-loop.
+        if self._extracting:
+            logger.warning(
+                "generate_commit_proposal called while extraction already in progress for %s — skipping",
+                self.conversation_id,
+            )
+            return None
 
-        # Check if we should generate proposal
-        if force or self.knowledge_score > self.knowledge_threshold:
-            try:
-                # Generate proposal
-                proposal = await self._generate_commit_proposal()
+        self._extracting = True
+        try:
+            # Calculate score if not already done
+            if self.knowledge_score == 0.0:
+                self.knowledge_score = await self._calculate_knowledge_score()
+                self.last_analysis_time = datetime.now(timezone.utc).isoformat()
 
-                # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
-                # Buffer will be cleared by consensus_manager when proposal is approved
-                if proposal is not None:
-                    self.proposals_created += 1
+            # Check if we should generate proposal
+            if force or self.knowledge_score > self.knowledge_threshold:
+                try:
+                    # Generate proposal
+                    proposal = await self._generate_commit_proposal()
 
-                return proposal
-            except Exception as e:
-                # Log error but DON'T clear buffer to allow retry (v0.14.0 fix)
-                logger.error(f"Error generating proposal (buffer preserved for retry): {e}", exc_info=True)
-                raise  # Re-raise so caller knows it failed
+                    # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
+                    # Buffer will be cleared by consensus_manager when proposal is approved
+                    if proposal is not None:
+                        self.proposals_created += 1
 
-        return None
+                    return proposal
+                except Exception as e:
+                    # Log error but DON'T clear buffer to allow retry (v0.14.0 fix)
+                    logger.error(f"Error generating proposal (buffer preserved for retry): {e}", exc_info=True)
+                    raise  # Re-raise so caller knows it failed
+
+            return None
+        finally:
+            self._extracting = False
 
     def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
         """Infer inference settings when not explicitly tracked.
@@ -1680,6 +1699,44 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         except Exception as e:
             logger.error(f"Failed to load history from {path}: {e}")
             return False
+
+    def rebuild_extraction_buffers_from_history(self) -> int:
+        """Rebuild full_conversation and message_buffer from message_history.
+
+        Called after load_history() to restore the knowledge-extraction buffers
+        that are NOT persisted to disk. Without this, end_session extraction
+        only sees messages from the current in-memory session, missing all
+        historical messages loaded from disk.
+
+        Only adds messages that are not already in full_conversation (by message_id),
+        so it is safe to call even when some messages were added via add_message().
+
+        Returns:
+            Number of messages added to full_conversation
+        """
+        import uuid as _uuid
+        existing_ids = {msg.message_id for msg in self.full_conversation}
+        added = 0
+        for msg in self.message_history:
+            msg_id = msg.get("id", "")
+            if msg_id and msg_id in existing_ids:
+                continue  # already present
+            message_obj = Message(
+                message_id=msg_id or str(_uuid.uuid4()),
+                conversation_id=self.conversation_id,
+                sender_node_id=msg.get("sender_node_id", "local"),
+                sender_name=msg.get("sender_name", msg.get("role", "user").capitalize()),
+                text=msg.get("content", ""),
+                timestamp=msg.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            )
+            self.full_conversation.append(message_obj)
+            self.message_buffer.append(message_obj)
+            if msg_id:
+                existing_ids.add(msg_id)
+            added += 1
+        if added:
+            logger.debug(f"Rebuilt extraction buffers: added {added} historical messages for {self.conversation_id}")
+        return added
 
     def add_message_with_id(self, message: Dict[str, Any]) -> bool:
         """Add a message to history with duplicate detection
