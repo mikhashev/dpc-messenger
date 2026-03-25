@@ -3831,6 +3831,17 @@
         await sendVoiceMessage(activeChatId, blob, duration);
       }
 
+      // Delete Tauri temp WAV file (blob is already in memory / queued for transfer)
+      const tempFilePath = voicePreview?.filePath;
+      if (tempFilePath) {
+        try {
+          const { remove } = await import('@tauri-apps/plugin-fs');
+          await remove(tempFilePath);
+        } catch (e) {
+          console.warn('[VoiceRecorder] Could not delete temp file:', tempFilePath, e);
+        }
+      }
+
       // Clear preview
       voicePreview = null;
     } catch (error) {
@@ -3890,6 +3901,19 @@
         currentInput = currentInput + (currentInput ? ' ' : '') + transcription;
       }
 
+      // Delete the Tauri-created temp WAV file (it was recorded to ~/.dpc/temp/
+      // and is no longer needed once we have the transcription text).
+      const tempFilePath = voicePreview?.filePath;
+      if (tempFilePath) {
+        try {
+          const { remove } = await import('@tauri-apps/plugin-fs');
+          await remove(tempFilePath);
+          console.log('[VoiceRecorder] Deleted temp file:', tempFilePath);
+        } catch (e) {
+          console.warn('[VoiceRecorder] Could not delete temp file:', tempFilePath, e);
+        }
+      }
+
       // Clear preview and hide toast
       voicePreview = null;
       showFileOfferToast = false;
@@ -3909,6 +3933,12 @@
   }
 
   function handleCancelVoicePreview() {
+    // Delete temp WAV if user cancels without sending
+    if (voicePreview?.filePath) {
+      import('@tauri-apps/plugin-fs').then(({ remove }) => {
+        remove(voicePreview!.filePath!).catch(() => {});
+      });
+    }
     voicePreview = null;
   }
 

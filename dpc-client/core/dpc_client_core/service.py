@@ -8006,9 +8006,11 @@ Respond in JSON format:
                 agent_llm_provider=agent_llm_provider or conversation_id
             )
 
-            # Get actual model and provider from agent's last usage
-            # The agent stores metadata after each query in agent._last_usage
-            agent = agent_manager.agent
+            # Get actual model and provider from agent's last usage.
+            # process_message() may use a per-provider agent (stored in _agents[alias])
+            # rather than the default self._agent, so we must resolve the same instance.
+            _used_provider_alias = agent_llm_provider or conversation_id
+            agent = agent_manager._get_or_create_agent_for_provider(_used_provider_alias) if _used_provider_alias else agent_manager.agent
             model_name = "dpc_agent"
             provider_name = agent_llm_provider or "dpc_agent"
 
