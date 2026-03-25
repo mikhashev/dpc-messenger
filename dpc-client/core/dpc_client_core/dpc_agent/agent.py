@@ -84,6 +84,7 @@ class DpcAgent:
         firewall: Optional[Any] = None,  # ContextFirewall for tool control
         provider_alias: Optional[str] = None,  # Per-agent provider override (Phase 3)
         firewall_profile: Optional[str] = None,  # Per-agent permission profile (Phase 2)
+        service: Optional[Any] = None,  # CoreService reference for commit proposals
     ):
         """
         Initialize the agent.
@@ -101,6 +102,7 @@ class DpcAgent:
         self._firewall = firewall  # Firewall controls tool access
         self._provider_alias = provider_alias  # Store for LLM adapter
         self._firewall_profile = firewall_profile  # Store for tool permission lookups
+        self._service = service  # CoreService — used by tools that need it (e.g. extract_knowledge)
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components
@@ -235,7 +237,11 @@ class DpcAgent:
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
             skill_store=self.skill_store,  # For execute_skill tool
+            dpc_service=self._service,  # For extract_knowledge commit proposal trigger
         )
+        # Store main event loop so sync tools running in executor threads can schedule
+        # async calls back onto it via asyncio.run_coroutine_threadsafe.
+        ctx.agent_event_loop = asyncio.get_event_loop()
         ctx._agent = self  # Enable schedule_task and other agent-dependent tools
         self.tools.set_context(ctx)
 

@@ -50,6 +50,10 @@ class ToolContext:
     # Reference to DPC service for DPC-specific tools
     dpc_service: Optional[Any] = None
 
+    # Main asyncio event loop — set by DpcAgent.process() so sync tools running in
+    # executor threads can schedule async calls back via asyncio.run_coroutine_threadsafe.
+    agent_event_loop: Optional[Any] = None
+
     # ConversationMonitor for knowledge extraction (set by agent_manager)
     conversation_monitor: Optional[Any] = None
 

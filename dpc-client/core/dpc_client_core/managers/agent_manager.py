@@ -139,6 +139,7 @@ class DpcAgentManager:
             agent_root=self.agent_root,
             firewall=self.firewall,
             provider_alias=provider_alias,  # Phase 3: Use specific provider
+            service=self.service,           # For tools that need service access
         )
 
         # Cache for reuse
@@ -186,6 +187,7 @@ class DpcAgentManager:
             config=agent_config,
             agent_root=self.agent_root,
             firewall=self.firewall,  # Firewall controls tool access
+            service=self.service,   # For tools that need service access (e.g. extract_knowledge)
         )
 
         # Start background consciousness if enabled

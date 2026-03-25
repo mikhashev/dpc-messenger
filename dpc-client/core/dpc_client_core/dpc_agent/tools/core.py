@@ -1616,20 +1616,25 @@ def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool
         proposal = asyncio.run(monitor.generate_commit_proposal(force=force))
 
         if not proposal:
-            return "No knowledge extracted from conversation. Try with force=True to extract anyway."
+            return "⚠️ No knowledge extracted — conversation buffer is empty or below threshold. Try force=True."
 
-        # Save to agent's knowledge directory
+        if not proposal.entries:
+            return (
+                "⚠️ Extraction ran but the LLM returned 0 knowledge entries. "
+                "The conversation may not contain extractable facts, or the model needs more context. "
+                f"Topic detected: {proposal.topic!r}. Summary: {proposal.summary[:200]}"
+            )
+
+        # Save to agent's local knowledge directory for reference
         knowledge_dir = ctx.agent_root / "knowledge"
         knowledge_dir.mkdir(parents=True, exist_ok=True)
 
-        # Generate filename from topic or timestamp
         safe_topic = "".join(c if c.isalnum() or c in " _-" else "_" for c in (topic or proposal.topic or "knowledge"))
         safe_topic = safe_topic[:50].strip() or "knowledge"
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         filename = f"{safe_topic}_{timestamp}.json"
         filepath = knowledge_dir / filename
 
-        # Build knowledge entry
         knowledge_entry = {
             "topic": proposal.topic,
             "summary": proposal.summary,
@@ -1647,13 +1652,51 @@ def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool
             "extraction_method": "agent_tool",
         }
 
-        # Write to file
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(knowledge_entry, f, indent=2, ensure_ascii=False)
 
         log.info(f"Extracted knowledge saved to {filepath}")
 
-        return f"✅ Knowledge extracted successfully!\n\n**Topic:** {proposal.topic}\n**Summary:** {proposal.summary[:200]}...\n**Entries:** {len(proposal.entries)}\n**Saved to:** knowledge/{filename}"
+        # Trigger the knowledge commit proposal + voting workflow so the UI shows
+        # the vote panel. Uses run_coroutine_threadsafe because this tool runs in
+        # an executor thread with its own event loop (asyncio.run above), while the
+        # consensus_manager and local_api are bound to the main event loop.
+        voted_via_service = False
+        service = getattr(ctx, 'dpc_service', None)
+        event_loop = getattr(ctx, 'agent_event_loop', None)
+        if service and event_loop and event_loop.is_running():
+            try:
+                conversation_id = proposal.conversation_id
+
+                async def _trigger_commit_proposal():
+                    # Broadcast to UI so voting panel appears
+                    if hasattr(service, 'local_api') and service.local_api:
+                        await service.local_api.broadcast_event(
+                            "knowledge_commit_proposed", proposal.to_dict()
+                        )
+                    # Submit to consensus manager (no-op broadcast for private agent convs)
+                    if hasattr(service, 'consensus_manager') and service.consensus_manager:
+                        async def _no_op_broadcast(msg): pass
+                        await service.consensus_manager.propose_commit(
+                            proposal=proposal,
+                            broadcast_func=_no_op_broadcast,
+                        )
+
+                future = asyncio.run_coroutine_threadsafe(_trigger_commit_proposal(), event_loop)
+                future.result(timeout=15)
+                voted_via_service = True
+                log.info(f"Knowledge commit proposal triggered for voting: {proposal.proposal_id}")
+            except Exception as e:
+                log.warning(f"Could not trigger commit proposal workflow: {e}")
+
+        voting_note = " Proposal sent for voting." if voted_via_service else " (voting workflow unavailable)"
+        return (
+            f"✅ Knowledge extracted successfully!{voting_note}\n\n"
+            f"**Topic:** {proposal.topic}\n"
+            f"**Summary:** {proposal.summary[:200]}...\n"
+            f"**Entries:** {len(proposal.entries)}\n"
+            f"**Saved to:** knowledge/{filename}"
+        )
 
     except Exception as e:
         log.error(f"Knowledge extraction error: {e}", exc_info=True)
