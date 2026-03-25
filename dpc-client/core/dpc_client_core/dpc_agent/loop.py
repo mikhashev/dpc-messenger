@@ -73,6 +73,12 @@ _INJECTION_PATTERNS = [
     "\n\nHuman:",
     "\n\nAssistant:",
     "\n\nUser:",
+    # These match the role delimiters used by llm_adapter._messages_to_prompt().
+    # A tool result containing "\n[USER]\n" could make the LLM believe a new user
+    # turn has started, allowing prompt injection via tool output.
+    "\n[USER]\n",
+    "\n[SYSTEM]\n",
+    "\n[ASSISTANT]\n",
 ]
 
 
