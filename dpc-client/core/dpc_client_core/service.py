@@ -735,6 +735,10 @@ class CoreService:
 
         if dht_manager:
             logger.info("Phase 6 managers started (DHT, Hole Punch, Relay, Gossip)")
+            # Announce shareable agent skills to DHT (Phase 5b) — non-blocking, best-effort
+            asyncio.create_task(self.skill_coordinator.announce_skills_to_dht()).set_name(
+                "skill_dht_announce"
+            )
         else:
             logger.warning("Phase 6 managers unavailable (DHT not initialized)")
 

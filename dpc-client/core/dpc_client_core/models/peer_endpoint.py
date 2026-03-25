@@ -14,8 +14,8 @@ Schema Version 2.0 (Phase 6):
 
 import json
 import time
-from dataclasses import dataclass, asdict
-from typing import Optional, Dict, Any
+from dataclasses import dataclass, field, asdict
+from typing import Optional, Dict, Any, List
 
 
 @dataclass
@@ -91,6 +91,7 @@ class PeerEndpoint:
     relay: Optional[RelayInfo] = None
     punch: Optional[PunchInfo] = None
     timestamp: float = 0.0  # UNIX timestamp
+    skills: Optional[List[Dict[str, Any]]] = None  # Shareable skill metadata (Phase 5b)
 
     def __post_init__(self):
         """Set timestamp if not provided."""
@@ -142,6 +143,10 @@ class PeerEndpoint:
                 "stun_port": self.punch.stun_port,
                 "success_rate": self.punch.success_rate,
             }
+
+        # Optional skills (Phase 5b DHT announcement)
+        if self.skills:
+            result["skills"] = self.skills
 
         return result
 
@@ -218,6 +223,11 @@ class PeerEndpoint:
                 success_rate=punch_data.get("success_rate", 0.0),
             )
 
+        # Parse skills (optional, Phase 5b)
+        skills = data.get("skills") or None
+        if skills is not None and not isinstance(skills, list):
+            skills = None
+
         return cls(
             schema_version=schema_version,
             node_id=node_id,
@@ -226,6 +236,7 @@ class PeerEndpoint:
             relay=relay,
             punch=punch,
             timestamp=data.get("timestamp", time.time()),
+            skills=skills,
         )
 
     @classmethod

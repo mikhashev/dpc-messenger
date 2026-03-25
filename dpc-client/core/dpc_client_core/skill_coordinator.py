@@ -336,21 +336,67 @@ class SkillCoordinator:
         """
         Return a SkillStore instance for the first running agent, or None.
 
-        Skills are agent-scoped; we use the first running agent as the
+        Skills are agent-scoped; we use the first running DpcAgent as the
         default for P2P skill sharing.
+
+        Access path: service.llm_manager.providers["dpc_agent"]._managers[id]._agent.skill_store
         """
         try:
-            agent_manager = getattr(self.service, "agent_manager", None)
-            if agent_manager is None:
+            llm_manager = getattr(self.service, "llm_manager", None)
+            if llm_manager is None:
                 return None
-            agents = agent_manager._agents
-            if not agents:
+            provider = llm_manager.providers.get("dpc_agent")
+            if provider is None or not provider._managers:
                 return None
-            agent = next(iter(agents.values()))
-            return getattr(agent, "skill_store", None)
+            for manager in provider._managers.values():
+                agent = getattr(manager, "_agent", None)
+                if agent is not None:
+                    store = getattr(agent, "skill_store", None)
+                    if store is not None:
+                        return store
+            return None
         except Exception as e:
             logger.warning("Could not get agent skill store: %s", e)
             return None
+
+    async def announce_skills_to_dht(self) -> int:
+        """
+        Announce this node's shareable skills to the DHT (Phase 5b).
+
+        Called on startup and after mark_as_shared(). Requires:
+        - firewall `auto_announce_to_dht` permission
+        - DHT manager available
+
+        Returns number of successful STORE operations (0 if skipped).
+        """
+        if not self.firewall.get_agent_skill_permission("auto_announce_to_dht"):
+            logger.debug("announce_skills_to_dht: auto_announce_to_dht is disabled")
+            return 0
+
+        dht_manager = getattr(self.p2p_manager, "dht_manager", None)
+        if dht_manager is None:
+            logger.debug("announce_skills_to_dht: DHT manager not available")
+            return 0
+
+        skill_store = self._get_agent_skill_store()
+        if skill_store is None:
+            logger.debug("announce_skills_to_dht: no skill store found")
+            return 0
+
+        skill_metas = skill_store.list_shareable_skills()
+        if not skill_metas:
+            logger.debug("announce_skills_to_dht: no shareable skills to announce")
+            return 0
+
+        try:
+            count = await dht_manager.announce_full(skills=skill_metas)
+            logger.info(
+                "Announced %d shareable skill(s) to DHT (%d nodes)", len(skill_metas), count
+            )
+            return count
+        except Exception as e:
+            logger.error("Error announcing skills to DHT: %s", e, exc_info=True)
+            return 0
 
     async def _notify_skill_received(self, sender_node_id: str, skill_name: str) -> None:
         """Broadcast skill_received event to the UI."""
