@@ -338,10 +338,40 @@ metadata:
 2. If improving an existing skill: load the current SKILL.md with `drive_read`, review it, then write an improved version.
 3. If creating a new skill:
    a. Choose a kebab-case name (e.g. `code-analysis`, `web-research`)
-   b. Write the frontmatter: name, version, description (routing key!), provenance, tags
+   b. Write the frontmatter using **exactly this structure** (provenance and sharing must be nested dicts):
+      ```yaml
+      ---
+      name: your-skill-name
+      version: 1
+      description: >
+        One sentence routing key. Be specific about trigger phrases.
+      provenance:
+        source: local
+        created_at: 2026-01-01T00:00:00Z
+        author_node_id: null
+        author_name: agent
+        parent_skill: null
+        origin_peer: null
+      sharing:
+        shareable: false
+        shared_with_nodes: []
+        shared_with_groups: []
+        dht_announced: false
+      metadata:
+        execution_mode: knowledge
+        required_tools:
+          - tool_name_here
+        required_permissions: []
+        agent_profiles:
+          - default
+        tags:
+          - your-tag
+      ---
+      ```
    c. Write the body: Strategy (numbered steps), When to Use, When NOT to Use, Examples, Common Failures
    d. Save to `{{skills_dir}}/{{name}}/SKILL.md` using `drive_write`
 4. The description field is the most important — it must be specific enough for the LLM router to pick this skill correctly.
+5. **Critical**: `provenance` and `sharing` must always be YAML dicts (indented key-value pairs), never plain strings. A plain string will silently break skill loading.
 
 ## When to Use
 
@@ -371,6 +401,8 @@ Creating a new skill after a successful code review:
 - **Description too vague**: "Do things" won't route correctly — be specific about trigger phrases
 - **Strategy too abstract**: Write concrete tool call sequences, not high-level descriptions
 - **Forgetting edge cases**: Add a "Common Failures" section from real experience
+- **provenance as plain string**: `provenance: "Created by..."` breaks YAML parsing — it must always be a nested dict with `source:`, `created_at:`, etc.
+- **Missing nested structure**: Any top-level key the schema expects as a dict (`provenance`, `sharing`, `metadata`) will silently cause the skill to disappear from the available skills list if written as a scalar
 
 ## Update History
 

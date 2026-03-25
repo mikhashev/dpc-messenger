@@ -29,7 +29,7 @@ class SkillProvenance:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SkillProvenance":
-        if not d:
+        if not d or not isinstance(d, dict):
             return cls()
         return cls(
             source=d.get("source", "local"),
@@ -51,7 +51,7 @@ class SkillSharing:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SkillSharing":
-        if not d:
+        if not d or not isinstance(d, dict):
             return cls()
         return cls(
             shareable=bool(d.get("shareable", False)),
@@ -72,7 +72,7 @@ class SkillMetadata:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "SkillMetadata":
-        if not d:
+        if not d or not isinstance(d, dict):
             return cls()
         return cls(
             execution_mode=d.get("execution_mode", SkillExecutionMode.KNOWLEDGE),
