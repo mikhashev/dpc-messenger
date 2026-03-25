@@ -217,8 +217,10 @@ class ConversationMonitor:
 
         self._extracting = True
         try:
-            # Calculate score if not already done
-            if self.knowledge_score == 0.0:
+            # Calculate score only when needed for the threshold check.
+            # Skip when force=True — score is irrelevant and the extra LLM call
+            # doubles the extraction time (1-2 min wasted).
+            if not force and self.knowledge_score == 0.0:
                 self.knowledge_score = await self._calculate_knowledge_score()
                 self.last_analysis_time = datetime.now(timezone.utc).isoformat()
 

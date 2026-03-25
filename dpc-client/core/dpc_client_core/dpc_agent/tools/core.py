@@ -1612,8 +1612,28 @@ def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool
             # Use asyncio.run_coroutine_threadsafe or return a message
             return "⚠️ Knowledge extraction requires async context. Use force=True to attempt extraction."
 
-        # Run extraction
-        proposal = asyncio.run(monitor.generate_commit_proposal(force=force))
+        # Run extraction on the main event loop via run_coroutine_threadsafe so that:
+        # - asyncio objects (HTTP clients, etc.) bound to the main loop work correctly
+        # - we avoid creating a second event loop in the thread (asyncio.run would
+        #   do that and cause cross-loop issues with ai_query_func)
+        # - the timeout below propagates a clear error instead of a generic TOOL_TIMEOUT
+        main_loop = getattr(ctx, 'agent_event_loop', None)
+        if main_loop and main_loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    monitor.generate_commit_proposal(force=force),
+                    main_loop,
+                )
+                # Use 290s so we can return a meaningful error before the 300s TOOL_TIMEOUT fires
+                proposal = future.result(timeout=290)
+            except TimeoutError:
+                return (
+                    "⚠️ Knowledge extraction timed out (>290s). The conversation history is very long — "
+                    "try calling end_conversation_session instead, or split into shorter sessions."
+                )
+        else:
+            # Fallback when event loop reference is unavailable (should not happen normally)
+            proposal = asyncio.run(monitor.generate_commit_proposal(force=force))
 
         if not proposal:
             return "⚠️ No knowledge extracted — conversation buffer is empty or below threshold. Try force=True."
