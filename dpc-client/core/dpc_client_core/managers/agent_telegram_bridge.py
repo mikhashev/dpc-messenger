@@ -154,6 +154,9 @@ class AgentTelegramBridge:
         # Semaphore to limit concurrent Telegram API calls (prevents pool exhaustion)
         self._send_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent sends
 
+        # Consecutive network error counter for log suppression
+        self._network_error_count = 0
+
         log.info(f"AgentTelegramBridge initialized for {len(allowed_chat_ids)} chat(s), "
                 f"filter={len(self.event_filter)} event types, transcription={transcription_enabled}")
 
@@ -1039,12 +1042,21 @@ Send a voice message and it will be transcribed and processed\\.
             return False
 
         # Send to all allowed chats
+        try:
+            from telegram.error import NetworkError, TimedOut
+            _network_exc = (NetworkError, TimedOut)
+        except ImportError:
+            _network_exc = (Exception,)  # type: ignore[assignment]
+
         success = True
         for chat_id in self.allowed_chat_ids:
             try:
                 log.debug(f"[handle_event] Calling _send_message for chat_id={chat_id}")
                 await self._send_message(chat_id, message)
                 log.debug(f"[handle_event] _send_message completed for chat_id={chat_id}")
+            except _network_exc:
+                # Already logged as WARNING inside _send_single_message — no need to repeat
+                success = False
             except Exception as e:
                 log.error(f"[handle_event] Failed to send Telegram message to {chat_id}: {e}", exc_info=True)
                 success = False
@@ -1128,6 +1140,12 @@ Send a voice message and it will be transcribed and processed\\.
             log.debug(f"[_send_message] Sending to chat_id={chat_id}, text_len={len(text)}")
 
             try:
+                from telegram.error import NetworkError, TimedOut
+            except ImportError:
+                NetworkError = Exception  # type: ignore[misc,assignment]
+                TimedOut = Exception      # type: ignore[misc,assignment]
+
+            try:
                 result = await self._bot.send_message(
                     chat_id=chat_id,
                     text=text,
@@ -1135,20 +1153,38 @@ Send a voice message and it will be transcribed and processed\\.
                     disable_notification=False,
                 )
                 log.debug(f"[_send_message] Success! message_id={result.message_id}")
+                self._network_error_count = 0
                 return result
+            except (NetworkError, TimedOut) as e:
+                # Network unavailable — skip Markdown fallback (same outcome), log at WARNING
+                self._network_error_count += 1
+                if self._network_error_count <= 3 or self._network_error_count % 50 == 0:
+                    log.warning(
+                        "[_send_message] Telegram unreachable (error #%d): %s",
+                        self._network_error_count, e,
+                    )
+                raise
             except Exception as e:
-                log.error(f"[_send_message] FAILED to send to {chat_id}: {e}", exc_info=True)
-                # Try without Markdown as fallback
+                # Non-network failure (e.g. Markdown parse error) — try plain text fallback
+                log.debug(f"[_send_message] Send failed ({type(e).__name__}), retrying without Markdown: {e}")
                 try:
-                    log.debug(f"[_send_message] Retrying without Markdown parsing...")
                     result = await self._bot.send_message(
                         chat_id=chat_id,
                         text=text,
-                        parse_mode=None,  # No markdown
+                        parse_mode=None,
                         disable_notification=False,
                     )
                     log.debug(f"[_send_message] Success without Markdown! message_id={result.message_id}")
+                    self._network_error_count = 0
                     return result
+                except (NetworkError, TimedOut) as e2:
+                    self._network_error_count += 1
+                    if self._network_error_count <= 3 or self._network_error_count % 50 == 0:
+                        log.warning(
+                            "[_send_message] Telegram unreachable on fallback (error #%d): %s",
+                            self._network_error_count, e2,
+                        )
+                    raise
                 except Exception as e2:
                     log.error(f"[_send_message] Failed even without Markdown: {e2}", exc_info=True)
                     raise
