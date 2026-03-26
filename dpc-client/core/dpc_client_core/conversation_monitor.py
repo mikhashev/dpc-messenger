@@ -182,8 +182,10 @@ class ConversationMonitor:
             if self.knowledge_score > self.knowledge_threshold:
                 # Check for consensus signals
                 if self._detect_consensus():
-                    # Generate commit proposal
-                    proposal = await self._generate_commit_proposal()
+                    # Generate commit proposal (auto-threshold path)
+                    proposal = await self._generate_commit_proposal(
+                        proposed_by="auto_monitor", initiated_by="auto_monitor"
+                    )
 
                     # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
                     # Buffer will be cleared by consensus_manager when proposal is approved
@@ -193,11 +195,19 @@ class ConversationMonitor:
 
         return None
 
-    async def generate_commit_proposal(self, force: bool = False) -> Optional[KnowledgeCommitProposal]:
+    async def generate_commit_proposal(
+        self,
+        force: bool = False,
+        proposed_by: str = "auto_monitor",
+        initiated_by: str = "auto_monitor",
+    ) -> Optional[KnowledgeCommitProposal]:
         """Manually generate a knowledge commit proposal
 
         Args:
             force: If True, generate proposal even if below threshold
+            proposed_by: Agent ID or node_id that triggered extraction
+            initiated_by: How extraction was triggered: "auto_monitor", "agent_tool",
+                          "telegram", or "user_request"
 
         Returns:
             KnowledgeCommitProposal if knowledge detected (or forced), None otherwise
@@ -228,7 +238,9 @@ class ConversationMonitor:
             if force or self.knowledge_score > self.knowledge_threshold:
                 try:
                     # Generate proposal
-                    proposal = await self._generate_commit_proposal()
+                    proposal = await self._generate_commit_proposal(
+                        proposed_by=proposed_by, initiated_by=initiated_by
+                    )
 
                     # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
                     # Buffer will be cleared by consensus_manager when proposal is approved
@@ -869,7 +881,11 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
 
         return json_str
 
-    async def _generate_commit_proposal(self) -> KnowledgeCommitProposal:
+    async def _generate_commit_proposal(
+        self,
+        proposed_by: str = "auto_monitor",
+        initiated_by: str = "auto_monitor",
+    ) -> KnowledgeCommitProposal:
         """Generate knowledge commit proposal from conversation
 
         Uses bias-aware prompting to extract structured knowledge with:
@@ -1115,7 +1131,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 summary=result.get('summary', 'Knowledge from group discussion'),
                 entries=entries,
                 participants=[p['node_id'] for p in self.participants],
-                proposed_by='ai',
+                proposed_by=proposed_by,
+                initiated_by=initiated_by,
                 cultural_perspectives=result.get('cultural_perspectives', []),
                 alternatives=alternatives,
                 flagged_assumptions=result.get('flagged_assumptions', []),

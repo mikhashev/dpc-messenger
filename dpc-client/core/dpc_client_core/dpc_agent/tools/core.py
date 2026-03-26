@@ -1621,8 +1621,14 @@ def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool
         main_loop = getattr(ctx, 'agent_event_loop', None)
         if main_loop and main_loop.is_running():
             try:
+                agent_id = getattr(ctx, 'firewall_profile', None) or "agent_tool"
+                initiated_by = "telegram" if getattr(ctx, 'reply_telegram_chat_id', None) else "agent_tool"
                 future = asyncio.run_coroutine_threadsafe(
-                    monitor.generate_commit_proposal(force=force),
+                    monitor.generate_commit_proposal(
+                        force=force,
+                        proposed_by=agent_id,
+                        initiated_by=initiated_by,
+                    ),
                     main_loop,
                 )
                 # Use 290s so we can return a meaningful error before the 300s TOOL_TIMEOUT fires
@@ -1634,7 +1640,11 @@ def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool
                 )
         else:
             # Fallback when event loop reference is unavailable (should not happen normally)
-            proposal = asyncio.run(monitor.generate_commit_proposal(force=force))
+            agent_id = getattr(ctx, 'firewall_profile', None) or "agent_tool"
+            initiated_by = "telegram" if getattr(ctx, 'reply_telegram_chat_id', None) else "agent_tool"
+            proposal = asyncio.run(monitor.generate_commit_proposal(
+                force=force, proposed_by=agent_id, initiated_by=initiated_by
+            ))
 
         if not proposal:
             return "⚠️ No knowledge extracted — conversation buffer is empty or below threshold. Try force=True."

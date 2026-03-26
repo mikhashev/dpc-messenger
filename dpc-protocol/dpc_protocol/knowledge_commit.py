@@ -37,7 +37,8 @@ class KnowledgeCommitProposal:
 
     # Participants and consensus
     participants: List[str] = field(default_factory=list)  # Node IDs
-    proposed_by: str = "ai"  # "ai" or node_id
+    proposed_by: str = "ai"  # agent_id, node_id, or "ai"
+    initiated_by: str = "auto_monitor"  # "auto_monitor", "agent_tool", "telegram", "user_request"
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Bias mitigation tracking (Phase 2 integration)
@@ -103,6 +104,7 @@ class KnowledgeCommitProposal:
             entries=entries,
             participants=data.get('participants', []),
             proposed_by=data.get('proposed_by', 'ai'),
+            initiated_by=data.get('initiated_by', 'auto_monitor'),
             timestamp=data.get('timestamp', datetime.now(timezone.utc).isoformat()),
             cultural_perspectives=data.get('cultural_perspectives', []),
             alternatives=data.get('alternatives', []),
@@ -155,12 +157,15 @@ class KnowledgeCommit:
     # Provenance
     conversation_id: Optional[str] = None
     participants: List[str] = field(default_factory=list)
+    proposed_by: str = "ai"  # agent_id, node_id, or "ai" — who triggered extraction
+    initiated_by: str = "auto_monitor"  # "auto_monitor", "agent_tool", "telegram", "user_request"
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Consensus tracking
     consensus_type: Literal["unanimous", "majority", "disputed"] = "unanimous"
     approved_by: List[str] = field(default_factory=list)
     rejected_by: List[str] = field(default_factory=list)
+    vote_comments: Dict[str, str] = field(default_factory=dict)  # node_id -> comment
 
     # Bias mitigation metadata
     cultural_perspectives_considered: List[str] = field(default_factory=list)

@@ -697,8 +697,8 @@ class DpcAgentManager:
                     "context": "local"
                 },
                 {
-                    "node_id": "dpc-agent",
-                    "name": "DPC Agent",
+                    "node_id": self.agent_id or "dpc-agent",
+                    "name": self.agent_id or "DPC Agent",
                     "context": "agent"
                 }
             ]

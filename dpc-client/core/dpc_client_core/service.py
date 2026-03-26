@@ -231,6 +231,9 @@ class CoreService:
         # Register callback to broadcast voting results to participants
         self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
 
+        # Register callback to surface revision requests to the UI (and optionally auto-revise)
+        self.consensus_manager.on_commit_revision_needed = self._on_commit_revision_needed
+
         # Session manager (mutual new session approval)
         self.session_manager = None
 
@@ -4447,7 +4450,13 @@ class CoreService:
                     ai_agent_node_id = conversation_id
                 elif conversation_id.startswith("agent_"):
                     is_ai_chat = True
-                    ai_agent_node_id = "dpc-agent"  # hardcoded in agent_manager.py participants
+                    # Resolve the actual agent_id from the manager so votes are attributed correctly
+                    ai_agent_node_id = conversation_id  # fallback
+                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                        agent_mgr = dpc_agent_provider._managers.get(conversation_id)
+                        if agent_mgr and agent_mgr.agent_id:
+                            ai_agent_node_id = agent_mgr.agent_id
 
             # Cast user's vote through ConsensusManager
             # For AI chats, don't broadcast to peers (use no-op)
@@ -4513,8 +4522,28 @@ class CoreService:
                 logger.info("AI agent %s already voted on proposal %s", ai_agent_node_id, proposal_id)
                 return
 
-            # Evaluate the proposal using AI
-            ai_decision = await self._evaluate_knowledge_proposal_for_ai_vote(proposal)
+            # Resolve the agent's configured provider and full conversation so the
+            # same model that participated can verify entries against what was said.
+            agent_provider_alias = None
+            conversation_history = None
+            conv_id = proposal.conversation_id
+            if conv_id and conv_id.startswith("agent_"):
+                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                    _mgr = dpc_agent_provider._managers.get(conv_id)
+                    if _mgr:
+                        agent_provider_alias = _mgr.config.get("provider_alias")
+                        _monitor = _mgr._agent_monitors.get(conv_id)
+                        if _monitor:
+                            conversation_history = _monitor.full_conversation
+
+            # Evaluate the proposal using the agent's own provider and the full
+            # conversation so entries can be verified against what was actually said.
+            ai_decision = await self._evaluate_knowledge_proposal_for_ai_vote(
+                proposal,
+                provider_alias=agent_provider_alias,
+                conversation_history=conversation_history,
+            )
 
             logger.info(
                 "AI agent %s voting on proposal %s: %s - %s",
@@ -4541,7 +4570,7 @@ class CoreService:
                 {
                     "proposal_id": proposal_id,
                     "voter_node_id": ai_agent_node_id,
-                    "voter_name": "DPC Agent",
+                    "voter_name": ai_agent_node_id,
                     "vote": ai_decision["vote"],
                     "comment": ai_decision.get("comment", "")
                 }
@@ -4554,51 +4583,75 @@ class CoreService:
         except Exception as e:
             logger.error("Error in AI agent voting: %s", e, exc_info=True)
 
-    async def _evaluate_knowledge_proposal_for_ai_vote(self, proposal) -> Dict[str, Any]:
+    async def _evaluate_knowledge_proposal_for_ai_vote(
+        self,
+        proposal,
+        provider_alias: Optional[str] = None,
+        conversation_history: Optional[list] = None,
+    ) -> Dict[str, Any]:
         """Evaluate a knowledge proposal and return an AI vote decision.
 
-        The AI reviews each knowledge entry for accuracy, relevance, and quality,
-        then decides whether to approve, reject, or request changes.
+        The AI reviews each knowledge entry against the full conversation it came
+        from, verifying accuracy, relevance, and quality before voting.
 
         Args:
             proposal: KnowledgeCommitProposal to evaluate
+            provider_alias: Provider to use — should be the agent's own provider so
+                            the same model that held the conversation evaluates its
+                            extraction. Falls back to the global default if None.
+            conversation_history: Full conversation messages from ConversationMonitor
+                                  used to verify entries against what was actually said.
 
         Returns:
             Dict with 'vote' (approve/reject/request_changes) and 'comment'
         """
         try:
-            # Build evaluation prompt
+            # Build entries section
             entries_text = ""
             for i, entry in enumerate(proposal.entries, 1):
                 entries_text += f"\n{i}. {entry.content} (confidence: {entry.confidence:.2f})"
                 if hasattr(entry, 'tags') and entry.tags:
                     entries_text += f" [tags: {', '.join(entry.tags)}]"
 
-            prompt = f"""You are reviewing a knowledge commit proposal from a conversation you just participated in as the DPC Agent. You need to vote on whether this knowledge should be saved to the user's personal knowledge base.
+            # Build conversation section — full history, no truncation (fresh context window)
+            conversation_text = ""
+            if conversation_history:
+                lines = []
+                for msg in conversation_history:
+                    role = msg.get("role", "unknown").upper()
+                    content = msg.get("content", "")
+                    lines.append(f"{role}: {content}")
+                conversation_text = (
+                    "\n\n**Full Conversation (source of the extracted knowledge):**\n"
+                    + "\n\n".join(lines)
+                )
+
+            prompt = f"""You extracted the following knowledge entries from the conversation below. Now review them and vote on whether they should be saved to the user's personal knowledge base.
 
 **Proposal Topic:** {proposal.topic}
 **Summary:** {proposal.summary}
 **Average Confidence:** {proposal.avg_confidence:.2f}
 
 **Knowledge Entries:**{entries_text}
+{conversation_text}
 
 **Your Task:**
-Evaluate each entry for:
-1. **Accuracy**: Is this factually correct based on standard knowledge? (Not opinions)
-2. **Relevance**: Is this genuinely useful knowledge worth preserving?
+Evaluate each entry against the actual conversation above:
+1. **Accuracy**: Does this correctly reflect what was said or concluded in the conversation?
+2. **Relevance**: Is this genuinely useful knowledge worth preserving long-term?
 3. **Redundancy**: Does this duplicate or contradict existing common knowledge?
 4. **Quality**: Is the entry clear, specific, and well-formulated?
 
 **Voting Options:**
-- `approve`: Knowledge is accurate, relevant, and worth saving
-- `reject`: Knowledge is factually incorrect, irrelevant, or harmful
-- `request_changes`: Knowledge has potential but needs revision (explain what)
+- `approve`: Entries accurately reflect the conversation and are worth saving
+- `reject`: Entries are factually wrong, misrepresent the conversation, or are harmful
+- `request_changes`: Entries have potential but need revision (explain what specifically)
 
 **IMPORTANT:**
-- Be thoughtful but not overly critical - personal knowledge is subjective
-- Technical facts, user preferences, and learned insights are all valid
-- If most entries are good but a few need work, vote request_changes
-- Only reject if the knowledge is genuinely problematic
+- Ground your evaluation in the conversation above — not just general world knowledge
+- Personal preferences, technical conclusions, and learned insights are all valid
+- If most entries are good but a few misrepresent the conversation, vote request_changes
+- Only reject if entries are genuinely wrong or harmful
 
 Respond in JSON format:
 {{
@@ -4610,10 +4663,15 @@ Respond in JSON format:
 }}
 """
 
-            # Use the LLM to evaluate
+            # Use the agent's own provider — not the global default — so the same
+            # model that participated in the conversation evaluates its own extraction.
+            logger.debug(
+                "Evaluating knowledge proposal %s with provider=%s",
+                proposal.proposal_id, provider_alias or "default"
+            )
             response = await self.llm_manager.query(
                 prompt=prompt,
-                provider_alias=None,  # Use default provider
+                provider_alias=provider_alias,
                 max_tokens=500
             )
 
@@ -4807,7 +4865,11 @@ Respond in JSON format:
             )
 
             # Force knowledge extraction even if threshold not met
-            proposal = await monitor.generate_commit_proposal(force=True)
+            proposal = await monitor.generate_commit_proposal(
+                force=True,
+                proposed_by=self.p2p_manager.node_id,
+                initiated_by="user_request",
+            )
 
             if proposal:
                 logger.info("Knowledge proposal generated for %s", conversation_id)
@@ -7486,6 +7548,148 @@ Respond in JSON format:
             logger.error("Error in _on_commit_applied: %s", e, exc_info=True)
             import traceback
             traceback.print_exc()
+
+    async def _on_commit_revision_needed(self, proposal, votes: Dict[str, Any]) -> None:
+        """Callback when a knowledge commit proposal receives 'request_changes' votes.
+
+        Broadcasts a structured revision event to the UI so the user (or agent)
+        can see exactly which changes were requested, then optionally triggers
+        the originating agent to auto-revise and resubmit.
+
+        Args:
+            proposal: KnowledgeCommitProposal in revision_needed state
+            votes: Dict[node_id, CommitVote] from all voters
+        """
+        try:
+            # Collect change requests from all voters who voted request_changes
+            change_requests = [
+                {
+                    "node_id": v.voter_node_id,
+                    "comment": v.comment or "",
+                    "is_required_dissent": v.is_required_dissent,
+                }
+                for v in votes.values()
+                if v.vote == "request_changes" and v.comment
+            ]
+
+            logger.info(
+                "Revision needed for proposal %s: %d change request(s)",
+                proposal.proposal_id, len(change_requests)
+            )
+            for cr in change_requests:
+                logger.info("  %s: %s", cr["node_id"][:20], cr["comment"][:120])
+
+            # Broadcast to UI so the vote panel can display the requested changes
+            await self.local_api.broadcast_event("knowledge_commit_revision_needed", {
+                "proposal_id": proposal.proposal_id,
+                "topic": proposal.topic,
+                "summary": proposal.summary,
+                "conversation_id": proposal.conversation_id,
+                "change_requests": change_requests,
+            })
+
+            # For agent conversations, let the originating agent auto-revise
+            conv_id = proposal.conversation_id
+            if conv_id and conv_id.startswith("agent_"):
+                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                    agent_mgr = dpc_agent_provider._managers.get(conv_id)
+                    if agent_mgr:
+                        asyncio.create_task(
+                            self._agent_auto_revise_proposal(
+                                agent_mgr, proposal, change_requests
+                            )
+                        )
+
+        except Exception as e:
+            logger.error("Error in _on_commit_revision_needed: %s", e, exc_info=True)
+
+    async def _agent_auto_revise_proposal(self, agent_mgr, proposal, change_requests: list) -> None:
+        """Ask the originating agent to revise its knowledge proposal based on change requests.
+
+        Builds a concise revision prompt from the requested changes, runs the agent
+        to produce updated entries, then calls revise_proposal() to restart voting.
+
+        Args:
+            agent_mgr: DpcAgentManager instance that owns the conversation
+            proposal: KnowledgeCommitProposal to revise
+            change_requests: List of {node_id, comment} dicts from voters
+        """
+        try:
+            if not change_requests:
+                return
+
+            # Build a concise revision brief for the agent
+            feedback_lines = "\n".join(
+                f"- {cr['node_id']}: {cr['comment']}" for cr in change_requests
+            )
+            revision_prompt = (
+                f"Your knowledge commit proposal for topic '{proposal.topic}' received change requests:\n\n"
+                f"{feedback_lines}\n\n"
+                f"Please revise the proposal entries to address the feedback. "
+                f"Reply ONLY with a JSON object:\n"
+                f'{{"summary": "...", "entries": [{{"content": "...", "confidence": 0.9, "tags": []}}]}}'
+            )
+
+            logger.info("Asking agent %s to revise proposal %s", agent_mgr.agent_id, proposal.proposal_id)
+            response = await agent_mgr.process_message(
+                message=revision_prompt,
+                conversation_id=proposal.conversation_id,
+                include_context=False,
+            )
+
+            if not response:
+                logger.warning("Agent returned empty revision response for %s", proposal.proposal_id)
+                return
+
+            # Extract the JSON from the agent's response
+            import re as _re
+            json_match = _re.search(r'\{.*\}', response, _re.DOTALL)
+            if not json_match:
+                logger.warning("Agent revision response contained no JSON: %s", response[:200])
+                return
+
+            revision = json.loads(json_match.group())
+            updated_summary = revision.get("summary") or None
+            raw_entries = revision.get("entries") or []
+
+            if not raw_entries:
+                logger.warning("Agent revision produced 0 entries for %s", proposal.proposal_id)
+                return
+
+            # Convert raw dicts to KnowledgeEntry objects (reuse existing entries' source/tags structure)
+            from dpc_protocol.pcm_core import KnowledgeEntry, KnowledgeSource
+            updated_entries = []
+            for raw in raw_entries:
+                updated_entries.append(KnowledgeEntry(
+                    content=raw.get("content", ""),
+                    confidence=float(raw.get("confidence", 0.8)),
+                    tags=raw.get("tags", []),
+                    source=KnowledgeSource(
+                        type="ai_summary",
+                        conversation_id=proposal.conversation_id,
+                    ),
+                ))
+
+            # Restart voting with revised content
+            async def _no_op_broadcast(msg): pass
+            ok = await self.consensus_manager.revise_proposal(
+                proposal_id=proposal.proposal_id,
+                updated_summary=updated_summary,
+                updated_entries=updated_entries,
+                broadcast_func=_no_op_broadcast,  # private agent conv — no P2P broadcast
+            )
+
+            if ok:
+                logger.info("Agent %s resubmitted revised proposal %s", agent_mgr.agent_id, proposal.proposal_id)
+                await self.local_api.broadcast_event("knowledge_commit_proposed", proposal.to_dict())
+            else:
+                logger.warning("revise_proposal returned False for %s (wrong state?)", proposal.proposal_id)
+
+        except json.JSONDecodeError as e:
+            logger.warning("Agent revision JSON parse error for %s: %s", proposal.proposal_id, e)
+        except Exception as e:
+            logger.error("Error in _agent_auto_revise_proposal: %s", e, exc_info=True)
 
     async def _on_commit_signed(self, commit):
         """Sign the commit with our private key and broadcast COMMIT_SIGNED to participants.
