@@ -1450,6 +1450,7 @@ export interface AgentInfo {
     instruction_set_name: string;
     created_at: string;
     updated_at?: string;
+    compute_host?: string;  // Remote peer node_id for LLM inference (if set)
     // Telegram integration fields (v0.22.0+)
     telegram_enabled?: boolean;
     telegram_bot_token?: string;

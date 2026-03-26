@@ -8623,11 +8623,19 @@ Respond in JSON format:
         Returns:
             Dict with status and list of agents
         """
-        from .dpc_agent.utils import AgentRegistry
+        from .dpc_agent.utils import AgentRegistry, load_agent_config
 
         try:
             registry = AgentRegistry()
             agents = registry.list_agents()
+
+            # Augment registry entries with config.json fields not stored in registry
+            for agent in agents:
+                agent_id = agent.get("agent_id", "")
+                if agent_id:
+                    cfg = load_agent_config(agent_id) or {}
+                    if cfg.get("compute_host"):
+                        agent["compute_host"] = cfg["compute_host"]
 
             return {
                 "status": "success",

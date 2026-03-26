@@ -374,6 +374,15 @@
       clearAgentStreaming();
       lastActiveChatId = activeChatId;
       console.log(`[ChatSwitch] Cleared progress for chat switch to: ${activeChatId}`);
+
+      // Restore compute host from agent metadata when switching to an agent chat
+      const chatMeta = $aiChats.get(activeChatId);
+      if (chatMeta?.compute_host) {
+        selectedComputeHost = chatMeta.compute_host;
+      } else if (activeChatId.startsWith('agent_') && selectedComputeHost !== 'local') {
+        // Agent with no compute_host should use local
+        selectedComputeHost = "local";
+      }
     }
   });
 
@@ -3260,9 +3269,13 @@
         provider: 'dpc_agent',
         profile_name: agent.profile_name,
         llm_provider: agent.provider_alias,
+        ...(agent.compute_host ? { compute_host: agent.compute_host } : {}),
       });
       return newMap;
     });
+
+    // Restore compute host for this agent
+    selectedComputeHost = agent.compute_host || "local";
 
     // Set the chat provider
     chatProviders.update(map => {
@@ -4549,6 +4562,7 @@
             peerProviders={$peerProviders}
             nodeStatus={$nodeStatus}
             defaultProviders={$defaultProviders}
+            agentLlmProvider={$aiChats.get(activeChatId)?.llm_provider || ""}
           />
           {/if}
 

@@ -45,7 +45,10 @@
     providersList = [],
     peerProviders = new Map(),
     nodeStatus = null,
-    defaultProviders = null
+    defaultProviders = null,
+
+    // For agent chats with remote compute host: the LLM provider alias used by the agent
+    agentLlmProvider = ""
   }: {
     selectedComputeHost?: string;
     selectedTextProvider?: string;
@@ -57,6 +60,7 @@
     peerProviders?: Map<string, ProviderInfo[]>;
     nodeStatus?: { peer_info?: PeerInfo[] } | null;
     defaultProviders?: DefaultProviders | null;
+    agentLlmProvider?: string;
   } = $props();
 
   // Merged provider lists (Phase 2: combines local + remote providers)
@@ -66,8 +70,13 @@
       // Special display for dpc_agent: show underlying provider
       let displayText = `${p.alias} (${p.model}) - local`;
       if (p.alias === 'dpc_agent') {
-        const underlying = defaultProviders?.agent_provider || defaultProviders?.default_provider;
-        displayText = `Agent (uses ${underlying || 'default'})`;
+        if (selectedComputeHost !== 'local' && agentLlmProvider) {
+          // Remote-host agent: show the actual remote LLM provider being used
+          displayText = `Agent (uses ${agentLlmProvider})`;
+        } else {
+          const underlying = defaultProviders?.agent_provider || defaultProviders?.default_provider;
+          displayText = `Agent (uses ${underlying || 'default'})`;
+        }
       }
       return {
         ...p,
