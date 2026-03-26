@@ -111,6 +111,48 @@ def _sanitize_tool_result(result: str) -> str:
     return sanitized
 
 
+def _extract_thinking_prefix(content: str) -> str:
+    """Return only the text before the first tool_call block.
+
+    GLM-4.7 often generates hallucinated [TOOL RESULT] / [USER] / [ASSISTANT]
+    sections after the first tool_call block. Stripping them prevents these
+    from polluting subsequent prompt rounds.
+    """
+    if not content:
+        return ""
+    marker = "```tool_call"
+    idx = content.find(marker)
+    if idx == -1:
+        return content        # no tool_call blocks — return as-is
+    prefix = content[:idx].strip()
+    if len(content) - idx > 500:   # only log when actually trimming significant content
+        log.debug(
+            "_extract_thinking_prefix: trimmed %d chars of post-tool-call hallucination",
+            len(content) - idx,
+        )
+    return prefix
+
+
+_ROLE_BOUNDARY_PATTERNS = ["\n[USER]\n", "\n[ASSISTANT]\n", "\n[SYSTEM]\n", "[USER]"]
+
+
+def _strip_role_boundaries(content: str) -> str:
+    """Strip hallucinated role markers and everything after them from a final response."""
+    lower = content.lower()
+    earliest = len(content)
+    for pat in _ROLE_BOUNDARY_PATTERNS:
+        idx = lower.find(pat.lower())
+        if idx != -1 and idx < earliest:
+            earliest = idx
+    if earliest < len(content):
+        log.warning(
+            "_strip_role_boundaries: stripped %d chars starting at hallucinated role marker",
+            len(content) - earliest,
+        )
+        return content[:earliest].strip()
+    return content
+
+
 def _execute_single_tool(
     tools: "ToolRegistry",
     tc: Dict[str, Any],
@@ -381,8 +423,9 @@ async def run_llm_loop(
             # No tool calls — final response or empty-response retry
             if not tool_calls:
                 if content and content.strip():
-                    llm_trace["assistant_notes"].append(content.strip()[:320])
-                    return content, accumulated_usage, llm_trace
+                    clean_content = _strip_role_boundaries(content)
+                    llm_trace["assistant_notes"].append(clean_content.strip()[:320])
+                    return clean_content, accumulated_usage, llm_trace
                 # LLM returned empty content (e.g. GLM thinking-only with no text).
                 # Inject a re-prompt and retry once so the user gets a real answer.
                 if round_idx == 1:
@@ -394,12 +437,13 @@ async def run_llm_loop(
                     continue
                 return "", accumulated_usage, llm_trace
 
-            # Process tool calls
-            messages.append({"role": "assistant", "content": content or "", "tool_calls": tool_calls})
+            # Process tool calls — strip hallucinated post-tool-call content before storing
+            thinking = _extract_thinking_prefix(content)
+            messages.append({"role": "assistant", "content": thinking, "tool_calls": tool_calls})
 
-            if content and content.strip():
-                emit_progress(content.strip(), None, round_idx)
-                llm_trace["assistant_notes"].append(content.strip()[:320])
+            if thinking and thinking.strip():
+                emit_progress(thinking.strip(), None, round_idx)
+                llm_trace["assistant_notes"].append(thinking.strip()[:320])
 
             # Check for duplicate tool calls before executing.
             # If the same (tool, args) fingerprint has appeared MAX_DUPLICATE_CALLS
