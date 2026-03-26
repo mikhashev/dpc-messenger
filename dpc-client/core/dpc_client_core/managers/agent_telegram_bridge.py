@@ -456,6 +456,49 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
 
+    def _build_proposal_message(self, proposal_id: str, proposal) -> tuple:
+        """Build Telegram message text and keyboard for a knowledge proposal.
+
+        Returns (text, InlineKeyboardMarkup) so both /endsession and
+        notify_knowledge_proposal use identical formatting.
+        """
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        # Build entries preview
+        entries = getattr(proposal, 'entries', []) or []
+        entries_lines = []
+        for i, entry in enumerate(entries, 1):
+            content = getattr(entry, 'content', str(entry))
+            confidence = getattr(entry, 'confidence', 1.0)
+            tags = getattr(entry, 'tags', [])
+            tag_str = f" \\[{escape_markdown(', '.join(tags))}\\]" if tags else ""
+            entries_lines.append(
+                f"{i}\\. {escape_markdown(content[:120])} _{confidence:.0%} confidence_{tag_str}"
+            )
+
+        topic = escape_markdown(getattr(proposal, 'topic', 'Unknown') or 'Unknown')
+        summary = escape_markdown(getattr(proposal, 'summary', '') or '')
+        avg_conf = getattr(proposal, 'avg_confidence', 1.0)
+        entries_text = "\n".join(entries_lines) if entries_lines else "_No entries_"
+
+        text = (
+            f"📚 *Knowledge Proposal*\n\n"
+            f"*Topic:* {topic}\n"
+            f"*Summary:* {summary}\n"
+            f"*Confidence:* {avg_conf:.0%} \\| *Entries:* {len(entries)}\n\n"
+            f"*Entries:*\n{entries_text}\n\n"
+            f"Review and vote:"
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                InlineKeyboardButton("🔄 Request Changes", callback_data=f"vote:{proposal_id}:request_changes"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
+            ]
+        ])
+        return text, keyboard
+
     async def _handle_endsession_command(self, update, context):
         """Handle /endsession command — end session and trigger knowledge extraction."""
         chat_id = str(update.effective_chat.id)
@@ -476,27 +519,37 @@ Send a voice message and it will be transcribed and processed\\.
         )
 
         try:
-            result = await service.end_conversation_session(conversation_id)
+            result = await service.end_conversation_session(
+                conversation_id,
+                initiated_by="telegram",
+            )
             status = result.get("status", "unknown")
 
             if status == "success":
                 proposal_id = result.get("proposal_id")
                 if proposal_id:
-                    # Store pending proposal so vote callback can look it up
+                    # Fetch the proposal object so we can show its content
+                    proposal = None
+                    if (hasattr(service, 'consensus_manager')
+                            and proposal_id in service.consensus_manager.sessions):
+                        proposal = service.consensus_manager.sessions[proposal_id].proposal
+
                     self._pending_proposals[proposal_id] = chat_id
 
-                    # Send message with inline approve/reject keyboard
-                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-                    keyboard = InlineKeyboardMarkup([
-                        [
+                    if proposal:
+                        text, keyboard = self._build_proposal_message(proposal_id, proposal)
+                    else:
+                        # Fallback: no proposal object available
+                        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                        text = "📚 *Knowledge proposal created\\!*\n\nReview and vote:"
+                        keyboard = InlineKeyboardMarkup([[
                             InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                            InlineKeyboardButton("🔄 Request Changes", callback_data=f"vote:{proposal_id}:request_changes"),
                             InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
-                        ]
-                    ])
+                        ]])
+
                     await update.message.reply_text(
-                        "✅ *Session Ended*\n\n"
-                        "📚 *Knowledge proposal created\\!*\n\n"
-                        "Review and vote on the knowledge commit:",
+                        f"✅ *Session Ended*\n\n{text}",
                         parse_mode="MarkdownV2",
                         reply_markup=keyboard,
                     )
@@ -542,27 +595,22 @@ Send a voice message and it will be transcribed and processed\\.
             status = result.get("status", "unknown")
 
             if status == "success":
-                if vote == "approve":
-                    label = "✅ *Approved*"
-                    detail = "\n\nKnowledge will be saved to your personal context\\."
-                else:
-                    label = "❌ *Rejected*"
-                    detail = "\n\nKnowledge commit rejected\\."
-
-                await query.edit_message_text(
-                    f"{label}\n\nVote recorded\\."
-                    f"{detail}",
-                    parse_mode="MarkdownV2",
-                )
+                vote_labels = {
+                    "approve": "✅ Vote recorded — waiting for agent review\\.",
+                    "reject": "❌ Vote recorded — waiting for agent review\\.",
+                    "request_changes": "🔄 Vote recorded — agent will be asked to revise\\.",
+                }
+                label = vote_labels.get(vote, "Vote recorded\\.")
+                # Edit the proposal message to show vote was cast; final result
+                # will arrive via notify_knowledge_result once all votes are in.
+                await query.edit_message_text(label, parse_mode="MarkdownV2")
             else:
                 msg = escape_markdown(result.get("message", "Unknown error"))
                 await query.edit_message_text(
                     f"❌ *Vote failed:* {msg}",
                     parse_mode="MarkdownV2",
                 )
-
-            # Clean up pending proposal
-            self._pending_proposals.pop(proposal_id, None)
+                self._pending_proposals.pop(proposal_id, None)
 
         except Exception as e:
             log.error(f"Error handling vote callback: {e}", exc_info=True)
@@ -571,18 +619,14 @@ Send a voice message and it will be transcribed and processed\\.
     async def notify_knowledge_proposal(
         self,
         proposal_id: str,
-        topic: str,
+        proposal=None,
         chat_ids: Optional[List[str]] = None,
     ) -> None:
-        """
-        Send a Telegram notification for an auto-detected knowledge commit proposal.
-
-        Called by service.py when a ConversationMonitor auto-detects knowledge and creates
-        a proposal. Sends a message with inline [✅ Approve] [❌ Reject] buttons.
+        """Send a Telegram notification for an auto-detected knowledge commit proposal.
 
         Args:
             proposal_id: The proposal ID from consensus_manager
-            topic: Short topic description for the user
+            proposal: KnowledgeCommitProposal object (for showing entries/summary)
             chat_ids: Optional list of chat IDs to notify (defaults to all allowed_chat_ids)
         """
         if not self._enabled or not self._bot:
@@ -591,19 +635,17 @@ Send a voice message and it will be transcribed and processed\\.
         targets = [str(c) for c in chat_ids] if chat_ids else self.allowed_chat_ids
 
         try:
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            keyboard = InlineKeyboardMarkup([
-                [
+            if proposal:
+                text, keyboard = self._build_proposal_message(proposal_id, proposal)
+            else:
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                text = "📚 *Knowledge Proposal*\n\nReview and vote:"
+                keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                    InlineKeyboardButton("🔄 Request Changes", callback_data=f"vote:{proposal_id}:request_changes"),
                     InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
-                ]
-            ])
-            topic_escaped = escape_markdown(topic or "New knowledge detected")
-            text = (
-                "📚 *Knowledge Proposal*\n\n"
-                f"*Topic:* {topic_escaped}\n\n"
-                "Review and vote:"
-            )
+                ]])
+
             for chat_id in targets:
                 if chat_id in self.allowed_chat_ids:
                     self._pending_proposals[proposal_id] = chat_id
@@ -618,6 +660,63 @@ Send a voice message and it will be transcribed and processed\\.
                         log.warning(f"Failed to notify chat {chat_id} of knowledge proposal: {e}")
         except Exception as e:
             log.error(f"notify_knowledge_proposal error: {e}", exc_info=True)
+
+    async def notify_knowledge_result(
+        self,
+        proposal_id: str,
+        status: str,
+        topic: str,
+        vote_comments: Optional[Dict[str, str]] = None,
+        change_requests: Optional[list] = None,
+    ) -> None:
+        """Send the final voting result back to Telegram after all votes are in.
+
+        Called by service.py callbacks (_on_commit_approved, _on_commit_rejected,
+        _on_commit_revision_needed) so the user learns the actual outcome rather
+        than just "vote recorded".
+
+        Args:
+            proposal_id: The proposal that was finalized
+            status: "approved", "rejected", or "revision_needed"
+            topic: Topic name for context
+            vote_comments: Dict of node_id → comment from all voters
+            change_requests: List of {node_id, comment} for revision_needed case
+        """
+        if not self._enabled or not self._bot:
+            return
+
+        chat_id = self._pending_proposals.pop(proposal_id, None)
+        if not chat_id:
+            return  # Not a Telegram-originated proposal
+
+        try:
+            topic_esc = escape_markdown(topic or "")
+            if status == "approved":
+                text = f"✅ *Knowledge Saved*\n\n*Topic:* {topic_esc}\n\nThe agent approved and the knowledge has been added to your personal context\\."
+            elif status == "rejected":
+                reasons = ""
+                if vote_comments:
+                    lines = [f"• {escape_markdown(c)}" for c in vote_comments.values() if c]
+                    if lines:
+                        reasons = "\n\n*Reasons:*\n" + "\n".join(lines)
+                text = f"❌ *Knowledge Rejected*\n\n*Topic:* {topic_esc}{reasons}"
+            elif status == "revision_needed":
+                changes = ""
+                if change_requests:
+                    lines = [f"• {escape_markdown(cr.get('comment', ''))}" for cr in change_requests if cr.get('comment')]
+                    if lines:
+                        changes = "\n\n*Requested changes:*\n" + "\n".join(lines)
+                text = f"🔄 *Revision Requested*\n\n*Topic:* {topic_esc}{changes}\n\nThe agent will revise and resubmit for voting\\."
+            else:
+                text = f"⏱ *Voting timed out*\n\n*Topic:* {topic_esc}"
+
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="MarkdownV2",
+            )
+        except Exception as e:
+            log.error(f"notify_knowledge_result error: {e}", exc_info=True)
 
     async def _handle_message(self, update, context):
         """Handle incoming text message."""

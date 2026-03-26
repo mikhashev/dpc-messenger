@@ -4825,13 +4825,19 @@ Respond in JSON format:
 
         return self.conversation_monitors[conversation_id]
 
-    async def end_conversation_session(self, conversation_id: str) -> Dict[str, Any]:
+    async def end_conversation_session(
+        self,
+        conversation_id: str,
+        initiated_by: str = "user_request",
+    ) -> Dict[str, Any]:
         """Manually end a conversation session and extract knowledge.
 
         UI Integration: Called when user clicks "End Session & Save Knowledge" button.
+        Also called by agent_telegram_bridge for /endsession command.
 
         Args:
             conversation_id: The conversation/peer ID to end session for
+            initiated_by: Trigger source — "user_request" (UI) or "telegram"
 
         Returns:
             Dict with status and proposal (if knowledge detected)
@@ -4862,7 +4868,7 @@ Respond in JSON format:
             proposal = await monitor.generate_commit_proposal(
                 force=True,
                 proposed_by=self.p2p_manager.node_id,
-                initiated_by="user_request",
+                initiated_by=initiated_by,
             )
 
             if proposal:
@@ -4874,6 +4880,10 @@ Respond in JSON format:
                     "knowledge_commit_proposed",
                     proposal.to_dict()
                 )
+
+                # For agent conversations triggered from Telegram, the bridge already
+                # showed the proposal via _handle_endsession_command (it fetches it from
+                # consensus_manager after propose_commit returns). No duplicate send needed.
 
                 # For local_ai, ai_chat_xxx, telegram, and agent conversations, don't broadcast to peers (privacy)
                 # For peer conversations, broadcast for collaborative consensus
@@ -7485,6 +7495,17 @@ Respond in JSON format:
             proposal.to_dict()
         )
 
+    def _get_agent_telegram_bridge(self, conversation_id: str):
+        """Return the AgentTelegramBridge for an agent conversation, or None."""
+        if not conversation_id or not conversation_id.startswith("agent_"):
+            return None
+        dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+        if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+            mgr = dpc_agent_provider._managers.get(conversation_id)
+            if mgr:
+                return getattr(mgr, '_telegram_bridge', None)
+        return None
+
     async def _on_vote_received(self, vote) -> None:
         """Broadcast a received vote to the UI so the vote panel updates in real time."""
         try:
@@ -7509,6 +7530,14 @@ Respond in JSON format:
                 "approved_by": commit.approved_by,
                 "vote_comments": commit.vote_comments,
             })
+            bridge = self._get_agent_telegram_bridge(commit.conversation_id)
+            if bridge:
+                await bridge.notify_knowledge_result(
+                    proposal_id=commit.commit_id,
+                    status="approved",
+                    topic=commit.topic,
+                    vote_comments=commit.vote_comments,
+                )
         except Exception as e:
             logger.error("Error in _on_commit_approved: %s", e, exc_info=True)
 
@@ -7527,6 +7556,14 @@ Respond in JSON format:
                 "rejected_by": [v.voter_node_id for v in votes.values() if v.vote == "reject"],
                 "rejection_comments": rejection_comments,
             })
+            bridge = self._get_agent_telegram_bridge(proposal.conversation_id)
+            if bridge:
+                await bridge.notify_knowledge_result(
+                    proposal_id=proposal.proposal_id,
+                    status="rejected",
+                    topic=proposal.topic,
+                    vote_comments=rejection_comments,
+                )
         except Exception as e:
             logger.error("Error in _on_commit_rejected: %s", e, exc_info=True)
 
@@ -7626,6 +7663,16 @@ Respond in JSON format:
                 "conversation_id": proposal.conversation_id,
                 "change_requests": change_requests,
             })
+
+            # Notify Telegram user of the requested changes
+            bridge = self._get_agent_telegram_bridge(proposal.conversation_id)
+            if bridge:
+                await bridge.notify_knowledge_result(
+                    proposal_id=proposal.proposal_id,
+                    status="revision_needed",
+                    topic=proposal.topic,
+                    change_requests=change_requests,
+                )
 
             # For agent conversations, let the originating agent auto-revise
             conv_id = proposal.conversation_id
