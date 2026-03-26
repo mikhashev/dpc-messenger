@@ -162,6 +162,7 @@ class BackgroundConsciousness:
 
         # Get event emitter
         emitter = get_event_emitter()
+        _agent_id = self.agent.agent_root.name
 
         try:
             # Choose a thought type
@@ -172,6 +173,7 @@ class BackgroundConsciousness:
             await emitter.emit(EventType.THOUGHT_STARTED, {
                 "thought_number": self.thought_count,
                 "thought_type": thought_type,
+                "agent_id": _agent_id,
             })
 
             # Generate thought prompt
@@ -194,6 +196,7 @@ class BackgroundConsciousness:
                 "thought_number": self.thought_count,
                 "thought_type": thought_type,
                 "response_preview": response[:200] if response else None,
+                "agent_id": _agent_id,
             })
 
             log.info(f"Background thought #{self.thought_count} complete")
@@ -204,6 +207,7 @@ class BackgroundConsciousness:
             await emitter.emit(EventType.THOUGHT_COMPLETED, {
                 "thought_number": self.thought_count,
                 "error": str(e)[:200],
+                "agent_id": _agent_id,
             })
 
     def _choose_thought_type(self) -> str:

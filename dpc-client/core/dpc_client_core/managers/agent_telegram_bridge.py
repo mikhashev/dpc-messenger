@@ -1347,10 +1347,17 @@ def create_telegram_bridge_callback(bridge: AgentTelegramBridge, agent_id: Optio
         # Filter out events that belong to a different agent conversation
         if agent_id is not None:
             event_conv_id = event.data.get("conversation_id")
+            event_agent_id = event.data.get("agent_id")
             if event_conv_id is not None and event_conv_id != agent_id:
                 log.debug(
                     f"[TelegramBridge Callback] Skipping event {event.type.value} "
                     f"for conversation '{event_conv_id}' (bridge owns '{agent_id}')"
+                )
+                return
+            if event_agent_id is not None and event_agent_id != agent_id:
+                log.debug(
+                    f"[TelegramBridge Callback] Skipping event {event.type.value} "
+                    f"from agent '{event_agent_id}' (bridge owns '{agent_id}')"
                 )
                 return
 

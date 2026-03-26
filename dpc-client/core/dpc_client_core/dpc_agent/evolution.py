@@ -211,9 +211,11 @@ class EvolutionManager:
         self._current_cycle = cycle
 
         emitter = get_event_emitter()
+        _agent_id = self.agent_root.name
         await emitter.emit(EventType.EVOLUTION_CYCLE_STARTED, {
             "cycle_id": cycle.id,
             "cycle_number": self._cycle_count,
+            "agent_id": _agent_id,
         })
 
         try:
@@ -250,6 +252,7 @@ class EvolutionManager:
                         await emitter.emit(EventType.CODE_MODIFIED, {
                             "path": proposal["path"],
                             "description": proposal["description"][:200],
+                            "agent_id": _agent_id,
                         })
                 else:
                     # Queue for human approval (memory/identity changes)
@@ -277,6 +280,7 @@ class EvolutionManager:
                 "files_modified": cycle.files_modified,
                 "changes_applied": cycle.changes_applied,
                 "description": cycle.description,
+                "agent_id": _agent_id,
             })
 
         # Log cycle to file
@@ -602,6 +606,7 @@ If no improvements are warranted: {{"proposals": []}}
                         "path": change.path,
                         "description": change.description,
                         "approved": True,
+                        "agent_id": self.agent_root.name,
                     })
 
                 return success

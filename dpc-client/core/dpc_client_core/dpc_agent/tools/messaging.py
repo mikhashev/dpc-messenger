@@ -126,6 +126,7 @@ async def send_user_message(ctx: ToolContext, message: str, priority: str = "nor
             await emit_agent_message(
                 message=part_with_indicator,
                 priority=priority,
+                agent_id=ctx.agent_root.name,
             )
 
         result = f"Message sent to user via Telegram (priority: {priority})"

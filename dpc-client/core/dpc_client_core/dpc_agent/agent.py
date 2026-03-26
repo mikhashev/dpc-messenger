@@ -806,7 +806,7 @@ class DpcAgent:
             # Also broadcast via event system (e.g. DPC UI notifications)
             try:
                 from .events import emit_agent_message
-                await emit_agent_message(formatted, priority="high")
+                await emit_agent_message(formatted, priority="high", agent_id=self.agent_root.name)
             except Exception as e:
                 log.warning("Failed to emit reminder event: %s", e)
 
