@@ -1645,6 +1645,7 @@ class CoreService:
                 "model": provider.model,
                 "type": provider.__class__.__name__.replace("Provider", ""),  # "Ollama", "OpenAICompatible", etc.
                 "supports_vision": provider.supports_vision(),
+                "context_window": self.llm_manager.get_context_window(provider.model),
             }
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)

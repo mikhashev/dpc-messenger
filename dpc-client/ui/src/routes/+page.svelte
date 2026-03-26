@@ -2989,13 +2989,20 @@
     // If creating a DPC Agent, also create backend agent storage (v0.19.0+)
     if (selectedProviderForNewChat === 'dpc_agent') {
       try {
+        // Find the selected LLM provider's context_window (from local or remote providers)
+        const llmProviderAlias = selectedAgentLLMProvider || $availableProviders?.default_provider || 'dpc_agent';
+        const llmProviderList = selectedDialogComputeHost === 'local'
+          ? $availableProviders.providers
+          : ($peerProviders.get(selectedDialogComputeHost) ?? []);
+        const llmProviderInfo = llmProviderList.find((p: any) => p.alias === llmProviderAlias);
         const result = await createAgent(
           chatName,
-          selectedAgentLLMProvider || $availableProviders?.default_provider || 'dpc_agent',
+          llmProviderAlias,
           selectedProfileForNewAgent,
           'general',  // Default instruction set for agents
           50.0, 200,
-          selectedDialogComputeHost !== 'local' ? selectedDialogComputeHost : undefined
+          selectedDialogComputeHost !== 'local' ? selectedDialogComputeHost : undefined,
+          llmProviderInfo?.context_window
         );
         if (result?.status === 'success') {
           console.log('[DPC Agent] Created agent storage:', result.agent_id);

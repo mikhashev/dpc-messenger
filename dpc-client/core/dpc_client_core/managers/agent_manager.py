@@ -579,8 +579,14 @@ class DpcAgentManager:
             if conversation_tokens:
                 llm_manager = getattr(self.service, "llm_manager", None)
                 if llm_manager:
-                    model = llm_manager.get_active_model_name()
-                    context_window = llm_manager.get_context_window(model)
+                    # Use stored context_window from agent config when available
+                    # (remote agents have a different context window than the local default model)
+                    stored_cw = self.config.get("context_window")
+                    if stored_cw:
+                        context_window = int(stored_cw)
+                    else:
+                        model = llm_manager.get_active_model_name()
+                        context_window = llm_manager.get_context_window(model)
                     monitor.set_token_limit(context_window)
                 monitor.set_token_count(conversation_tokens)
 

@@ -1493,6 +1493,7 @@ export async function createAgent(
     budgetUsd: number = 50.0,
     maxRounds: number = 200,
     computeHost?: string,
+    contextWindow?: number,
 ): Promise<any> {
     return sendCommand('create_agent', {
         name,
@@ -1502,6 +1503,7 @@ export async function createAgent(
         budget_usd: budgetUsd,
         max_rounds: maxRounds,
         ...(computeHost ? { compute_host: computeHost } : {}),
+        ...(contextWindow ? { context_window: contextWindow } : {}),
     });
 }
 
