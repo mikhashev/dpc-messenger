@@ -96,9 +96,10 @@ def _list_agent_skills(ctx: "ToolContext", agent_id: str, tags: Optional[str] = 
 
 def _import_skill_from_agent(ctx: "ToolContext", agent_id: str, skill_name: str) -> str:
     """Copy a shareable skill from another local agent into this agent's skill store."""
-    # Firewall check
+    # Firewall check (per-agent profile if available)
     firewall = getattr(ctx, "firewall", None)
-    if firewall and not firewall.get_agent_skill_permission("accept_peer_skills"):
+    _profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
+    if firewall and not firewall.get_agent_skill_permission("accept_peer_skills", profile_name=_profile):
         return "⚠️ Firewall blocks skill import: 'accept_peer_skills' is disabled"
 
     if ctx.skill_store is None:

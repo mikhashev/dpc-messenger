@@ -147,7 +147,8 @@ class ToolContext:
         """
         if not self.firewall:
             return False
-        return self.firewall.is_extended_path_allowed(path, require_write)
+        _profile = getattr(getattr(self, "_agent", None), "_firewall_profile", None)
+        return self.firewall.is_extended_path_allowed(path, require_write, profile_name=_profile)
 
     def validate_extended_path(self, path: str, require_write: bool = False) -> pathlib.Path:
         """
@@ -182,7 +183,8 @@ class ToolContext:
         """Get all configured extended sandbox paths."""
         if not self.firewall:
             return {'read_only': [], 'read_write': []}
-        return self.firewall.get_extended_paths()
+        _profile = getattr(getattr(self, "_agent", None), "_firewall_profile", None)
+        return self.firewall.get_extended_paths(profile_name=_profile)
 
 
 @dataclass

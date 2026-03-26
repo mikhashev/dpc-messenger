@@ -217,13 +217,46 @@ class ContextFirewall:
             logger.warning(f"Invalid path in sandbox_extensions: {path_str}")
             return ""
 
-    def is_extended_path_allowed(self, path: str, require_write: bool = False) -> bool:
+    def _get_profile_or_global(self, profile_name: Optional[str], *keys, default=None):
+        """
+        Read a value from a per-agent profile if present, else from the global dpc_agent section.
+
+        Args:
+            profile_name: Agent profile key (typically agent_id), or None for global-only
+            *keys: Sequence of dict keys to traverse (e.g. 'evolution', 'enabled')
+            default: Value returned when key is absent everywhere
+        """
+        # Try per-agent profile first
+        if profile_name:
+            profile = self.rules.get('agent_profiles', {}).get(profile_name)
+            if profile is not None:
+                val = profile
+                for k in keys:
+                    if isinstance(val, dict):
+                        val = val.get(k)
+                    else:
+                        val = None
+                        break
+                if val is not None:
+                    return val
+        # Fall back to global dpc_agent
+        val = self.rules.get('dpc_agent', {})
+        for k in keys:
+            if isinstance(val, dict):
+                val = val.get(k)
+            else:
+                return default
+        return val if val is not None else default
+
+    def is_extended_path_allowed(self, path: str, require_write: bool = False,
+                                 profile_name: Optional[str] = None) -> bool:
         """
         Check if a path is in the extended sandbox (outside ~/.dpc/agent/).
 
         Args:
             path: Path to check
             require_write: If True, check for write access; if False, read access is sufficient
+            profile_name: Per-agent profile key; when set, per-agent sandbox_extensions are used
 
         Returns:
             True if the path is allowed for the requested access level
@@ -236,8 +269,17 @@ class ContextFirewall:
         except Exception:
             return False
 
+        # Resolve sandbox paths: per-agent profile overrides global
+        if profile_name:
+            sandbox = self._get_profile_or_global(profile_name, 'sandbox_extensions', default={})
+            rw_paths = [self._normalize_path(p) for p in sandbox.get('read_write', []) if p]
+            ro_paths = [self._normalize_path(p) for p in sandbox.get('read_only', []) if p]
+        else:
+            rw_paths = self.sandbox_read_write_paths
+            ro_paths = self.sandbox_read_only_paths
+
         # Check read_write paths first (they also allow read)
-        for allowed_path in self.sandbox_read_write_paths:
+        for allowed_path in rw_paths:
             if allowed_path and (
                 normalized == allowed_path
                 or normalized.startswith(allowed_path + os.sep)
@@ -250,7 +292,7 @@ class ContextFirewall:
             return False
 
         # Check read_only paths
-        for allowed_path in self.sandbox_read_only_paths:
+        for allowed_path in ro_paths:
             if allowed_path and (
                 normalized == allowed_path
                 or normalized.startswith(allowed_path + os.sep)
@@ -260,19 +302,27 @@ class ContextFirewall:
 
         return False
 
-    def get_extended_paths(self) -> Dict[str, List[str]]:
-        """Get all extended sandbox paths."""
+    def get_extended_paths(self, profile_name: Optional[str] = None) -> Dict[str, List[str]]:
+        """Get all extended sandbox paths, optionally scoped to a per-agent profile."""
+        if profile_name:
+            sandbox = self._get_profile_or_global(profile_name, 'sandbox_extensions', default={})
+            return {
+                'read_only': [self._normalize_path(p) for p in sandbox.get('read_only', []) if p],
+                'read_write': [self._normalize_path(p) for p in sandbox.get('read_write', []) if p],
+            }
         return {
             'read_only': self.sandbox_read_only_paths,
             'read_write': self.sandbox_read_write_paths,
         }
 
-    def can_agent_access_context(self, context_type: str) -> bool:
+    def can_agent_access_context(self, context_type: str,
+                                  profile_name: Optional[str] = None) -> bool:
         """
         Check if the DPC agent can access a specific context type.
 
         Args:
             context_type: Type of context ('personal', 'device', 'knowledge')
+            profile_name: Per-agent profile key; when set, per-agent settings override global
 
         Returns:
             True if agent can access this context type
@@ -281,36 +331,54 @@ class ContextFirewall:
             return False
 
         if context_type == 'personal':
-            return self.dpc_agent_personal_context_access
+            return bool(self._get_profile_or_global(
+                profile_name, 'personal_context_access',
+                default=self.dpc_agent_personal_context_access))
         elif context_type == 'device':
-            return self.dpc_agent_device_context_access
+            return bool(self._get_profile_or_global(
+                profile_name, 'device_context_access',
+                default=self.dpc_agent_device_context_access))
         elif context_type == 'knowledge':
-            # knowledge_access can be 'read_only', 'read_write', or 'none'
-            return self.dpc_agent_knowledge_access != 'none'
+            ka = self._get_profile_or_global(
+                profile_name, 'knowledge_access',
+                default=self.dpc_agent_knowledge_access)
+            return ka != 'none'
 
         return False
 
-    def can_agent_write_knowledge(self) -> bool:
+    def can_agent_write_knowledge(self, profile_name: Optional[str] = None) -> bool:
         """Check if the agent can write to knowledge base."""
         if not self.dpc_agent_enabled:
             return False
-        return self.dpc_agent_knowledge_access == 'read_write'
+        ka = self._get_profile_or_global(
+            profile_name, 'knowledge_access',
+            default=self.dpc_agent_knowledge_access)
+        return ka == 'read_write'
 
-    def get_agent_skill_permission(self, operation: str) -> bool:
+    def get_agent_skill_permission(self, operation: str,
+                                    profile_name: Optional[str] = None) -> bool:
         """
         Check if agent has permission for a skill self-modification operation.
 
         Args:
             operation: One of: 'self_modify', 'create_new', 'rewrite_existing',
                        'accept_peer_skills', 'auto_announce_to_dht'
+            profile_name: Per-agent profile key; when set, per-agent skills settings are used
 
         Returns:
             True if permitted, False otherwise (defaults to False = safe)
         """
         if not self.dpc_agent_enabled:
             return False
-        skills_config = self.rules.get('dpc_agent', {}).get('skills', {})
-        return bool(skills_config.get(operation, False))
+        global_skills = self.rules.get('dpc_agent', {}).get('skills', {})
+        global_val = bool(global_skills.get(operation, False))
+        if profile_name:
+            profile = self.rules.get('agent_profiles', {}).get(profile_name)
+            if profile is not None:
+                skills = profile.get('skills', {})
+                if operation in skills:
+                    return bool(skills[operation])
+        return global_val
 
     def get_allowed_agent_tools(self) -> set:
         """
@@ -371,26 +439,47 @@ class ContextFirewall:
         """
         Get allowed tools for a specific agent profile.
 
+        Uses global dpc_agent tools as the baseline, then applies per-profile overrides.
+        Also enforces per-profile knowledge_access, personal_context_access, and skills
+        overrides (same logic as get_allowed_agent_tools() but scoped to the profile).
+
         Args:
-            profile_name: Name of the profile to get tools for
+            profile_name: Agent profile key (typically agent_id)
 
         Returns:
-            Set of allowed tool names based on profile configuration
+            Set of allowed tool names based on per-agent profile configuration
         """
         profile = self.get_agent_profile_settings(profile_name)
         if not profile:
-            # Fallback to global settings
+            # No per-agent profile — fall back to global settings
             return self.get_allowed_agent_tools()
 
-        if not profile.get('enabled', True):
+        if not profile.get('enabled', self.dpc_agent_enabled):
             return set()
 
-        tools_config = profile.get('tools', {})
+        # Start from global tool defaults, then override with per-profile values
+        profile_tools = profile.get('tools', {})
         allowed = set()
-
-        for tool_name, is_enabled in tools_config.items():
-            if is_enabled:
+        for tool_name, global_enabled in self.dpc_agent_tools.items():
+            if bool(profile_tools.get(tool_name, global_enabled)):
                 allowed.add(tool_name)
+
+        # Per-profile overrides mirroring get_allowed_agent_tools()
+        personal_access = profile.get('personal_context_access', self.dpc_agent_personal_context_access)
+        if not personal_access:
+            allowed.discard('get_dpc_context')
+
+        knowledge_access = profile.get('knowledge_access', self.dpc_agent_knowledge_access)
+        if knowledge_access != 'read_write':
+            allowed.discard('knowledge_write')
+
+        profile_skills = profile.get('skills', {})
+        accept_peer = profile_skills.get(
+            'accept_peer_skills',
+            bool(self.rules.get('dpc_agent', {}).get('skills', {}).get('accept_peer_skills', False))
+        )
+        if not accept_peer:
+            allowed.discard('import_skill_from_agent')
 
         return allowed
 

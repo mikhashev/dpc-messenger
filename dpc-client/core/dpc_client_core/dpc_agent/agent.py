@@ -115,6 +115,7 @@ class DpcAgent:
             skill_store=self.skill_store,
             llm=self.llm,
             firewall=firewall,
+            firewall_profile=firewall_profile,
         )
 
         # Task queue for background execution
@@ -363,8 +364,12 @@ class DpcAgent:
             log.info("DPC Agent disabled in firewall")
             return set()  # No tools allowed
 
-        allowed = self._firewall.get_allowed_agent_tools()
-        log.debug(f"Firewall allowed tools: {len(allowed)} tools")
+        if self._firewall_profile:
+            allowed = self._firewall.get_allowed_agent_tools_for_profile(self._firewall_profile)
+            log.debug(f"Firewall allowed tools (profile={self._firewall_profile}): {len(allowed)} tools")
+        else:
+            allowed = self._firewall.get_allowed_agent_tools()
+            log.debug(f"Firewall allowed tools (global): {len(allowed)} tools")
         return allowed
 
     def get_memory(self) -> Memory:

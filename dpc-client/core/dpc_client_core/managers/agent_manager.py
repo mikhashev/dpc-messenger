@@ -117,9 +117,19 @@ class DpcAgentManager:
             raise RuntimeError("CoreService does not have llm_manager")
 
         # Build agent config (same as default but with different provider)
-        evolution_enabled = self.firewall.evolution_enabled if self.firewall else False
-        evolution_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
-        evolution_auto = self.firewall.evolution_auto_apply if self.firewall else False
+        # Evolution settings: per-agent profile overrides global dpc_agent settings
+        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
+        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
+        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
+        _per_agent_profile = (
+            self.firewall.get_agent_profile_settings(self.agent_id)
+            if (self.firewall and self.agent_id)
+            else None
+        )
+        _per_agent_evo = _per_agent_profile.get('evolution', {}) if _per_agent_profile else {}
+        evolution_enabled = _per_agent_evo.get('enabled', _evo_global_enabled)
+        evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
+        evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
 
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
@@ -138,8 +148,9 @@ class DpcAgentManager:
             config=agent_config,
             agent_root=self.agent_root,
             firewall=self.firewall,
-            provider_alias=provider_alias,  # Phase 3: Use specific provider
-            service=self.service,           # For tools that need service access
+            provider_alias=provider_alias,   # Phase 3: Use specific provider
+            firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
+            service=self.service,            # For tools that need service access
         )
 
         # Cache for reuse
@@ -154,16 +165,36 @@ class DpcAgentManager:
             log.warning("Agent already initialized")
             return
 
-        # Check if agent is enabled via firewall
-        if self.firewall and not self.firewall.dpc_agent_enabled:
-            log.warning("DPC Agent is disabled via firewall - not starting")
+        # Check if agent is enabled: per-agent profile overrides global dpc_agent setting
+        _per_agent_enabled = (
+            self.firewall.get_agent_profile_settings(self.agent_id) if (self.firewall and self.agent_id) else None
+        )
+        _agent_enabled = (
+            _per_agent_enabled.get('enabled', self.firewall.dpc_agent_enabled)
+            if _per_agent_enabled is not None
+            else (self.firewall.dpc_agent_enabled if self.firewall else True)
+        )
+        if not _agent_enabled:
+            log.warning("DPC Agent is disabled (firewall profile=%s) - not starting", self.agent_id or 'global')
             return
 
         # Build agent config (tool control is via firewall, not config)
-        # Evolution settings come from firewall (privacy_rules.json), not provider config
-        evolution_enabled = self.firewall.evolution_enabled if self.firewall else False
-        evolution_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
-        evolution_auto = self.firewall.evolution_auto_apply if self.firewall else False
+        # Evolution settings: per-agent profile overrides global dpc_agent settings
+        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
+        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
+        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
+        _per_agent_profile = (
+            self.firewall.get_agent_profile_settings(self.agent_id)
+            if (self.firewall and self.agent_id)
+            else None
+        )
+        _per_agent_evo = _per_agent_profile.get('evolution', {}) if _per_agent_profile else {}
+        evolution_enabled = _per_agent_evo.get('enabled', _evo_global_enabled)
+        evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
+        evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
+        if _per_agent_evo:
+            log.debug("Agent %s: using per-agent evolution settings (enabled=%s, interval=%s, auto=%s)",
+                      self.agent_id, evolution_enabled, evolution_interval, evolution_auto)
 
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
@@ -186,8 +217,9 @@ class DpcAgentManager:
             llm_manager=llm_manager,
             config=agent_config,
             agent_root=self.agent_root,
-            firewall=self.firewall,  # Firewall controls tool access
-            service=self.service,   # For tools that need service access (e.g. extract_knowledge)
+            firewall=self.firewall,           # Firewall controls tool access
+            firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
+            service=self.service,             # For tools that need service access (e.g. extract_knowledge)
         )
 
         # Start background consciousness if enabled

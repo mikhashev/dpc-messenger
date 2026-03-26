@@ -761,17 +761,18 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
         Context content
     """
     try:
-        # Check firewall if available via DPC service
+        # Check firewall if available via DPC service (per-agent profile if set)
         if ctx.dpc_service and hasattr(ctx.dpc_service, 'firewall'):
             firewall = ctx.dpc_service.firewall
+            _profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
 
             if not getattr(firewall, 'dpc_agent_enabled', True):
                 return "⚠️ DPC Agent is disabled via firewall rules"
 
-            if context_type == "personal" and not getattr(firewall, 'dpc_agent_personal_context_access', True):
+            if context_type == "personal" and not firewall.can_agent_access_context("personal", profile_name=_profile):
                 return "⚠️ Personal context access is disabled via firewall rules"
 
-            if context_type == "device" and not getattr(firewall, 'dpc_agent_device_context_access', True):
+            if context_type == "device" and not firewall.can_agent_access_context("device", profile_name=_profile):
                 return "⚠️ Device context access is disabled via firewall rules"
 
         dpc_dir = Path.home() / ".dpc"

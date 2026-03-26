@@ -45,12 +45,14 @@ class SkillReflector:
     def __init__(
         self,
         skill_store: Any,
-        llm: Optional[Any] = None,   # DpcLlmAdapter
-        firewall: Optional[Any] = None,  # ContextFirewall
+        llm: Optional[Any] = None,           # DpcLlmAdapter
+        firewall: Optional[Any] = None,       # ContextFirewall
+        firewall_profile: Optional[str] = None,  # Per-agent profile key
     ):
         self.skill_store = skill_store
         self.llm = llm
         self.firewall = firewall
+        self.firewall_profile = firewall_profile
 
     # -------------------------------------------------------------------------
     # Synchronous: always called, fast
@@ -216,7 +218,7 @@ Do NOT suggest improvements for: normal variance, minor wording, or tasks that s
         if not self.firewall:
             return False
         try:
-            return self.firewall.get_agent_skill_permission(operation)
+            return self.firewall.get_agent_skill_permission(operation, profile_name=self.firewall_profile)
         except Exception:
             return False
 
