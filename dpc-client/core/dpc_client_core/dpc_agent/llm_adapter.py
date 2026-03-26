@@ -206,6 +206,15 @@ class DpcLlmAdapter:
             raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
         provider = self._llm_manager.providers[alias]
 
+        # Native tool calling path — use when provider supports it and tools are requested.
+        # This eliminates the text-based tool injection pattern that causes GLM-4.7 to
+        # hallucinate [TOOL RESULT]/[USER] sections (tool bypass behavior, ArXiv 2412.04141).
+        if tools and hasattr(provider, "generate_with_tools"):
+            log.debug("Using native tool calling path for provider '%s'", alias)
+            return await self._chat_native_tools(
+                provider, messages, tools, on_stream_chunk, conversation_id
+            )
+
         # Local inference - text-only path (or pre-analyzed image description)
         # Convert message list to prompt string for DPC providers
         prompt = self._messages_to_prompt(messages)
@@ -396,6 +405,170 @@ class DpcLlmAdapter:
         except Exception as e:
             log.error(f"Native vision query error: {e}")
             raise
+
+    async def _chat_native_tools(
+        self,
+        provider: Any,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Native Anthropic SDK tool calling path.
+
+        Converts Ouroboros-format messages/tools to Anthropic format, calls
+        provider.generate_with_tools(), and converts the response back to
+        Ouroboros format. Tool calls are returned as structured data — the model
+        cannot hallucinate [TOOL RESULT]/[USER] sections because the API cleanly
+        separates tool_use blocks from text content.
+        """
+        system, anthropic_messages = self._convert_messages_to_anthropic(messages)
+        anthropic_tools = self._convert_tools_to_anthropic(tools)
+
+        log.debug(
+            "Native tool calling: %d messages → %d anthropic messages, %d tools",
+            len(messages), len(anthropic_messages), len(anthropic_tools),
+        )
+
+        raw = await provider.generate_with_tools(
+            messages=anthropic_messages,
+            tools=anthropic_tools,
+            system=system,
+            on_chunk=on_stream_chunk,
+            conversation_id=conversation_id,
+        )
+
+        # Convert Anthropic tool_use blocks → Ouroboros tool_calls format
+        tool_calls = []
+        for block in raw.get("tool_calls_raw", []):
+            tool_calls.append({
+                "id": block.id,
+                "type": "function",
+                "function": {
+                    "name": block.name,
+                    "arguments": json.dumps(block.input),
+                },
+            })
+
+        response_msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": raw.get("content", ""),
+        }
+        if tool_calls:
+            response_msg["tool_calls"] = tool_calls
+            log.info("Native tool calling: %d tool call(s): %s", len(tool_calls), [tc["function"]["name"] for tc in tool_calls])
+        if raw.get("thinking"):
+            response_msg["thinking"] = raw["thinking"]
+
+        usage = raw.get("usage") or {}
+        if not usage.get("total_tokens"):
+            # Fallback if provider didn't return usage
+            model_name = self.default_model()
+            if self._token_counter:
+                prompt_tokens = self._token_counter.count_tokens(str(anthropic_messages), model_name)
+                completion_tokens = self._token_counter.count_tokens(raw.get("content", ""), model_name)
+            else:
+                prompt_tokens = sum(len(str(m.get("content", ""))) for m in messages) // 4
+                completion_tokens = len(raw.get("content", "")) // 4
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "cost": 0.0,
+            }
+        else:
+            usage.setdefault("cost", 0.0)
+
+        return response_msg, usage
+
+    @staticmethod
+    def _convert_messages_to_anthropic(
+        messages: List[Dict[str, Any]],
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Convert Ouroboros message list → (system_str, anthropic_messages).
+
+        Ouroboros uses role:"tool" for tool results; Anthropic expects them as
+        role:"user" with tool_result content blocks. Consecutive tool results are
+        batched into a single user message as required by the Anthropic API.
+        """
+        system = ""
+        anthropic_messages: List[Dict[str, Any]] = []
+
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            role = msg.get("role", "")
+
+            if role == "system":
+                system = msg.get("content", "")
+                i += 1
+                continue
+
+            if role == "user":
+                content = msg.get("content", "")
+                # If content is already a list (e.g. vision), pass through
+                anthropic_messages.append({"role": "user", "content": content})
+                i += 1
+                continue
+
+            if role == "assistant":
+                blocks: List[Dict[str, Any]] = []
+                text = msg.get("content", "")
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                for tc in msg.get("tool_calls", []):
+                    try:
+                        input_data = json.loads(tc["function"]["arguments"])
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        input_data = {}
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", f"tu_{i}"),
+                        "name": tc["function"]["name"],
+                        "input": input_data,
+                    })
+                # Anthropic requires at least one block
+                if not blocks:
+                    blocks = [{"type": "text", "text": ""}]
+                anthropic_messages.append({"role": "assistant", "content": blocks})
+                i += 1
+                continue
+
+            if role == "tool":
+                # Batch all consecutive tool results into one user message
+                tool_results: List[Dict[str, Any]] = []
+                while i < len(messages) and messages[i].get("role") == "tool":
+                    tm = messages[i]
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tm.get("tool_call_id", ""),
+                        "content": str(tm.get("content", "")),
+                    })
+                    i += 1
+                anthropic_messages.append({"role": "user", "content": tool_results})
+                continue
+
+            i += 1
+
+        return system, anthropic_messages
+
+    @staticmethod
+    def _convert_tools_to_anthropic(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert Ouroboros/OpenAI tool schemas → Anthropic tool format.
+
+        OpenAI format: {"type":"function","function":{"name":...,"parameters":...}}
+        Anthropic format: {"name":...,"description":...,"input_schema":...}
+        """
+        result = []
+        for t in tools:
+            func = t.get("function", t)  # unwrap if OpenAI-style wrapper present
+            result.append({
+                "name": func["name"],
+                "description": func.get("description", ""),
+                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+            })
+        return result
 
     async def _chat_via_remote_peer(
         self,

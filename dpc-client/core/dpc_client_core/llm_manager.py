@@ -849,6 +849,100 @@ class ZaiProvider(AIProvider):
             logger.error(f"Z.AI streaming failed: {e}", exc_info=True)
             raise RuntimeError(f"Z.AI streaming provider '{self.alias}' failed: {e}") from e
 
+    async def generate_with_tools(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        system: str = "",
+        on_chunk: Optional[callable] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Native Anthropic SDK tool calling for GLM-4.7.
+
+        Accepts Anthropic-format messages and tools directly.
+        Returns dict: {content, tool_calls_raw, thinking, usage}
+
+        Note: Extended thinking is disabled here — the interleaved-thinking beta
+        required for thinking + tools may not be supported on Z.AI's endpoint.
+        Tool results are returned as structured data (not hallucinated text).
+        """
+        effective_max_tokens = max(self.max_tokens or 8192, 8192)
+
+        api_params: Dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": effective_max_tokens,
+            "messages": messages,
+            "tools": tools,
+        }
+        if system:
+            api_params["system"] = system
+
+        self._last_thinking = None
+
+        try:
+            if on_chunk:
+                full_text = ""
+                tool_calls_raw = []
+                async with self.client.messages.stream(**api_params) as stream:
+                    async for text in stream.text_stream:
+                        full_text += text
+                        await on_chunk(text, conversation_id)
+                    final_message = await stream.get_final_message()
+                for block in final_message.content:
+                    if hasattr(block, "type") and block.type == "tool_use":
+                        tool_calls_raw.append(block)
+                usage_obj = final_message.usage
+            else:
+                message = await self.client.messages.create(**api_params)
+                full_text = ""
+                tool_calls_raw = []
+                for block in message.content:
+                    if hasattr(block, "type"):
+                        if block.type == "text":
+                            full_text += getattr(block, "text", "")
+                        elif block.type == "tool_use":
+                            tool_calls_raw.append(block)
+                usage_obj = message.usage
+
+            return {
+                "content": full_text,
+                "tool_calls_raw": tool_calls_raw,
+                "thinking": self._last_thinking,
+                "usage": {
+                    "prompt_tokens": usage_obj.input_tokens,
+                    "completion_tokens": usage_obj.output_tokens,
+                    "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
+                },
+            }
+
+        except Exception as e:
+            is_overloaded = "1305" in str(e) or "overloaded" in str(e).lower()
+            if is_overloaded:
+                logger.warning(f"Z.AI tool calling overloaded (1305), retrying in 3s: {e}")
+                await asyncio.sleep(3)
+                message = await self.client.messages.create(**api_params)
+                full_text = ""
+                tool_calls_raw = []
+                for block in message.content:
+                    if hasattr(block, "type"):
+                        if block.type == "text":
+                            full_text += getattr(block, "text", "")
+                        elif block.type == "tool_use":
+                            tool_calls_raw.append(block)
+                usage_obj = message.usage
+                return {
+                    "content": full_text,
+                    "tool_calls_raw": tool_calls_raw,
+                    "thinking": None,
+                    "usage": {
+                        "prompt_tokens": usage_obj.input_tokens,
+                        "completion_tokens": usage_obj.output_tokens,
+                        "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
+                    },
+                }
+            raise RuntimeError(f"Z.AI native tool calling failed for '{self.alias}': {e}") from e
+
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """
         Z.AI vision API for GLM-V models (glm-4.6v-flash, glm-4.5v, glm-4.0v)
