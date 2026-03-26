@@ -234,6 +234,11 @@ class CoreService:
         # Register callback to surface revision requests to the UI (and optionally auto-revise)
         self.consensus_manager.on_commit_revision_needed = self._on_commit_revision_needed
 
+        # Register callbacks for vote progress and final outcomes
+        self.consensus_manager.on_vote_received = self._on_vote_received
+        self.consensus_manager.on_commit_approved = self._on_commit_approved
+        self.consensus_manager.on_commit_rejected = self._on_commit_rejected
+
         # Session manager (mutual new session approval)
         self.session_manager = None
 
@@ -4550,35 +4555,24 @@ class CoreService:
                 ai_agent_node_id, proposal_id, ai_decision["vote"], ai_decision.get("comment", "")
             )
 
-            # Cast AI's vote (directly through consensus_manager, no broadcast for AI chats)
-            from dpc_protocol.knowledge_commit import CommitVote
+            # Cast AI's vote through cast_vote() so on_vote_received fires and
+            # _finalize_vote is triggered automatically when all participants have voted.
+            # Use a no-op broadcast — agent conversations are private (no P2P).
+            async def _no_op(msg): pass
 
-            vote_obj = CommitVote(
-                proposal_id=proposal_id,
-                voter_node_id=ai_agent_node_id,
-                vote=ai_decision["vote"],
-                comment=ai_decision.get("comment"),
-                is_required_dissent=False
-            )
-
-            # Record the vote
-            session.votes[ai_agent_node_id] = vote_obj
-
-            # Broadcast AI vote to UI
-            await self.local_api.broadcast_event(
-                "knowledge_vote_received",
-                {
-                    "proposal_id": proposal_id,
-                    "voter_node_id": ai_agent_node_id,
-                    "voter_name": ai_agent_node_id,
-                    "vote": ai_decision["vote"],
-                    "comment": ai_decision.get("comment", "")
-                }
-            )
-
-            # Check if voting is complete (all participants have voted)
-            if len(session.votes) == len(session.proposal.participants):
-                await self.consensus_manager._finalize_vote(session)
+            # Temporarily set consensus_manager.node_id to the agent's id so cast_vote
+            # records the vote under the correct voter_node_id.
+            original_node_id = self.consensus_manager.node_id
+            self.consensus_manager.node_id = ai_agent_node_id
+            try:
+                await self.consensus_manager.cast_vote(
+                    proposal_id=proposal_id,
+                    vote=ai_decision["vote"],
+                    comment=ai_decision.get("comment"),
+                    broadcast_func=_no_op,
+                )
+            finally:
+                self.consensus_manager.node_id = original_node_id
 
         except Exception as e:
             logger.error("Error in AI agent voting: %s", e, exc_info=True)
@@ -7490,6 +7484,51 @@ Respond in JSON format:
             "knowledge_commit_proposed",
             proposal.to_dict()
         )
+
+    async def _on_vote_received(self, vote) -> None:
+        """Broadcast a received vote to the UI so the vote panel updates in real time."""
+        try:
+            await self.local_api.broadcast_event("knowledge_vote_received", {
+                "proposal_id": vote.proposal_id,
+                "voter_node_id": vote.voter_node_id,
+                "voter_name": vote.voter_node_id,
+                "vote": vote.vote,
+                "comment": vote.comment or "",
+                "is_required_dissent": vote.is_required_dissent,
+            })
+        except Exception as e:
+            logger.error("Error in _on_vote_received: %s", e, exc_info=True)
+
+    async def _on_commit_approved(self, commit) -> None:
+        """Notify the UI that consensus was reached and the commit was approved."""
+        try:
+            await self.local_api.broadcast_event("knowledge_commit_approved", {
+                "commit_id": commit.commit_id,
+                "topic": commit.topic,
+                "summary": commit.summary,
+                "approved_by": commit.approved_by,
+                "vote_comments": commit.vote_comments,
+            })
+        except Exception as e:
+            logger.error("Error in _on_commit_approved: %s", e, exc_info=True)
+
+    async def _on_commit_rejected(self, proposal, votes: Dict[str, Any]) -> None:
+        """Notify the UI that the proposal was rejected, including rejection reasons."""
+        try:
+            rejection_comments = {
+                v.voter_node_id: v.comment
+                for v in votes.values()
+                if v.vote == "reject" and v.comment
+            }
+            await self.local_api.broadcast_event("knowledge_commit_rejected", {
+                "proposal_id": proposal.proposal_id,
+                "topic": proposal.topic,
+                "summary": proposal.summary,
+                "rejected_by": [v.voter_node_id for v in votes.values() if v.vote == "reject"],
+                "rejection_comments": rejection_comments,
+            })
+        except Exception as e:
+            logger.error("Error in _on_commit_rejected: %s", e, exc_info=True)
 
     async def _on_commit_applied(self, commit):
         """Callback called after a knowledge commit is applied

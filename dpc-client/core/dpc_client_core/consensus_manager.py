@@ -761,7 +761,7 @@ class ConsensusManager:
 
         for pid, session in self.sessions.items():
             if session.deadline and session.deadline < cutoff:
-                if session.status in ["approved", "rejected", "timeout", "revision_needed"]:
+                if session.status in ["approved", "rejected", "timeout", "revision_needed", "apply_failed"]:
                     to_remove.append(pid)
 
         for pid in to_remove:
