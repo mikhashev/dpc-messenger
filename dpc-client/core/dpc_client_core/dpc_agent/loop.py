@@ -79,6 +79,7 @@ _INJECTION_PATTERNS = [
     "\n[USER]\n",
     "\n[SYSTEM]\n",
     "\n[ASSISTANT]\n",
+    "[USER]"
 ]
 
 
