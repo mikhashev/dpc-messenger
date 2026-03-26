@@ -585,8 +585,30 @@ class DpcAgentManager:
                     if stored_cw:
                         context_window = int(stored_cw)
                     else:
-                        model = llm_manager.get_active_model_name()
-                        context_window = llm_manager.get_context_window(model)
+                        # Try to resolve context window without stored value.
+                        # This handles agents created before context_window was persisted.
+                        provider_alias = self.config.get("provider_alias", "")
+                        compute_host = self.config.get("compute_host", "")
+                        context_window = None
+                        if provider_alias and provider_alias in llm_manager.providers:
+                            # Local provider: resolve model name then look up window
+                            model = llm_manager.providers[provider_alias].model
+                            context_window = llm_manager.get_context_window(model)
+                        elif compute_host and provider_alias:
+                            # Remote provider: check peer_metadata cache for the provider
+                            peer_meta = getattr(self.service, "peer_metadata", {})
+                            peer_providers = peer_meta.get(compute_host, {}).get("providers", [])
+                            for p in peer_providers:
+                                if p.get("alias") == provider_alias:
+                                    cw = p.get("context_window")
+                                    if cw:
+                                        context_window = int(cw)
+                                    elif p.get("model"):
+                                        context_window = llm_manager.get_context_window(p["model"])
+                                    break
+                        if not context_window:
+                            model = llm_manager.get_active_model_name()
+                            context_window = llm_manager.get_context_window(model)
                     monitor.set_token_limit(context_window)
                 monitor.set_token_count(conversation_tokens)
 
