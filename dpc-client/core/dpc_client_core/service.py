@@ -4909,6 +4909,43 @@ Respond in JSON format:
                 "message": str(e)
             }
 
+    def _resolve_agent_token_limit(self, agent_id: str) -> int:
+        """Resolve the context window for an agent using its stored config.
+
+        Priority:
+        1. config.json context_window (stored at creation time)
+        2. Local provider lookup via provider_alias
+        3. peer_metadata cache (for remote-host agents)
+        4. Active local model fallback
+        """
+        if not self.llm_manager:
+            return 0
+        try:
+            from .dpc_agent.utils import load_agent_config
+            agent_cfg = load_agent_config(agent_id) or {}
+            stored_cw = agent_cfg.get("context_window")
+            if stored_cw:
+                return int(stored_cw)
+            provider_alias = agent_cfg.get("provider_alias", "")
+            if provider_alias and provider_alias in self.llm_manager.providers:
+                model = self.llm_manager.providers[provider_alias].model
+                return self.llm_manager.get_context_window(model) or 0
+            compute_host = agent_cfg.get("compute_host", "")
+            if compute_host and provider_alias:
+                peer_providers = self.peer_metadata.get(compute_host, {}).get("providers", [])
+                for p in peer_providers:
+                    if p.get("alias") == provider_alias:
+                        cw = p.get("context_window")
+                        if cw:
+                            return int(cw)
+                        if p.get("model"):
+                            return self.llm_manager.get_context_window(p["model"]) or 0
+                        break
+            _model = self.llm_manager.get_active_model_name()
+            return self.llm_manager.get_context_window(_model) or 0
+        except Exception:
+            return 0
+
     async def get_conversation_history(self, conversation_id: str) -> Dict[str, Any]:
         """Get conversation history from backend (for frontend sync after page refresh).
 
@@ -4959,13 +4996,7 @@ Respond in JSON format:
                                         messages = data.get("messages", [])
                                         logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
                                         tokens_used = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                                        token_limit = 0
-                                        if self.llm_manager:
-                                            try:
-                                                _model = self.llm_manager.get_active_model_name()
-                                                token_limit = self.llm_manager.get_context_window(_model) or 0
-                                            except Exception:
-                                                pass
+                                        token_limit = self._resolve_agent_token_limit(conversation_id)
                                         return {
                                             "status": "success",
                                             "messages": messages,
@@ -4989,13 +5020,7 @@ Respond in JSON format:
                                 messages = data.get("messages", [])
                                 logger.info("Loaded %d messages from disk for %s (agent manager not created yet)", len(messages), conversation_id)
                                 tokens_used = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                                token_limit = 0
-                                if self.llm_manager:
-                                    try:
-                                        _model = self.llm_manager.get_active_model_name()
-                                        token_limit = self.llm_manager.get_context_window(_model) or 0
-                                    except Exception:
-                                        pass
+                                token_limit = self._resolve_agent_token_limit(conversation_id)
                                 # Return early with the loaded messages
                                 return {
                                     "status": "success",
