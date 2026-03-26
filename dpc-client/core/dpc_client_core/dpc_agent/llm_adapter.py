@@ -211,9 +211,14 @@ class DpcLlmAdapter:
         # hallucinate [TOOL RESULT]/[USER] sections (tool bypass behavior, ArXiv 2412.04141).
         if tools and hasattr(provider, "generate_with_tools"):
             log.debug("Using native tool calling path for provider '%s'", alias)
-            return await self._chat_native_tools(
-                provider, messages, tools, on_stream_chunk, conversation_id
-            )
+            try:
+                return await self._chat_native_tools(
+                    provider, messages, tools, on_stream_chunk, conversation_id
+                )
+            except Exception as e:
+                log.warning(
+                    "Native tool calling failed (%s), falling back to text injection path", e
+                )
 
         # Local inference - text-only path (or pre-analyzed image description)
         # Convert message list to prompt string for DPC providers

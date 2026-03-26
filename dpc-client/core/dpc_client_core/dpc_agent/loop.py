@@ -444,6 +444,11 @@ async def run_llm_loop(
             if thinking and thinking.strip():
                 emit_progress(thinking.strip(), None, round_idx)
                 llm_trace["assistant_notes"].append(thinking.strip()[:320])
+            elif tool_calls:
+                # Native tool calling returns no text preamble — emit tool names so the
+                # UI shows activity rather than a silent "Thinking..." placeholder.
+                names = ", ".join(tc["function"]["name"] for tc in tool_calls)
+                emit_progress(f"→ {names}", None, round_idx)
 
             # Check for duplicate tool calls before executing.
             # If the same (tool, args) fingerprint has appeared MAX_DUPLICATE_CALLS
