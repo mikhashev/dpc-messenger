@@ -342,6 +342,12 @@ When you want to use a tool, output a code block like:
 {"name": "tool_name", "arguments": {"arg1": "value1"}}
 ```
 
+**IMPORTANT rules:**
+- Output the ```tool_call block DIRECTLY, without any preceding explanation text
+- Do NOT use `<tool_call>`, `(tool_call)`, or any XML/HTML format
+- The JSON must have exactly `"name"` and `"arguments"` keys
+- Do NOT write the tool name outside the JSON (e.g. `<tool_call>tool_name>{...}` is WRONG)
+
 Available tools will be listed in your context. Use them to accomplish tasks.
 
 ## Memory Management

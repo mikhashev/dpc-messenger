@@ -698,7 +698,11 @@ class DpcLlmAdapter:
         lines.append("You have access to the following tools. To use a tool, output a code block like:")
         lines.append("```tool_call")
         lines.append('{"name": "tool_name", "arguments": {"arg1": "value1"}}')
-        lines.append("```\n")
+        lines.append("```")
+        lines.append("")
+        lines.append("**IMPORTANT**: Use ONLY the ```tool_call code block format above.")
+        lines.append("Do NOT use <tool_call>, [tool_call], or any XML/HTML format.")
+        lines.append("Do NOT add explanatory text before the tool call block — output the block directly.\n")
 
         for tool in tools:
             func = tool.get("function", {})
@@ -765,6 +769,19 @@ class DpcLlmAdapter:
             if json_matches:
                 log.debug(f"Found {len(json_matches)} JSON tool call objects directly")
                 matches = json_matches
+
+        # 4th fallback: handle GLM-4.7 native XML format <tool_call>tool_name>{json}</tool_name>
+        # GLM-4.7 sometimes outputs this format when it generates text before the tool call
+        if not matches:
+            glm_pattern = r'<tool_call>\s*([A-Za-z0-9_-]+)\s*>\s*(\{.*?\})\s*</[^>]+>'
+            for tool_name, args_str in re.findall(glm_pattern, content, re.DOTALL):
+                try:
+                    args = json.loads(args_str)
+                    normalized = json.dumps({"name": tool_name, "arguments": args}, ensure_ascii=False)
+                    matches.append(normalized)
+                    log.debug(f"GLM fallback: normalized <tool_call>{tool_name}> to standard format")
+                except json.JSONDecodeError:
+                    log.debug(f"GLM fallback: failed to parse args for <tool_call>{tool_name}")
 
         for i, match in enumerate(matches):
             try:
