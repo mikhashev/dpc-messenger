@@ -198,7 +198,7 @@
   const chatProviders = writable<Map<string, string>>(new Map());
 
   // Store AI chat metadata (chatId -> {name: string, provider: string, instruction_set_name?: string})
-  const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string, profile_name?: string, llm_provider?: string}>>(
+  const aiChats = writable<Map<string, {name: string, provider: string, instruction_set_name?: string, profile_name?: string, llm_provider?: string, compute_host?: string}>>(
     new Map([['local_ai', {name: 'Local AI Chat', provider: '', instruction_set_name: 'general'}]])
   );
 
@@ -260,6 +260,7 @@
   let selectedProfileForNewAgent = $state("default");  // Agent permission profile
   let newAgentName = $state("");  // Agent name input
   let selectedAgentLLMProvider = $state("");  // LLM provider for agent
+  let selectedDialogComputeHost = $state("local");  // AI Host for new chat dialog (local or peer node_id)
 
   // Agent profiles state (v0.19.0+ - per-agent isolation)
   let availableAgentProfiles = $state<string[]>(["default"]);
@@ -2550,6 +2551,11 @@
         // Use chat-specific provider (e.g., dpc_agent for agent chats)
         payload.provider = chatSpecificProvider;
 
+        // Pass compute_host if the chat was created with a remote AI host
+        if (chatMetadata?.compute_host) {
+          payload.compute_host = chatMetadata.compute_host;
+        }
+
         // For DPC Agent, pass the underlying LLM provider (Phase 3: per-agent provider selection)
         if (chatSpecificProvider === 'dpc_agent' && chatMetadata?.llm_provider) {
           payload.agent_llm_provider = chatMetadata.llm_provider;
@@ -2956,8 +2962,11 @@
   async function confirmAddAIChat() {
     if (!selectedProviderForNewChat) return;
 
-    // Find the selected provider
-    const provider = $availableProviders.providers.find((p: any) => p.alias === selectedProviderForNewChat);
+    // Find the selected provider (check remote providers when a remote host is selected)
+    const dialogProviders = selectedDialogComputeHost === 'local'
+      ? $availableProviders.providers
+      : ($peerProviders.get(selectedDialogComputeHost) ?? []);
+    const provider = dialogProviders.find((p: any) => p.alias === selectedProviderForNewChat);
     if (!provider) {
       alert(`Provider '${selectedProviderForNewChat}' not found.`);
       return;
@@ -2984,7 +2993,9 @@
           chatName,
           selectedAgentLLMProvider || $availableProviders?.default_provider || 'dpc_agent',
           selectedProfileForNewAgent,
-          'general'  // Default instruction set for agents
+          'general',  // Default instruction set for agents
+          50.0, 200,
+          selectedDialogComputeHost !== 'local' ? selectedDialogComputeHost : undefined
         );
         if (result?.status === 'success') {
           console.log('[DPC Agent] Created agent storage:', result.agent_id);
@@ -3017,6 +3028,7 @@
       newMap.set(chatId, {
         name: chatName,
         provider: selectedProviderForNewChat,
+        compute_host: selectedDialogComputeHost !== 'local' ? selectedDialogComputeHost : undefined,
         instruction_set_name: selectedProviderForNewChat === 'dpc_agent' ? 'general' : selectedInstructionSetForNewChat,
         profile_name: selectedProviderForNewChat === 'dpc_agent' ? selectedProfileForNewAgent : undefined,
         llm_provider: selectedProviderForNewChat === 'dpc_agent' ? selectedAgentLLMProvider : undefined
@@ -3051,6 +3063,7 @@
     selectedProfileForNewAgent = "default";
     newAgentName = "";
     selectedAgentLLMProvider = "";
+    selectedDialogComputeHost = "local";
   }
 
   async function handleAddAgentChat() {
@@ -5080,10 +5093,24 @@
       <h2 id="modal-title">Add New AI Chat</h2>
       <p>Select an AI provider for the new chat:</p>
 
+      {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
+        <div class="dialog-provider-selector">
+          <label for="new-chat-ai-host">AI Host:</label>
+          <select id="new-chat-ai-host" bind:value={selectedDialogComputeHost}>
+            <option value="local">Local</option>
+            {#each $nodeStatus.peer_info as peer}
+              <option value={peer.node_id}>
+                {peer.name ? `${peer.name} | ${peer.node_id.slice(0, 20)}...` : `${peer.node_id.slice(0, 20)}...`}
+              </option>
+            {/each}
+          </select>
+        </div>
+      {/if}
+
       <div class="dialog-provider-selector">
         <label for="new-chat-provider">Chat Type:</label>
         <select id="new-chat-provider" bind:value={selectedProviderForNewChat}>
-          {#each $availableProviders.providers as provider}
+          {#each (selectedDialogComputeHost === 'local' ? $availableProviders.providers : ($peerProviders.get(selectedDialogComputeHost) ?? [])) as provider}
             <option value={provider.alias}>
               {#if provider.alias === 'dpc_agent'}
                 DPC Agent (Autonomous AI with tools)
@@ -5112,7 +5139,7 @@
         <div class="dialog-provider-selector">
           <label for="new-chat-llm-provider">AI Model (LLM):</label>
           <select id="new-chat-llm-provider" bind:value={selectedAgentLLMProvider}>
-            {#each $availableProviders.providers as provider}
+            {#each (selectedDialogComputeHost === 'local' ? $availableProviders.providers : ($peerProviders.get(selectedDialogComputeHost) ?? [])) as provider}
               {#if provider.alias !== 'dpc_agent'}
                 <option value={provider.alias}>
                   {provider.alias} - {provider.model}

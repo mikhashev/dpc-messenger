@@ -1491,7 +1491,8 @@ export async function createAgent(
     profileName: string = "default",
     instructionSetName: string = "general",
     budgetUsd: number = 50.0,
-    maxRounds: number = 200
+    maxRounds: number = 200,
+    computeHost?: string,
 ): Promise<any> {
     return sendCommand('create_agent', {
         name,
@@ -1499,7 +1500,8 @@ export async function createAgent(
         profile_name: profileName,
         instruction_set_name: instructionSetName,
         budget_usd: budgetUsd,
-        max_rounds: maxRounds
+        max_rounds: maxRounds,
+        ...(computeHost ? { compute_host: computeHost } : {}),
     });
 }
 

@@ -8524,17 +8524,19 @@ Respond in JSON format:
         instruction_set_name: str = "general",
         budget_usd: float = 50.0,
         max_rounds: int = 200,
+        compute_host: str = "",  # Optional remote peer node_id for LLM inference
     ) -> Dict[str, Any]:
         """
         Create a new DPC Agent with isolated storage.
 
         Args:
             name: Human-readable agent name
-            provider_alias: AI provider to use (from providers.json)
+            provider_alias: AI provider to use (from providers.json or remote peer)
             profile_name: Permission profile name (defaults to agent_id for per-agent profiles)
             instruction_set_name: Instruction set for the agent
             budget_usd: Budget limit in USD
             max_rounds: Maximum LLM rounds per task
+            compute_host: Optional remote peer node_id — routes LLM calls to that peer
 
         Returns:
             Dict with status and agent info
@@ -8561,6 +8563,7 @@ Respond in JSON format:
                 instruction_set_name=instruction_set_name,
                 budget_usd=budget_usd,
                 max_rounds=max_rounds,
+                **({"compute_host": compute_host} if compute_host else {}),
             )
 
             # Create per-agent profile in firewall (copies from dpc_agent defaults)

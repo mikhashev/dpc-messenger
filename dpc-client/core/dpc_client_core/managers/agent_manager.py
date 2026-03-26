@@ -151,6 +151,7 @@ class DpcAgentManager:
             provider_alias=provider_alias,   # Phase 3: Use specific provider
             firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
             service=self.service,            # For tools that need service access
+            compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
 
         # Cache for reuse
@@ -220,6 +221,7 @@ class DpcAgentManager:
             firewall=self.firewall,           # Firewall controls tool access
             firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
             service=self.service,             # For tools that need service access (e.g. extract_knowledge)
+            compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
 
         # Start background consciousness if enabled

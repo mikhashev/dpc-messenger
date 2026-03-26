@@ -1722,6 +1722,11 @@ class DpcAgentProvider(AIProvider):
 
         # Import here to avoid circular imports
         from dpc_client_core.managers.agent_manager import DpcAgentManager
+        from dpc_client_core.dpc_agent.utils import load_agent_config
+
+        # Load per-agent config to pick up compute_host (remote LLM peer)
+        agent_file_config = load_agent_config(agent_id) or {}
+        compute_host = agent_file_config.get("compute_host", "")
 
         # Create new manager for this agent
         logger.debug(f"DpcAgentProvider '{self.alias}': Creating new manager for agent '{agent_id}'")
@@ -1730,6 +1735,7 @@ class DpcAgentProvider(AIProvider):
             "background_consciousness": self.background_consciousness,
             "budget_usd": self.budget_usd,
             "max_rounds": self.max_rounds,
+            "compute_host": compute_host,
         }, agent_id=agent_id)  # Pass agent_id for per-agent configuration
 
         # Cache for reuse

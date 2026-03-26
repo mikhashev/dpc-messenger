@@ -85,6 +85,7 @@ class DpcAgent:
         provider_alias: Optional[str] = None,  # Per-agent provider override (Phase 3)
         firewall_profile: Optional[str] = None,  # Per-agent permission profile (Phase 2)
         service: Optional[Any] = None,  # CoreService reference for commit proposals
+        compute_host: str = "",  # Optional remote peer node_id for LLM inference
     ):
         """
         Initialize the agent.
@@ -106,7 +107,7 @@ class DpcAgent:
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components
-        self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias)
+        self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias, compute_host=compute_host)
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
         self.skill_store = SkillStore(agent_root=self.agent_root)

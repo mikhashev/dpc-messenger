@@ -37,6 +37,7 @@ class DpcLlmAdapter:
         self,
         llm_manager: "LLMManager",
         provider_alias: Optional[str] = None,
+        compute_host: str = "",
     ):
         """
         Initialize the adapter.
@@ -44,9 +45,11 @@ class DpcLlmAdapter:
         Args:
             llm_manager: DPC's LLMManager instance (injected from CoreService)
             provider_alias: Specific provider to use (overrides agent_provider/default_provider)
+            compute_host: Optional remote peer node_id — routes all LLM calls to that peer
         """
         self._llm_manager = llm_manager
         self._provider_alias = provider_alias  # Per-agent provider override
+        self._compute_host = compute_host  # Per-agent remote peer override
         self._default_model: Optional[str] = None
         # Reuse existing TokenCountManager for accurate token counting
         self._token_counter = getattr(llm_manager, 'token_count_manager', None)
@@ -170,13 +173,32 @@ class DpcLlmAdapter:
                 messages = self._inject_image_description_into_messages(messages, description)
                 # Continue with normal text-based agent flow
 
-        # Check if dpc_agent provider has peer_id (remote inference) - KISS approach
+        # Check for remote peer routing — per-agent compute_host takes priority over global peer_id
         dpc_agent_provider = self._llm_manager.providers.get("dpc_agent")
-        if dpc_agent_provider and hasattr(dpc_agent_provider, 'peer_id') and dpc_agent_provider.peer_id:
-            log.debug(f"Routing to remote peer: {dpc_agent_provider.peer_id}")
-            return await self._chat_via_remote_peer(
-                dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
-            )
+        effective_peer_id = self._compute_host or (
+            getattr(dpc_agent_provider, 'peer_id', None) if dpc_agent_provider else None
+        )
+        if effective_peer_id:
+            if self._compute_host:
+                # Per-agent remote routing: build a context object from per-agent values
+                from types import SimpleNamespace
+                remote_ctx = SimpleNamespace(
+                    peer_id=effective_peer_id,
+                    remote_provider=self._provider_alias,
+                    remote_model=getattr(dpc_agent_provider, 'remote_model', None) if dpc_agent_provider else None,
+                    _service=getattr(dpc_agent_provider, '_service', None) if dpc_agent_provider else None,
+                    timeout=getattr(dpc_agent_provider, 'timeout', 180) if dpc_agent_provider else 180,
+                )
+                log.debug(f"Routing to per-agent remote peer: {effective_peer_id} (provider={self._provider_alias})")
+                return await self._chat_via_remote_peer(
+                    remote_ctx, messages, tools, on_stream_chunk, conversation_id
+                )
+            else:
+                # Global peer_id routing (legacy KISS approach)
+                log.debug(f"Routing to remote peer: {effective_peer_id}")
+                return await self._chat_via_remote_peer(
+                    dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
+                )
 
         # Get the agent's provider
         alias = self._get_agent_provider_alias()
