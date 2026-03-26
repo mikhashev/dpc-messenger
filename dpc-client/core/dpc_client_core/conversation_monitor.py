@@ -279,7 +279,8 @@ class ConversationMonitor:
         (for manual extraction) and message_buffer (for auto-detection).
 
         Returns:
-            Conversation type: "task", "technical", "decision", or "general"
+            Conversation type: "task", "technical", "decision", "general", or
+            "self_reflection_candidate" (requires async LLM confirmation before use)
         """
         # Use full_conversation if available (manual extraction), otherwise message_buffer
         messages = self.full_conversation if self.full_conversation else self.message_buffer
@@ -308,10 +309,25 @@ class ConversationMonitor:
             "recommend", "suggest", "evaluate", "tradeoff", "pros and cons"
         ]
 
+        # Self-reflection keywords (multi-word phrases for low false-positive rate)
+        # Single words like "reflect", "analyze", "behavior" are too common in technical contexts
+        self_reflection_keywords = [
+            "self-reflection", "self reflection", "retrospective",
+            "my habit", "my behavior", "my routine", "my pattern",
+            "i tend to", "reflecting on myself", "who am i",
+            "my values", "my progress", "lessons learned",
+            "context anxiety", "self-analysis"
+        ]
+
         # Count keyword matches
         task_count = sum(1 for kw in task_keywords if kw in all_text)
         technical_count = sum(1 for kw in technical_keywords if kw in all_text)
         decision_count = sum(1 for kw in decision_keywords if kw in all_text)
+        self_reflection_count = sum(1 for kw in self_reflection_keywords if kw in all_text)
+
+        # Self-reflection candidate: requires async LLM confirmation (handled in _generate_commit_proposal)
+        if self_reflection_count > 0:
+            return "self_reflection_candidate"
 
         # Determine type based on highest count (task has priority for ties)
         if task_count >= technical_count and task_count >= decision_count and task_count > 0:
@@ -322,6 +338,51 @@ class ConversationMonitor:
             return "decision"
         else:
             return "general"
+
+    async def _is_self_reflection_conversation(self, messages_text: str) -> bool:
+        """Use LLM to confirm whether a conversation is a self-reflection.
+
+        Only called when self_reflection keywords matched (pre-filter). Prevents
+        false positives where technical language coincidentally matches phrases like
+        "this reflects the architecture decision".
+
+        Returns:
+            True if LLM confirms self-reflection, False otherwise (falls back to general)
+        """
+        logger.debug("Monitor %s: Running LLM self-reflection confirmation (keyword pre-filter matched)",
+                     self.conversation_id)
+
+        prompt = f"""Analyze this conversation. Is it a SELF-REFLECTION?
+
+SELF-REFLECTION: Discussion of personal behaviors, habits, routines, identity,
+emotional patterns, self-performance review ("I tend to...", "My habit is...",
+"Who am I", "My values").
+
+NOT self-reflection: Technical discussions (even with "analyze", "reflect"),
+task planning (even with "my goals"), external decisions.
+
+Return ONLY: "yes" or "no"
+
+Conversation:
+{messages_text}"""
+
+        try:
+            result = await asyncio.wait_for(
+                self.llm_manager.query(prompt=prompt),
+                timeout=10.0  # Don't block extraction if LLM is slow
+            )
+            confirmed = result.strip().lower().startswith("yes")
+            logger.debug("Monitor %s: Self-reflection LLM confirmation: %s",
+                         self.conversation_id, confirmed)
+            return confirmed
+        except asyncio.TimeoutError:
+            logger.warning("Monitor %s: Self-reflection LLM confirmation timed out — falling back to general",
+                           self.conversation_id)
+            return False
+        except Exception as e:
+            logger.warning("Monitor %s: Self-reflection LLM confirmation failed (%s) — falling back to general",
+                           self.conversation_id, e)
+            return False
 
     def _get_task_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
         """Build extraction prompt optimized for task/planning conversations.
@@ -538,6 +599,61 @@ CONVERSATION:
 {messages_text}
 
 TASK: Extract structured knowledge with bias mitigation.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+
+    def _get_self_reflection_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt optimized for self-reflection conversations.
+
+        Focuses on: behavioral patterns, habits, identity insights, improvement areas.
+        Key difference from general: devil's advocate critiques insights, not the process.
+        """
+        json_format = """{
+  "topic": "reflection_topic_name",
+  "summary": "One sentence: what was reflected on and the key realization",
+  "entries": [
+    {
+      "content": "Specific behavior, habit, pattern, or identity insight",
+      "tags": ["behavior_pattern", "habit", "identity", "emotion", "goal"],
+      "confidence": 0.8,
+      "sources": ["participant_name"],
+      "reasoning": "Context or evidence supporting this insight"
+    }
+  ],
+  "behavioral_patterns": ["Recurring behaviors or habits identified"],
+  "identity_insights": ["Insights about values, goals, or self-perception"],
+  "improvement_areas": ["Areas mentioned for growth or change"],
+  "devil_advocate": "Critique the INSIGHTS themselves — what assumptions might be wrong, what context might be missing — but do NOT question whether reflection was warranted",
+  "flagged_assumptions": ["Statements presented as facts that might be projections"]
+}"""
+
+        rules_section = """EXTRACTION RULES FOR SELF-REFLECTION CONVERSATIONS:
+1. BEHAVIORS: Capture specific recurring behaviors ("I tend to work until 3 AM")
+2. HABITS: Extract named habits, routines, or patterns
+3. IDENTITY: Note values, self-perception, "who am I" explorations
+4. NUANCE: Self-reflection is inherently uncertain — preserve "maybe", "I think", "seems like"
+5. IMPROVEMENT: What the person wants to change, grow, or explore
+6. DEVIL'S ADVOCATE — CRITICAL RULE:
+   - CORRECT: "This insight assumes X is a problem, but what if it's a coping strategy?"
+   - CORRECT: "The conclusion may overlook Y factor"
+   - WRONG: "Why reflect on this?" / "Trigger threshold too low" / "This doesn't warrant analysis"
+   - The devil's advocate should challenge the SUBSTANCE of insights, never the act of reflecting
+7. CONFIDENCE: Lower (0.6-0.75) for uncertain self-assessments, higher (0.85+) for clearly stated patterns
+"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+
+CONVERSATION TYPE: Self-Reflection (personal behavior, habits, identity analysis)
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract behavioral patterns, identity insights, and improvement areas from self-reflection.
 
 REQUIRED JSON FORMAT (output ONLY this, nothing else):
 {json_format}
@@ -805,6 +921,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 {', '.join(cultural_contexts) if cultural_contexts else 'Not specified'}
 """
 
+        # LLM confirmation for self-reflection candidate (keyword pre-filter ran in _detect_conversation_type)
+        if self.conversation_type == "self_reflection_candidate":
+            confirmed = await self._is_self_reflection_conversation(messages_text)
+            self.conversation_type = "self_reflection" if confirmed else "general"
+
         # Select type-specific prompt builder (v0.9.3)
         if self.conversation_type == "task":
             prompt = self._get_task_extraction_prompt(messages_text, cultural_section)
@@ -812,6 +933,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             prompt = self._get_technical_extraction_prompt(messages_text, cultural_section)
         elif self.conversation_type == "decision":
             prompt = self._get_decision_extraction_prompt(messages_text, cultural_section)
+        elif self.conversation_type == "self_reflection":
+            prompt = self._get_self_reflection_extraction_prompt(messages_text, cultural_section)
         else:  # general (fallback)
             prompt = self._get_general_extraction_prompt(messages_text, cultural_section)
 
