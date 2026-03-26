@@ -4612,8 +4612,12 @@ class CoreService:
             if conversation_history:
                 lines = []
                 for msg in conversation_history:
-                    role = msg.get("role", "unknown").upper()
-                    content = msg.get("content", "")
+                    if hasattr(msg, 'sender_name'):
+                        role = msg.sender_name.upper()
+                        content = msg.text
+                    else:
+                        role = msg.get("role", "unknown").upper()
+                        content = msg.get("content", "")
                     lines.append(f"{role}: {content}")
                 conversation_text = (
                     "\n\n**Full Conversation (source of the extracted knowledge):**\n"
