@@ -418,7 +418,21 @@ async def run_llm_loop(
                         llm_trace,
                     )
             elif content and "tool_call" in content.lower():
-                log.warning(f"No tool_calls parsed but 'tool_call' found in content: {content[:200]!r}")
+                # Native tool calling returned no tool_use blocks but the content contains
+                # text-format ```tool_call``` blocks — model fell back to text format.
+                # Parse them so the task still runs instead of returning raw JSON to the user.
+                if hasattr(llm, "_parse_tool_calls"):
+                    parsed = llm._parse_tool_calls(content)
+                    if parsed:
+                        log.warning(
+                            "Native path returned text-format tool calls — "
+                            "parsed %d via text fallback", len(parsed)
+                        )
+                        tool_calls = parsed
+                    else:
+                        log.warning(f"No tool_calls parsed but 'tool_call' found in content: {content[:200]!r}")
+                else:
+                    log.warning(f"No tool_calls parsed but 'tool_call' found in content: {content[:200]!r}")
 
             # No tool calls — final response or empty-response retry
             if not tool_calls:
