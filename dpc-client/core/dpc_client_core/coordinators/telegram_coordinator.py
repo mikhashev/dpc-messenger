@@ -432,6 +432,25 @@ class TelegramBridge:
                             )
                             if response:
                                 await self.telegram.send_message(chat_id, response)
+                            # Broadcast updated history to UI so the chat panel reflects
+                            # the Telegram exchange in real time (mirrors agent_telegram_bridge._broadcast_history_to_ui)
+                            try:
+                                history_result = await self.service.get_conversation_history(agent_id)
+                                messages = history_result.get("messages", [])
+                                monitor = agent_manager._agent_monitors.get(agent_id)
+                                tokens_used = monitor.current_token_count if monitor else 0
+                                token_limit = monitor.token_limit if monitor else 0
+                                await self.service.local_api.broadcast_event("agent_history_updated", {
+                                    "conversation_id": agent_id,
+                                    "messages": messages,
+                                    "message_count": len(messages),
+                                    "tokens_used": tokens_used,
+                                    "token_limit": token_limit,
+                                    "thinking": None,
+                                })
+                                logger.debug(f"Broadcast {len(messages)} messages to UI for agent {agent_id}")
+                            except Exception as broadcast_err:
+                                logger.warning(f"Failed to broadcast agent history to UI for {agent_id}: {broadcast_err}")
                         else:
                             logger.warning(f"Agent manager not available for {agent_id}")
                     else:
