@@ -66,6 +66,103 @@ def ensure_agent_dirs(agent_id: Optional[str] = None) -> None:
     (root / "skills").mkdir(exist_ok=True)
 
 
+# Default .gitignore for agent sandbox repos
+_AGENT_GITIGNORE = """\
+# Task results (ephemeral outputs, not persistent knowledge)
+task_results/
+# Logs (too large, too frequent)
+logs/
+# Runtime state (changes every operation)
+state/state.json
+# Voice recordings (large binary files)
+voice/
+# Temporary files
+*.tmp
+temp_read.py
+"""
+
+
+def init_agent_git_repo(agent_id: str) -> None:
+    """
+    Initialize a local git repo in the agent sandbox.
+
+    Sets up hooks-disabled config, writes .gitignore, and creates the
+    initial commit. Called once during agent creation. Safe to call on
+    an already-initialized repo (no-op).
+
+    Args:
+        agent_id: Agent identifier (used for git user config)
+    """
+    root = get_agent_root(agent_id)
+
+    # No-op if already initialized
+    if (root / ".git").exists():
+        return
+
+    # Shared empty hooks directory — disables all git hook execution
+    # on both Unix and Windows (Git for Windows understands forward slashes)
+    no_hooks_dir = get_agents_base_dir() / ".no_hooks"
+    no_hooks_dir.mkdir(exist_ok=True)
+
+    try:
+        subprocess.run(["git", "init"], cwd=str(root), capture_output=True, timeout=30, check=False)
+
+        # Disable hooks, set a stable local identity
+        for cmd in [
+            ["git", "config", "core.hooksPath", str(no_hooks_dir)],
+            ["git", "config", "user.name", agent_id],
+            ["git", "config", "user.email", f"{agent_id}@dpc-local"],
+        ]:
+            subprocess.run(cmd, cwd=str(root), capture_output=True, timeout=10, check=False)
+
+        # Write .gitignore
+        gitignore_path = root / ".gitignore"
+        if not gitignore_path.exists():
+            gitignore_path.write_text(_AGENT_GITIGNORE, encoding="utf-8")
+
+        # Initial commit capturing all bootstrapped files
+        subprocess.run(["git", "add", "-A"], cwd=str(root), capture_output=True, timeout=30, check=False)
+        subprocess.run(
+            ["git", "commit", "-m", "chore: initial agent state"],
+            cwd=str(root), capture_output=True, timeout=30, check=False,
+        )
+
+        log.info(f"Initialized git repo for agent {agent_id}")
+
+    except Exception as e:
+        log.warning(f"Failed to initialize git repo for agent {agent_id}: {e}")
+
+
+def auto_commit_agent_change(agent_root: pathlib.Path, message: str) -> None:
+    """
+    Best-effort auto-commit all changes in the agent sandbox.
+
+    Only runs if a .git repo exists. Logs a warning on failure but never
+    raises — callers must not depend on this succeeding.
+
+    Args:
+        agent_root: Agent sandbox root (e.g. ~/.dpc/agents/agent_001/)
+        message: Commit message (use prefix convention: knowledge:, identity:, etc.)
+    """
+    if not (agent_root / ".git").exists():
+        return
+
+    try:
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(agent_root), capture_output=True, timeout=30, check=False,
+        )
+        result = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=str(agent_root), capture_output=True, text=True, timeout=30, check=False,
+        )
+        combined = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0 and "nothing to commit" not in combined.lower():
+            log.warning(f"Auto-commit failed for {agent_root.name}: {result.stderr.strip()}")
+    except Exception as e:
+        log.warning(f"Auto-commit failed for {agent_root.name}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # Agent Registry
 # ---------------------------------------------------------------------------
@@ -608,6 +705,8 @@ def create_agent_storage(
     skill_store.ensure_starter_skills()
 
     # Create config
+    # Note: git repo initialized AFTER all files are bootstrapped so the
+    # initial commit captures the complete starting state.
     config = {
         "agent_id": agent_id,
         "name": name,
@@ -622,6 +721,9 @@ def create_agent_storage(
 
     # Save config
     save_agent_config(agent_id, config)
+
+    # Initialize git repo now that all files are in place
+    init_agent_git_repo(agent_id)
 
     # Register in global registry with Telegram support
     registry = AgentRegistry()

@@ -232,8 +232,9 @@ RESTRICTED_TOOL_NAMES = {
     "repo_commit_push",    # Git push
     "request_restart",     # Control operations
     "promote_to_stable",
-    # Git tools (can modify files)
+    # Git tools (can modify files / history)
     "git_add", "git_commit", "git_init",
+    "git_checkout", "git_merge", "git_tag", "git_reset", "git_snapshot",
 }
 
 

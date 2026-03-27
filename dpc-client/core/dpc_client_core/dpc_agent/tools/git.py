@@ -12,10 +12,21 @@ All git operations are restricted to the agent's sandbox directory.
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
+
+# Conventional commits: type(optional-scope): description
+# Types: feat fix docs style refactor perf test chore build ci revert
+_CONVENTIONAL_COMMIT_RE = re.compile(
+    r"^(feat|fix|docs|style|refactor|perf|test|chore|build|ci|revert)"
+    r"(\([^)]+\))?"
+    r"!?:"
+    r" .+",
+    re.IGNORECASE,
+)
 
 log = logging.getLogger(__name__)
 
@@ -189,9 +200,17 @@ def git_commit(ctx: ToolContext, message: str, path: str = ".") -> str:
     """
     Create a git commit.
 
+    Message MUST follow Conventional Commits: type(optional-scope): description
+    Valid types: feat, fix, docs, style, refactor, perf, test, chore, build, ci, revert
+    Examples:
+        "feat(knowledge): add TurboQuant complexity analysis"
+        "chore(identity): refine core values after security audit"
+        "refactor: consolidate knowledge files by topic"
+        "fix: correct outdated GPU model in device context"
+
     Args:
         ctx: Tool context
-        message: Commit message
+        message: Conventional Commits message (type(scope): description)
         path: Repository root
 
     Returns:
@@ -199,6 +218,13 @@ def git_commit(ctx: ToolContext, message: str, path: str = ".") -> str:
     """
     if not message:
         return "⚠️ Commit message required"
+
+    if not _CONVENTIONAL_COMMIT_RE.match(message):
+        return (
+            "⚠️ Commit message must follow Conventional Commits format: type(scope): description\n"
+            "Valid types: feat, fix, docs, style, refactor, perf, test, chore, build, ci, revert\n"
+            f"Got: {message!r}"
+        )
 
     result = _run_git(ctx, ["commit", "-m", message], cwd=path)
 
@@ -251,6 +277,172 @@ def git_init(ctx: ToolContext, path: str = ".") -> str:
         return f"⚠️ Git init failed: {result.get('error', 'Unknown error')}"
 
     return f"Initialized git repository in {path}"
+
+
+def git_checkout(ctx: ToolContext, branch: str, create: bool = False, path: str = ".") -> str:
+    """
+    Switch to a branch, or create and switch to a new branch.
+
+    Args:
+        ctx: Tool context
+        branch: Branch name to switch to
+        create: If True, create the branch before switching (-b flag)
+        path: Repository root
+
+    Returns:
+        Result message
+    """
+    args = ["checkout"]
+    if create:
+        args.append("-b")
+    args.append(branch)
+
+    result = _run_git(ctx, args, cwd=path)
+
+    if not result["success"]:
+        return f"⚠️ Git checkout failed: {result.get('error', 'Unknown error')}"
+
+    return result["output"] or f"Switched to branch '{branch}'"
+
+
+def git_merge(ctx: ToolContext, branch: str, no_ff: bool = False, path: str = ".") -> str:
+    """
+    Merge a branch into the current branch.
+
+    Args:
+        ctx: Tool context
+        branch: Branch name to merge
+        no_ff: Use --no-ff to always create a merge commit
+        path: Repository root
+
+    Returns:
+        Result message (includes conflict details if merge failed)
+    """
+    args = ["merge"]
+    if no_ff:
+        args.append("--no-ff")
+    args.append(branch)
+
+    result = _run_git(ctx, args, cwd=path)
+
+    if not result["success"]:
+        output = result.get("output", "") or ""
+        error = result.get("error", "") or ""
+        if "CONFLICT" in output or "conflict" in error.lower():
+            return (
+                f"⚠️ Merge conflicts detected:\n{output}\n"
+                "Resolve conflicts manually, then git_add the files and git_commit."
+            )
+        return f"⚠️ Git merge failed: {error}"
+
+    return result["output"] or f"Merged branch '{branch}'"
+
+
+def git_tag(ctx: ToolContext, name: str, message: Optional[str] = None, path: str = ".") -> str:
+    """
+    Create a git tag on the current commit.
+
+    Args:
+        ctx: Tool context
+        name: Tag name (e.g. 'milestone-v1', 'before-cleanup-20260327')
+        message: If provided, creates an annotated tag with this message
+        path: Repository root
+
+    Returns:
+        Result message
+    """
+    if message:
+        args = ["tag", "-a", name, "-m", message]
+    else:
+        args = ["tag", name]
+
+    result = _run_git(ctx, args, cwd=path)
+
+    if not result["success"]:
+        return f"⚠️ Git tag failed: {result.get('error', 'Unknown error')}"
+
+    return f"Created tag '{name}'"
+
+
+def git_reset(
+    ctx: ToolContext,
+    ref: str = "HEAD",
+    hard: bool = False,
+    files: Optional[List[str]] = None,
+    path: str = ".",
+) -> str:
+    """
+    Reset files or commits.
+
+    Modes (in order of safety):
+    - files provided: restore specific files from ref (safe, no history change)
+    - hard=False (default): soft reset — moves HEAD, keeps working tree intact
+    - hard=True: hard reset — moves HEAD AND discards working tree changes
+
+    Args:
+        ctx: Tool context
+        ref: Commit ref to reset to (default: HEAD)
+        hard: If True, perform a hard reset (destructive — use with care)
+        files: If provided, restore only these specific files from ref
+        path: Repository root
+
+    Returns:
+        Result message
+    """
+    if files:
+        # Restore specific files only — safest option
+        args = ["checkout", ref, "--"] + files
+        result = _run_git(ctx, args, cwd=path)
+        if not result["success"]:
+            return f"⚠️ Git reset (file restore) failed: {result.get('error', 'Unknown error')}"
+        return f"Restored {len(files)} file(s) from {ref}"
+
+    if hard:
+        args = ["reset", "--hard", ref]
+    else:
+        args = ["reset", ref]
+
+    result = _run_git(ctx, args, cwd=path)
+
+    if not result["success"]:
+        return f"⚠️ Git reset failed: {result.get('error', 'Unknown error')}"
+
+    return result["output"] or f"Reset to {ref}"
+
+
+def git_snapshot(ctx: ToolContext, path: str = ".") -> str:
+    """
+    Quick snapshot: stage all changes and commit with a UTC timestamp message.
+
+    Commit message format: 'snapshot: 2026-03-27T14:30:00Z'
+
+    Use this before experiments, restructuring, or any time you want a
+    quick save point without thinking about a commit message.
+
+    Args:
+        ctx: Tool context
+        path: Repository root
+
+    Returns:
+        Commit hash and message, or 'nothing to commit' if no changes
+    """
+    import datetime as _dt
+
+    timestamp = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    message = f"snapshot: {timestamp}"
+
+    add_result = _run_git(ctx, ["add", "-A"], cwd=path)
+    if not add_result["success"]:
+        return f"⚠️ Failed to stage files: {add_result.get('error', 'Unknown error')}"
+
+    commit_result = _run_git(ctx, ["commit", "-m", message], cwd=path)
+    if not commit_result["success"]:
+        combined = (commit_result.get("output") or "") + (commit_result.get("error") or "")
+        if "nothing to commit" in combined.lower():
+            return "Nothing to commit (working directory clean)"
+        return f"⚠️ Snapshot commit failed: {commit_result.get('error', 'Unknown error')}"
+
+    return f"Snapshot created: {message}\n{commit_result['output']}"
 
 
 def get_tools() -> List[ToolEntry]:
@@ -361,13 +553,24 @@ def get_tools() -> List[ToolEntry]:
             name="git_commit",
             schema={
                 "name": "git_commit",
-                "description": "Create a git commit within the agent sandbox",
+                "description": (
+                    "Create a git commit within the agent sandbox. "
+                    "REQUIRED: message must follow Conventional Commits — "
+                    "type(optional-scope): description — "
+                    "where type is one of: feat, fix, docs, style, refactor, perf, test, chore, build, ci, revert. "
+                    "Examples: 'feat(knowledge): add TurboQuant complexity analysis', "
+                    "'chore(identity): refine core values after security audit', "
+                    "'refactor: consolidate knowledge files by topic'."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "message": {
                             "type": "string",
-                            "description": "Commit message"
+                            "description": (
+                                "Conventional Commits message: type(optional-scope): description. "
+                                "Write a meaningful description — you own this commit message."
+                            )
                         },
                         "path": {
                             "type": "string",
@@ -421,6 +624,160 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=git_init,
+            timeout_sec=30,
+        ),
+
+        ToolEntry(
+            name="git_checkout",
+            schema={
+                "name": "git_checkout",
+                "description": "Switch to a branch or create and switch to a new branch within the agent sandbox",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "branch": {
+                            "type": "string",
+                            "description": "Branch name to switch to (e.g. 'main', 'experiment/new-identity')"
+                        },
+                        "create": {
+                            "type": "boolean",
+                            "description": "Create the branch before switching (git checkout -b)",
+                            "default": False
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Repository root",
+                            "default": "."
+                        }
+                    },
+                    "required": ["branch"]
+                }
+            },
+            handler=git_checkout,
+            timeout_sec=30,
+        ),
+
+        ToolEntry(
+            name="git_merge",
+            schema={
+                "name": "git_merge",
+                "description": "Merge a branch into the current branch within the agent sandbox",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "branch": {
+                            "type": "string",
+                            "description": "Branch name to merge into current branch"
+                        },
+                        "no_ff": {
+                            "type": "boolean",
+                            "description": "Always create a merge commit (--no-ff), preserving branch history",
+                            "default": False
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Repository root",
+                            "default": "."
+                        }
+                    },
+                    "required": ["branch"]
+                }
+            },
+            handler=git_merge,
+            timeout_sec=30,
+        ),
+
+        ToolEntry(
+            name="git_tag",
+            schema={
+                "name": "git_tag",
+                "description": "Create a git tag on the current commit within the agent sandbox",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Tag name (e.g. 'milestone-security-audit', 'before-cleanup-20260327')"
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "Optional message for an annotated tag"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Repository root",
+                            "default": "."
+                        }
+                    },
+                    "required": ["name"]
+                }
+            },
+            handler=git_tag,
+            timeout_sec=30,
+        ),
+
+        ToolEntry(
+            name="git_reset",
+            schema={
+                "name": "git_reset",
+                "description": (
+                    "Reset files or commits within the agent sandbox. "
+                    "Safest with 'files' (restores specific files). "
+                    "hard=True discards all uncommitted changes — use with care."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ref": {
+                            "type": "string",
+                            "description": "Commit ref to reset to (default: HEAD)",
+                            "default": "HEAD"
+                        },
+                        "hard": {
+                            "type": "boolean",
+                            "description": "Perform a hard reset, discarding working tree changes (destructive)",
+                            "default": False
+                        },
+                        "files": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "If provided, restore only these files from ref (safest option)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Repository root",
+                            "default": "."
+                        }
+                    },
+                    "required": []
+                }
+            },
+            handler=git_reset,
+            timeout_sec=30,
+        ),
+
+        ToolEntry(
+            name="git_snapshot",
+            schema={
+                "name": "git_snapshot",
+                "description": (
+                    "Quick save: stage all changes and commit with a UTC timestamp message "
+                    "(e.g. 'snapshot: 2026-03-27T14:30:00Z'). "
+                    "Use before experiments or restructuring when you want a save point without crafting a message."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Repository root",
+                            "default": "."
+                        }
+                    },
+                    "required": []
+                }
+            },
+            handler=git_snapshot,
             timeout_sec=30,
         ),
     ]

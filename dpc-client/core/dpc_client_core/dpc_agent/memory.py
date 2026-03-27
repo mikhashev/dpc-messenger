@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from .utils import (
     utc_now_iso, read_text, write_text, append_jsonl, short,
-    get_agent_root, ensure_agent_dirs
+    get_agent_root, ensure_agent_dirs, auto_commit_agent_change
 )
 
 log = logging.getLogger(__name__)
@@ -110,6 +110,7 @@ class Memory:
     def save_identity(self, content: str) -> None:
         """Save identity content."""
         write_text(self.identity_path(), content)
+        auto_commit_agent_change(self.agent_root, "identity: updated self-understanding")
 
     def load_dialogue_summary(self) -> str:
         """Load dialogue summary if exists."""

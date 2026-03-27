@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
+from ..utils import auto_commit_agent_change
 
 log = logging.getLogger(__name__)
 
@@ -311,7 +312,13 @@ def deduplicate_identity(ctx: ToolContext) -> str:
         return f"⚠️ Error deduplicating identity: {e}"
 
 
-def update_identity(ctx: ToolContext, section: str, content: str, mode: str = "replace") -> str:
+def update_identity(
+    ctx: ToolContext,
+    section: str,
+    content: str,
+    mode: str = "replace",
+    commit_message: Optional[str] = None,
+) -> str:
     """
     Update a section of the agent's identity file.
 
@@ -324,6 +331,9 @@ def update_identity(ctx: ToolContext, section: str, content: str, mode: str = "r
               - append: Add content to existing section (removes duplicates first)
               - merge: Combine content with existing section (removes duplicates first)
               - deduplicate: Just remove duplicate sections without adding content
+        commit_message: Conventional commit message for this change
+            (e.g. 'chore(identity): refine core values after security audit').
+            Defaults to 'chore(identity): update {section}'.
 
     Returns:
         Result message
@@ -434,6 +444,10 @@ This file tracks the agent's self-understanding and evolving identity.
         new_content = "\n".join(new_lines)
         identity_path.write_text(new_content, encoding="utf-8")
 
+        # Auto-commit identity changes (best-effort)
+        msg = commit_message or f"chore(identity): update {section}"
+        auto_commit_agent_change(ctx.agent_root, msg)
+
         msg = f"✓ Updated identity section '{section}'"
         if duplicates_removed > 0:
             msg += f" (removed {duplicates_removed} duplicate(s))"
@@ -507,7 +521,12 @@ def knowledge_read(ctx: ToolContext, topic: str) -> str:
         return f"⚠️ Error reading knowledge: {e}"
 
 
-def knowledge_write(ctx: ToolContext, topic: str, content: str) -> str:
+def knowledge_write(
+    ctx: ToolContext,
+    topic: str,
+    content: str,
+    commit_message: Optional[str] = None,
+) -> str:
     """
     Write or update a knowledge base topic with firewall check.
 
@@ -515,6 +534,9 @@ def knowledge_write(ctx: ToolContext, topic: str, content: str) -> str:
         ctx: Tool context
         topic: Topic name
         content: Topic content (markdown)
+        commit_message: Conventional commit message for this change
+            (e.g. 'docs(knowledge): add TurboQuant complexity analysis').
+            Defaults to 'docs(knowledge): update {topic}'.
 
     Returns:
         Result message
@@ -540,6 +562,10 @@ Last updated: {datetime.now(timezone.utc).isoformat()}
 
         # Update index
         _update_knowledge_index(ctx, topic)
+
+        # Auto-commit knowledge changes (best-effort)
+        msg = commit_message or f"docs(knowledge): update {topic}"
+        auto_commit_agent_change(ctx.agent_root, msg)
 
         return f"✓ Wrote knowledge topic '{topic}' ({len(content)} chars)"
 
@@ -1915,7 +1941,14 @@ def get_tools() -> List[ToolEntry]:
             name="update_identity",
             schema={
                 "name": "update_identity",
-                "description": "Update a section of the agent's identity (self-understanding). Automatically removes duplicate sections. Use mode='deduplicate' to just clean up duplicates without adding content.",
+                "description": (
+                    "Update a section of the agent's identity (self-understanding). "
+                    "Automatically removes duplicate sections. "
+                    "Use mode='deduplicate' to just clean up duplicates without adding content. "
+                    "Provide commit_message in Conventional Commits format to describe why you made this change "
+                    "(e.g. 'chore(identity): refine core values after security audit'). "
+                    "You own this commit message — write it to reflect what actually changed and why."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1932,6 +1965,14 @@ def get_tools() -> List[ToolEntry]:
                             "description": "Update mode",
                             "enum": ["replace", "append", "merge", "deduplicate"],
                             "default": "replace"
+                        },
+                        "commit_message": {
+                            "type": "string",
+                            "description": (
+                                "Conventional Commits message for this change: type(scope): description. "
+                                "E.g. 'chore(identity): refine core values after coevolution task'. "
+                                "Omit to use the default."
+                            )
                         }
                     },
                     "required": ["section"]
@@ -2004,7 +2045,12 @@ def get_tools() -> List[ToolEntry]:
             name="knowledge_write",
             schema={
                 "name": "knowledge_write",
-                "description": "Write or update a knowledge base topic",
+                "description": (
+                    "Write or update a knowledge base topic. "
+                    "Provide commit_message in Conventional Commits format to describe what you learned "
+                    "(e.g. 'docs(knowledge): add TurboQuant complexity analysis with benchmarks'). "
+                    "You own this commit message — make it meaningful."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -2015,6 +2061,14 @@ def get_tools() -> List[ToolEntry]:
                         "content": {
                             "type": "string",
                             "description": "Topic content (markdown)"
+                        },
+                        "commit_message": {
+                            "type": "string",
+                            "description": (
+                                "Conventional Commits message for this change: type(scope): description. "
+                                "E.g. 'docs(knowledge): add TurboQuant complexity analysis'. "
+                                "Omit to use the default."
+                            )
                         }
                     },
                     "required": ["topic", "content"]
