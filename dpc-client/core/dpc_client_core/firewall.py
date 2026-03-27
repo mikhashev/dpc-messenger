@@ -134,6 +134,9 @@ class ContextFirewall:
             'list_local_agents': True,   # Read-only: list registered agents
             'list_agent_skills': True,   # Read-only: list another agent's shareable skills
             'import_skill_from_agent': False,  # Opt-in: copy skill from another agent (needs accept_peer_skills)
+            # Self-introspection tools
+            'list_my_tools': True,   # Read-only: list own available tools
+            'list_my_skills': True,  # Read-only: list own installed skills
             # DPC integration
             'get_dpc_context': True,
             # Web tools
@@ -152,11 +155,16 @@ class ContextFirewall:
             'git_status': False,
             'git_diff': False,
             'git_log': False,
-            # Git tools (modify files)
+            'git_branch': False,
+            # Git tools (modify files / history)
             'git_add': False,
             'git_commit': False,
-            'git_branch': False,
             'git_init': False,
+            'git_checkout': False,
+            'git_merge': False,
+            'git_tag': False,
+            'git_reset': False,
+            'git_snapshot': False,
             'repo_commit_push': False,  # Can push to remote
             # Restricted tools (security sensitive)
             'run_shell': False,
@@ -700,6 +708,11 @@ class ContextFirewall:
                         "git_commit": False,
                         "git_branch": False,
                         "git_init": False,
+                        "git_checkout": False,
+                        "git_merge": False,
+                        "git_tag": False,
+                        "git_reset": False,
+                        "git_snapshot": False,
                         "repo_commit_push": False,
                         "run_shell": False,
                         "claude_code_edit": False,
@@ -711,7 +724,14 @@ class ContextFirewall:
                         "resume_evolution": True,
                         "get_evolution_stats": True,
                         "approve_evolution_change": False,
-                        "reject_evolution_change": True
+                        "reject_evolution_change": True,
+                        "_comment_skills": "Skill and introspection tools",
+                        "execute_skill": True,
+                        "list_local_agents": True,
+                        "list_agent_skills": True,
+                        "import_skill_from_agent": False,
+                        "list_my_tools": True,
+                        "list_my_skills": True
                     }
                 },
                 "file_transfer": {
@@ -1551,6 +1571,7 @@ class ContextFirewall:
                                 'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                 # Git tools
                                 'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
+                                'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
                                 'repo_commit_push',
                                 # Restricted tools
                                 'run_shell', 'claude_code_edit',
@@ -1574,6 +1595,8 @@ class ContextFirewall:
                                 'execute_skill',
                                 # Inter-agent skill sharing tools (v0.21.0+)
                                 'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
+                                # Self-introspection tools
+                                'list_my_tools', 'list_my_skills',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):
@@ -1651,6 +1674,7 @@ class ContextFirewall:
                                         'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
                                         'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                         'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
+                                        'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
                                         'repo_commit_push',
                                         'run_shell', 'claude_code_edit',
                                         'schedule_task', 'get_task_status',
@@ -1666,6 +1690,8 @@ class ContextFirewall:
                                         'execute_skill',
                                         # Inter-agent skill sharing tools (v0.21.0+)
                                         'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
+                                        # Self-introspection tools
+                                        'list_my_tools', 'list_my_skills',
                                     }
                                     for tool_name, tool_enabled in tools.items():
                                         if tool_name.startswith('_'):

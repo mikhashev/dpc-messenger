@@ -223,6 +223,8 @@ CORE_TOOL_NAMES = {
     "send_user_message",
     # Skill router (Read phase of Memento-Skills loop)
     "execute_skill",
+    # Self-introspection tools
+    "list_my_tools", "list_my_skills",
 }
 
 # Restricted tools (require explicit enable in config)

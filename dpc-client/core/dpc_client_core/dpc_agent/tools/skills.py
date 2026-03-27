@@ -94,6 +94,53 @@ def _list_agent_skills(ctx: "ToolContext", agent_id: str, tags: Optional[str] = 
         return f"⚠️ Failed to list agent skills: {e}"
 
 
+def _list_my_tools(ctx: "ToolContext") -> str:
+    """List all tools currently available to this agent (respects firewall whitelist)."""
+    agent = getattr(ctx, "_agent", None)
+    if agent is None or not hasattr(agent, "tools"):
+        return "⚠️ Tool registry not accessible"
+
+    own_id = ctx.agent_root.name
+    # schemas() already applies ctx.tool_whitelist, so this reflects actual availability
+    schemas = agent.tools.schemas()
+    if not schemas:
+        return f"Agent {own_id}: no tools currently available."
+
+    lines = [f"Agent {own_id} — available tools ({len(schemas)} total):"]
+    for s in schemas:
+        fn = s.get("function", {})
+        name = fn.get("name", "?")
+        desc = fn.get("description", "No description")
+        if len(desc) > 100:
+            desc = desc[:97] + "..."
+        lines.append(f"- {name}: {desc}")
+    return "\n".join(lines)
+
+
+def _list_my_skills(ctx: "ToolContext") -> str:
+    """List all skills installed in this agent's skill store."""
+    own_id = ctx.agent_root.name
+    if ctx.skill_store is None:
+        return f"⚠️ Skill store not available on agent {own_id}"
+
+    skills = ctx.skill_store.list_skills()
+    if not skills:
+        return (
+            f"Agent {own_id}: no skills installed. "
+            "Skills can be written via knowledge tools or imported from other agents."
+        )
+
+    lines = [f"Agent {own_id} — installed skills ({len(skills)} total):"]
+    for s in skills:
+        name = s.get("name", "?")
+        desc = s.get("description", "No description")
+        if len(desc) > 120:
+            desc = desc[:117] + "..."
+        lines.append(f"- {name}: {desc}")
+    lines.append("\nUse execute_skill(skill_name) to load a skill's full strategy.")
+    return "\n".join(lines)
+
+
 def _import_skill_from_agent(ctx: "ToolContext", agent_id: str, skill_name: str) -> str:
     """Copy a shareable skill from another local agent into this agent's skill store."""
     # Firewall check (per-agent profile if available)
@@ -197,6 +244,35 @@ def get_tools() -> "List[ToolEntry]":
     from ..tools.registry import ToolEntry
 
     return [
+        ToolEntry(
+            name="list_my_tools",
+            schema={
+                "name": "list_my_tools",
+                "description": (
+                    "List all tools currently available to you (respects your firewall permissions). "
+                    "Use this to discover what you can do, plan a task, or explain your capabilities."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+            handler=_list_my_tools,
+            is_core=True,
+            timeout_sec=5,
+        ),
+        ToolEntry(
+            name="list_my_skills",
+            schema={
+                "name": "list_my_skills",
+                "description": (
+                    "List all skills installed in your own skill store. "
+                    "Shows skill names and descriptions. "
+                    "Use execute_skill(skill_name) to load a skill's full strategy."
+                ),
+                "parameters": {"type": "object", "properties": {}, "required": []},
+            },
+            handler=_list_my_skills,
+            is_core=True,
+            timeout_sec=5,
+        ),
         ToolEntry(
             name="list_local_agents",
             schema={
