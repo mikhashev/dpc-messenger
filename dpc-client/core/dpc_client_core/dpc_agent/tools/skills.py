@@ -101,8 +101,9 @@ def _list_my_tools(ctx: "ToolContext") -> str:
         return "⚠️ Tool registry not accessible"
 
     own_id = ctx.agent_root.name
-    # schemas() already applies ctx.tool_whitelist, so this reflects actual availability
-    schemas = agent.tools.schemas()
+    # include_restricted=True so whitelisted git/shell tools appear;
+    # the whitelist check inside schemas() still filters to only enabled tools.
+    schemas = agent.tools.schemas(include_restricted=True)
     if not schemas:
         return f"Agent {own_id}: no tools currently available."
 
