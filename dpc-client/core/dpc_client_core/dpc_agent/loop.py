@@ -523,10 +523,23 @@ async def run_llm_loop(
 
                 truncated_result = _truncate_tool_result(exec_result["result"])
                 safe_result = _sanitize_tool_result(truncated_result)
+
+                # When a tool fails, wrap the result in an explicit failure envelope
+                # so the LLM cannot misinterpret it as a success and hallucinate outcomes.
+                if exec_result["is_error"]:
+                    tool_content = (
+                        f"[TOOL_FAILED: {exec_result['fn_name']}]\n"
+                        f"{safe_result}\n"
+                        f"The tool call above FAILED. Do NOT report success or fabricate results. "
+                        f"Acknowledge the failure and tell the user exactly what went wrong."
+                    )
+                else:
+                    tool_content = safe_result
+
                 messages.append({
                     "role": "tool",
                     "tool_call_id": exec_result["tool_call_id"],
-                    "content": safe_result,
+                    "content": tool_content,
                 })
 
                 llm_trace["tool_calls"].append({
