@@ -318,8 +318,10 @@ async def run_llm_loop(
         "rounds": 0,
     }
 
-    # Get tool schemas (use firewall whitelist, not just core tools)
-    tool_schemas = tools.schemas(core_only=False, include_restricted=False)
+    # Get tool schemas — include_restricted=True so whitelisted restricted tools
+    # (git write, shell, etc.) are presented to the LLM when the firewall allows them.
+    # The whitelist check inside schemas() still enforces per-agent authorization.
+    tool_schemas = tools.schemas(core_only=False, include_restricted=True)
 
     # Deduplication: track (tool_name, args_hash) → call count.
     # If the same call is repeated MAX_DUPLICATE_CALLS times without new information,
