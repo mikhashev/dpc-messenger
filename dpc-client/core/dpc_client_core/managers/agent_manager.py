@@ -566,6 +566,11 @@ class DpcAgentManager:
                 )
                 monitor.save_history()  # Save to disk immediately
 
+            # Store full context estimate from this request so next request's session_state
+            # can expose it. One request stale, but accurate — context grows incrementally.
+            if hasattr(agent, '_last_cap_info') and agent._last_cap_info:
+                monitor._last_context_estimated = agent._last_cap_info.get("estimated_tokens_before", 0)
+
             # Update token count in monitor after agent response.
             # Count tokens directly from the conversation history (user + assistant messages)
             # stored in the monitor — the same data that gets sent as input on every new request.
@@ -763,10 +768,20 @@ class DpcAgentManager:
             }
 
         usage = monitor.get_token_usage()
+        token_limit = usage.get("token_limit", 128000)
+        history_tokens = usage.get("tokens_used", 0)
+        context_estimated = getattr(monitor, '_last_context_estimated', 0)
         return {
-            "tokens_used": usage.get("tokens_used", 0),
-            "tokens_limit": usage.get("token_limit", 128000),
-            "usage_percent": usage.get("usage_percent", 0),
+            # Conversation history only (user+assistant text ÷ 4).
+            # Same basis as the token counter shown in the UI.
+            "history_tokens": history_tokens,
+            "history_usage_percent": round(history_tokens / token_limit, 4) if token_limit else 0,
+            # Full context estimate from previous request (one request stale).
+            # Includes: system prompt + scratchpad + identity + knowledge + tools + history.
+            # This is what the log "Context size: X%" reports.
+            "context_estimated": context_estimated,
+            "context_usage_percent": round(context_estimated / token_limit, 4) if token_limit and context_estimated else 0,
+            "tokens_limit": token_limit,
             "messages_count": len(monitor.message_history),
             "should_extract_knowledge": monitor.should_suggest_extraction(),
         }

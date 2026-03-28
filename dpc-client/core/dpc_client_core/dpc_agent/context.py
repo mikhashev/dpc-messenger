@@ -93,11 +93,19 @@ def _build_runtime_section(
 
     # Session state from ConversationMonitor (token usage, context window)
     if session_state:
+        token_limit = session_state.get("tokens_limit", 128000)
+        history_tokens = session_state.get("history_tokens", 0)
+        context_estimated = session_state.get("context_estimated", 0)
         runtime_data["session"] = {
-            "tokens_used": session_state.get("tokens_used", 0),
-            "tokens_limit": session_state.get("tokens_limit", 128000),
-            "usage_percent": session_state.get("usage_percent", 0),
             "messages_count": session_state.get("messages_count", 0),
+            "tokens_limit": token_limit,
+            # history_tokens: conversation text only (user+assistant ÷4). Matches UI token counter.
+            "history_tokens": history_tokens,
+            "history_usage_percent": session_state.get("history_usage_percent", 0),
+            # context_estimated: full context from previous request (system+memory+tools+history).
+            # One request stale. Matches "Context size: X%" in dpc-client.log.
+            "context_estimated": context_estimated,
+            "context_usage_percent": session_state.get("context_usage_percent", 0),
             "should_extract_knowledge": session_state.get("should_extract_knowledge", False),
         }
 

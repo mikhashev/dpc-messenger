@@ -155,6 +155,8 @@ class DpcAgent:
 
         # Track last usage for session state access by agent_manager
         self._last_usage: Optional[Dict[str, Any]] = None
+        # Track last full context estimate (from build_llm_messages cap_info)
+        self._last_cap_info: Optional[Dict[str, Any]] = None
 
         log.info(f"DpcAgent initialized with storage at {self.agent_root}")
 
@@ -226,6 +228,9 @@ class DpcAgent:
             conversation_history=prior_history,
             skill_store=self.skill_store,
         )
+
+        # Store cap_info for agent_manager to include in next request's session_state
+        self._last_cap_info = cap_info
 
         # Log context window usage — warn if approaching limit or sections were trimmed
         _estimated = cap_info.get("estimated_tokens_before", 0)
