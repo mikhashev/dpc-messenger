@@ -85,6 +85,7 @@ from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
 )
 from .managers.file_transfer_manager import FileTransferManager
 from .voice_service import VoiceService
+from .knowledge_service import KnowledgeService
 from .managers.group_manager import GroupManager
 from .managers.prompt_manager import PromptManager
 from .managers.instruction_manager import InstructionManager
@@ -208,37 +209,9 @@ class CoreService:
         except Exception as e:
             logger.warning("Failed to load display name from personal context: %s", e)
 
-        self.consensus_manager = ConsensusManager(
-            node_id=self.p2p_manager.node_id,
-            pcm_core=self.pcm_core,
-            vote_timeout_minutes=10
-        )
-
-        # Register callback to reload context and notify peers after commit
-        self.consensus_manager.on_commit_applied = self._on_commit_applied
-
-        # Register callback to sign our own copy and broadcast COMMIT_SIGNED to peers
-        self.consensus_manager.on_commit_signed = self._on_commit_signed
-
-        # Register callback to broadcast COMMIT_ACK to peers (Gap 3 observability)
-        self.consensus_manager.on_commit_ack = self._on_commit_ack
-
-        # Register callback to surface apply failures to the UI
-        self.consensus_manager.on_commit_apply_failed = self._on_commit_apply_failed
-
-        # Register callback to broadcast peer proposals to UI
-        self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
-
-        # Register callback to broadcast voting results to participants
-        self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
-
-        # Register callback to surface revision requests to the UI (and optionally auto-revise)
-        self.consensus_manager.on_commit_revision_needed = self._on_commit_revision_needed
-
-        # Register callbacks for vote progress and final outcomes
-        self.consensus_manager.on_vote_received = self._on_vote_received
-        self.consensus_manager.on_commit_approved = self._on_commit_approved
-        self.consensus_manager.on_commit_rejected = self._on_commit_rejected
+        # consensus_manager and knowledge state are owned by KnowledgeService
+        # (created below after group_manager and peer_metadata are ready)
+        self.consensus_manager = None  # aliased after KnowledgeService.__init__
 
         # Session manager (mutual new session approval)
         self.session_manager = None
@@ -306,11 +279,8 @@ class CoreService:
         self.group_manager.load_from_disk()
 
         # Conversation monitors (per conversation/peer for knowledge extraction)
-        # conversation_id -> ConversationMonitor
+        # Owned by KnowledgeService but CoreService keeps a reference to the same dict.
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
-
-        # Knowledge extraction settings
-        self.auto_knowledge_detection_enabled: bool = False  # Can be toggled by user (matches UI default)
 
         # External IP discovery (via STUN)
         self._external_ip: str | None = None  # Will be populated by STUN discovery
@@ -349,6 +319,34 @@ class CoreService:
         self._voice_transcriptions = self.voice_service._voice_transcriptions
         self._transcription_locks = self.voice_service._transcription_locks
         self._voice_transcription_settings = self.voice_service._voice_transcription_settings
+
+        # Knowledge — managed by KnowledgeService (Phase 1b refactor)
+        try:
+            self.knowledge_service = KnowledgeService(
+                pcm_core=self.pcm_core,
+                llm_manager=self.llm_manager,
+                local_api=self.local_api,
+                p2p_manager=self.p2p_manager,
+                settings=self.settings,
+                dpc_home_dir=DPC_HOME_DIR,
+                conversation_monitors=self.conversation_monitors,
+                peer_metadata=self.peer_metadata,
+                group_manager=self.group_manager,
+                instruction_set=self.instruction_set,
+                send_ai_query=self.send_ai_query,
+                broadcast_to_peers=self._broadcast_to_peers,
+                broadcast_to_group=self._broadcast_to_group,
+                compute_context_hash=self._compute_context_hash,
+            )
+        except Exception as e:
+            logger.error(
+                "KnowledgeService init failed, continuing without knowledge features: %s", e
+            )
+            self.knowledge_service = None
+
+        # Alias consensus_manager for backward compat (same object as KnowledgeService owns)
+        if self.knowledge_service:
+            self.consensus_manager = self.knowledge_service.consensus_manager
 
         # Per-conversation chat provider selection (v0.20.0+)
         self._chat_providers: Dict[str, str] = {}  # conversation_id -> provider_alias
@@ -1570,6 +1568,18 @@ class CoreService:
             return None
 
         return status_result
+
+    @property
+    def auto_knowledge_detection_enabled(self) -> bool:
+        """Delegates to KnowledgeService (Phase 1b)."""
+        if self.knowledge_service:
+            return self.knowledge_service.auto_knowledge_detection_enabled
+        return False
+
+    @auto_knowledge_detection_enabled.setter
+    def auto_knowledge_detection_enabled(self, value: bool) -> None:
+        if self.knowledge_service:
+            self.knowledge_service.auto_knowledge_detection_enabled = value
 
     def get_state(self) -> dict:
         """
@@ -3967,152 +3977,12 @@ class CoreService:
         vote: str,
         comment: str = None
     ) -> Dict[str, Any]:
-        """Cast vote on a knowledge commit proposal.
-
-        UI Integration: Called when user clicks approve/reject/request_changes
-        in KnowledgeCommitDialog component.
-
-        Args:
-            proposal_id: ID of the proposal to vote on
-            vote: 'approve', 'reject', or 'request_changes'
-            comment: Optional comment explaining the vote
-
-        Returns:
-            Dict with status and result
-        """
-        try:
-            # Check if this is an AI chat proposal (AI agent needs to vote too)
-            is_ai_chat = False
-            ai_agent_node_id = None
-            if proposal_id in self.consensus_manager.sessions:
-                session = self.consensus_manager.sessions[proposal_id]
-                conversation_id = session.proposal.conversation_id
-                if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
-                    is_ai_chat = True
-                    ai_agent_node_id = conversation_id
-                elif conversation_id.startswith("agent_"):
-                    is_ai_chat = True
-                    # Resolve the actual agent_id from the manager so votes are attributed correctly
-                    ai_agent_node_id = conversation_id  # fallback
-                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                        agent_mgr = dpc_agent_provider._managers.get(conversation_id)
-                        if agent_mgr and agent_mgr.agent_id:
-                            ai_agent_node_id = agent_mgr.agent_id
-
-            # Cast user's vote through ConsensusManager
-            # For AI chats, don't broadcast to peers (use no-op)
-            broadcast_func = self._broadcast_to_peers
-            if is_ai_chat:
-                async def _no_op_broadcast(message: Dict[str, Any]) -> None:
-                    pass  # AI chats are private, no peer broadcast
-                broadcast_func = _no_op_broadcast
-
-            success = await self.consensus_manager.cast_vote(
-                proposal_id=proposal_id,
-                vote=vote,
-                comment=comment,
-                broadcast_func=broadcast_func
-            )
-
-            if success and is_ai_chat:
-                # User voted first, now trigger AI agent to evaluate and vote
-                logger.info("User voted on AI chat proposal %s, triggering AI evaluation", proposal_id)
-                asyncio.create_task(
-                    self._ai_agent_vote_on_proposal(proposal_id, ai_agent_node_id)
-                )
-
-            if success:
-                return {
-                    "status": "success",
-                    "message": f"Vote cast: {vote}"
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": "Proposal not found or voting session expired"
-                }
-
-        except Exception as e:
-            logger.error("Error voting on knowledge commit: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.vote_knowledge_commit(proposal_id, vote, comment)
 
     async def _ai_agent_vote_on_proposal(self, proposal_id: str, ai_agent_node_id: str) -> None:
-        """Have the AI agent evaluate and cast a vote on a knowledge proposal.
-
-        The AI agent reviews the proposed knowledge entries and makes a reasoned
-        decision to approve, reject, or request changes.
-
-        Args:
-            proposal_id: ID of the proposal to vote on
-            ai_agent_node_id: The AI agent's node_id (same as conversation_id)
-        """
-        try:
-            # Get the proposal
-            if proposal_id not in self.consensus_manager.sessions:
-                logger.warning("AI vote: Proposal %s not found", proposal_id)
-                return
-
-            session = self.consensus_manager.sessions[proposal_id]
-            proposal = session.proposal
-
-            # Check if AI already voted (prevent double voting)
-            if ai_agent_node_id in session.votes:
-                logger.info("AI agent %s already voted on proposal %s", ai_agent_node_id, proposal_id)
-                return
-
-            # Resolve the agent's configured provider and full conversation so the
-            # same model that participated can verify entries against what was said.
-            agent_provider_alias = None
-            conversation_history = None
-            conv_id = proposal.conversation_id
-            if conv_id and conv_id.startswith("agent_"):
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    _mgr = dpc_agent_provider._managers.get(conv_id)
-                    if _mgr:
-                        agent_provider_alias = _mgr.config.get("provider_alias")
-                        _monitor = _mgr._agent_monitors.get(conv_id)
-                        if _monitor:
-                            conversation_history = _monitor.full_conversation
-
-            # Evaluate the proposal using the agent's own provider and the full
-            # conversation so entries can be verified against what was actually said.
-            ai_decision = await self._evaluate_knowledge_proposal_for_ai_vote(
-                proposal,
-                provider_alias=agent_provider_alias,
-                conversation_history=conversation_history,
-            )
-
-            logger.info(
-                "AI agent %s voting on proposal %s: %s - %s",
-                ai_agent_node_id, proposal_id, ai_decision["vote"], ai_decision.get("comment", "")
-            )
-
-            # Cast AI's vote through cast_vote() so on_vote_received fires and
-            # _finalize_vote is triggered automatically when all participants have voted.
-            # Use a no-op broadcast — agent conversations are private (no P2P).
-            async def _no_op(msg): pass
-
-            # Temporarily set consensus_manager.node_id to the agent's id so cast_vote
-            # records the vote under the correct voter_node_id.
-            original_node_id = self.consensus_manager.node_id
-            self.consensus_manager.node_id = ai_agent_node_id
-            try:
-                await self.consensus_manager.cast_vote(
-                    proposal_id=proposal_id,
-                    vote=ai_decision["vote"],
-                    comment=ai_decision.get("comment"),
-                    broadcast_func=_no_op,
-                )
-            finally:
-                self.consensus_manager.node_id = original_node_id
-
-        except Exception as e:
-            logger.error("Error in AI agent voting: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._ai_agent_vote_on_proposal(proposal_id, ai_agent_node_id)
 
     async def _evaluate_knowledge_proposal_for_ai_vote(
         self,
@@ -4120,139 +3990,8 @@ class CoreService:
         provider_alias: Optional[str] = None,
         conversation_history: Optional[list] = None,
     ) -> Dict[str, Any]:
-        """Evaluate a knowledge proposal and return an AI vote decision.
-
-        The AI reviews each knowledge entry against the full conversation it came
-        from, verifying accuracy, relevance, and quality before voting.
-
-        Args:
-            proposal: KnowledgeCommitProposal to evaluate
-            provider_alias: Provider to use — should be the agent's own provider so
-                            the same model that held the conversation evaluates its
-                            extraction. Falls back to the global default if None.
-            conversation_history: Full conversation messages from ConversationMonitor
-                                  used to verify entries against what was actually said.
-
-        Returns:
-            Dict with 'vote' (approve/reject/request_changes) and 'comment'
-        """
-        try:
-            # Build entries section
-            entries_text = ""
-            for i, entry in enumerate(proposal.entries, 1):
-                entries_text += f"\n{i}. {entry.content} (confidence: {entry.confidence:.2f})"
-                if hasattr(entry, 'tags') and entry.tags:
-                    entries_text += f" [tags: {', '.join(entry.tags)}]"
-
-            # Build conversation section — full history, no truncation (fresh context window)
-            conversation_text = ""
-            if conversation_history:
-                lines = []
-                for msg in conversation_history:
-                    if hasattr(msg, 'sender_name'):
-                        role = msg.sender_name.upper()
-                        content = msg.text
-                    else:
-                        role = msg.get("role", "unknown").upper()
-                        content = msg.get("content", "")
-                    lines.append(f"{role}: {content}")
-                conversation_text = (
-                    "\n\n**Full Conversation (source of the extracted knowledge):**\n"
-                    + "\n\n".join(lines)
-                )
-
-            prompt = f"""You extracted the following knowledge entries from the conversation below. Now review them and vote on whether they should be saved to the user's personal knowledge base.
-
-**Proposal Topic:** {proposal.topic}
-**Summary:** {proposal.summary}
-**Average Confidence:** {proposal.avg_confidence:.2f}
-
-**Knowledge Entries:**{entries_text}
-{conversation_text}
-
-**Your Task:**
-Evaluate each entry against the actual conversation above:
-1. **Accuracy**: Does this correctly reflect what was said or concluded in the conversation?
-2. **Relevance**: Is this genuinely useful knowledge worth preserving long-term?
-3. **Redundancy**: Does this duplicate or contradict existing common knowledge?
-4. **Quality**: Is the entry clear, specific, and well-formulated?
-
-**Voting Options:**
-- `approve`: Entries accurately reflect the conversation and are worth saving
-- `reject`: Entries are factually wrong, misrepresent the conversation, or are harmful
-- `request_changes`: Entries have potential but need revision (explain what specifically)
-
-**IMPORTANT:**
-- Ground your evaluation in the conversation above — not just general world knowledge
-- Personal preferences, technical conclusions, and learned insights are all valid
-- If most entries are good but a few misrepresent the conversation, vote request_changes
-- Only reject if entries are genuinely wrong or harmful
-
-Respond in JSON format:
-{{
-    "vote": "approve" | "reject" | "request_changes",
-    "comment": "Brief explanation of your decision (1-2 sentences)",
-    "entry_feedback": [
-        {{"index": 1, "assessment": "good" | "needs_work" | "problematic", "note": "optional note"}}
-    ]
-}}
-"""
-
-            # Use the agent's own provider — not the global default — so the same
-            # model that participated in the conversation evaluates its own extraction.
-            logger.debug(
-                "Evaluating knowledge proposal %s with provider=%s",
-                proposal.proposal_id, provider_alias or "default"
-            )
-            response = await self.llm_manager.query(
-                prompt=prompt,
-                provider_alias=provider_alias,
-                max_tokens=500
-            )
-
-            # Parse the response (response is already a string when return_metadata=False)
-            response_text = response
-
-            # Try to extract JSON from the response
-            json_match = re.search(r'\{[\s\S]*\}', response_text)
-            if json_match:
-                decision = json.loads(json_match.group())
-            else:
-                # Fallback: try parsing the whole response
-                decision = json.loads(response_text)
-
-            vote = decision.get("vote", "approve")
-            comment = decision.get("comment", "")
-
-            # Add entry feedback to comment if available
-            entry_feedback = decision.get("entry_feedback", [])
-            if entry_feedback and vote == "request_changes":
-                feedback_notes = []
-                for ef in entry_feedback:
-                    if ef.get("assessment") != "good" and ef.get("note"):
-                        feedback_notes.append(f"Entry {ef.get('index')}: {ef.get('note')}")
-                if feedback_notes:
-                    comment += " | " + "; ".join(feedback_notes[:3])  # Limit to 3 notes
-
-            return {
-                "vote": vote,
-                "comment": comment[:500]  # Limit comment length
-            }
-
-        except json.JSONDecodeError as e:
-            logger.warning("AI vote evaluation returned invalid JSON: %s", e)
-            # Default to approve on parsing error (generous interpretation)
-            return {
-                "vote": "approve",
-                "comment": "AI evaluation completed (defaulting to approve due to parsing issue)"
-            }
-        except Exception as e:
-            logger.error("Error in AI vote evaluation: %s", e, exc_info=True)
-            # Default to approve on error
-            return {
-                "vote": "approve",
-                "comment": "AI evaluation encountered an error, defaulting to user's judgment"
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service._evaluate_knowledge_proposal_for_ai_vote(proposal, provider_alias=provider_alias, conversation_history=conversation_history)
 
     async def _broadcast_to_peers(self, message: Dict[str, Any]) -> None:
         """Broadcast message to all connected peers.
@@ -4281,240 +4020,20 @@ Respond in JSON format:
                     logger.error("Failed to send group message to %s: %s", node_id[:20], e)
 
     def _get_or_create_conversation_monitor(self, conversation_id: str, instruction_set_name: str = None) -> ConversationMonitor:
-        """Get or create a conversation monitor for a conversation/peer.
-
-        Args:
-            conversation_id: Identifier for the conversation (peer node_id or "local_ai")
-            instruction_set_name: Optional instruction set to use for this conversation (defaults to "general")
-
-        Returns:
-            ConversationMonitor instance
-        """
-        if conversation_id not in self.conversation_monitors:
-            # Build participants list
-            participants = []
-
-            if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
-                # AI chat: user + AI agent as participant (for collaborative knowledge voting)
-                participants = [
-                    {
-                        "node_id": self.p2p_manager.node_id,
-                        "name": "User",
-                        "context": "local"
-                    },
-                    {
-                        "node_id": conversation_id,  # AI agent uses conversation_id as its node_id
-                        "name": "DPC Agent",
-                        "context": "ai_agent"
-                    }
-                ]
-            elif conversation_id.startswith("group-"):
-                # Group chat: all group members as participants
-                group = self.group_manager.get_group(conversation_id)
-                if group:
-                    for member_id in group.members:
-                        if member_id == self.p2p_manager.node_id:
-                            participants.append({
-                                "node_id": member_id,
-                                "name": "User",
-                                "context": "local"
-                            })
-                        else:
-                            participants.append({
-                                "node_id": member_id,
-                                "name": self.peer_metadata.get(member_id, {}).get("name", member_id),
-                                "context": "peer"
-                            })
-                else:
-                    # Group not found, minimal participant list
-                    participants = [{"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"}]
-            else:
-                # Peer chat: user + peer
-                participants = [
-                    {
-                        "node_id": self.p2p_manager.node_id,
-                        "name": "User",
-                        "context": "local"
-                    },
-                    {
-                        "node_id": conversation_id,
-                        "name": self.peer_metadata.get(conversation_id, {}).get("name", conversation_id),
-                        "context": "peer"
-                    }
-                ]
-
-            self.conversation_monitors[conversation_id] = ConversationMonitor(
-                conversation_id=conversation_id,
-                participants=participants,
-                llm_manager=self.llm_manager,
-                knowledge_threshold=0.7,  # 70% confidence threshold
-                settings=self.settings,  # Pass settings for config (e.g., cultural_perspectives_enabled)
-                ai_query_func=self.send_ai_query,  # Enable both local and remote inference for knowledge detection
-                auto_detect=self.auto_knowledge_detection_enabled,  # Pass auto-detection setting
-                instruction_set_name=instruction_set_name or self.instruction_set.default  # Use provided or default instruction set
-            )
-
-            # Load persisted history from disk (v0.20.0)
-            # Only for group chats - peer chats sync via CHAT_HISTORY_REQUEST
-            if conversation_id.startswith("group-"):
-                if self.conversation_monitors[conversation_id].load_history():
-                    logger.info("Loaded persisted history for group %s (%d messages)",
-                               conversation_id,
-                               len(self.conversation_monitors[conversation_id].message_history))
-
-            logger.info("Created conversation monitor for %s with %d participant(s) (auto_detect=%s, instruction_set=%s)", conversation_id, len(participants), self.auto_knowledge_detection_enabled, instruction_set_name or self.instruction_set.default)
-
-        return self.conversation_monitors[conversation_id]
+        """Delegated to KnowledgeService."""
+        return self.knowledge_service._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
 
     async def end_conversation_session(
         self,
         conversation_id: str,
         initiated_by: str = "user_request",
     ) -> Dict[str, Any]:
-        """Manually end a conversation session and extract knowledge.
-
-        UI Integration: Called when user clicks "End Session & Save Knowledge" button.
-        Also called by agent_telegram_bridge for /endsession command.
-
-        Args:
-            conversation_id: The conversation/peer ID to end session for
-            initiated_by: Trigger source — "user_request" (UI) or "telegram"
-
-        Returns:
-            Dict with status and proposal (if knowledge detected)
-        """
-        try:
-            # For agent conversations, the monitor lives inside DpcAgentManager._agent_monitors,
-            # not in service.conversation_monitors. Mirror the same lookup used by get_conversation_history.
-            monitor = None
-            if conversation_id.startswith("agent_"):
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    if conversation_id in dpc_agent_provider._managers:
-                        agent_manager = dpc_agent_provider._managers[conversation_id]
-                        if hasattr(agent_manager, '_agent_monitors'):
-                            monitor = agent_manager._agent_monitors.get(conversation_id)
-            if monitor is None:
-                monitor = self._get_or_create_conversation_monitor(conversation_id)
-
-            logger.info("End Session - attempting manual extraction for %s", conversation_id)
-            logger.info(
-                "Full conversation: %d messages (incremental buffer: %d), Score: %.2f",
-                len(monitor.full_conversation),
-                len(monitor.message_buffer),
-                monitor.knowledge_score
-            )
-
-            # Force knowledge extraction even if threshold not met
-            proposal = await monitor.generate_commit_proposal(
-                force=True,
-                proposed_by=self.p2p_manager.node_id,
-                initiated_by=initiated_by,
-            )
-
-            if proposal:
-                logger.info("Knowledge proposal generated for %s", conversation_id)
-                logger.info("Topic: %s, Entries: %d, Confidence: %.2f", proposal.topic, len(proposal.entries), proposal.avg_confidence)
-
-                # Broadcast to UI
-                await self.local_api.broadcast_event(
-                    "knowledge_commit_proposed",
-                    proposal.to_dict()
-                )
-
-                # For agent conversations triggered from Telegram, the bridge already
-                # showed the proposal via _handle_endsession_command (it fetches it from
-                # consensus_manager after propose_commit returns). No duplicate send needed.
-
-                # For local_ai, ai_chat_xxx, telegram, and agent conversations, don't broadcast to peers (privacy)
-                # For peer conversations, broadcast for collaborative consensus
-                if (conversation_id == "local_ai" or conversation_id.startswith("ai_")
-                        or conversation_id.startswith("telegram-") or conversation_id.startswith("agent_")):
-                    logger.info("%s - private conversation, knowledge will not be shared with peers", conversation_id)
-                    # Use no-op broadcast function (local-only approval)
-                    async def _no_op_broadcast(message: Dict[str, Any]) -> None:
-                        pass  # Don't send to peers for private conversations
-
-                    await self.consensus_manager.propose_commit(
-                        proposal=proposal,
-                        broadcast_func=_no_op_broadcast
-                    )
-                elif conversation_id.startswith("group-"):
-                    # Group conversation - broadcast to group members only
-                    logger.info("Group Chat - broadcasting knowledge proposal to group %s for consensus", conversation_id)
-
-                    async def _group_broadcast(message: Dict[str, Any], _gid=conversation_id) -> None:
-                        await self._broadcast_to_group(_gid, message)
-
-                    await self.consensus_manager.propose_commit(
-                        proposal=proposal,
-                        broadcast_func=_group_broadcast
-                    )
-                else:
-                    # Peer conversation - broadcast for collaborative knowledge building
-                    logger.info("Peer Chat - broadcasting knowledge proposal to peers for consensus")
-                    await self.consensus_manager.propose_commit(
-                        proposal=proposal,
-                        broadcast_func=self._broadcast_to_peers
-                    )
-
-                return {
-                    "status": "success",
-                    "message": "Knowledge proposal created",
-                    "proposal_id": proposal.proposal_id
-                }
-            else:
-                logger.info("No proposal generated - buffer was empty or no knowledge detected")
-                return {
-                    "status": "success",
-                    "message": "No significant knowledge detected in conversation (buffer may be empty)"
-                }
-
-        except Exception as e:
-            logger.error("Error ending conversation session: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.end_conversation_session(conversation_id, initiated_by)
 
     async def toggle_auto_knowledge_detection(self, enabled: bool = None) -> Dict[str, Any]:
-        """Toggle automatic knowledge detection on/off.
-
-        UI Integration: Called when user toggles the auto-detection switch.
-
-        Args:
-            enabled: True to enable, False to disable, None to toggle current state
-
-        Returns:
-            Dict with status and current state
-        """
-        try:
-            if enabled is None:
-                # Toggle current state
-                self.auto_knowledge_detection_enabled = not self.auto_knowledge_detection_enabled
-            else:
-                # Set to specific value
-                self.auto_knowledge_detection_enabled = enabled
-
-            state_text = "enabled" if self.auto_knowledge_detection_enabled else "disabled"
-            logger.info("Auto knowledge detection %s", state_text)
-
-            # Update all existing conversation monitors to reflect the new setting
-            for monitor in self.conversation_monitors.values():
-                monitor.auto_detect = self.auto_knowledge_detection_enabled
-
-            return {
-                "status": "success",
-                "enabled": self.auto_knowledge_detection_enabled,
-                "message": f"Automatic knowledge detection {state_text}"
-            }
-
-        except Exception as e:
-            logger.error("Error toggling auto knowledge detection: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.toggle_auto_knowledge_detection(enabled)
 
     def _resolve_agent_token_limit(self, agent_id: str) -> int:
         """Resolve the context window for an agent using its stored config.
@@ -7022,421 +6541,52 @@ Respond in JSON format:
                 logger.error("Error notifying %s of name change: %s", peer_id, e, exc_info=True)
 
     async def _on_proposal_received_from_peer(self, proposal):
-        """Callback when knowledge proposal received from peer.
-
-        Broadcasts proposal to UI so user can review and vote.
-
-        Args:
-            proposal: The knowledge commit proposal from peer
-        """
-        logger.info("Broadcasting peer proposal to UI: %s (topic: %s)",
-                    proposal.proposal_id, proposal.topic)
-        await self.local_api.broadcast_event(
-            "knowledge_commit_proposed",
-            proposal.to_dict()
-        )
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_proposal_received_from_peer(proposal)
 
     def _get_agent_telegram_bridge(self, conversation_id: str):
-        """Return the AgentTelegramBridge for an agent conversation, or None."""
-        if not conversation_id or not conversation_id.startswith("agent_"):
-            return None
-        dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-        if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-            mgr = dpc_agent_provider._managers.get(conversation_id)
-            if mgr:
-                return getattr(mgr, '_telegram_bridge', None)
-        return None
+        """Delegated to KnowledgeService."""
+        return self.knowledge_service._get_agent_telegram_bridge(conversation_id)
 
     async def _on_vote_received(self, vote) -> None:
-        """Broadcast a received vote to the UI so the vote panel updates in real time."""
-        try:
-            await self.local_api.broadcast_event("knowledge_vote_received", {
-                "proposal_id": vote.proposal_id,
-                "voter_node_id": vote.voter_node_id,
-                "voter_name": vote.voter_node_id,
-                "vote": vote.vote,
-                "comment": vote.comment or "",
-                "is_required_dissent": vote.is_required_dissent,
-            })
-        except Exception as e:
-            logger.error("Error in _on_vote_received: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_vote_received(vote)
 
     async def _on_commit_approved(self, commit) -> None:
-        """Notify the UI that consensus was reached and the commit was approved."""
-        try:
-            await self.local_api.broadcast_event("knowledge_commit_approved", {
-                "commit_id": commit.commit_id,
-                "topic": commit.topic,
-                "summary": commit.summary,
-                "approved_by": commit.approved_by,
-                "vote_comments": commit.vote_comments,
-            })
-            bridge = self._get_agent_telegram_bridge(commit.conversation_id)
-            if bridge:
-                await bridge.notify_knowledge_result(
-                    proposal_id=commit.commit_id,
-                    status="approved",
-                    topic=commit.topic,
-                    vote_comments=commit.vote_comments,
-                )
-        except Exception as e:
-            logger.error("Error in _on_commit_approved: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_approved(commit)
 
     async def _on_commit_rejected(self, proposal, votes: Dict[str, Any]) -> None:
-        """Notify the UI that the proposal was rejected, including rejection reasons."""
-        try:
-            rejection_comments = {
-                v.voter_node_id: v.comment
-                for v in votes.values()
-                if v.vote == "reject" and v.comment
-            }
-            await self.local_api.broadcast_event("knowledge_commit_rejected", {
-                "proposal_id": proposal.proposal_id,
-                "topic": proposal.topic,
-                "summary": proposal.summary,
-                "rejected_by": [v.voter_node_id for v in votes.values() if v.vote == "reject"],
-                "rejection_comments": rejection_comments,
-            })
-            bridge = self._get_agent_telegram_bridge(proposal.conversation_id)
-            if bridge:
-                await bridge.notify_knowledge_result(
-                    proposal_id=proposal.proposal_id,
-                    status="rejected",
-                    topic=proposal.topic,
-                    vote_comments=rejection_comments,
-                )
-        except Exception as e:
-            logger.error("Error in _on_commit_rejected: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_rejected(proposal, votes)
 
     async def _on_commit_applied(self, commit):
-        """Callback called after a knowledge commit is applied
-
-        This reloads the local context in p2p_manager and notifies peers.
-
-        Args:
-            commit: The KnowledgeCommit that was applied
-        """
-        try:
-            logger.info("Commit Applied - reloading local context after commit %s", commit.commit_id)
-
-            # Clear conversation monitor buffer for this conversation (v0.15.1 fix)
-            # Buffer is now cleared only after all peers approve, not when proposal is generated
-            if commit.conversation_id:
-                monitor = self._get_or_create_conversation_monitor(commit.conversation_id)
-                if monitor.message_buffer:
-                    logger.info("Clearing buffer for %s after commit approval", commit.conversation_id)
-                    monitor.message_buffer = []
-                    monitor.knowledge_score = 0.0
-
-            # Reload context from disk
-            context = self.pcm_core.load_context()
-
-            # Update in P2PManager so context requests return latest data
-            if hasattr(self, 'p2p_manager') and self.p2p_manager:
-                self.p2p_manager.local_context = context
-                logger.info("Updated p2p_manager.local_context with new knowledge")
-
-            # Compute new context hash
-            new_context_hash = self._compute_context_hash()
-
-            # Broadcast CONTEXT_UPDATED to all connected peers
-            await self._broadcast_context_updated_to_peers(new_context_hash)
-
-            # Also emit event to UI
-            await self.local_api.broadcast_event("personal_context_updated", {
-                "message": f"Knowledge commit applied: {commit.topic}",
-                "context_hash": new_context_hash
-            })
-
-            # For private conversations (agent, ai_chat, local_ai, telegram), reset the
-            # conversation after commit so the context window counter clears in the UI,
-            # allowing the user to start a fresh session.
-            conv_id = commit.conversation_id
-            if conv_id and (
-                conv_id == "local_ai"
-                or conv_id.startswith("ai_")
-                or conv_id.startswith("agent_")
-                or conv_id.startswith("telegram-")
-            ):
-                logger.info("Resetting private conversation %s after knowledge commit applied", conv_id)
-                await self.local_api.broadcast_event("conversation_reset", {"conversation_id": conv_id})
-
-        except Exception as e:
-            logger.error("Error in _on_commit_applied: %s", e, exc_info=True)
-            import traceback
-            traceback.print_exc()
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_applied(commit)
 
     async def _on_commit_revision_needed(self, proposal, votes: Dict[str, Any]) -> None:
-        """Callback when a knowledge commit proposal receives 'request_changes' votes.
-
-        Broadcasts a structured revision event to the UI so the user (or agent)
-        can see exactly which changes were requested, then optionally triggers
-        the originating agent to auto-revise and resubmit.
-
-        Args:
-            proposal: KnowledgeCommitProposal in revision_needed state
-            votes: Dict[node_id, CommitVote] from all voters
-        """
-        try:
-            # Collect change requests from all voters who voted request_changes
-            change_requests = [
-                {
-                    "node_id": v.voter_node_id,
-                    "comment": v.comment or "",
-                    "is_required_dissent": v.is_required_dissent,
-                }
-                for v in votes.values()
-                if v.vote == "request_changes" and v.comment
-            ]
-
-            logger.info(
-                "Revision needed for proposal %s: %d change request(s)",
-                proposal.proposal_id, len(change_requests)
-            )
-            for cr in change_requests:
-                logger.info("  %s: %s", cr["node_id"][:20], cr["comment"][:120])
-
-            # Broadcast to UI so the vote panel can display the requested changes
-            await self.local_api.broadcast_event("knowledge_commit_revision_needed", {
-                "proposal_id": proposal.proposal_id,
-                "topic": proposal.topic,
-                "summary": proposal.summary,
-                "conversation_id": proposal.conversation_id,
-                "change_requests": change_requests,
-            })
-
-            # Notify Telegram user of the requested changes
-            bridge = self._get_agent_telegram_bridge(proposal.conversation_id)
-            if bridge:
-                await bridge.notify_knowledge_result(
-                    proposal_id=proposal.proposal_id,
-                    status="revision_needed",
-                    topic=proposal.topic,
-                    change_requests=change_requests,
-                )
-
-            # For agent conversations, let the originating agent auto-revise
-            conv_id = proposal.conversation_id
-            if conv_id and conv_id.startswith("agent_"):
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    agent_mgr = dpc_agent_provider._managers.get(conv_id)
-                    if agent_mgr:
-                        asyncio.create_task(
-                            self._agent_auto_revise_proposal(
-                                agent_mgr, proposal, change_requests
-                            )
-                        )
-
-        except Exception as e:
-            logger.error("Error in _on_commit_revision_needed: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_revision_needed(proposal, votes)
 
     async def _agent_auto_revise_proposal(self, agent_mgr, proposal, change_requests: list) -> None:
-        """Ask the originating agent to revise its knowledge proposal based on change requests.
-
-        Builds a concise revision prompt from the requested changes, runs the agent
-        to produce updated entries, then calls revise_proposal() to restart voting.
-
-        Args:
-            agent_mgr: DpcAgentManager instance that owns the conversation
-            proposal: KnowledgeCommitProposal to revise
-            change_requests: List of {node_id, comment} dicts from voters
-        """
-        try:
-            if not change_requests:
-                return
-
-            # Build a concise revision brief for the agent
-            feedback_lines = "\n".join(
-                f"- {cr['node_id']}: {cr['comment']}" for cr in change_requests
-            )
-            revision_prompt = (
-                f"Your knowledge commit proposal for topic '{proposal.topic}' received change requests:\n\n"
-                f"{feedback_lines}\n\n"
-                f"Please revise the proposal entries to address the feedback. "
-                f"Reply ONLY with a JSON object:\n"
-                f'{{"summary": "...", "entries": [{{"content": "...", "confidence": 0.9, "tags": []}}]}}'
-            )
-
-            logger.info("Asking agent %s to revise proposal %s", agent_mgr.agent_id, proposal.proposal_id)
-            response = await agent_mgr.process_message(
-                message=revision_prompt,
-                conversation_id=proposal.conversation_id,
-                include_context=False,
-            )
-
-            if not response:
-                logger.warning("Agent returned empty revision response for %s", proposal.proposal_id)
-                return
-
-            # Extract the JSON from the agent's response
-            import re as _re
-            json_match = _re.search(r'\{.*\}', response, _re.DOTALL)
-            if not json_match:
-                logger.warning("Agent revision response contained no JSON: %s", response[:200])
-                return
-
-            revision = json.loads(json_match.group())
-            updated_summary = revision.get("summary") or None
-            raw_entries = revision.get("entries") or []
-
-            if not raw_entries:
-                logger.warning("Agent revision produced 0 entries for %s", proposal.proposal_id)
-                return
-
-            # Convert raw dicts to KnowledgeEntry objects (reuse existing entries' source/tags structure)
-            from dpc_protocol.pcm_core import KnowledgeEntry, KnowledgeSource
-            updated_entries = []
-            for raw in raw_entries:
-                updated_entries.append(KnowledgeEntry(
-                    content=raw.get("content", ""),
-                    confidence=float(raw.get("confidence", 0.8)),
-                    tags=raw.get("tags", []),
-                    source=KnowledgeSource(
-                        type="ai_summary",
-                        conversation_id=proposal.conversation_id,
-                    ),
-                ))
-
-            # Restart voting with revised content
-            async def _no_op_broadcast(msg): pass
-            ok = await self.consensus_manager.revise_proposal(
-                proposal_id=proposal.proposal_id,
-                updated_summary=updated_summary,
-                updated_entries=updated_entries,
-                broadcast_func=_no_op_broadcast,  # private agent conv — no P2P broadcast
-            )
-
-            if ok:
-                logger.info("Agent %s resubmitted revised proposal %s", agent_mgr.agent_id, proposal.proposal_id)
-                await self.local_api.broadcast_event("knowledge_commit_proposed", proposal.to_dict())
-            else:
-                logger.warning("revise_proposal returned False for %s (wrong state?)", proposal.proposal_id)
-
-        except json.JSONDecodeError as e:
-            logger.warning("Agent revision JSON parse error for %s: %s", proposal.proposal_id, e)
-        except Exception as e:
-            logger.error("Error in _agent_auto_revise_proposal: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._agent_auto_revise_proposal(agent_mgr, proposal, change_requests)
 
     async def _on_commit_signed(self, commit):
-        """Sign the commit with our private key and broadcast COMMIT_SIGNED to participants.
-
-        Called by ConsensusManager after _apply_commit succeeds.  Every participating
-        node broadcasts their own RSA-PSS signature so peers can accumulate multi-party
-        attestations in the markdown frontmatter.
-        """
-        try:
-            from dpc_protocol.commit_integrity import CommitSigner
-            from cryptography.hazmat.primitives import serialization as _ser
-
-            key_path = DPC_HOME_DIR / NODE_KEY
-            if not key_path.exists():
-                logger.debug("_on_commit_signed: key file not found, skipping")
-                return
-
-            with open(key_path, 'rb') as f:
-                private_key = _ser.load_pem_private_key(f.read(), password=None)
-
-            signer = CommitSigner(self.p2p_manager.node_id, private_key)
-            signature_b64 = signer.sign_commit(commit.commit_hash)
-
-            payload = {
-                "commit_id": commit.commit_id,
-                "commit_hash": commit.commit_hash,
-                "node_id": self.p2p_manager.node_id,
-                "signature": signature_b64
-            }
-
-            # Broadcast to all participants (excluding self — we already applied locally)
-            participants = commit.participants or []
-            for peer_id in participants:
-                if peer_id == self.p2p_manager.node_id:
-                    continue
-                try:
-                    await self.p2p_manager.send_message_to_peer(
-                        peer_id, {"command": "COMMIT_SIGNED", "payload": payload}
-                    )
-                    logger.debug("Sent COMMIT_SIGNED to %s for commit %s", peer_id[:20], commit.commit_id[:12])
-                except Exception as e:
-                    logger.debug("Could not send COMMIT_SIGNED to %s: %s", peer_id[:20], e)
-
-        except Exception as e:
-            logger.error("Error in _on_commit_signed: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_signed(commit)
 
     async def _on_commit_ack(self, commit):
-        """Broadcast COMMIT_ACK to all participants confirming this node applied the commit.
-
-        Called by ConsensusManager after _apply_commit succeeds. Enables peers to track
-        convergence: once all expected participants have ACKed, the commit is fully
-        confirmed across the group. Non-ACKing nodes can be retransmitted via
-        APPLY_KNOWLEDGE_COMMIT (future: with a timeout trigger).
-        """
-        try:
-            participants = commit.participants or []
-            payload = {
-                "commit_id": commit.commit_id,
-                "node_id": self.p2p_manager.node_id,
-                "participants": participants
-            }
-
-            for peer_id in participants:
-                if peer_id == self.p2p_manager.node_id:
-                    continue
-                try:
-                    await self.p2p_manager.send_message_to_peer(
-                        peer_id, {"command": "COMMIT_ACK", "payload": payload}
-                    )
-                    logger.debug("Sent COMMIT_ACK to %s for commit %s", peer_id[:20], commit.commit_id[:12])
-                except Exception as e:
-                    logger.debug("Could not send COMMIT_ACK to %s: %s", peer_id[:20], e)
-
-        except Exception as e:
-            logger.error("Error in _on_commit_ack: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_ack(commit)
 
     async def _on_commit_apply_failed(self, commit, error_msg: str):
-        """Callback called when _apply_commit fails to write to disk.
-
-        Surfaces the error to the UI so the user knows the commit was not persisted
-        on this node, even though peers voted to approve it.
-        """
-        logger.error(
-            "Failed to apply knowledge commit %s: %s",
-            getattr(commit, 'commit_id', '?'), error_msg
-        )
-        await self.local_api.broadcast_event("knowledge_commit_apply_failed", {
-            "topic": getattr(commit, 'topic', 'unknown'),
-            "commit_id": getattr(commit, 'commit_id', None),
-            "error": error_msg
-        })
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_apply_failed(commit, error_msg)
 
     async def _broadcast_context_updated_to_peers(self, context_hash: str):
-        """
-        Phase 7: Broadcast CONTEXT_UPDATED to all connected peers.
-        Notifies peers that personal context has changed so they can invalidate their cache.
-
-        Args:
-            context_hash: New hash of the updated context
-        """
-        connected_peers = list(self.p2p_manager.peers.keys())
-        if not connected_peers:
-            logger.debug("No connected peers to notify of context update")
-            return
-
-        logger.info("Broadcasting CONTEXT_UPDATED to %d peer(s)", len(connected_peers))
-        for peer_id in connected_peers:
-            try:
-                # Send CONTEXT_UPDATED message
-                message = {
-                    "command": "CONTEXT_UPDATED",
-                    "payload": {
-                        "node_id": self.p2p_manager.node_id,
-                        "context_hash": context_hash
-                    }
-                }
-                await self.p2p_manager.send_message_to_peer(peer_id, message)
-                logger.debug("Notified %s of context update", peer_id[:20])
-            except Exception as e:
-                logger.error("Error notifying %s of context update: %s", peer_id[:20], e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._broadcast_context_updated_to_peers(context_hash)
 
     async def _notify_peers_of_provider_changes(self):
         """
@@ -7503,30 +6653,8 @@ Respond in JSON format:
                 logger.error("Error notifying %s of provider changes: %s", peer_id, e, exc_info=True)
 
     async def _broadcast_commit_result(self, result_payload: dict, participants: List[str]):
-        """Broadcast KNOWLEDGE_COMMIT_RESULT to all participants
-
-        Args:
-            result_payload: Complete voting result data (status, vote_tally, votes, etc.)
-            participants: List of participant node_ids who should receive the notification
-        """
-        message = {
-            "command": "KNOWLEDGE_COMMIT_RESULT",
-            "payload": result_payload
-        }
-
-        # Send to all participants (who are currently connected)
-        for node_id in participants:
-            if node_id in self.p2p_manager.peers:
-                try:
-                    await self.p2p_manager.send_message_to_peer(node_id, message)
-                    logger.info("Sent KNOWLEDGE_COMMIT_RESULT to %s", node_id[:20])
-                except Exception as e:
-                    logger.error("Failed to send result to %s: %s", node_id[:20], e, exc_info=True)
-            else:
-                logger.debug("Participant %s not connected, skipping result broadcast", node_id[:20])
-
-        # Also emit to local UI
-        await self.local_api.broadcast_event("knowledge_commit_result", result_payload)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._broadcast_commit_result(result_payload, participants)
 
     async def _on_session_proposal_received(self, payload: dict):
         """Callback when new session proposal received from peer.
@@ -8294,7 +7422,7 @@ Respond in JSON format:
                            len(monitor.message_buffer), monitor.knowledge_score)
 
                 # Only handle automatic proposals if auto-detection is enabled
-                if self.auto_knowledge_detection_enabled:
+                if self.knowledge_service.auto_knowledge_detection_enabled:
                     # If proposal generated, broadcast to UI
                     if proposal:
                         logger.info("Auto-detect - knowledge proposal generated for %s chat", conversation_id)
@@ -8318,7 +7446,7 @@ Respond in JSON format:
             except Exception as e:
                 logger.error("Error in local AI conversation monitoring: %s", e, exc_info=True)
                 # Only broadcast extraction failure if auto-detection was enabled
-                if self.auto_knowledge_detection_enabled:
+                if self.knowledge_service.auto_knowledge_detection_enabled:
                     await self.local_api.broadcast_event(
                         "knowledge_extraction_failed",
                         {

@@ -43,6 +43,14 @@ def core_service():
         service.context_cache = MagicMock()
         service.context_cache.local_context = None
 
+        # Sync KnowledgeService with the replaced references so tests see
+        # the same mock objects when accessing service or knowledge_service.
+        if service.knowledge_service:
+            service.knowledge_service.p2p_manager = service.p2p_manager
+            service.knowledge_service.peer_metadata = service.peer_metadata
+            service.knowledge_service.local_api = service.local_api
+            service.knowledge_service.consensus_manager = service.consensus_manager
+
         return service
 
 
@@ -233,8 +241,11 @@ class TestManualExtraction:
             assert result["status"] == "success"
             assert "No significant knowledge" in result["message"]
 
-            # Verify force=True was passed
-            mock_generate.assert_called_once_with(force=True)
+            # Verify force=True was passed (proposed_by and initiated_by are also passed)
+            from unittest.mock import ANY
+            mock_generate.assert_called_once_with(
+                force=True, proposed_by=ANY, initiated_by="user_request"
+            )
 
     @pytest.mark.asyncio
     async def test_end_session_no_knowledge(self, core_service):
