@@ -862,10 +862,6 @@ class ZaiProvider(AIProvider):
 
         Accepts Anthropic-format messages and tools directly.
         Returns dict: {content, tool_calls_raw, thinking, usage}
-
-        Note: Extended thinking is disabled here — the interleaved-thinking beta
-        required for thinking + tools may not be supported on Z.AI's endpoint.
-        Tool results are returned as structured data (not hallucinated text).
         """
         effective_max_tokens = max(self.max_tokens or 8192, 8192)
 
@@ -878,7 +874,36 @@ class ZaiProvider(AIProvider):
         if system:
             api_params["system"] = system
 
+        # Enable extended thinking if configured (test: Z.AI may support interleaved thinking + tools)
+        if self.thinking_enabled:
+            if effective_max_tokens <= self.thinking_budget_tokens:
+                effective_max_tokens = self.thinking_budget_tokens + 4096
+                api_params["max_tokens"] = effective_max_tokens
+            api_params["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self.thinking_budget_tokens,
+            }
+            logger.info(f"GLM tool calling with thinking enabled (budget={self.thinking_budget_tokens} tokens)")
+
         self._last_thinking = None
+
+        def _extract_blocks(content_blocks):
+            """Extract text, tool_use, and thinking blocks from content."""
+            full_text = ""
+            tool_calls_raw = []
+            for block in content_blocks:
+                if not hasattr(block, "type"):
+                    continue
+                if block.type == "text":
+                    full_text += getattr(block, "text", "")
+                elif block.type == "tool_use":
+                    tool_calls_raw.append(block)
+                elif block.type == "thinking":
+                    thinking_val = getattr(block, "thinking", "")
+                    if thinking_val:
+                        self._last_thinking = thinking_val
+                        logger.info(f"GLM tool calling thinking: {len(thinking_val)} chars")
+            return full_text, tool_calls_raw
 
         try:
             if on_chunk:
@@ -889,20 +914,11 @@ class ZaiProvider(AIProvider):
                         full_text += text
                         await on_chunk(text, conversation_id)
                     final_message = await stream.get_final_message()
-                for block in final_message.content:
-                    if hasattr(block, "type") and block.type == "tool_use":
-                        tool_calls_raw.append(block)
+                full_text, tool_calls_raw = _extract_blocks(final_message.content)
                 usage_obj = final_message.usage
             else:
                 message = await self.client.messages.create(**api_params)
-                full_text = ""
-                tool_calls_raw = []
-                for block in message.content:
-                    if hasattr(block, "type"):
-                        if block.type == "text":
-                            full_text += getattr(block, "text", "")
-                        elif block.type == "tool_use":
-                            tool_calls_raw.append(block)
+                full_text, tool_calls_raw = _extract_blocks(message.content)
                 usage_obj = message.usage
 
             return {
@@ -922,19 +938,12 @@ class ZaiProvider(AIProvider):
                 logger.warning(f"Z.AI tool calling overloaded (1305), retrying in 3s: {e}")
                 await asyncio.sleep(3)
                 message = await self.client.messages.create(**api_params)
-                full_text = ""
-                tool_calls_raw = []
-                for block in message.content:
-                    if hasattr(block, "type"):
-                        if block.type == "text":
-                            full_text += getattr(block, "text", "")
-                        elif block.type == "tool_use":
-                            tool_calls_raw.append(block)
+                full_text, tool_calls_raw = _extract_blocks(message.content)
                 usage_obj = message.usage
                 return {
                     "content": full_text,
                     "tool_calls_raw": tool_calls_raw,
-                    "thinking": None,
+                    "thinking": self._last_thinking,
                     "usage": {
                         "prompt_tokens": usage_obj.input_tokens,
                         "completion_tokens": usage_obj.output_tokens,
