@@ -1561,7 +1561,32 @@ class CoreService:
             return None
 
         return status_result
-    
+
+    def get_state(self) -> dict:
+        """
+        Agent-readable synchronous snapshot of current CoreService state.
+
+        Unlike get_status() (async, UI-facing), this is synchronous and lightweight —
+        intended for runtime introspection by agents and debugging tools.
+
+        Returns a composite dict that will be extended as sub-services are extracted
+        (VoiceService, KnowledgeService, TelegramService, AgentService).
+
+        See: docs/decisions/001-service-split.md
+        """
+        import time
+        services = {}
+
+        # Populated incrementally as sub-services are extracted in Phase 1
+        # e.g. "voice": self.voice_service.get_state()
+
+        return {
+            "is_running": self._is_running,
+            "active_tasks": len(self._background_tasks),
+            "p2p_peers": list(self.p2p_manager.peers.keys()) if self.p2p_manager else [],
+            "services": services,
+        }
+
     async def list_providers(self) -> Dict[str, Any]:
         """
         Returns all available AI providers from providers.json.

@@ -273,7 +273,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 **Client Backend (`dpc-client/core`):**
 
 **Service Layer:**
-- `service.py` - Main orchestrator (CoreService, ~3,270 lines)
+- `service.py` - Main orchestrator (CoreService, ~9,630 lines — refactor/grand in progress)
   - Lifecycle management (startup/shutdown)
   - Component initialization
   - Configuration loading
@@ -1194,6 +1194,11 @@ poetry run pytest tests/test_turn_connectivity.py
 - `dpc-protocol/README.md` - Protocol library documentation and usage examples
 - `VISION.md` - Business vision, market opportunity, and mission (investor/co-founder focused)
 - `PRODUCT_VISION.md` - Product vision and technical philosophy
+- `docs/decisions/` - Architecture Decision Records (ADRs) for major structural choices
+  - `001-service-split.md` - Why and how service.py is being split (refactor/grand)
+  - `002-provider-abc.md` - LLM provider abstract base class design
+  - `003-frontend-stores.md` - Frontend hybrid local/global store strategy
+- `docs/REFACTORING_GUIDELINES_FOR_CLAUDE_CODE.md` - AI-assisted refactoring principles
 
 ---
 
