@@ -86,6 +86,7 @@ from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
 from .managers.file_transfer_manager import FileTransferManager
 from .voice_service import VoiceService
 from .knowledge_service import KnowledgeService
+from .telegram_service import TelegramService
 from .managers.group_manager import GroupManager
 from .managers.prompt_manager import PromptManager
 from .managers.instruction_manager import InstructionManager
@@ -249,30 +250,19 @@ class CoreService:
         self.session_manager.on_result_broadcast = self._broadcast_session_result
 
         # Telegram bot integration (v0.14.0+)
-        self.telegram_manager = None
-        self.telegram_bridge = None
-        telegram_config = self.settings.get_telegram_config()
-        if telegram_config['enabled']:
-            try:
-                from .managers.telegram_manager import TelegramBotManager
-                from .coordinators.telegram_coordinator import TelegramBridge
-
-                # Initialize Telegram manager
-                self.telegram_manager = TelegramBotManager(self, telegram_config)
-
-                # Initialize Telegram bridge (depends on manager)
-                self.telegram_bridge = TelegramBridge(self, self.telegram_manager)
-
-                logger.info("Telegram bot integration initialized (whitelist: %d chat_ids)",
-                           len(telegram_config['allowed_chat_ids']))
-            except ImportError as e:
-                logger.warning(f"Failed to import telegram library: {e}. Install with: poetry install")
-                self.telegram_manager = None
-                self.telegram_bridge = None
-            except Exception as e:
-                logger.error(f"Failed to initialize Telegram integration: {e}", exc_info=True)
-                self.telegram_manager = None
-                self.telegram_bridge = None
+        try:
+            self.telegram_service = TelegramService(
+                core_service_ref=self,
+                settings=self.settings,
+                llm_manager=self.llm_manager,
+                p2p_manager=self.p2p_manager,
+                dpc_home_dir=DPC_HOME_DIR,
+            )
+        except Exception as e:
+            logger.error("TelegramService init failed, continuing without Telegram: %s", e)
+            self.telegram_service = None
+        self.telegram_manager = self.telegram_service.telegram_manager if self.telegram_service else None
+        self.telegram_bridge = self.telegram_service.telegram_bridge if self.telegram_service else None
 
         # Group chat manager (v0.19.0)
         self.group_manager = GroupManager(Path.home() / ".dpc", self.p2p_manager.node_id)
@@ -758,22 +748,11 @@ class CoreService:
             logger.warning("Phase 6 managers unavailable (DHT not initialized)")
 
         # Start Telegram bot integration (v0.14.0+)
-        if self.telegram_manager:
+        if self.telegram_service:
             logger.info("Starting Telegram bot integration...")
-
-            async def start_telegram_with_error_handling():
-                try:
-                    await self.telegram_manager.start()
-                except Exception as e:
-                    logger.error(f"Telegram bot task failed: {e}", exc_info=True)
-                    # Don't crash the service - Telegram is optional
-
-            telegram_task = asyncio.create_task(start_telegram_with_error_handling())
-            telegram_task.set_name("telegram_bot")
-            self._background_tasks.add(telegram_task)
-
-        # Auto-start Telegram bridges for agents with telegram_enabled=True
-        await self._start_agent_telegram_bridges()
+            telegram_task = await self.telegram_service.start()
+            if telegram_task:
+                self._background_tasks.add(telegram_task)
 
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
@@ -886,9 +865,9 @@ class CoreService:
             await self.gossip_manager.stop()
 
         # Shutdown Telegram bot integration (v0.14.0+)
-        if hasattr(self, 'telegram_manager') and self.telegram_manager:
+        if hasattr(self, 'telegram_service') and self.telegram_service:
             logger.info("Stopping Telegram bot...")
-            await self.telegram_manager.stop()
+            await self.telegram_service.stop()
 
         # Unload Whisper model if loaded (free VRAM before shutdown)
         try:
@@ -5030,327 +5009,40 @@ class CoreService:
         voice_mime_type: Optional[str] = None,
         file_path: Optional[str] = None  # NEW: For sending files/images from UI
     ) -> Dict[str, Any]:
-        """
-        Send message from DPC to Telegram chat.
-
-        Args:
-            conversation_id: DPC conversation ID (must be linked to Telegram)
-            text: Message text
-            attachments: Optional list of attachments (voice, images, etc.)
-            voice_audio_base64: Optional base64-encoded voice audio data (for recording from UI)
-            voice_duration_seconds: Optional voice duration in seconds
-            voice_mime_type: Optional voice MIME type (e.g., "audio/webm")
-            file_path: Optional path to file/image to send to Telegram
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            if not self.telegram_bridge:
-                return {
-                    "status": "error",
-                    "message": "Telegram integration not enabled"
-                }
-
-            # Handle file path from UI (send file/image directly to Telegram)
-            if file_path:
-                from pathlib import Path
-                import mimetypes
-
-                path = Path(file_path)
-
-                if not path.exists():
-                    return {
-                        "status": "error",
-                        "message": f"File not found: {file_path}"
-                    }
-
-                # Get Telegram chat ID
-                telegram_chat_id = self.telegram_bridge._get_linked_chat_id(conversation_id)
-                if not telegram_chat_id:
-                    return {
-                        "status": "error",
-                        "message": "No linked Telegram chat for this conversation"
-                    }
-
-                # Determine file type and send appropriately
-                mime_type, _ = mimetypes.guess_type(str(path))
-                if mime_type and mime_type.startswith("image/"):
-                    # Send as photo
-                    success = await self.telegram_manager.send_photo(
-                        telegram_chat_id,
-                        path,
-                        caption=text if text else None
-                    )
-                else:
-                    # Send as document
-                    success = await self.telegram_manager.send_document(
-                        telegram_chat_id,
-                        path,
-                        caption=text if text else None
-                    )
-
-                if not success:
-                    return {
-                        "status": "error",
-                        "message": "Failed to send file to Telegram"
-                    }
-
-                return {
-                    "status": "success",
-                    "message": "File sent to Telegram"
-                }
-
-            # Handle voice data from UI (save file and create attachment)
-            if voice_audio_base64:
-                import base64
-                from pathlib import Path
-                from datetime import datetime, timezone
-
-                # Decode audio data
-                try:
-                    audio_data = base64.b64decode(voice_audio_base64)
-                except Exception as e:
-                    return {
-                        "status": "error",
-                        "message": f"Failed to decode voice audio: {e}"
-                    }
-
-                # Generate filename with timestamp
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                extension = (voice_mime_type or "audio/webm").split("/")[-1].split(";")[0].strip()
-                filename = f"voice_{timestamp}.{extension}"
-
-                # Create directory for Telegram voice files
-                voice_dir = DPC_HOME_DIR / "conversations" / conversation_id / "files"
-                voice_dir.mkdir(parents=True, exist_ok=True)
-                voice_path = voice_dir / filename
-
-                # Handle filename collisions
-                if voice_path.exists():
-                    stem = voice_path.stem
-                    suffix = voice_path.suffix
-                    counter = 1
-                    while voice_path.exists():
-                        voice_path = voice_dir / f"{stem}_{counter}{suffix}"
-                        counter += 1
-
-                # Save voice file
-                try:
-                    with open(voice_path, "wb") as f:
-                        f.write(audio_data)
-                    logger.info(f"Saved Telegram voice message: {voice_path} ({len(audio_data)} bytes, {voice_duration_seconds}s)")
-                except Exception as e:
-                    return {
-                        "status": "error",
-                        "message": f"Failed to save voice file: {e}"
-                    }
-
-                # Create voice attachment
-                voice_attachment = {
-                    "type": "voice",
-                    "filename": filename,
-                    "file_path": str(voice_path),
-                    "size_bytes": len(audio_data),
-                    "voice_metadata": {
-                        "duration_seconds": voice_duration_seconds,
-                        "sample_rate": int(self.settings.get("voice_messages", "default_sample_rate", "48000")),
-                        "channels": int(self.settings.get("voice_messages", "default_channels", "1")),
-                        "codec": self.settings.get("voice_messages", "default_codec", "opus"),
-                        "recorded_at": datetime.now(timezone.utc).isoformat()
-                    }
-                }
-
-                # Add to attachments list
-                if not attachments:
-                    attachments = []
-                attachments.append(voice_attachment)
-
-            # Get sender name
-            sender_name = self.p2p_manager.get_display_name() or "You"
-
-            # Forward to Telegram
-            await self.telegram_bridge.forward_dpc_to_telegram(
-                conversation_id=conversation_id,
-                sender_name=sender_name,
-                text=text,
-                attachments=attachments or []
-            )
-
-            return {
-                "status": "success",
-                "message": "Sent to Telegram"
-            }
-
-        except Exception as e:
-            logger.error("Failed to send to Telegram: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.send_to_telegram(
+            conversation_id,
+            text,
+            attachments,
+            voice_audio_base64,
+            voice_duration_seconds,
+            voice_mime_type,
+            file_path,
+        )
 
     async def link_telegram_chat(
         self,
         conversation_id: str,
         telegram_chat_id: str
     ) -> Dict[str, Any]:
-        """
-        Link a DPC conversation to a Telegram chat.
-
-        Args:
-            conversation_id: DPC conversation ID
-            telegram_chat_id: Telegram chat ID to link
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            if not self.telegram_bridge:
-                return {
-                    "status": "error",
-                    "message": "Telegram integration not enabled"
-                }
-
-            # Validate chat_id is in whitelist
-            if not self.telegram_manager.is_allowed(telegram_chat_id):
-                return {
-                    "status": "error",
-                    "message": f"Chat ID {telegram_chat_id} not in whitelist"
-                }
-
-            # Store link
-            self.telegram_bridge.conversation_map[telegram_chat_id] = conversation_id
-            self.telegram_bridge._save_conversation_links()
-
-            logger.info(f"Linked conversation {conversation_id} to Telegram chat {telegram_chat_id}")
-
-            return {
-                "status": "success",
-                "message": f"Linked {conversation_id} to Telegram chat {telegram_chat_id}"
-            }
-
-        except Exception as e:
-            logger.error("Failed to link Telegram chat: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.link_telegram_chat(conversation_id, telegram_chat_id)
 
     async def get_telegram_status(self) -> Dict[str, Any]:
-        """
-        Get Telegram bot integration status.
-
-        Returns:
-            Dict with status information including conversation links
-        """
-        try:
-            if not self.telegram_manager:
-                return {
-                    "status": "success",
-                    "enabled": False,
-                    "connected": False,
-                    "message": "Telegram integration not enabled"
-                }
-
-            # Include conversation links (telegram_chat_id -> conversation_id)
-            # Reverse it for frontend: (conversation_id -> telegram_chat_id)
-            conversation_links = {}
-            if self.telegram_bridge:
-                for telegram_chat_id, conversation_id in self.telegram_bridge.conversation_map.items():
-                    conversation_links[conversation_id] = telegram_chat_id
-
-            return {
-                "status": "success",
-                "enabled": True,
-                "connected": self.telegram_manager._running,
-                "webhook_mode": self.telegram_manager.use_webhook,
-                "whitelist_count": len(self.telegram_manager.allowed_chat_ids),
-                "transcription_enabled": self.telegram_manager.transcription_enabled,
-                "bridge_to_p2p": self.telegram_manager.bridge_to_p2p,
-                "conversation_links_count": len(self.telegram_bridge.conversation_map) if self.telegram_bridge else 0,
-                "conversation_links": conversation_links  # Frontend needs: conversation_id -> telegram_chat_id
-            }
-
-        except Exception as e:
-            logger.error("Failed to get Telegram status: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.get_telegram_status()
 
     async def delete_telegram_conversation_link(self, conversation_id: str) -> Dict[str, Any]:
-        """
-        Delete a Telegram conversation link and all associated data from the backend.
-
-        Called by UI when user deletes a Telegram chat. This removes:
-        1. The conversation link from config.ini
-        2. The conversation folder (~/.dpc/conversations/{conversation_id}/)
-        3. Any message history files
-
-        This ensures the chat doesn't reappear on restart and cleans up disk space.
-
-        Args:
-            conversation_id: DPC conversation ID (format: telegram-{chat_id})
-
-        Returns:
-            Dict with status
-        """
-        try:
-            if not self.telegram_bridge:
-                return {
-                    "status": "error",
-                    "message": "Telegram bridge not initialized"
-                }
-
-            # Extract telegram_chat_id from conversation_id
-            # Format: telegram-{chat_id}
-            if not conversation_id.startswith("telegram-"):
-                return {
-                    "status": "error",
-                    "message": f"Invalid Telegram conversation ID format: {conversation_id}"
-                }
-
-            telegram_chat_id = conversation_id.replace("telegram-", "")
-
-            # Remove from conversation_map and persist
-            removed = self.telegram_bridge.remove_conversation_link(telegram_chat_id)
-
-            # Delete conversation folder and all its contents
-            # Path: ~/.dpc/conversations/{conversation_id}/
-            import shutil
-            from pathlib import Path
-
-            conversation_folder = Path.home() / ".dpc" / "conversations" / conversation_id
-            if conversation_folder.exists():
-                shutil.rmtree(conversation_folder)
-                logger.info(f"Deleted conversation folder: {conversation_folder}")
-            else:
-                logger.debug(f"Conversation folder not found (already clean): {conversation_folder}")
-
-            # Also check for history file in groups folder (used by some conversation types)
-            history_file = Path.home() / ".dpc" / "groups" / f"{conversation_id}_history.json"
-            if history_file.exists():
-                history_file.unlink()
-                logger.info(f"Deleted conversation history file: {history_file}")
-
-            if removed:
-                logger.info(f"Deleted Telegram conversation link: {conversation_id}")
-                return {
-                    "status": "success",
-                    "message": f"Conversation {conversation_id} deleted"
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Conversation link not found: {conversation_id}"
-                }
-
-        except Exception as e:
-            logger.error("Failed to delete Telegram conversation link: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.delete_telegram_conversation_link(conversation_id)
 
     async def link_agent_telegram(
         self,
@@ -5363,307 +5055,55 @@ class CoreService:
         transcription_enabled: bool = True,
         unified_conversation: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Link an agent to Telegram with full configuration.
-
-        UI Integration: Called when user clicks "Link Telegram" button for an agent.
-
-        Args:
-            agent_id: Agent ID to link
-            bot_token: Telegram bot token
-            chat_ids: List of Telegram chat IDs (numeric strings)
-            event_filter: Optional list of event types to forward
-            max_events_per_minute: Maximum events to send per minute
-            cooldown_seconds: Minimum time between same-type events
-            transcription_enabled: Enable voice message transcription
-            unified_conversation: When True, Telegram messages share history with DPC chat UI
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            from .dpc_agent.utils import AgentRegistry
-
-            registry = AgentRegistry()
-
-            # Check if agent exists
-            agent = registry.get_agent(agent_id)
-            if not agent:
-                return {
-                    "status": "error",
-                    "message": f"Agent not found: {agent_id}"
-                }
-
-            # Update registry with full Telegram config
-            try:
-                registry.link_agent_to_telegram(
-                    agent_id=agent_id,
-                    bot_token=bot_token,
-                    chat_ids=chat_ids,
-                    event_filter=event_filter,
-                    max_events_per_minute=max_events_per_minute,
-                    cooldown_seconds=cooldown_seconds,
-                    transcription_enabled=transcription_enabled,
-                    unified_conversation=unified_conversation,
-                )
-            except ValueError as e:
-                return {
-                    "status": "error",
-                    "message": str(e)
-                }
-
-            # Start or restart the agent's Telegram bridge immediately.
-            # _ensure_manager creates the manager if needed (starts it + bridge).
-            # If manager is already running, restart just the bridge with new config.
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if dpc_agent_provider:
-                if hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
-                    await self._restart_agent_telegram_bridge(agent_id)
-                else:
-                    # Manager not running yet — start it now so bridge is live immediately
-                    try:
-                        await dpc_agent_provider._ensure_manager(agent_id=agent_id)
-                        logger.info(f"Started agent manager and Telegram bridge for {agent_id}")
-                    except Exception as e:
-                        logger.warning(f"Could not start agent manager for {agent_id}: {e}")
-
-            return {
-                "status": "success",
-                "message": f"Agent {agent_id} linked to Telegram successfully",
-                "agent_id": agent_id,
-                "chat_ids": chat_ids
-            }
-
-        except Exception as e:
-            logger.error("Failed to link agent to Telegram: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.link_agent_telegram(
+            agent_id,
+            bot_token,
+            chat_ids,
+            event_filter,
+            max_events_per_minute,
+            cooldown_seconds,
+            transcription_enabled,
+            unified_conversation,
+        )
 
     async def _start_agent_telegram_bridges(self) -> None:
-        """
-        On startup, proactively initialize agent managers and start Telegram bridges
-        for all registered agents that have telegram_enabled=True.
-
-        Without this, bridges only start on the first DPC chat message, so Telegram
-        messages sent before any DPC chat activity would be silently ignored.
-        """
-        try:
-            from .dpc_agent.utils import AgentRegistry
-            registry = AgentRegistry()
-            agents = registry.list_agents()
-
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if not dpc_agent_provider:
-                return
-
-            for agent in agents:
-                agent_id = agent.get("agent_id", "")
-                if not agent_id or not agent.get("telegram_enabled", False):
-                    continue
-
-                try:
-                    # _ensure_manager creates the manager and calls start() + _start_telegram_bridge()
-                    await dpc_agent_provider._ensure_manager(agent_id=agent_id)
-                    logger.info(f"Auto-started Telegram bridge for agent {agent_id} on service startup")
-                except Exception as e:
-                    logger.warning(f"Failed to auto-start Telegram bridge for agent {agent_id}: {e}")
-
-        except Exception as e:
-            logger.warning(f"Failed to auto-start agent Telegram bridges: {e}")
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return
+        await self.telegram_service._start_agent_telegram_bridges()
 
     def _get_telegram_bridge_for_conversation(self, conversation_id: str):
-        """
-        Find the AgentTelegramBridge associated with a conversation, if any.
-
-        In unified_conversation mode, conversation_id == agent_id (e.g. "agent_foo").
-        In non-unified mode, conversation_id == "telegram-{chat_id}" — in that case
-        we scan all running bridges whose allowed_chat_ids contain the chat_id.
-
-        Returns:
-            AgentTelegramBridge instance, or None if not found / bridge not running.
-        """
-        try:
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if not dpc_agent_provider or not hasattr(dpc_agent_provider, '_managers'):
-                return None
-
-            managers = dpc_agent_provider._managers
-
-            # Unified mode: conversation_id IS the agent_id
-            if conversation_id in managers:
-                mgr = managers[conversation_id]
-                bridge = getattr(mgr, '_telegram_bridge', None)
-                if bridge and bridge.is_enabled():
-                    return bridge
-
-            # Non-unified mode: conversation_id = "telegram-{chat_id}"
-            if conversation_id.startswith("telegram-"):
-                chat_id = conversation_id[len("telegram-"):]
-                for mgr in managers.values():
-                    bridge = getattr(mgr, '_telegram_bridge', None)
-                    if bridge and bridge.is_enabled() and chat_id in bridge.allowed_chat_ids:
-                        return bridge
-
-        except Exception as e:
-            logger.debug("_get_telegram_bridge_for_conversation: %s", e)
-        return None
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return None
+        return self.telegram_service._get_telegram_bridge_for_conversation(conversation_id)
 
     async def _restart_agent_telegram_bridge(self, agent_id: str) -> None:
-        """
-        Restart Telegram bridge for a running agent with new configuration.
-
-        Args:
-            agent_id: Agent ID whose Telegram bridge should be restarted
-        """
-        dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-        if not dpc_agent_provider or not hasattr(dpc_agent_provider, '_managers'):
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
             return
-        if agent_id not in dpc_agent_provider._managers:
-            return
-
-        agent_manager = dpc_agent_provider._managers[agent_id]
-
-        # Stop existing bridge if running
-        if hasattr(agent_manager, "_telegram_bridge") and agent_manager._telegram_bridge:
-            try:
-                await agent_manager._telegram_bridge.stop()
-                logger.info(f"Stopped Telegram bridge for agent {agent_id}")
-            except Exception as e:
-                logger.error(f"Error stopping Telegram bridge for agent {agent_id}: {e}", exc_info=True)
-
-        # Start bridge with new configuration
-        try:
-            await agent_manager._start_telegram_bridge()
-            logger.info(f"Restarted Telegram bridge for agent {agent_id}")
-        except Exception as e:
-            logger.error(f"Error restarting Telegram bridge for agent {agent_id}: {e}", exc_info=True)
+        await self.telegram_service._restart_agent_telegram_bridge(agent_id)
 
     async def unlink_agent_telegram(self, agent_id: str) -> Dict[str, Any]:
-        """
-        Unlink an agent from Telegram (removes all Telegram configuration).
-
-        UI Integration: Called when user clicks "Unlink Telegram" button for an agent.
-
-        Args:
-            agent_id: Agent ID to unlink
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            from .dpc_agent.utils import AgentRegistry
-
-            registry = AgentRegistry()
-
-            # Check if agent exists
-            agent = registry.get_agent(agent_id)
-            if not agent:
-                return {
-                    "status": "error",
-                    "message": f"Agent not found: {agent_id}"
-                }
-
-            # Remove Telegram configuration from registry
-            registry.unlink_agent_from_telegram(agent_id)
-
-            # Stop agent's Telegram bridge if it's currently running
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
-                agent_manager = dpc_agent_provider._managers[agent_id]
-                if hasattr(agent_manager, "_telegram_bridge") and agent_manager._telegram_bridge:
-                    try:
-                        await agent_manager._telegram_bridge.stop()
-                        agent_manager._telegram_bridge = None
-                        logger.info(f"Stopped Telegram bridge for agent {agent_id}")
-                    except Exception as e:
-                        logger.error(f"Error stopping Telegram bridge for agent {agent_id}: {e}", exc_info=True)
-
-            return {
-                "status": "success",
-                "message": f"Agent {agent_id} unlinked from Telegram successfully",
-                "agent_id": agent_id
-            }
-
-        except Exception as e:
-            logger.error("Failed to unlink agent from Telegram: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.unlink_agent_telegram(agent_id)
 
     async def migrate_telegram_config(self) -> Dict[str, Any]:
-        """
-        Migrate global [dpc_agent_telegram] config to per-agent config.
-
-        Reads from ~/.dpc/config.ini [dpc_agent_telegram] section
-        and copies to each agent in _registry.json.
-
-        Returns:
-            Dict with migration status and details
-        """
-        try:
-            from .dpc_agent.utils import migrate_global_telegram_to_agents
-
-            result = migrate_global_telegram_to_agents()
-
-            # Restart Telegram bridges for any agents that were migrated
-            if result.get("status") == "success" and result.get("migrated_count", 0) > 0:
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                for agent_id in result.get("migrated_agents", []):
-                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
-                        await self._restart_agent_telegram_bridge(agent_id)
-
-            return result
-
-        except Exception as e:
-            logger.error("Failed to migrate Telegram config: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.migrate_telegram_config()
 
     async def get_agent_telegram_status(self, agent_id: str) -> Dict[str, Any]:
-        """
-        Get Telegram link status for an agent.
-
-        UI Integration: Called to display current Telegram link status for an agent.
-
-        Args:
-            agent_id: Agent ID to query
-
-        Returns:
-            Dict with status information
-        """
-        try:
-            from .dpc_agent.utils import AgentRegistry
-
-            registry = AgentRegistry()
-            agent = registry.get_agent(agent_id)
-
-            if not agent:
-                return {
-                    "status": "error",
-                    "message": f"Agent {agent_id} not found"
-                }
-
-            linked_chat_id = registry.get_agent_linked_chat(agent_id)
-
-            return {
-                "status": "success",
-                "agent_id": agent_id,
-                "telegram_enabled": agent.get("telegram_enabled", False),
-                "telegram_chat_id": linked_chat_id,
-                "telegram_linked_at": agent.get("telegram_linked_at")
-            }
-
-        except Exception as e:
-            logger.error("Failed to get agent Telegram status: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.get_agent_telegram_status(agent_id)
 
     async def vote_new_session(self, proposal_id: str, vote: bool) -> Dict[str, Any]:
         """Cast vote on a new session proposal.
