@@ -227,6 +227,26 @@ class DpcAgent:
             skill_store=self.skill_store,
         )
 
+        # Log context window usage — warn if approaching limit or sections were trimmed
+        _estimated = cap_info.get("estimated_tokens_before", 0)
+        _ctx_window = (session_state or {}).get("tokens_limit", 200000) or 200000
+        _trimmed = cap_info.get("trimmed_sections", [])
+        if _trimmed:
+            log.warning(
+                "Context trimmed (approaching limit): %s | estimated: %d / %d tokens (%.0f%%)",
+                _trimmed, _estimated, _ctx_window, _estimated / _ctx_window * 100,
+            )
+        elif _estimated > _ctx_window * 0.8:
+            log.warning(
+                "Context window >80%% full: estimated %d / %d tokens (%.0f%%)",
+                _estimated, _ctx_window, _estimated / _ctx_window * 100,
+            )
+        else:
+            log.debug(
+                "Context size: estimated %d / %d tokens (%.0f%%)",
+                _estimated, _ctx_window, _estimated / _ctx_window * 100,
+            )
+
         # Set tool context with firewall-controlled tool access
         allowed_tools = self._get_allowed_tools()
         ctx = ToolContext(
@@ -302,6 +322,9 @@ class DpcAgent:
             "response_preview": response[:200] if response else "",
             "rounds": usage.get("rounds", 0),
             "cost_usd": usage.get("cost", 0),
+            "tokens_estimated_total": cap_info.get("estimated_tokens_before", 0),
+            "tokens_context_window": _ctx_window,
+            "context_trimmed": bool(_trimmed),
         })
 
         # Persist full task result to task_results/{task_id}.json

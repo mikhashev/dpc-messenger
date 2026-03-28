@@ -617,10 +617,13 @@
     // Debounce save by 500ms
     chatHistoriesSaveTimeout = setTimeout(() => {
       try {
-        // Only save histories for AI chats and agent chats (excluding Telegram)
+        // Only save histories for AI chats (excluding agent_ and Telegram).
+        // Agent chat histories are persisted server-side (history.json) and
+        // loaded via get_conversation_history on reconnect — no need for localStorage,
+        // which avoids QuotaExceededError on long sessions.
         const historiesToSave = Object.fromEntries(
           Array.from($chatHistories.entries())
-            .filter(([id, _]) => (id.startsWith('ai_') || id.startsWith('agent_')) && !id.startsWith('telegram-'))
+            .filter(([id, _]) => id.startsWith('ai_') && !id.startsWith('telegram-'))
         );
         localStorage.setItem('dpc-ai-chat-histories', JSON.stringify(historiesToSave));
       } catch (error) {

@@ -458,16 +458,28 @@ This file tracks the agent's self-understanding and evolving identity.
         return f"⚠️ Error updating identity: {e}"
 
 
-def chat_history(ctx: ToolContext, limit: int = 10) -> str:
+def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1) -> str:
     """
-    Read recent conversation messages (user and assistant turns).
+    Read conversation messages (user and assistant turns).
+
+    Use this to review the full conversation, assess context window usage,
+    and decide whether to extract knowledge or suggest a session reset.
 
     Args:
         ctx: Tool context
-        limit: Maximum number of messages to return (most recent)
+        limit: Max messages to return. 0 = all messages (default).
+        offset: Start position. -1 = from end/newest (default).
+                0+ = from start/oldest (e.g. offset=0 returns oldest messages first).
+
+    Examples:
+        chat_history()                    → all messages (full session review)
+        chat_history(limit=10)            → last 10 messages (most recent)
+        chat_history(limit=1, offset=0)   → first message in session
+        chat_history(limit=10, offset=0)  → first 10 messages (oldest)
+        chat_history(limit=10, offset=20) → messages 20-29 from start
 
     Returns:
-        Recent conversation messages with role, sender, and content
+        Conversation messages with role, sender, timestamp, and content
     """
     try:
         monitor = getattr(ctx, 'conversation_monitor', None)
@@ -478,9 +490,13 @@ def chat_history(ctx: ToolContext, limit: int = 10) -> str:
         if not history:
             return "No conversation history yet"
 
-        recent = history[-limit:]
-        output_lines = [f"Recent conversation ({len(recent)} of {len(history)} total messages):\n"]
-        for msg in recent:
+        if offset >= 0:
+            selected = history[offset:offset + limit] if limit > 0 else history[offset:]
+        else:
+            selected = history[-limit:] if limit > 0 else history
+
+        output_lines = [f"Conversation ({len(selected)} of {len(history)} total messages):\n"]
+        for msg in selected:
             role = msg.get("role", "unknown")
             sender = msg.get("sender_name", role)
             ts = msg.get("timestamp", "")

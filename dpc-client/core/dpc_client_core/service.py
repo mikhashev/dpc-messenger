@@ -8327,7 +8327,8 @@ Respond in JSON format:
                 message=prompt,
                 conversation_id=conversation_id,
                 include_context=include_context,
-                agent_llm_provider=agent_llm_provider or conversation_id
+                agent_llm_provider=agent_llm_provider or conversation_id,
+                sender_name=self.p2p_manager.get_display_name() or "User",
             )
 
             # Get actual model and provider from agent's last usage.
