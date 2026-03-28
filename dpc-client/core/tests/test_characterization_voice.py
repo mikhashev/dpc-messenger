@@ -1,9 +1,8 @@
 """
 Characterization tests for VoiceService extraction.
 
-These tests capture the ACTUAL current behavior of voice/Whisper methods
-in CoreService BEFORE extraction. If any test fails after VoiceService is
-extracted, we broke something during refactoring.
+These tests capture the ACTUAL behavior of voice/Whisper methods in VoiceService
+after extraction from CoreService. If any test fails, we broke something.
 
 Per refactoring guidelines: characterization tests record current behavior
 (including bugs) as a safety net — not ideal behavior.
@@ -16,18 +15,24 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 
-def make_mock_service():
-    """Create a minimal CoreService-like object for testing voice methods."""
-    from dpc_client_core.service import CoreService
-    # We patch __init__ to avoid needing full initialization
-    with patch.object(CoreService, '__init__', lambda self: None):
-        svc = CoreService()
+def make_voice_service():
+    """Create a minimal VoiceService for testing."""
+    from dpc_client_core.voice_service import VoiceService
+    from unittest.mock import MagicMock, AsyncMock
 
-    # Inject the minimal state that voice methods require
-    svc.local_api = MagicMock()
-    svc.local_api.broadcast_event = AsyncMock()
-    svc.llm_manager = MagicMock()
-    svc.llm_manager.providers = {}
+    local_api = MagicMock()
+    local_api.broadcast_event = AsyncMock()
+    llm_manager = MagicMock()
+    llm_manager.providers = {}
+    settings = MagicMock()
+
+    # Patch _load_voice_transcription_settings to avoid disk I/O
+    with patch.object(VoiceService, '_load_voice_transcription_settings', lambda self: None):
+        svc = VoiceService(
+            llm_manager=llm_manager,
+            settings=settings,
+            local_api=local_api,
+        )
     return svc
 
 
@@ -37,7 +42,7 @@ class TestPreloadWhisperCharacterization:
     @pytest.mark.asyncio
     async def test_returns_error_when_no_whisper_provider_configured(self):
         """Current behavior: returns error dict when no local_whisper provider exists."""
-        svc = make_mock_service()
+        svc = make_voice_service()
         svc.llm_manager.providers = {}  # no providers
 
         result = await svc.preload_whisper_model()
@@ -48,7 +53,7 @@ class TestPreloadWhisperCharacterization:
     @pytest.mark.asyncio
     async def test_returns_error_for_unknown_provider_alias(self):
         """Current behavior: returns error dict when alias doesn't exist."""
-        svc = make_mock_service()
+        svc = make_voice_service()
         svc.llm_manager.providers = {}
 
         result = await svc.preload_whisper_model(provider_alias="nonexistent")
@@ -59,7 +64,7 @@ class TestPreloadWhisperCharacterization:
     @pytest.mark.asyncio
     async def test_returns_success_when_model_already_loaded(self):
         """Current behavior: returns success with already_loaded=True if model loaded."""
-        svc = make_mock_service()
+        svc = make_voice_service()
 
         mock_provider = MagicMock()
         mock_provider.config = {"type": "local_whisper"}
@@ -78,7 +83,7 @@ class TestPreloadWhisperCharacterization:
         """Current behavior: unloads other loaded Whisper providers before loading new one.
         This is the VRAM conflict fix — critical behavior to preserve after extraction.
         """
-        svc = make_mock_service()
+        svc = make_voice_service()
 
         # Provider to load
         target_provider = MagicMock()
@@ -108,7 +113,7 @@ class TestPreloadWhisperCharacterization:
     @pytest.mark.asyncio
     async def test_broadcasts_loading_started_event(self):
         """Current behavior: broadcasts whisper_model_loading_started event to UI."""
-        svc = make_mock_service()
+        svc = make_voice_service()
 
         provider = MagicMock()
         provider.config = {"type": "local_whisper"}
@@ -127,7 +132,7 @@ class TestPreloadWhisperCharacterization:
     @pytest.mark.asyncio
     async def test_broadcasts_loaded_event_on_success(self):
         """Current behavior: broadcasts whisper_model_loaded event on success."""
-        svc = make_mock_service()
+        svc = make_voice_service()
 
         provider = MagicMock()
         provider.config = {"type": "local_whisper"}
@@ -148,7 +153,7 @@ class TestPreloadWhisperCharacterization:
     @pytest.mark.asyncio
     async def test_broadcasts_failed_event_on_exception(self):
         """Current behavior: broadcasts whisper_model_loading_failed on exception."""
-        svc = make_mock_service()
+        svc = make_voice_service()
 
         provider = MagicMock()
         provider.config = {"type": "local_whisper"}
@@ -169,7 +174,7 @@ class TestPreloadWhisperCharacterization:
     @pytest.mark.asyncio
     async def test_returns_error_if_provider_lacks_ensure_model_loaded(self):
         """Current behavior: returns error if provider doesn't support ensure_model_loaded."""
-        svc = make_mock_service()
+        svc = make_voice_service()
 
         provider = MagicMock()
         provider.config = {"type": "local_whisper"}
