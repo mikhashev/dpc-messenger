@@ -482,6 +482,9 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1) -> str:
         Conversation messages with role, sender, timestamp, and content
     """
     try:
+        limit = int(limit) if limit is not None else 0
+        offset = int(offset) if offset is not None else -1
+
         monitor = getattr(ctx, 'conversation_monitor', None)
         if not monitor:
             return "No conversation monitor available for this session"
