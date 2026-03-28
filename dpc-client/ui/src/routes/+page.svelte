@@ -533,10 +533,23 @@
 
         chatHistories.update(map => {
           const newMap = new Map(map);
+
+          // Preserve any pending DPC execute_ai_query placeholders so they survive
+          // this Telegram broadcast overwrite. Pending messages have a commandId and
+          // are waiting for a DPC response — if we drop them here, the response handler
+          // can't find them (m.commandId === responseCommandId never matches) and the
+          // DPC reply is silently discarded (visible in task board but not in chat).
+          const existing = map.get(conversation_id) || [];
+          const pendingMsgs = existing.filter((m: any) => m.commandId);
+
           const mappedMessages = (messages || []).map((msg: any, index: number) => {
             const isUser = msg.role === 'user';
+            // Use a stable ID derived from conversation_id + backend timestamp (or index
+            // as fallback). Avoids Date.now() which forces Svelte to destroy/recreate all
+            // DOM nodes on every Telegram broadcast, causing flicker and scroll issues.
+            const stableId = `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
             const mapped: any = {
-              id: `tg-${index}-${Date.now()}`,
+              id: stableId,
               sender: isUser ? 'user' : conversation_id,
               senderName: isUser ? (msg.sender_name || 'User') : getPeerDisplayName(conversation_id),
               text: msg.content,
@@ -556,15 +569,20 @@
               thinking: thinking || undefined,
             };
           }
-          newMap.set(conversation_id, mappedMessages);
+
+          // Re-append pending DPC placeholders after the synced history so they are still
+          // findable by the execute_ai_query response handler (m.commandId === responseCommandId).
+          newMap.set(conversation_id, [...mappedMessages, ...pendingMsgs]);
           return newMap;
         });
 
-        // Scroll to bottom if this is the active chat
+        // Scroll to bottom if this is the active chat.
+        // Two rAF calls: first frame = Svelte flushes DOM updates,
+        // second frame = browser lays out new nodes so scrollHeight is accurate.
         if (isActiveChatConv(conversation_id)) {
-          setTimeout(() => {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
             if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
-          }, 50);
+          }));
         }
       });
     }
@@ -1165,7 +1183,7 @@
               chatHistories.update(map => {
                 const newMap = new Map(map);
                 const msgs = histResult.messages.map((msg: any, index: number) => ({
-                  id: `agent-init-${index}-${Date.now()}`,
+                  id: `${conv_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`,
                   sender: msg.role === 'user' ? 'user' : conv_id,
                   senderName: msg.role === 'user' ? (msg.sender_name || 'You') : (agent.name || conv_id),
                   text: msg.content,
