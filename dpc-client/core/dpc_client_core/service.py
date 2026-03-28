@@ -1585,11 +1585,15 @@ class CoreService:
 
         See: docs/decisions/001-service-split.md
         """
-        import time
         services = {}
-
-        # Populated incrementally as sub-services are extracted in Phase 1
-        # e.g. "voice": self.voice_service.get_state()
+        if self.voice_service:
+            services["voice"] = self.voice_service.get_state()
+        if self.knowledge_service:
+            services["knowledge"] = self.knowledge_service.get_state()
+        if self.telegram_service:
+            services["telegram"] = self.telegram_service.get_state()
+        if self.agent_service:
+            services["agent"] = self.agent_service.get_state()
 
         return {
             "is_running": self._is_running,
