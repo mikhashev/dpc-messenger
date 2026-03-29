@@ -500,24 +500,12 @@
       const { conversation_id, messages, tokens_used, token_limit, thinking } = $agentHistoryUpdated;
       console.log(`[AgentTelegramMsg] Refreshing chat history for ${conversation_id} (${messages?.length} messages)`);
 
-      // Capture accumulated streaming text NOW (before untrack/clearAgentStreaming).
-      // agentStreamingText holds tool-call traces + LLM chunks accumulated during this
-      // task. Because _execute_task now uses reply_conversation_id (e.g. "agent_001"),
-      // streaming events arrive with the correct conversation_id and populate this buffer.
-      let capturedAgentStreaming = "";
-      if (isActiveChatConv(conversation_id)) {
-        // Flush any pending buffer content that hasn't been moved to agentStreamingText yet
-        if (streamingBuffer) {
-          agentStreamingText += streamingBuffer;
-          streamingBuffer = "";
-          if (streamingFlushTimeout) { clearTimeout(streamingFlushTimeout); streamingFlushTimeout = null; }
-        }
-        capturedAgentStreaming = agentStreamingText;
-        if (capturedAgentStreaming) clearAgentStreaming();
-      }
-
       // All side-effects are wrapped in untrack() to ensure this effect ONLY re-runs when
       // $agentHistoryUpdated changes (i.e., a new Telegram message arrives).
+      // The streaming buffer capture is ALSO inside untrack() — keeping it outside would
+      // subscribe to streamingBuffer/agentStreamingText ($state), causing this effect to
+      // re-fire on every streaming token with the STALE agentHistoryUpdated payload, which
+      // overwrites chat history repeatedly and drops user messages and DPC responses in flight.
       // Without untrack():
       //   - chatHistories.update() makes Svelte track chatHistories as a dependency
       //     (store access inside $effect creates a subscription), causing this effect
@@ -525,6 +513,22 @@
       //   - activeChatId read tracks it as a dependency, causing re-run on chat switch
       //     while $agentHistoryUpdated still holds the old payload → same loop
       untrack(() => {
+        // Capture accumulated streaming text NOW (before chatHistories update).
+        // agentStreamingText holds tool-call traces + LLM chunks accumulated during this
+        // task. Because _execute_task now uses reply_conversation_id (e.g. "agent_001"),
+        // streaming events arrive with the correct conversation_id and populate this buffer.
+        let capturedAgentStreaming = "";
+        if (isActiveChatConv(conversation_id)) {
+          // Flush any pending buffer content that hasn't been moved to agentStreamingText yet
+          if (streamingBuffer) {
+            agentStreamingText += streamingBuffer;
+            streamingBuffer = "";
+            if (streamingFlushTimeout) { clearTimeout(streamingFlushTimeout); streamingFlushTimeout = null; }
+          }
+          capturedAgentStreaming = agentStreamingText;
+          if (capturedAgentStreaming) clearAgentStreaming();
+        }
+
         // Update token usage map so the token counter reflects the agent's LLM usage
         if (tokens_used !== undefined && token_limit !== undefined && token_limit > 0) {
           tokenUsageMap = new Map(tokenUsageMap);
@@ -635,13 +639,14 @@
     // Debounce save by 500ms
     chatHistoriesSaveTimeout = setTimeout(() => {
       try {
-        // Only save histories for AI chats (excluding agent_ and Telegram).
-        // Agent chat histories are persisted server-side (history.json) and
-        // loaded via get_conversation_history on reconnect — no need for localStorage,
-        // which avoids QuotaExceededError on long sessions.
+        // Save histories for AI chats and agent chats (excluding Telegram).
+        // Agent chats are also included so that thinking blocks and raw tool-call
+        // output survive UI/app restarts. On startup, backend messages are merged
+        // onto the localStorage snapshot so new Telegram messages received while
+        // the app was closed are picked up without losing the UI metadata.
         const historiesToSave = Object.fromEntries(
           Array.from($chatHistories.entries())
-            .filter(([id, _]) => id.startsWith('ai_') && !id.startsWith('telegram-'))
+            .filter(([id, _]) => (id.startsWith('ai_') || id.startsWith('agent_')) && !id.startsWith('telegram-'))
         );
         localStorage.setItem('dpc-ai-chat-histories', JSON.stringify(historiesToSave));
       } catch (error) {
@@ -1174,7 +1179,9 @@
 
         // Proactively fetch each agent's conversation history from the backend.
         // The backend is authoritative (includes Telegram messages received while app was closed).
-        // Without this, history only loads when the user clicks on the agent chat.
+        // We merge with any localStorage snapshot so that UI metadata (thinking blocks,
+        // raw tool-call output) is preserved for messages that already exist locally.
+        // New messages that arrived while the app was closed are added without metadata.
         for (const agent of agentsResult.agents) {
           const conv_id = agent.agent_id;
           try {
@@ -1182,14 +1189,28 @@
             if (histResult?.status === 'success' && histResult.messages?.length > 0) {
               chatHistories.update(map => {
                 const newMap = new Map(map);
-                const msgs = histResult.messages.map((msg: any, index: number) => ({
-                  id: `${conv_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`,
-                  sender: msg.role === 'user' ? 'user' : conv_id,
-                  senderName: msg.role === 'user' ? (msg.sender_name || 'You') : (agent.name || conv_id),
-                  text: msg.content,
-                  timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (histResult.messages.length - index) * 1000,
-                  attachments: msg.attachments || []
-                }));
+
+                // Build a lookup of existing localStorage messages by stable ID so we can
+                // carry over thinking blocks and streamingRaw onto matching backend messages.
+                const localHistory: any[] = newMap.get(conv_id) || [];
+                const localById = new Map(localHistory.map((m: any) => [m.id, m]));
+
+                const msgs = histResult.messages.map((msg: any, index: number) => {
+                  const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (histResult.messages.length - index) * 1000;
+                  const stableId = `${conv_id}-${msg.timestamp ? ts : index}`;
+                  const local = localById.get(stableId);
+                  return {
+                    id: stableId,
+                    sender: msg.role === 'user' ? 'user' : conv_id,
+                    senderName: msg.role === 'user' ? (msg.sender_name || 'You') : (agent.name || conv_id),
+                    text: msg.content,
+                    timestamp: ts,
+                    attachments: msg.attachments || [],
+                    // Preserve UI metadata from localStorage snapshot (if message existed before)
+                    thinking: local?.thinking,
+                    streamingRaw: local?.streamingRaw,
+                  };
+                });
                 newMap.set(conv_id, msgs);
                 return newMap;
               });
