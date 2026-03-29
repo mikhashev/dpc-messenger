@@ -408,6 +408,7 @@ class GroupHistoryStatusHandler(MessageHandler):
         group_id = payload.get("group_id")
         remote_hash = payload.get("history_hash", "")
         remote_count = payload.get("message_count", 0)
+        is_reply = payload.get("is_reply", False)
 
         self.logger.debug(
             "Received GROUP_HISTORY_STATUS from %s for group %s (hash=%s, count=%d)",
@@ -421,15 +422,18 @@ class GroupHistoryStatusHandler(MessageHandler):
         local_hash = monitor.compute_history_hash() if monitor and hasattr(monitor, "compute_history_hash") else "sha256:empty"
         local_count = len(monitor.message_history) if monitor else 0
 
-        # Send our status back
-        await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-            "command": "GROUP_HISTORY_STATUS",
-            "payload": {
-                "group_id": group_id,
-                "history_hash": local_hash,
-                "message_count": local_count,
-            }
-        })
+        # Reply only to the initiating STATUS (not to replies), to prevent infinite ping-pong.
+        # A sends STATUS → B replies once with is_reply=True → A does NOT reply again.
+        if not is_reply:
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                "command": "GROUP_HISTORY_STATUS",
+                "payload": {
+                    "group_id": group_id,
+                    "history_hash": local_hash,
+                    "message_count": local_count,
+                    "is_reply": True,
+                }
+            })
 
         # If hashes differ and peer has more messages, request history
         if remote_hash != local_hash and remote_count > local_count:

@@ -1505,12 +1505,17 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         exported = []
         for msg in self.message_history:
             exported_msg = {
+                "id": msg.get("id"),  # Preserve ID so merge_history can deduplicate
                 "role": msg["role"],
                 "content": msg["content"],
-                "timestamp": datetime.now(timezone.utc).isoformat(),  # Add current timestamp
+                "timestamp": msg.get("timestamp", datetime.now(timezone.utc).isoformat()),
             }
             if "attachments" in msg:
                 exported_msg["attachments"] = msg["attachments"]
+            if "sender_node_id" in msg:
+                exported_msg["sender_node_id"] = msg["sender_node_id"]
+            if "sender_name" in msg:
+                exported_msg["sender_name"] = msg["sender_name"]
             exported.append(exported_msg)
 
         logger.info(f"Exported {len(exported)} messages from conversation history")
