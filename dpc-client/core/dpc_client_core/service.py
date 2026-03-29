@@ -825,6 +825,12 @@ class CoreService:
             monitor_task.set_name("hub_monitor")
             self._background_tasks.add(monitor_task)
 
+        # Auto-connect to firewall node group members
+        if self.settings.get_p2p_auto_connect_node_groups():
+            ac_task = asyncio.create_task(self._auto_connect_node_groups())
+            ac_task.set_name("auto_connect_node_groups")
+            self._background_tasks.add(ac_task)
+
         try:
             await self._shutdown_event.wait()
         except asyncio.CancelledError:
@@ -1058,6 +1064,30 @@ class CoreService:
                 break
             except Exception as e:
                 logger.error("Error in hub connection monitor: %s", e, exc_info=True)
+
+    async def _auto_connect_node_groups(self):
+        """Auto-connect to all node IDs listed in firewall node groups on startup."""
+        delay = self.settings.get_p2p_auto_connect_delay()
+        await asyncio.sleep(delay)
+
+        node_ids = {
+            nid
+            for group_ids in self.firewall.node_groups.values()
+            for nid in group_ids
+            if nid != self.p2p_manager.node_id
+        }
+
+        if not node_ids:
+            logger.debug("No node group peers to auto-connect")
+            return
+
+        logger.info("Auto-connecting to %d node group peer(s)", len(node_ids))
+        for node_id in node_ids:
+            try:
+                await self.connection_orchestrator.connect(node_id)
+                logger.info("Auto-connect succeeded: %s", node_id)
+            except Exception as e:
+                logger.debug("Auto-connect skipped %s: %s", node_id, e)
 
     async def _listen_for_hub_signals(self):
         """Background task that listens for incoming WebRTC signaling messages from Hub."""
