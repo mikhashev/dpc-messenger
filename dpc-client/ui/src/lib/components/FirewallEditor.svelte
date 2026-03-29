@@ -105,6 +105,42 @@
   let saveMessage: string = '';
   let saveMessageType: 'success' | 'error' | '' = '';
 
+  // Inline input state — replaces all prompt() calls (blocked on macOS WKWebView)
+  // Node Groups tab
+  let addingGroupInline: boolean = false;
+  let newGroupNameInput: string = '';
+  let addingNodeToGroupName: string | null = null;
+  let newNodeIdInput: string = '';
+  // File Groups tab
+  let addingFileGroupInline: boolean = false;
+  let newFileGroupNameInput: string = '';
+  let addingPatternToFileGroupName: string | null = null;
+  let newFilePatternInput: string = '';
+  // AI Scopes tab
+  let addingAIScopeInline: boolean = false;
+  let newAIScopeNameInput: string = '';
+  let addingRuleToAIScopeName: string | null = null;
+  let newAIScopeRulePathInput: string = '';
+  // Device Sharing tab
+  let addingDevicePresetInline: boolean = false;
+  let newDevicePresetNameInput: string = '';
+  let addingRuleToDevicePresetName: string | null = null;
+  let newDevicePresetRulePathInput: string = '';
+  // File Transfer tab
+  let addingFileTransferGroupInline: boolean = false;
+  let newFileTransferGroupNameInput: string = '';
+  let addingFileTransferNodeInline: boolean = false;
+  let newFileTransferNodeIdInput: string = '';
+  // Peers tab
+  let addingPeerNodeInline: boolean = false;
+  let newPeerNodeIdInput: string = '';
+  let addingRuleToNodeId: string | null = null;
+  let newNodeRulePathInput: string = '';
+  let addingPeerGroupInline: boolean = false;
+  let newPeerGroupNameInput: string = '';
+  let addingRuleToGroupName: string | null = null;
+  let newGroupRulePathInput: string = '';
+
   // Intermediate string variables for textarea editing (compute sharing)
   let allowNodesText: string = '';
   let allowGroupsText: string = '';
@@ -285,17 +321,34 @@
 
   // Helper functions for editing
   function addNodeGroup() {
+    // Show inline input instead of prompt() (prompt is blocked on macOS WKWebView)
+    addingGroupInline = true;
+    newGroupNameInput = '';
+  }
+
+  function confirmAddGroup() {
     if (!editedRules) return;
-    const groupName = prompt('Enter group name:');
-    if (groupName) {
-      if (!editedRules.node_groups) editedRules.node_groups = {};
-      // Check for duplicates
-      if (editedRules.node_groups[groupName]) {
-        alert('This group already exists');
-        return;
-      }
-      editedRules.node_groups[groupName] = [];
+    const groupName = newGroupNameInput.trim();
+    if (!groupName) return;
+    if (!editedRules.node_groups) editedRules.node_groups = {};
+    if (editedRules.node_groups[groupName]) {
+      alert('This group already exists');
+      return;
     }
+    editedRules.node_groups[groupName] = [];
+    editedRules = editedRules; // trigger reactivity
+    addingGroupInline = false;
+    newGroupNameInput = '';
+  }
+
+  function cancelAddGroup() {
+    addingGroupInline = false;
+    newGroupNameInput = '';
+  }
+
+  function handleGroupNameKeydown(e: KeyboardEvent) {
+    if (e.key === 'Enter') confirmAddGroup();
+    if (e.key === 'Escape') cancelAddGroup();
   }
 
   function removeNodeGroup(groupName: string) {
@@ -305,23 +358,36 @@
   }
 
   function addNodeToGroup(groupName: string) {
+    // Show inline input instead of prompt() (prompt is blocked on macOS WKWebView)
+    addingNodeToGroupName = groupName;
+    newNodeIdInput = '';
+  }
+
+  function confirmAddNode(groupName: string) {
     if (!editedRules || !editedRules.node_groups) return;
-    const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
-    const trimmedNodeId = nodeId?.trim();
-    if (trimmedNodeId && trimmedNodeId.startsWith('dpc-node-')) {
-      // Check for duplicates
-      if (editedRules.node_groups[groupName].includes(trimmedNodeId)) {
-        alert('This node is already in the group');
-        return;
-      }
-      // Use immutable update to trigger Svelte reactivity
-      editedRules.node_groups[groupName] = [
-        ...editedRules.node_groups[groupName],
-        trimmedNodeId
-      ];
-    } else if (nodeId) {
+    const trimmedNodeId = newNodeIdInput.trim();
+    if (!trimmedNodeId) return;
+    if (!trimmedNodeId.startsWith('dpc-node-')) {
       alert('Node ID must start with "dpc-node-"');
+      return;
     }
+    if (editedRules.node_groups[groupName].includes(trimmedNodeId)) {
+      alert('This node is already in the group');
+      return;
+    }
+    editedRules.node_groups[groupName] = [...editedRules.node_groups[groupName], trimmedNodeId];
+    addingNodeToGroupName = null;
+    newNodeIdInput = '';
+  }
+
+  function cancelAddNode() {
+    addingNodeToGroupName = null;
+    newNodeIdInput = '';
+  }
+
+  function handleNodeIdKeydown(e: KeyboardEvent, groupName: string) {
+    if (e.key === 'Enter') confirmAddNode(groupName);
+    if (e.key === 'Escape') cancelAddNode();
   }
 
   function removeNodeFromGroup(groupName: string, nodeId: string) {
@@ -331,20 +397,32 @@
 
   // Peer Permissions - Node Management Functions
   function addNodePermission() {
+    addingPeerNodeInline = true;
+    newPeerNodeIdInput = '';
+  }
+
+  function confirmAddNodePermission() {
     if (!editedRules) return;
-    const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
-    const trimmedNodeId = nodeId?.trim();
-    if (trimmedNodeId && trimmedNodeId.startsWith('dpc-node-')) {
-      if (!editedRules.nodes) editedRules.nodes = {};
-      // Check for duplicates
-      if (editedRules.nodes[trimmedNodeId]) {
-        alert('This node already has permission rules');
-        return;
-      }
-      editedRules.nodes[trimmedNodeId] = {};
-    } else if (nodeId) {
+    const trimmedNodeId = newPeerNodeIdInput.trim();
+    if (!trimmedNodeId) return;
+    if (!trimmedNodeId.startsWith('dpc-node-')) {
       alert('Node ID must start with "dpc-node-"');
+      return;
     }
+    if (!editedRules.nodes) editedRules.nodes = {};
+    if (editedRules.nodes[trimmedNodeId]) {
+      alert('This node already has permission rules');
+      return;
+    }
+    editedRules.nodes[trimmedNodeId] = {};
+    editedRules = editedRules;
+    addingPeerNodeInline = false;
+    newPeerNodeIdInput = '';
+  }
+
+  function cancelAddNodePermission() {
+    addingPeerNodeInline = false;
+    newPeerNodeIdInput = '';
   }
 
   function removeNodePermission(nodeId: string) {
@@ -354,16 +432,26 @@
   }
 
   function addRuleToNode(nodeId: string) {
+    addingRuleToNodeId = nodeId;
+    newNodeRulePathInput = 'personal.json:profile.*';
+  }
+
+  function confirmAddRuleToNode(nodeId: string) {
     if (!editedRules || !editedRules.nodes) return;
-    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.*, device_context.json:hardware.*, or personal.json:*):', 'personal.json:profile.*');
-    if (resourcePath) {
-      // Check for duplicates
-      if (editedRules.nodes[nodeId][resourcePath]) {
-        alert('This rule already exists for this node');
-        return;
-      }
-      editedRules.nodes[nodeId][resourcePath] = 'allow';
+    const resourcePath = newNodeRulePathInput.trim();
+    if (!resourcePath) return;
+    if (editedRules.nodes[nodeId][resourcePath]) {
+      alert('This rule already exists for this node');
+      return;
     }
+    editedRules.nodes[nodeId][resourcePath] = 'allow';
+    addingRuleToNodeId = null;
+    newNodeRulePathInput = '';
+  }
+
+  function cancelAddRuleToNode() {
+    addingRuleToNodeId = null;
+    newNodeRulePathInput = '';
   }
 
   function removeRuleFromNode(nodeId: string, path: string) {
@@ -374,17 +462,28 @@
 
   // Peer Permissions - Group Management Functions
   function addGroupPermission() {
+    addingPeerGroupInline = true;
+    newPeerGroupNameInput = '';
+  }
+
+  function confirmAddGroupPermission() {
     if (!editedRules) return;
-    const groupName = prompt('Enter group name:');
-    if (groupName) {
-      if (!editedRules.groups) editedRules.groups = {};
-      // Check for duplicates
-      if (editedRules.groups[groupName]) {
-        alert('This group already has permission rules');
-        return;
-      }
-      editedRules.groups[groupName] = {};
+    const groupName = newPeerGroupNameInput.trim();
+    if (!groupName) return;
+    if (!editedRules.groups) editedRules.groups = {};
+    if (editedRules.groups[groupName]) {
+      alert('This group already has permission rules');
+      return;
     }
+    editedRules.groups[groupName] = {};
+    editedRules = editedRules;
+    addingPeerGroupInline = false;
+    newPeerGroupNameInput = '';
+  }
+
+  function cancelAddGroupPermission() {
+    addingPeerGroupInline = false;
+    newPeerGroupNameInput = '';
   }
 
   function removeGroupPermission(groupName: string) {
@@ -394,16 +493,26 @@
   }
 
   function addRuleToGroup(groupName: string) {
+    addingRuleToGroupName = groupName;
+    newGroupRulePathInput = 'personal.json:profile.*';
+  }
+
+  function confirmAddRuleToGroup(groupName: string) {
     if (!editedRules || !editedRules.groups) return;
-    const resourcePath = prompt('Enter resource path (e.g., personal.json:profile.*, device_context.json:hardware.*, or personal.json:*):', 'personal.json:profile.*');
-    if (resourcePath) {
-      // Check for duplicates
-      if (editedRules.groups[groupName][resourcePath]) {
-        alert('This rule already exists for this group');
-        return;
-      }
-      editedRules.groups[groupName][resourcePath] = 'allow';
+    const resourcePath = newGroupRulePathInput.trim();
+    if (!resourcePath) return;
+    if (editedRules.groups[groupName][resourcePath]) {
+      alert('This rule already exists for this group');
+      return;
     }
+    editedRules.groups[groupName][resourcePath] = 'allow';
+    addingRuleToGroupName = null;
+    newGroupRulePathInput = '';
+  }
+
+  function cancelAddRuleToGroup() {
+    addingRuleToGroupName = null;
+    newGroupRulePathInput = '';
   }
 
   function removeRuleFromGroup(groupName: string, path: string) {
@@ -550,17 +659,28 @@
 
   // File Groups Management Functions
   function addFileGroup() {
+    addingFileGroupInline = true;
+    newFileGroupNameInput = '';
+  }
+
+  function confirmAddFileGroup() {
     if (!editedRules) return;
-    const groupName = prompt('Enter file group name (e.g., "work", "personal"):');
-    if (groupName) {
-      if (!editedRules.file_groups) editedRules.file_groups = {};
-      // Check for duplicates
-      if (editedRules.file_groups[groupName]) {
-        alert('This file group already exists');
-        return;
-      }
-      editedRules.file_groups[groupName] = [];
+    const groupName = newFileGroupNameInput.trim();
+    if (!groupName) return;
+    if (!editedRules.file_groups) editedRules.file_groups = {};
+    if (editedRules.file_groups[groupName]) {
+      alert('This file group already exists');
+      return;
     }
+    editedRules.file_groups[groupName] = [];
+    editedRules = editedRules;
+    addingFileGroupInline = false;
+    newFileGroupNameInput = '';
+  }
+
+  function cancelAddFileGroup() {
+    addingFileGroupInline = false;
+    newFileGroupNameInput = '';
   }
 
   function removeFileGroup(groupName: string) {
@@ -570,20 +690,26 @@
   }
 
   function addFilePatternToGroup(groupName: string) {
+    addingPatternToFileGroupName = groupName;
+    newFilePatternInput = '';
+  }
+
+  function confirmAddFilePattern(groupName: string) {
     if (!editedRules || !editedRules.file_groups) return;
-    const pattern = prompt('Enter file pattern (e.g., "work_*.json", "personal.json"):');
-    if (pattern) {
-      // Check for duplicates
-      if (editedRules.file_groups[groupName].includes(pattern)) {
-        alert('This pattern already exists in the group');
-        return;
-      }
-      // Use immutable update to trigger Svelte reactivity
-      editedRules.file_groups[groupName] = [
-        ...editedRules.file_groups[groupName],
-        pattern
-      ];
+    const pattern = newFilePatternInput.trim();
+    if (!pattern) return;
+    if (editedRules.file_groups[groupName].includes(pattern)) {
+      alert('This pattern already exists in the group');
+      return;
     }
+    editedRules.file_groups[groupName] = [...editedRules.file_groups[groupName], pattern];
+    addingPatternToFileGroupName = null;
+    newFilePatternInput = '';
+  }
+
+  function cancelAddFilePattern() {
+    addingPatternToFileGroupName = null;
+    newFilePatternInput = '';
   }
 
   function removeFilePatternFromGroup(groupName: string, pattern: string) {
@@ -593,17 +719,28 @@
 
   // AI Scopes Management Functions
   function addAIScope() {
+    addingAIScopeInline = true;
+    newAIScopeNameInput = '';
+  }
+
+  function confirmAddAIScope() {
     if (!editedRules) return;
-    const scopeName = prompt('Enter AI scope name (e.g., "work", "personal"):');
-    if (scopeName) {
-      if (!editedRules.ai_scopes) editedRules.ai_scopes = {};
-      // Check for duplicates
-      if (editedRules.ai_scopes[scopeName]) {
-        alert('This AI scope already exists');
-        return;
-      }
-      editedRules.ai_scopes[scopeName] = {};
+    const scopeName = newAIScopeNameInput.trim();
+    if (!scopeName) return;
+    if (!editedRules.ai_scopes) editedRules.ai_scopes = {};
+    if (editedRules.ai_scopes[scopeName]) {
+      alert('This AI scope already exists');
+      return;
     }
+    editedRules.ai_scopes[scopeName] = {};
+    editedRules = editedRules;
+    addingAIScopeInline = false;
+    newAIScopeNameInput = '';
+  }
+
+  function cancelAddAIScope() {
+    addingAIScopeInline = false;
+    newAIScopeNameInput = '';
   }
 
   function removeAIScope(scopeName: string) {
@@ -613,16 +750,26 @@
   }
 
   function addRuleToAIScope(scopeName: string) {
+    addingRuleToAIScopeName = scopeName;
+    newAIScopeRulePathInput = '@work:*';
+  }
+
+  function confirmAddRuleToAIScope(scopeName: string) {
     if (!editedRules || !editedRules.ai_scopes) return;
-    const resourcePath = prompt('Enter resource path (e.g., @work:*, @personal:*, personal.json:*, device_context.json:*):', '@work:*');
-    if (resourcePath) {
-      // Check for duplicates
-      if (editedRules.ai_scopes[scopeName][resourcePath]) {
-        alert('This rule already exists for this AI scope');
-        return;
-      }
-      editedRules.ai_scopes[scopeName][resourcePath] = 'allow';
+    const resourcePath = newAIScopeRulePathInput.trim();
+    if (!resourcePath) return;
+    if (editedRules.ai_scopes[scopeName][resourcePath]) {
+      alert('This rule already exists for this AI scope');
+      return;
     }
+    editedRules.ai_scopes[scopeName][resourcePath] = 'allow';
+    addingRuleToAIScopeName = null;
+    newAIScopeRulePathInput = '';
+  }
+
+  function cancelAddRuleToAIScope() {
+    addingRuleToAIScopeName = null;
+    newAIScopeRulePathInput = '';
   }
 
   function removeRuleFromAIScope(scopeName: string, path: string) {
@@ -633,17 +780,28 @@
 
   // Device Sharing Management Functions
   function addDeviceSharingPreset() {
+    addingDevicePresetInline = true;
+    newDevicePresetNameInput = '';
+  }
+
+  function confirmAddDevicePreset() {
     if (!editedRules) return;
-    const presetName = prompt('Enter device sharing preset name (e.g., "basic", "compute"):');
-    if (presetName) {
-      if (!editedRules.device_sharing) editedRules.device_sharing = {};
-      // Check for duplicates
-      if (editedRules.device_sharing[presetName]) {
-        alert('This device sharing preset already exists');
-        return;
-      }
-      editedRules.device_sharing[presetName] = {};
+    const presetName = newDevicePresetNameInput.trim();
+    if (!presetName) return;
+    if (!editedRules.device_sharing) editedRules.device_sharing = {};
+    if (editedRules.device_sharing[presetName]) {
+      alert('This device sharing preset already exists');
+      return;
     }
+    editedRules.device_sharing[presetName] = {};
+    editedRules = editedRules;
+    addingDevicePresetInline = false;
+    newDevicePresetNameInput = '';
+  }
+
+  function cancelAddDevicePreset() {
+    addingDevicePresetInline = false;
+    newDevicePresetNameInput = '';
   }
 
   function removeDeviceSharingPreset(presetName: string) {
@@ -653,16 +811,26 @@
   }
 
   function addRuleToDeviceSharingPreset(presetName: string) {
+    addingRuleToDevicePresetName = presetName;
+    newDevicePresetRulePathInput = 'device_context.json:software.os.*';
+  }
+
+  function confirmAddRuleToDevicePreset(presetName: string) {
     if (!editedRules || !editedRules.device_sharing) return;
-    const resourcePath = prompt('Enter resource path (e.g., device_context.json:hardware.gpu.*):','device_context.json:software.os.*');
-    if (resourcePath) {
-      // Check for duplicates
-      if (editedRules.device_sharing[presetName][resourcePath]) {
-        alert('This rule already exists for this preset');
-        return;
-      }
-      editedRules.device_sharing[presetName][resourcePath] = 'allow';
+    const resourcePath = newDevicePresetRulePathInput.trim();
+    if (!resourcePath) return;
+    if (editedRules.device_sharing[presetName][resourcePath]) {
+      alert('This rule already exists for this preset');
+      return;
     }
+    editedRules.device_sharing[presetName][resourcePath] = 'allow';
+    addingRuleToDevicePresetName = null;
+    newDevicePresetRulePathInput = '';
+  }
+
+  function cancelAddRuleToDevicePreset() {
+    addingRuleToDevicePresetName = null;
+    newDevicePresetRulePathInput = '';
   }
 
   function removeRuleFromDeviceSharingPreset(presetName: string, path: string) {
@@ -673,22 +841,33 @@
 
   // File Transfer Management Functions
   function addFileTransferGroup() {
+    addingFileTransferGroupInline = true;
+    newFileTransferGroupNameInput = '';
+  }
+
+  function confirmAddFileTransferGroup() {
     if (!editedRules) return;
-    const groupName = prompt('Enter group name (e.g., friends, colleagues):');
-    if (groupName) {
-      if (!editedRules.file_transfer) editedRules.file_transfer = { groups: {}, nodes: {} };
-      if (!editedRules.file_transfer.groups) editedRules.file_transfer.groups = {};
-      // Check for duplicates
-      if (editedRules.file_transfer.groups[groupName]) {
-        alert('This group already has file transfer settings');
-        return;
-      }
-      editedRules.file_transfer.groups[groupName] = {
-        'file_transfer.allow': 'deny',
-        'file_transfer.max_size_mb': 100,
-        'file_transfer.allowed_mime_types': ['*']
-      };
+    const groupName = newFileTransferGroupNameInput.trim();
+    if (!groupName) return;
+    if (!editedRules.file_transfer) editedRules.file_transfer = { groups: {}, nodes: {} };
+    if (!editedRules.file_transfer.groups) editedRules.file_transfer.groups = {};
+    if (editedRules.file_transfer.groups[groupName]) {
+      alert('This group already has file transfer settings');
+      return;
     }
+    editedRules.file_transfer.groups[groupName] = {
+      'file_transfer.allow': 'deny',
+      'file_transfer.max_size_mb': 100,
+      'file_transfer.allowed_mime_types': ['*']
+    };
+    editedRules = editedRules;
+    addingFileTransferGroupInline = false;
+    newFileTransferGroupNameInput = '';
+  }
+
+  function cancelAddFileTransferGroup() {
+    addingFileTransferGroupInline = false;
+    newFileTransferGroupNameInput = '';
   }
 
   function removeFileTransferGroup(groupName: string) {
@@ -698,25 +877,37 @@
   }
 
   function addFileTransferNode() {
+    addingFileTransferNodeInline = true;
+    newFileTransferNodeIdInput = '';
+  }
+
+  function confirmAddFileTransferNode() {
     if (!editedRules) return;
-    const nodeId = prompt('Enter node ID (e.g., dpc-node-alice-123):');
-    const trimmedNodeId = nodeId?.trim();
-    if (trimmedNodeId && trimmedNodeId.startsWith('dpc-node-')) {
-      if (!editedRules.file_transfer) editedRules.file_transfer = { groups: {}, nodes: {} };
-      if (!editedRules.file_transfer.nodes) editedRules.file_transfer.nodes = {};
-      // Check for duplicates
-      if (editedRules.file_transfer.nodes[trimmedNodeId]) {
-        alert('This node already has file transfer settings');
-        return;
-      }
-      editedRules.file_transfer.nodes[trimmedNodeId] = {
-        'file_transfer.allow': 'deny',
-        'file_transfer.max_size_mb': 100,
-        'file_transfer.allowed_mime_types': ['*']
-      };
-    } else if (nodeId) {
+    const trimmedNodeId = newFileTransferNodeIdInput.trim();
+    if (!trimmedNodeId) return;
+    if (!trimmedNodeId.startsWith('dpc-node-')) {
       alert('Node ID must start with "dpc-node-"');
+      return;
     }
+    if (!editedRules.file_transfer) editedRules.file_transfer = { groups: {}, nodes: {} };
+    if (!editedRules.file_transfer.nodes) editedRules.file_transfer.nodes = {};
+    if (editedRules.file_transfer.nodes[trimmedNodeId]) {
+      alert('This node already has file transfer settings');
+      return;
+    }
+    editedRules.file_transfer.nodes[trimmedNodeId] = {
+      'file_transfer.allow': 'deny',
+      'file_transfer.max_size_mb': 100,
+      'file_transfer.allowed_mime_types': ['*']
+    };
+    editedRules = editedRules;
+    addingFileTransferNodeInline = false;
+    newFileTransferNodeIdInput = '';
+  }
+
+  function cancelAddFileTransferNode() {
+    addingFileTransferNodeInline = false;
+    newFileTransferNodeIdInput = '';
   }
 
   function removeFileTransferNode(nodeId: string) {
@@ -873,7 +1064,23 @@
             <h3>Node Groups</h3>
             <p class="help-text">Define groups of nodes for easier permission management.</p>
 
-            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addNodeGroup}>+ Add Group</button>
+            {#if editMode && editedRules}
+              {#if addingGroupInline}
+                <div class="inline-input-row">
+                  <input
+                    type="text"
+                    class="inline-input"
+                    bind:value={newGroupNameInput}
+                    placeholder="Group name"
+                    on:keydown={handleGroupNameKeydown}
+                  />
+                  <button class="btn-small" on:click={confirmAddGroup}>Add</button>
+                  <button class="btn-small btn-cancel" on:click={cancelAddGroup}>Cancel</button>
+                </div>
+              {:else}
+                <button class="btn btn-add" on:click={addNodeGroup}>+ Add Group</button>
+              {/if}
+            {/if}
 
             <div class="groups-list">
               {#if displayRules?.node_groups}
@@ -899,9 +1106,25 @@
                           <p class="empty-small">No nodes in this group</p>
                         {/each}
 
-                        <button class="btn-small" class:hidden={!editMode} on:click={() => addNodeToGroup(groupName)}>
-                          + Add Node
-                        </button>
+                        {#if editMode}
+                          {#if addingNodeToGroupName === groupName}
+                            <div class="inline-input-row">
+                              <input
+                                type="text"
+                                class="inline-input"
+                                bind:value={newNodeIdInput}
+                                placeholder="dpc-node-..."
+                                on:keydown={e => handleNodeIdKeydown(e, groupName)}
+                              />
+                              <button class="btn-small" on:click={() => confirmAddNode(groupName)}>Add</button>
+                              <button class="btn-small btn-cancel" on:click={cancelAddNode}>Cancel</button>
+                            </div>
+                          {:else}
+                            <button class="btn-small" on:click={() => addNodeToGroup(groupName)}>
+                              + Add Node
+                            </button>
+                          {/if}
+                        {/if}
                       </div>
                     </div>
                   {/if}
@@ -920,7 +1143,15 @@
             <p class="help-text">Define aliases for groups of context files for easier permission management.</p>
 
             {#if editMode && editedRules}
-              <button class="btn btn-add" on:click={addFileGroup}>+ Add File Group</button>
+              {#if addingFileGroupInline}
+                <div class="inline-input-row">
+                  <input type="text" class="inline-input" bind:value={newFileGroupNameInput} placeholder="Group name (e.g. work, personal)" on:keydown={e => { if (e.key === 'Enter') confirmAddFileGroup(); if (e.key === 'Escape') cancelAddFileGroup(); }} />
+                  <button class="btn-small" on:click={confirmAddFileGroup}>Add</button>
+                  <button class="btn-small btn-cancel" on:click={cancelAddFileGroup}>Cancel</button>
+                </div>
+              {:else}
+                <button class="btn btn-add" on:click={addFileGroup}>+ Add File Group</button>
+              {/if}
             {/if}
 
             <div class="groups-list">
@@ -947,9 +1178,19 @@
                           <p class="empty-small">No file patterns in this group</p>
                         {/each}
 
-                        <button class="btn-small" class:hidden={!editMode} on:click={() => addFilePatternToGroup(groupName)}>
-                          + Add Pattern
-                        </button>
+                        {#if editMode}
+                          {#if addingPatternToFileGroupName === groupName}
+                            <div class="inline-input-row">
+                              <input type="text" class="inline-input" bind:value={newFilePatternInput} placeholder="e.g. work_*.json" on:keydown={e => { if (e.key === 'Enter') confirmAddFilePattern(groupName); if (e.key === 'Escape') cancelAddFilePattern(); }} />
+                              <button class="btn-small" on:click={() => confirmAddFilePattern(groupName)}>Add</button>
+                              <button class="btn-small btn-cancel" on:click={cancelAddFilePattern}>Cancel</button>
+                            </div>
+                          {:else}
+                            <button class="btn-small" on:click={() => addFilePatternToGroup(groupName)}>
+                              + Add Pattern
+                            </button>
+                          {/if}
+                        {/if}
                       </div>
                     </div>
                   {/if}
@@ -1205,7 +1446,17 @@
             <h3>AI Scopes</h3>
             <p class="help-text">Control what your local AI can access in different modes (e.g., work mode vs personal mode).</p>
 
-            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addAIScope}>+ Add AI Scope</button>
+            {#if editMode && editedRules}
+              {#if addingAIScopeInline}
+                <div class="inline-input-row">
+                  <input type="text" class="inline-input" bind:value={newAIScopeNameInput} placeholder="Scope name (e.g. work, personal)" on:keydown={e => { if (e.key === 'Enter') confirmAddAIScope(); if (e.key === 'Escape') cancelAddAIScope(); }} />
+                  <button class="btn-small" on:click={confirmAddAIScope}>Add</button>
+                  <button class="btn-small btn-cancel" on:click={cancelAddAIScope}>Cancel</button>
+                </div>
+              {:else}
+                <button class="btn btn-add" on:click={addAIScope}>+ Add AI Scope</button>
+              {/if}
+            {/if}
 
             {#if displayRules?.ai_scopes && Object.keys(displayRules.ai_scopes).length > 0}
               {#each Object.entries(displayRules.ai_scopes) as [scopeName, rules]}
@@ -1245,9 +1496,19 @@
                       {/each}
                     </div>
 
-                    <button class="btn-small" class:hidden={!editMode} on:click={() => addRuleToAIScope(scopeName)} style="margin-top: 0.5rem;">
-                      + Add Rule
-                    </button>
+                    {#if editMode}
+                      {#if addingRuleToAIScopeName === scopeName}
+                        <div class="inline-input-row">
+                          <input type="text" class="inline-input" bind:value={newAIScopeRulePathInput} placeholder="e.g. @work:*, personal.json:*" on:keydown={e => { if (e.key === 'Enter') confirmAddRuleToAIScope(scopeName); if (e.key === 'Escape') cancelAddRuleToAIScope(); }} />
+                          <button class="btn-small" on:click={() => confirmAddRuleToAIScope(scopeName)}>Add</button>
+                          <button class="btn-small btn-cancel" on:click={cancelAddRuleToAIScope}>Cancel</button>
+                        </div>
+                      {:else}
+                        <button class="btn-small" on:click={() => addRuleToAIScope(scopeName)} style="margin-top: 0.5rem;">
+                          + Add Rule
+                        </button>
+                      {/if}
+                    {/if}
                   </div>
                 {/if}
               {/each}
@@ -1267,7 +1528,17 @@
             <h3>Device Sharing Presets</h3>
             <p class="help-text">Define presets for sharing device context information (hardware, software, etc.).</p>
 
-            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addDeviceSharingPreset}>+ Add Preset</button>
+            {#if editMode && editedRules}
+              {#if addingDevicePresetInline}
+                <div class="inline-input-row">
+                  <input type="text" class="inline-input" bind:value={newDevicePresetNameInput} placeholder="Preset name (e.g. basic, compute)" on:keydown={e => { if (e.key === 'Enter') confirmAddDevicePreset(); if (e.key === 'Escape') cancelAddDevicePreset(); }} />
+                  <button class="btn-small" on:click={confirmAddDevicePreset}>Add</button>
+                  <button class="btn-small btn-cancel" on:click={cancelAddDevicePreset}>Cancel</button>
+                </div>
+              {:else}
+                <button class="btn btn-add" on:click={addDeviceSharingPreset}>+ Add Preset</button>
+              {/if}
+            {/if}
 
             {#if displayRules?.device_sharing && Object.keys(displayRules.device_sharing).length > 0}
               {#each Object.entries(displayRules.device_sharing) as [presetName, rules]}
@@ -1307,9 +1578,19 @@
                       {/each}
                     </div>
 
-                    <button class="btn-small" class:hidden={!editMode} on:click={() => addRuleToDeviceSharingPreset(presetName)} style="margin-top: 0.5rem;">
-                      + Add Rule
-                    </button>
+                    {#if editMode}
+                      {#if addingRuleToDevicePresetName === presetName}
+                        <div class="inline-input-row">
+                          <input type="text" class="inline-input" bind:value={newDevicePresetRulePathInput} placeholder="e.g. device_context.json:hardware.gpu.*" on:keydown={e => { if (e.key === 'Enter') confirmAddRuleToDevicePreset(presetName); if (e.key === 'Escape') cancelAddRuleToDevicePreset(); }} />
+                          <button class="btn-small" on:click={() => confirmAddRuleToDevicePreset(presetName)}>Add</button>
+                          <button class="btn-small btn-cancel" on:click={cancelAddRuleToDevicePreset}>Cancel</button>
+                        </div>
+                      {:else}
+                        <button class="btn-small" on:click={() => addRuleToDeviceSharingPreset(presetName)} style="margin-top: 0.5rem;">
+                          + Add Rule
+                        </button>
+                      {/if}
+                    {/if}
                   </div>
                 {/if}
               {/each}
@@ -1332,7 +1613,17 @@
             {#if displayRules?.file_transfer}
               <!-- Group Permissions Section -->
               <h4>Group Permissions</h4>
-              <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addFileTransferGroup}>+ Add Group</button>
+              {#if editMode && editedRules}
+                {#if addingFileTransferGroupInline}
+                  <div class="inline-input-row">
+                    <input type="text" class="inline-input" bind:value={newFileTransferGroupNameInput} placeholder="Group name (e.g. friends, colleagues)" on:keydown={e => { if (e.key === 'Enter') confirmAddFileTransferGroup(); if (e.key === 'Escape') cancelAddFileTransferGroup(); }} />
+                    <button class="btn-small" on:click={confirmAddFileTransferGroup}>Add</button>
+                    <button class="btn-small btn-cancel" on:click={cancelAddFileTransferGroup}>Cancel</button>
+                  </div>
+                {:else}
+                  <button class="btn btn-add" on:click={addFileTransferGroup}>+ Add Group</button>
+                {/if}
+              {/if}
 
               {#if displayRules.file_transfer.groups && Object.keys(displayRules.file_transfer.groups).length > 0}
                 {#each Object.entries(displayRules.file_transfer.groups) as [groupName, groupSettings]}
@@ -1406,7 +1697,17 @@
 
               <!-- Node Permissions Section -->
               <h4>Individual Node Permissions</h4>
-              <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addFileTransferNode}>+ Add Node</button>
+              {#if editMode && editedRules}
+                {#if addingFileTransferNodeInline}
+                  <div class="inline-input-row">
+                    <input type="text" class="inline-input" bind:value={newFileTransferNodeIdInput} placeholder="dpc-node-..." on:keydown={e => { if (e.key === 'Enter') confirmAddFileTransferNode(); if (e.key === 'Escape') cancelAddFileTransferNode(); }} />
+                    <button class="btn-small" on:click={confirmAddFileTransferNode}>Add</button>
+                    <button class="btn-small btn-cancel" on:click={cancelAddFileTransferNode}>Cancel</button>
+                  </div>
+                {:else}
+                  <button class="btn btn-add" on:click={addFileTransferNode}>+ Add Node</button>
+                {/if}
+              {/if}
 
               {#if displayRules.file_transfer.nodes && Object.keys(displayRules.file_transfer.nodes).length > 0}
                 {#each Object.entries(displayRules.file_transfer.nodes) as [nodeId, nodeSettings]}
@@ -1757,7 +2058,17 @@
 
             <!-- Individual Nodes Section -->
             <h4>Individual Nodes</h4>
-            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addNodePermission}>+ Add Node</button>
+            {#if editMode && editedRules}
+              {#if addingPeerNodeInline}
+                <div class="inline-input-row">
+                  <input type="text" class="inline-input" bind:value={newPeerNodeIdInput} placeholder="dpc-node-..." on:keydown={e => { if (e.key === 'Enter') confirmAddNodePermission(); if (e.key === 'Escape') cancelAddNodePermission(); }} />
+                  <button class="btn-small" on:click={confirmAddNodePermission}>Add</button>
+                  <button class="btn-small btn-cancel" on:click={cancelAddNodePermission}>Cancel</button>
+                </div>
+              {:else}
+                <button class="btn btn-add" on:click={addNodePermission}>+ Add Node</button>
+              {/if}
+            {/if}
 
             {#if displayRules?.nodes && Object.keys(displayRules.nodes).length > 0}
               {#each Object.entries(displayRules.nodes) as [nodeId, rules]}
@@ -1797,9 +2108,19 @@
                       {/each}
                     </div>
 
-                    <button class="btn-small" class:hidden={!editMode} on:click={() => addRuleToNode(nodeId)} style="margin-top: 0.5rem;">
-                      + Add Rule
-                    </button>
+                    {#if editMode}
+                      {#if addingRuleToNodeId === nodeId}
+                        <div class="inline-input-row">
+                          <input type="text" class="inline-input" bind:value={newNodeRulePathInput} placeholder="e.g. personal.json:profile.*" on:keydown={e => { if (e.key === 'Enter') confirmAddRuleToNode(nodeId); if (e.key === 'Escape') cancelAddRuleToNode(); }} />
+                          <button class="btn-small" on:click={() => confirmAddRuleToNode(nodeId)}>Add</button>
+                          <button class="btn-small btn-cancel" on:click={cancelAddRuleToNode}>Cancel</button>
+                        </div>
+                      {:else}
+                        <button class="btn-small" on:click={() => addRuleToNode(nodeId)} style="margin-top: 0.5rem;">
+                          + Add Rule
+                        </button>
+                      {/if}
+                    {/if}
                   </div>
                 {/if}
               {/each}
@@ -1809,7 +2130,17 @@
 
             <!-- Group Permissions Section -->
             <h4 style="margin-top: 1.5rem;">Group Permissions</h4>
-            <button class="btn btn-add" class:hidden={!editMode || !editedRules} on:click={addGroupPermission}>+ Add Group</button>
+            {#if editMode && editedRules}
+              {#if addingPeerGroupInline}
+                <div class="inline-input-row">
+                  <input type="text" class="inline-input" bind:value={newPeerGroupNameInput} placeholder="Group name" on:keydown={e => { if (e.key === 'Enter') confirmAddGroupPermission(); if (e.key === 'Escape') cancelAddGroupPermission(); }} />
+                  <button class="btn-small" on:click={confirmAddGroupPermission}>Add</button>
+                  <button class="btn-small btn-cancel" on:click={cancelAddGroupPermission}>Cancel</button>
+                </div>
+              {:else}
+                <button class="btn btn-add" on:click={addGroupPermission}>+ Add Group</button>
+              {/if}
+            {/if}
 
             {#if displayRules?.groups && Object.keys(displayRules.groups).length > 0}
               {#each Object.entries(displayRules.groups) as [groupName, rules]}
@@ -1849,9 +2180,19 @@
                       {/each}
                     </div>
 
-                    <button class="btn-small" class:hidden={!editMode} on:click={() => addRuleToGroup(groupName)} style="margin-top: 0.5rem;">
-                      + Add Rule
-                    </button>
+                    {#if editMode}
+                      {#if addingRuleToGroupName === groupName}
+                        <div class="inline-input-row">
+                          <input type="text" class="inline-input" bind:value={newGroupRulePathInput} placeholder="e.g. personal.json:profile.*" on:keydown={e => { if (e.key === 'Enter') confirmAddRuleToGroup(groupName); if (e.key === 'Escape') cancelAddRuleToGroup(); }} />
+                          <button class="btn-small" on:click={() => confirmAddRuleToGroup(groupName)}>Add</button>
+                          <button class="btn-small btn-cancel" on:click={cancelAddRuleToGroup}>Cancel</button>
+                        </div>
+                      {:else}
+                        <button class="btn-small" on:click={() => addRuleToGroup(groupName)} style="margin-top: 0.5rem;">
+                          + Add Rule
+                        </button>
+                      {/if}
+                    {/if}
                   </div>
                 {/if}
               {/each}
@@ -2232,6 +2573,27 @@
     border: none;
     border-radius: 4px;
     cursor: pointer;
+  }
+
+  .btn-small.btn-cancel {
+    background: #757575;
+  }
+
+  .inline-input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.5rem;
+  }
+
+  .inline-input {
+    flex: 1;
+    padding: 0.25rem 0.5rem;
+    font-size: 0.85rem;
+    border: 1px solid #555;
+    border-radius: 4px;
+    background: #2a2a2a;
+    color: #e0e0e0;
   }
 
   .btn-icon {
