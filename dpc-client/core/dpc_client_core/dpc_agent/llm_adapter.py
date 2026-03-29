@@ -983,6 +983,19 @@ class DpcLlmAdapter:
                 except json.JSONDecodeError:
                     log.debug(f"GLM fallback: failed to parse args for <tool_call>{tool_name}")
 
+        # 5th fallback: <tool_call>tool_name\n{json} (newline separator, no closing tag)
+        # Seen when Z.AI text injection path produces this compact format
+        if not matches:
+            glm_newline_pattern = r'<tool_call>\s*([A-Za-z0-9_-]+)\s*\n(\{.*?\})(?:\s*</tool_call>)?'
+            for tool_name, args_str in re.findall(glm_newline_pattern, content, re.DOTALL):
+                try:
+                    args = json.loads(args_str)
+                    normalized = json.dumps({"name": tool_name, "arguments": args}, ensure_ascii=False)
+                    matches.append(normalized)
+                    log.debug(f"GLM newline fallback: parsed <tool_call>{tool_name}\\n{{json}}")
+                except json.JSONDecodeError:
+                    log.debug(f"GLM newline fallback: failed to parse args for <tool_call>{tool_name}")
+
         for i, match in enumerate(matches):
             try:
                 # Clean up and parse JSON
