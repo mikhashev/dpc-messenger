@@ -158,8 +158,7 @@ def git_log(ctx: ToolContext, path: str = ".", count: int = 10) -> str:
     result = _run_git(ctx, [
         "log",
         f"-{count}",
-        "--oneline",
-        "--decorate",
+        "--format=%C(yellow)%h%C(reset) %C(cyan)%D%C(reset)%n%s%n%b",
         path
     ])
 
