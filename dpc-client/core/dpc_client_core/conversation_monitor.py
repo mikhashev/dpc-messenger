@@ -842,6 +842,38 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         threshold = len(self.participants) * 0.6
         return consensus_count >= threshold
 
+    def _extract_json_object(self, text: str) -> Optional[str]:
+        """Extract the first balanced JSON object from text, handling arbitrary nesting.
+
+        Unlike a simple regex, this correctly handles 3+ levels of nesting so that
+        the outermost JSON object is always returned, not an inner fragment.
+        """
+        start = text.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, char in enumerate(text[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if char == '\\' and in_string:
+                escape_next = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return None  # Unbalanced braces
+
     def _repair_json(self, json_str: str) -> str:
         """Attempt to repair common JSON malformations from LLM responses.
 
@@ -1039,10 +1071,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             result = None
             json_str = None
 
-            # Attempt 1: Try to find JSON object in response (handles markdown wrapping)
-            json_match = re.search(r'\{(?:[^{}]|\{[^{}]*\})*\}', response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
+            # Attempt 1: Extract outermost JSON object with balanced-bracket parser.
+            # Handles arbitrary nesting depth — the old regex only handled 2 levels and
+            # would capture an inner fragment (e.g. the bias section) when the LLM wraps
+            # its output in a 3-level structure like {"analysis": {"entries": [...]}}.
+            json_str = self._extract_json_object(response)
+            if json_str:
                 try:
                     result = json.loads(json_str)
                 except json.JSONDecodeError:
@@ -1078,6 +1112,14 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             extraction_host_name = "local" if not compute_host else compute_host
 
             # Build knowledge entries
+            if not result.get('entries'):
+                logger.warning(
+                    "Knowledge extraction returned no entries for %s. "
+                    "Result keys: %s | Response preview: %.300s",
+                    self.conversation_id,
+                    list(result.keys()),
+                    response,
+                )
             entries = []
             for entry_data in result.get('entries', []):
                 source = KnowledgeSource(

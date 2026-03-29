@@ -607,6 +607,22 @@ Respond in JSON format:
                     proposal.topic, len(proposal.entries), proposal.avg_confidence,
                 )
 
+                if len(proposal.entries) == 0:
+                    logger.warning(
+                        "Skipping empty knowledge proposal for %s "
+                        "(0 entries — likely LLM format mismatch, see earlier warning for details)",
+                        conversation_id,
+                    )
+                    await self.local_api.broadcast_event(
+                        "knowledge_extraction_failed",
+                        {
+                            "conversation_id": conversation_id,
+                            "reason": "no_entries",
+                            "message": "Knowledge extraction returned 0 entries. Try again or check the AI provider.",
+                        },
+                    )
+                    return
+
                 await self.local_api.broadcast_event(
                     "knowledge_commit_proposed",
                     proposal.to_dict(),
