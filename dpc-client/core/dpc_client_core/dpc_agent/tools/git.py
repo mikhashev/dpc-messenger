@@ -87,6 +87,62 @@ def _run_git(ctx: ToolContext, args: List[str], cwd: Optional[str] = None) -> Di
         return {"success": False, "error": f"Git error: {e}"}
 
 
+def _run_git_external(repo_path: str, args: List[str]) -> Dict[str, Any]:
+    """
+    Run a read-only git command in an external (non-sandbox) repository.
+
+    Security requirements:
+    - repo_path must be an absolute path (rejects relative paths and traversal)
+    - repo_path must exist and contain a .git directory
+    - Only called from read-only tools (git_log, git_diff, git_branch, git_checkout)
+
+    Args:
+        repo_path: Absolute path to the external git repository
+        args: Git command arguments
+
+    Returns:
+        Dict with success, output, and error fields
+    """
+    from pathlib import Path
+
+    p = Path(repo_path)
+
+    if not p.is_absolute():
+        return {"success": False, "error": f"repo_path must be an absolute path, got: {repo_path!r}"}
+
+    try:
+        resolved = p.resolve()
+    except Exception as e:
+        return {"success": False, "error": f"Invalid repo_path: {e}"}
+
+    if not resolved.exists():
+        return {"success": False, "error": f"Path does not exist: {resolved}"}
+
+    if not (resolved / ".git").exists():
+        return {"success": False, "error": f"Not a git repository (no .git found): {resolved}"}
+
+    try:
+        result = subprocess.run(
+            ["git"] + args,
+            cwd=str(resolved),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return {
+            "success": result.returncode == 0,
+            "output": result.stdout.strip(),
+            "error": result.stderr.strip() if result.stderr else None,
+            "return_code": result.returncode,
+        }
+    except subprocess.TimeoutExpired:
+        return {"success": False, "error": "Git command timed out (30s)"}
+    except FileNotFoundError:
+        return {"success": False, "error": "Git not found. Please install git."}
+    except Exception as e:
+        return {"success": False, "error": f"Git error: {e}"}
+
+
 def git_status(ctx: ToolContext, path: str = ".") -> str:
     """
     Check git status of a directory.
@@ -110,14 +166,16 @@ def git_status(ctx: ToolContext, path: str = ".") -> str:
     return f"Git status:\n{output}"
 
 
-def git_diff(ctx: ToolContext, path: str = ".", staged: bool = False) -> str:
+def git_diff(ctx: ToolContext, path: str = ".", staged: bool = False, repo_path: Optional[str] = None) -> str:
     """
     View git diff.
 
     Args:
         ctx: Tool context
-        path: Directory or file path
+        path: Directory or file path (relative, within repo)
         staged: Show staged changes
+        repo_path: Optional absolute path to an external git repository.
+                   When provided, runs git diff there instead of the agent sandbox.
 
     Returns:
         Git diff output
@@ -127,7 +185,10 @@ def git_diff(ctx: ToolContext, path: str = ".", staged: bool = False) -> str:
         args.append("--staged")
     args.append(path)
 
-    result = _run_git(ctx, args)
+    if repo_path is not None:
+        result = _run_git_external(repo_path, args)
+    else:
+        result = _run_git(ctx, args)
 
     if not result["success"]:
         return f"⚠️ Git diff failed: {result.get('error', 'Unknown error')}"
@@ -143,24 +204,31 @@ def git_diff(ctx: ToolContext, path: str = ".", staged: bool = False) -> str:
     return f"Git diff:\n{output}"
 
 
-def git_log(ctx: ToolContext, path: str = ".", count: int = 10) -> str:
+def git_log(ctx: ToolContext, path: str = ".", count: int = 10, repo_path: Optional[str] = None) -> str:
     """
     View git log.
 
     Args:
         ctx: Tool context
-        path: Directory path
+        path: File or directory path to filter history (relative, within repo)
         count: Number of commits to show
+        repo_path: Optional absolute path to an external git repository.
+                   When provided, queries history there instead of the agent sandbox.
 
     Returns:
-        Git log output
+        Git log output with full commit subjects and bodies
     """
-    result = _run_git(ctx, [
+    args = [
         "log",
         f"-{count}",
         "--format=%C(yellow)%h%C(reset) %C(cyan)%D%C(reset)%n%s%n%b",
-        path
-    ])
+        path,
+    ]
+
+    if repo_path is not None:
+        result = _run_git_external(repo_path, args)
+    else:
+        result = _run_git(ctx, args)
 
     if not result["success"]:
         return f"⚠️ Git log failed: {result.get('error', 'Unknown error')}"
@@ -169,7 +237,8 @@ def git_log(ctx: ToolContext, path: str = ".", count: int = 10) -> str:
     if not output:
         return "No commits found"
 
-    return f"Git log ({count} most recent):\n{output}"
+    location = repo_path if repo_path is not None else "agent sandbox"
+    return f"Git log ({count} most recent) [{location}]:\n{output}"
 
 
 def git_add(ctx: ToolContext, files: List[str], path: str = ".") -> str:
@@ -236,18 +305,23 @@ def git_commit(ctx: ToolContext, message: str, path: str = ".") -> str:
     return f"Committed: {result['output']}"
 
 
-def git_branch(ctx: ToolContext, path: str = ".") -> str:
+def git_branch(ctx: ToolContext, path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     List git branches.
 
     Args:
         ctx: Tool context
-        path: Repository root
+        path: Repository root (used only for sandbox mode)
+        repo_path: Optional absolute path to an external git repository.
+                   When provided, lists branches there instead of the agent sandbox.
 
     Returns:
         Branch list
     """
-    result = _run_git(ctx, ["branch", "-a"], cwd=path)
+    if repo_path is not None:
+        result = _run_git_external(repo_path, ["branch", "-a"])
+    else:
+        result = _run_git(ctx, ["branch", "-a"], cwd=path)
 
     if not result["success"]:
         return f"⚠️ Git branch failed: {result.get('error', 'Unknown error')}"
@@ -278,7 +352,7 @@ def git_init(ctx: ToolContext, path: str = ".") -> str:
     return f"Initialized git repository in {path}"
 
 
-def git_checkout(ctx: ToolContext, branch: str, create: bool = False, path: str = ".") -> str:
+def git_checkout(ctx: ToolContext, branch: str, create: bool = False, path: str = ".", repo_path: Optional[str] = None) -> str:
     """
     Switch to a branch, or create and switch to a new branch.
 
@@ -286,17 +360,26 @@ def git_checkout(ctx: ToolContext, branch: str, create: bool = False, path: str 
         ctx: Tool context
         branch: Branch name to switch to
         create: If True, create the branch before switching (-b flag)
-        path: Repository root
+        path: Repository root (used only for sandbox mode)
+        repo_path: Optional absolute path to an external git repository.
+                   When provided, switches branches there instead of the agent sandbox.
+                   Note: create=True is not allowed for external repos.
 
     Returns:
         Result message
     """
+    if repo_path is not None and create:
+        return "⚠️ Cannot create new branches in external repositories (create=True not allowed with repo_path)"
+
     args = ["checkout"]
     if create:
         args.append("-b")
     args.append(branch)
 
-    result = _run_git(ctx, args, cwd=path)
+    if repo_path is not None:
+        result = _run_git_external(repo_path, args)
+    else:
+        result = _run_git(ctx, args, cwd=path)
 
     if not result["success"]:
         return f"⚠️ Git checkout failed: {result.get('error', 'Unknown error')}"
@@ -472,19 +555,30 @@ def get_tools() -> List[ToolEntry]:
             name="git_diff",
             schema={
                 "name": "git_diff",
-                "description": "View git diff of changes within the agent sandbox",
+                "description": (
+                    "View git diff of changes. Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to inspect an external repository."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Directory or file path",
+                            "description": "Directory or file path (relative, within repo)",
                             "default": "."
                         },
                         "staged": {
                             "type": "boolean",
                             "description": "Show staged changes instead of unstaged",
                             "default": False
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": (
+                                "Absolute path to an external git repository "
+                                "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
+                                "When provided, runs git diff there instead of the agent sandbox."
+                            )
                         }
                     },
                     "required": []
@@ -498,13 +592,18 @@ def get_tools() -> List[ToolEntry]:
             name="git_log",
             schema={
                 "name": "git_log",
-                "description": "View git commit history within the agent sandbox",
+                "description": (
+                    "View git commit history with full subject and body. "
+                    "Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to inspect an external repository "
+                    "such as the main dpc-messenger repo."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Directory path",
+                            "description": "File or directory path to filter history (relative, within repo)",
                             "default": "."
                         },
                         "count": {
@@ -513,6 +612,14 @@ def get_tools() -> List[ToolEntry]:
                             "default": 10,
                             "minimum": 1,
                             "maximum": 50
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": (
+                                "Absolute path to an external git repository "
+                                "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
+                                "When provided, queries history there instead of the agent sandbox."
+                            )
                         }
                     },
                     "required": []
@@ -588,14 +695,25 @@ def get_tools() -> List[ToolEntry]:
             name="git_branch",
             schema={
                 "name": "git_branch",
-                "description": "List git branches within the agent sandbox",
+                "description": (
+                    "List git branches. Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to inspect an external repository."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Repository root",
+                            "description": "Repository root (used only for sandbox mode)",
                             "default": "."
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": (
+                                "Absolute path to an external git repository "
+                                "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
+                                "When provided, lists branches there instead of the agent sandbox."
+                            )
                         }
                     },
                     "required": []
@@ -630,23 +748,35 @@ def get_tools() -> List[ToolEntry]:
             name="git_checkout",
             schema={
                 "name": "git_checkout",
-                "description": "Switch to a branch or create and switch to a new branch within the agent sandbox",
+                "description": (
+                    "Switch to a branch. Defaults to agent sandbox. "
+                    "Provide repo_path (absolute path) to switch branches in an external repository. "
+                    "Note: create=True is not allowed with repo_path."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "branch": {
                             "type": "string",
-                            "description": "Branch name to switch to (e.g. 'main', 'experiment/new-identity')"
+                            "description": "Branch name to switch to (e.g. 'main', 'refactor/grand')"
                         },
                         "create": {
                             "type": "boolean",
-                            "description": "Create the branch before switching (git checkout -b)",
+                            "description": "Create the branch before switching (git checkout -b). Not allowed with repo_path.",
                             "default": False
                         },
                         "path": {
                             "type": "string",
-                            "description": "Repository root",
+                            "description": "Repository root (used only for sandbox mode)",
                             "default": "."
+                        },
+                        "repo_path": {
+                            "type": "string",
+                            "description": (
+                                "Absolute path to an external git repository "
+                                "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
+                                "When provided, switches branches there instead of the agent sandbox."
+                            )
                         }
                     },
                     "required": ["branch"]
