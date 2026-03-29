@@ -4020,14 +4020,18 @@ class CoreService:
                                             data = _json.load(f)
                                         messages = data.get("messages", [])
                                         logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
-                                        tokens_used = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                                        token_limit = self._resolve_agent_token_limit(conversation_id)
+                                        token_stats = data.get("token_stats", {})
+                                        history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                                        token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
+                                        context_estimated = token_stats.get("context_estimated", 0)
                                         return {
                                             "status": "success",
                                             "messages": messages,
                                             "message_count": len(messages),
-                                            "tokens_used": tokens_used,
-                                            "token_limit": token_limit
+                                            "tokens_used": token_stats.get("current_token_count", history_tokens),
+                                            "token_limit": token_limit,
+                                            "history_tokens": history_tokens,
+                                            "context_estimated": context_estimated,
                                         }
                                     except Exception as e:
                                         logger.error("Failed to load agent history from disk: %s", e)
@@ -4044,15 +4048,19 @@ class CoreService:
                                     data = json.load(f)
                                 messages = data.get("messages", [])
                                 logger.info("Loaded %d messages from disk for %s (agent manager not created yet)", len(messages), conversation_id)
-                                tokens_used = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                                token_limit = self._resolve_agent_token_limit(conversation_id)
+                                token_stats = data.get("token_stats", {})
+                                history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                                token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
+                                context_estimated = token_stats.get("context_estimated", 0)
                                 # Return early with the loaded messages
                                 return {
                                     "status": "success",
                                     "messages": messages,
                                     "message_count": len(messages),
-                                    "tokens_used": tokens_used,
-                                    "token_limit": token_limit
+                                    "tokens_used": token_stats.get("current_token_count", history_tokens),
+                                    "token_limit": token_limit,
+                                    "history_tokens": history_tokens,
+                                    "context_estimated": context_estimated,
                                 }
                             except Exception as e:
                                 logger.error("Failed to load agent history from disk: %s", e)
@@ -4116,12 +4124,20 @@ class CoreService:
             logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
 
             token_usage = monitor.get_token_usage()
+            # history_tokens: dialog-only (chars ÷ 4), same basis as the token counter
+            history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+            # context_estimated: full LLM context from the last request.
+            # For agent monitors, stored in _last_context_estimated.
+            # For local AI monitors, current_token_count = prompt_tokens (already the full context).
+            context_estimated = getattr(monitor, '_last_context_estimated', 0) or token_usage.get("tokens_used", 0)
             return {
                 "status": "success",
                 "messages": messages,
                 "message_count": len(messages),
                 "tokens_used": token_usage.get("tokens_used", 0),
-                "token_limit": token_usage.get("token_limit", 0)
+                "token_limit": token_usage.get("token_limit", 0),
+                "history_tokens": history_tokens,
+                "context_estimated": context_estimated,
             }
 
         except Exception as e:
@@ -6396,7 +6412,9 @@ class CoreService:
                     "conversation_id": conversation_id,
                     "tokens_used": monitor.current_token_count,
                     "token_limit": token_limit,
-                    "usage_percent": usage_percent
+                    "usage_percent": usage_percent,
+                    "history_tokens": session_state.get("history_tokens", 0),
+                    "context_estimated": session_state.get("context_estimated", 0),
                 })
                 logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
                                conversation_id, usage_percent * 100,
@@ -6422,6 +6440,8 @@ class CoreService:
                     "compute_host": "local",
                     "tokens_used": tokens_used,
                     "token_limit": token_limit,
+                    "history_tokens": session_state.get("history_tokens", 0),
+                    "context_estimated": session_state.get("context_estimated", 0),
                     "thinking": thinking_text,
                     "thinking_tokens": thinking_tokens,
                 }
@@ -6701,6 +6721,14 @@ class CoreService:
                 # Using update_token_count(tokens_used) would add prompt+response tokens cumulatively, causing exponential growth
                 monitor.set_token_count(result["prompt_tokens"])
 
+                # Compute breakdown for three-metric token display:
+                # - context_estimated = full assembled prompt (system + contexts + history)
+                # - history_tokens = rough estimate of conversation text only (chars ÷ 4)
+                _context_estimated = result["prompt_tokens"]
+                _history_tokens = sum(
+                    len(msg.get("content", "")) for msg in message_history
+                ) // 4
+
                 # Check if we should warn about approaching limit
                 if monitor.should_suggest_extraction():
                     # Use the current model's max tokens (not the monitor's cached value)
@@ -6712,7 +6740,9 @@ class CoreService:
                         "conversation_id": conversation_id,
                         "tokens_used": monitor.current_token_count,
                         "token_limit": current_limit,
-                        "usage_percent": current_usage_percent
+                        "usage_percent": current_usage_percent,
+                        "history_tokens": _history_tokens,
+                        "context_estimated": _context_estimated,
                     })
                     logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
                                  conversation_id, current_usage_percent * 100,
@@ -6722,6 +6752,8 @@ class CoreService:
                 response_payload["tokens_used"] = monitor.current_token_count  # Cumulative conversation tokens
                 response_payload["token_limit"] = result.get("model_max_tokens", 0)
                 response_payload["this_query_tokens"] = result["tokens_used"]  # Per-query tokens (for debugging)
+                response_payload["history_tokens"] = _history_tokens
+                response_payload["context_estimated"] = _context_estimated
 
         except Exception as e:
             logger.error("Error during inference: %s", e, exc_info=True)

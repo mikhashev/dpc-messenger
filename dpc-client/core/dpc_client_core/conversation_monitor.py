@@ -1778,6 +1778,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "last_updated": datetime.now(timezone.utc).isoformat(),
                 "message_count": len(self.message_history),
                 "history_hash": self.compute_history_hash(),
+                "token_stats": {
+                    "current_token_count": self.current_token_count,
+                    "token_limit": self.token_limit,
+                    "context_estimated": getattr(self, '_last_context_estimated', 0),
+                },
                 "messages": self.message_history
             }
 
@@ -1833,6 +1838,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 m.get("id") for m in messages
                 if m.get("id")
             }
+
+            # Restore token stats so the UI token counter shows correct values after restart
+            token_stats = data.get("token_stats", {})
+            if token_stats:
+                self.current_token_count = token_stats.get("current_token_count", self.current_token_count)
+                self.token_limit = token_stats.get("token_limit", self.token_limit)
+                self._last_context_estimated = token_stats.get("context_estimated", 0)
 
             self._history_dirty = False
             logger.info(f"Loaded {len(messages)} messages from {path}")

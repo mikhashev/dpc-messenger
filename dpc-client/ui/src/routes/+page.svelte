@@ -225,7 +225,7 @@
   );
 
   // Token tracking state (Phase 2)
-  let tokenUsageMap = $state(new Map<string, {used: number, limit: number}>());
+  let tokenUsageMap = $state(new Map<string, {used: number, limit: number, historyTokens?: number, contextEstimated?: number}>());
   let showTokenWarning = $state(false);
   let tokenWarningMessage = $state("");
 
@@ -1412,7 +1412,8 @@
   // Reactive: Handle token warnings (Phase 2)
   $effect(() => {
     if ($tokenWarning) {
-      const {conversation_id, tokens_used, token_limit, usage_percent} = $tokenWarning;
+      const {conversation_id, tokens_used, token_limit, usage_percent,
+             history_tokens, context_estimated} = $tokenWarning;
 
       // Guard: Only update if values actually changed (prevent infinite loop)
       const existing = tokenUsageMap.get(conversation_id);
@@ -1422,7 +1423,12 @@
 
       // Update token usage map
       tokenUsageMap = new Map(tokenUsageMap);
-      tokenUsageMap.set(conversation_id, {used: tokens_used, limit: token_limit});
+      tokenUsageMap.set(conversation_id, {
+        used: tokens_used,
+        limit: token_limit,
+        historyTokens: history_tokens ?? 0,
+        contextEstimated: context_estimated ?? 0,
+      });
 
       // Show warning toast
       showTokenWarning = true;
@@ -1437,7 +1443,9 @@
   // Use effective limit (default if not yet set by backend)
   let effectiveTokenUsage = $derived({
     used: currentTokenUsage.used,
-    limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT
+    limit: currentTokenUsage.limit > 0 ? currentTokenUsage.limit : DEFAULT_TOKEN_LIMIT,
+    historyTokens: currentTokenUsage.historyTokens ?? 0,
+    contextEstimated: currentTokenUsage.contextEstimated ?? 0,
   });
 
   // Reactive: Estimate token usage including current input (real-time feedback)
@@ -1566,7 +1574,12 @@
               // Update token counter with restored history token counts
               if (result.tokens_used !== undefined && result.token_limit !== undefined && result.token_limit > 0) {
                 tokenUsageMap = new Map(tokenUsageMap);
-                tokenUsageMap.set(activeChatId, { used: result.tokens_used, limit: result.token_limit });
+                tokenUsageMap.set(activeChatId, {
+                  used: result.tokens_used,
+                  limit: result.token_limit,
+                  historyTokens: result.history_tokens ?? 0,
+                  contextEstimated: result.context_estimated ?? 0,
+                });
               }
 
               // Remove from loading AFTER chatHistories update completes
@@ -1609,7 +1622,12 @@
             const result = await sendCommand('get_conversation_history', { conversation_id: activeChatId });
             if (result.tokens_used !== undefined && result.token_limit !== undefined && result.token_limit > 0) {
               tokenUsageMap = new Map(tokenUsageMap);
-              tokenUsageMap.set(activeChatId, { used: result.tokens_used, limit: result.token_limit });
+              tokenUsageMap.set(activeChatId, {
+                used: result.tokens_used,
+                limit: result.token_limit,
+                historyTokens: result.history_tokens ?? 0,
+                contextEstimated: result.context_estimated ?? 0,
+              });
               console.log(`[ChatHistory] Token counter refreshed for ${activeChatId.slice(0,20)}: ${result.tokens_used}/${result.token_limit}`);
             }
           } catch (e) {
@@ -4170,7 +4188,9 @@
           tokenUsageMap = new Map(tokenUsageMap);
           tokenUsageMap.set(chatId, {
             used: message.payload.tokens_used,
-            limit: message.payload.token_limit
+            limit: message.payload.token_limit,
+            historyTokens: message.payload.history_tokens ?? 0,
+            contextEstimated: message.payload.context_estimated ?? 0,
           });
         }
 
@@ -4619,6 +4639,8 @@
             tokenLimit={effectiveTokenUsage.limit}
             estimatedTokens={estimatedUsage.estimated}
             showEstimation={estimatedUsage.isEstimated}
+            historyTokens={effectiveTokenUsage.historyTokens ?? 0}
+            contextEstimated={effectiveTokenUsage.contextEstimated ?? 0}
             bind:enableMarkdown
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}

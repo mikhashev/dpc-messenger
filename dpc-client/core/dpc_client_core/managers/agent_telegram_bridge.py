@@ -1046,7 +1046,9 @@ Send a voice message and it will be transcribed and processed\\.
                     "conversation_id": conversation_id,
                     "tokens_used": tokens_used,
                     "token_limit": token_limit,
-                    "usage_percent": usage_percent
+                    "usage_percent": usage_percent,
+                    "history_tokens": tokens_used,  # for agent, current_token_count = history_tokens
+                    "context_estimated": getattr(monitor, '_last_context_estimated', 0),
                 })
                 log.warning(f"[_broadcast_history_to_ui] Token Warning - {conversation_id}: "
                             f"{usage_percent * 100:.1f}% of context window used ({tokens_used}/{token_limit})")

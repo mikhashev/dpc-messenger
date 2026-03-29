@@ -12,6 +12,8 @@
     tokenLimit = 0,
     estimatedTokens = 0,
     showEstimation = false,
+    historyTokens = 0,
+    contextEstimated = 0,
     enableMarkdown = $bindable(true),
     onNewSession,
     onEndSession
@@ -24,6 +26,8 @@
     tokenLimit?: number;
     estimatedTokens?: number;
     showEstimation?: boolean;
+    historyTokens?: number;
+    contextEstimated?: number;
     enableMarkdown?: boolean;
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
@@ -42,8 +46,15 @@
     effectiveLimit > 0 ? (totalTokens / effectiveLimit) : 0
   );
 
+  // Three-metric display (shown when context_estimated is available from backend)
+  let showThreeMetrics = $derived(contextEstimated > 0);
+  let staticMemory = $derived(showThreeMetrics ? contextEstimated - historyTokens : 0);
+  let dialogAvailable = $derived(showThreeMetrics ? effectiveLimit - staticMemory : effectiveLimit);
+  let dialogPercent = $derived(dialogAvailable > 0 ? historyTokens / dialogAvailable : 0);
+  let totalContextPercent = $derived(effectiveLimit > 0 ? contextEstimated / effectiveLimit : 0);
+
   let showWarning = $derived(
-    tokenUsagePercent >= 0.8
+    showThreeMetrics ? totalContextPercent >= 0.8 : tokenUsagePercent >= 0.8
   );
 
   // End session is disabled only for P2P chats when peer is offline
@@ -60,22 +71,40 @@
 </script>
 
 {#if isAIChat}
-  <div class="token-counter">
-    <span
-      class="token-value"
-      title={showEstimation && estimatedTokens > 0
-        ? "Estimate includes current input (4 chars ≈ 1 token, excludes contexts)"
-        : ""}
-    >
-      {#if showEstimation && estimatedTokens > 0}
-        {tokenUsed.toLocaleString()} + ~{estimatedTokens.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
-      {:else}
-        {tokenUsed.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
-      {/if}
-    </span>
-    <span class="token-percentage" class:warning={showWarning}>
-      ({Math.round(tokenUsagePercent * 100)}%)
-    </span>
+  <div class="token-counter" class:token-counter--detailed={showThreeMetrics}>
+    {#if showThreeMetrics}
+      <div class="token-row">
+        <span class="token-label">Dialog</span>
+        <span class="token-value">{historyTokens.toLocaleString()} / {dialogAvailable.toLocaleString()}</span>
+        <span class="token-percentage" class:warning={dialogPercent >= 0.8}>({Math.round(dialogPercent * 100)}%)</span>
+      </div>
+      <div class="token-row">
+        <span class="token-label">Total</span>
+        <span class="token-value">{contextEstimated.toLocaleString()} / {effectiveLimit.toLocaleString()}</span>
+        <span class="token-percentage" class:warning={totalContextPercent >= 0.8}>({Math.round(totalContextPercent * 100)}%)</span>
+      </div>
+      <div class="token-row token-row--muted" title="System prompt + contexts + tool schemas">
+        <span class="token-label">Static</span>
+        <span class="token-value">~{staticMemory.toLocaleString()}</span>
+        <span class="token-percentage"></span>
+      </div>
+    {:else}
+      <span
+        class="token-value"
+        title={showEstimation && estimatedTokens > 0
+          ? "Estimate includes current input (4 chars ≈ 1 token, excludes contexts)"
+          : ""}
+      >
+        {#if showEstimation && estimatedTokens > 0}
+          {tokenUsed.toLocaleString()} + ~{estimatedTokens.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
+        {:else}
+          {tokenUsed.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
+        {/if}
+      </span>
+      <span class="token-percentage" class:warning={showWarning}>
+        ({Math.round(tokenUsagePercent * 100)}%)
+      </span>
+    {/if}
     {#if showWarning}
       <span class="warning-label">
         ⚠️ Approaching limit
@@ -118,6 +147,36 @@
     background: #f8f9fa;
     border-radius: 6px;
     border: 1px solid #e0e0e0;
+  }
+
+  .token-counter--detailed {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.2rem;
+  }
+
+  .token-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .token-label {
+    font-family: 'Courier New', monospace;
+    color: #888;
+    font-size: 0.75rem;
+    font-weight: 500;
+    min-width: 3.2rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .token-row--muted .token-value {
+    color: #aaa;
+  }
+
+  .token-row--muted .token-label {
+    color: #bbb;
   }
 
   .token-value {
