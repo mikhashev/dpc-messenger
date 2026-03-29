@@ -33,6 +33,16 @@ class ProposeNewSessionHandler(MessageHandler):
         # Forward to session manager
         await self.service.session_manager.handle_proposal_message(sender_node_id, payload)
 
+        # Relay to group members that can't reach the proposer directly (star topology)
+        conversation_id = payload.get("conversation_id", "")
+        if conversation_id.startswith("group-"):
+            dedup_key = f"ses:{proposal_id}"
+            if dedup_key not in self.service._processed_message_ids:
+                self.service._processed_message_ids.add(dedup_key)
+                await self._relay_to_group(
+                    "PROPOSE_NEW_SESSION", payload, sender_node_id, conversation_id
+                )
+
         return None
 
 
@@ -66,6 +76,17 @@ class VoteNewSessionHandler(MessageHandler):
 
         # Forward to session manager
         await self.service.session_manager.handle_vote_message(sender_node_id, payload)
+
+        # Relay to group members that can't reach the voter directly (star topology)
+        session = self.service.session_manager.active_sessions.get(proposal_id)
+        conversation_id = session.proposal.conversation_id if session else ""
+        if conversation_id and conversation_id.startswith("group-"):
+            dedup_key = f"sev:{proposal_id}:{sender_node_id}"
+            if dedup_key not in self.service._processed_message_ids:
+                self.service._processed_message_ids.add(dedup_key)
+                await self._relay_to_group(
+                    "VOTE_NEW_SESSION", payload, sender_node_id, conversation_id
+                )
 
         return None
 
@@ -118,5 +139,14 @@ class NewSessionResultHandler(MessageHandler):
         # Broadcast event to UI (add sender_node_id for frontend conversation lookup)
         ui_payload = {**payload, "sender_node_id": sender_node_id}
         await self.service.local_api.broadcast_event("new_session_result", ui_payload)
+
+        # Relay to group members that can't reach the result sender directly (star topology)
+        if conversation_id and conversation_id.startswith("group-"):
+            dedup_key = f"ser:{proposal_id}"
+            if dedup_key not in self.service._processed_message_ids:
+                self.service._processed_message_ids.add(dedup_key)
+                await self._relay_to_group(
+                    "NEW_SESSION_RESULT", payload, sender_node_id, conversation_id
+                )
 
         return None

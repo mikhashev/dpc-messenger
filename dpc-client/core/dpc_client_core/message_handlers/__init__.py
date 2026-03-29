@@ -48,5 +48,26 @@ class MessageHandler(ABC):
         """Command name this handler responds to."""
         pass
 
+    async def _relay_to_group(
+        self, command: str, payload: Dict[str, Any],
+        sender_node_id: str, group_id: str
+    ) -> None:
+        """Relay message to group members the sender can't reach directly (star topology)."""
+        group = self.service.group_manager.get_group(group_id)
+        if not group:
+            return
+        relay_msg = {"command": command, "payload": payload}
+        for member_id in group.members:
+            if member_id == self.service.p2p_manager.node_id:
+                continue
+            if member_id == sender_node_id:
+                continue
+            if member_id in self.service.p2p_manager.peers:
+                try:
+                    await self.service.p2p_manager.send_message_to_peer(member_id, relay_msg)
+                    self.logger.debug("Relayed %s to %s", command, member_id[:20])
+                except Exception as e:
+                    self.logger.error("Failed to relay %s to %s: %s", command, member_id[:20], e)
+
 
 __all__ = ["MessageHandler"]

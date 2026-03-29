@@ -1557,14 +1557,19 @@
                     senderName = msg.role === 'user' ? 'You' : getPeerDisplayName(activeChatId);
                   }
 
+                  const stableId = msg.message_id || `backend-${index}-${Date.now()}`;
                   return {
-                    id: `backend-${index}-${Date.now()}`,
+                    id: stableId,
                     sender: sender,
                     senderName: senderName,
                     text: msg.content,
                     timestamp: timestamp,
                     attachments: msg.attachments || []
                   };
+                });
+                // Populate processedMessageIds so real-time events for these messages are deduped
+                loadedMessages.forEach((m: any) => {
+                  if (m.id && !m.id.startsWith('backend-')) processedMessageIds.add(m.id);
                 });
                 newMap.set(activeChatId, loadedMessages);
                 console.log(`[ChatHistory] Updated chatHistories with ${loadedMessages.length} messages`);
@@ -1993,18 +1998,30 @@
             if (response.status === 'success' && response.messages?.length > 0) {
               console.log(`[GroupHistorySync] Loaded ${response.messages.length} messages from backend`);
 
-              // Update chatHistories store
+              // Update chatHistories store (merge to preserve real-time messages not yet in backend)
               chatHistories.update(map => {
                 const newMap = new Map(map);
-                const syncedMessages = response.messages.map((msg: any, index: number) => ({
-                  id: msg.id || `synced-${index}-${Date.now()}`,
-                  sender: msg.node_id || (msg.role === 'user' ? 'user' : syncedGroupId),
-                  senderName: msg.display_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(msg.node_id || syncedGroupId)),
-                  text: msg.content || msg.text,
-                  timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
-                  attachments: msg.attachments || []
-                }));
-                newMap.set(syncedGroupId, syncedMessages);
+                const syncedMessages = response.messages.map((msg: any, index: number) => {
+                  const stableId = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
+                  return {
+                    id: stableId,
+                    sender: msg.sender_node_id || msg.node_id || (msg.role === 'user' ? 'user' : syncedGroupId),
+                    senderName: msg.sender_name || msg.display_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(msg.sender_node_id || msg.node_id || syncedGroupId)),
+                    text: msg.content || msg.text,
+                    timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
+                    attachments: msg.attachments || []
+                  };
+                });
+                // Populate processedMessageIds so real-time duplicates are ignored
+                syncedMessages.forEach((m: any) => {
+                  if (m.id && !m.id.startsWith('synced-')) processedMessageIds.add(m.id);
+                });
+                // Merge: keep frontend-only messages not yet in backend
+                const backendIds = new Set(syncedMessages.map((m: any) => m.id).filter(Boolean));
+                const existingMsgs = map.get(syncedGroupId) || [];
+                const frontendOnly = existingMsgs.filter((m: any) => m.id && !backendIds.has(m.id));
+                const merged = [...syncedMessages, ...frontendOnly].sort((a: any, b: any) => a.timestamp - b.timestamp);
+                newMap.set(syncedGroupId, merged);
                 return newMap;
               });
 
@@ -4223,7 +4240,7 @@
       }
 
       // Cleanup old processed IDs to prevent memory leak
-      if (processedMessageIds.size > 100) {
+      if (processedMessageIds.size > 500) {
         const firstId = processedMessageIds.values().next().value;
         if (firstId) {
           processedMessageIds.delete(firstId);
@@ -4317,7 +4334,7 @@
         })();
       }
 
-      if (processedMessageIds.size > 100) {
+      if (processedMessageIds.size > 500) {
         const firstId = processedMessageIds.values().next().value;
         if (firstId) {
           processedMessageIds.delete(firstId);
@@ -4356,7 +4373,7 @@
           autoScroll();
         }
 
-        if (processedMessageIds.size > 100) {
+        if (processedMessageIds.size > 500) {
           const firstId = processedMessageIds.values().next().value;
           if (firstId) processedMessageIds.delete(firstId);
         }
@@ -4396,7 +4413,7 @@
           autoScroll();
         }
 
-        if (processedMessageIds.size > 100) {
+        if (processedMessageIds.size > 500) {
           const firstId = processedMessageIds.values().next().value;
           if (firstId) processedMessageIds.delete(firstId);
         }

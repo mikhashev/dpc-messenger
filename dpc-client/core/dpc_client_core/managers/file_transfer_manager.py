@@ -669,10 +669,13 @@ class FileTransferManager:
         # Save file - use screenshots subdirectory for images
         subdir = "files/screenshots" if is_image else "files"
 
-        # v0.21.0: Store group files in group's conversation folder
+        # Store group files in group's conversation folder (slug path from ConversationMonitor)
         if transfer.group_id:
-            # Group file: store in group's conversation folder
-            storage_path = self.storage_base_path / transfer.group_id / subdir
+            if self.service and hasattr(self.service, '_get_or_create_conversation_monitor'):
+                group_monitor = self.service._get_or_create_conversation_monitor(transfer.group_id)
+                storage_path = group_monitor._get_conversation_dir() / subdir
+            else:
+                storage_path = self.storage_base_path / transfer.group_id / subdir
             storage_path.mkdir(parents=True, exist_ok=True)
         else:
             # P2P file: store in peer's conversation folder
@@ -822,6 +825,39 @@ class FileTransferManager:
                     group_id=transfer.group_id
                 )
             )
+
+        # Relay group file to connected members that couldn't reach the original sender (star topology)
+        if (transfer.group_id and save_to_disk and file_path and file_path.exists()
+                and self.service and hasattr(self.service, 'group_manager')):
+            relay_key = f"relay:{transfer.transfer_id}"
+            if relay_key not in self.service._processed_message_ids:
+                self.service._processed_message_ids.add(relay_key)
+                group = self.service.group_manager.get_group(transfer.group_id)
+                if group:
+                    for member_id in group.members:
+                        if member_id == self.p2p_manager.node_id:
+                            continue
+                        if member_id == node_id:  # skip original sender
+                            continue
+                        if member_id in self.p2p_manager.peers:
+                            try:
+                                import asyncio
+                                asyncio.create_task(self.send_file(
+                                    node_id=member_id,
+                                    file_path=file_path,
+                                    group_id=transfer.group_id,
+                                    image_metadata=transfer.image_metadata,
+                                    voice_metadata=transfer.voice_metadata,
+                                ))
+                                logger.info(
+                                    "Relayed group %s %s to %s",
+                                    "voice" if is_voice else "image" if is_image else "file",
+                                    transfer.filename, member_id[:20]
+                                )
+                            except Exception as e:
+                                logger.error(
+                                    "Failed to relay group file to %s: %s", member_id[:20], e
+                                )
 
         # Cleanup (chunk_data will be freed when transfer is deleted)
         del self.active_transfers[transfer.transfer_id]  # Remove from active transfers

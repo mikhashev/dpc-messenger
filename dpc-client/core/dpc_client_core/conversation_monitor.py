@@ -282,6 +282,12 @@ class ConversationMonitor:
                        self.conversation_id, self.conversation_id)
             return (self.conversation_id, self.last_model, None)  # Peer compute fallback
 
+        # PRIORITY 2b: Use last known compute host (works for group and P2P conversations)
+        if self.last_compute_host:
+            logger.info("Monitor %s: Using last_compute_host %s for knowledge extraction",
+                       self.conversation_id, self.last_compute_host)
+            return (self.last_compute_host, self.last_model, self.last_provider)
+
         # PRIORITY 3: Final fallback - try local anyway (will fail gracefully if no providers)
         logger.warning("Monitor %s: No inference provider available for knowledge extraction",
                       self.conversation_id)

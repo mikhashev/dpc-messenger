@@ -3579,7 +3579,8 @@ class CoreService:
 
                 # 11. Update conversation monitor with transcribed text (v0.15.1 fix)
                 # This ensures proposals include the actual transcription instead of placeholder
-                monitor = self._get_or_create_conversation_monitor(node_id)
+                monitor_key = group_id if group_id else node_id
+                monitor = self._get_or_create_conversation_monitor(monitor_key)
                 if monitor:
                     # Find and update Message objects in buffer with transcription
                     for message_list in [monitor.message_buffer, monitor.full_conversation]:
@@ -3736,13 +3737,16 @@ class CoreService:
             transcription_data: Transcription result
             group_id: If set, fan-out to all group members (v0.19.0)
         """
+        payload_data = {
+            "transfer_id": transfer_id,
+            "transcription_text": transcription_data.get("text", ""),
+            **transcription_data
+        }
+        if group_id:
+            payload_data["group_id"] = group_id  # Needed for relay and monitor lookup
         message = {
             "command": "VOICE_TRANSCRIPTION",
-            "payload": {
-                "transfer_id": transfer_id,
-                "transcription_text": transcription_data.get("text", ""),
-                **transcription_data
-            }
+            "payload": payload_data,
         }
 
         if group_id and hasattr(self, 'group_manager'):
@@ -4115,7 +4119,8 @@ class CoreService:
             for msg in history:
                 message_dict = {
                     "role": msg["role"],
-                    "content": msg["content"]
+                    "content": msg["content"],
+                    "message_id": msg.get("id"),  # Expose stable ID for frontend dedup
                 }
                 # Add timestamp if present (v0.15.3)
                 if "timestamp" in msg:
@@ -4794,8 +4799,9 @@ class CoreService:
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 filename = f"screenshot_{timestamp}.{extension}"
 
-            # Save image once (use group_id in path)
-            group_files_dir = DPC_HOME_DIR / "conversations" / group_id / "files" / "screenshots"
+            # Save image once (use slug folder so path matches conversation monitor's directory)
+            _group_monitor = self._get_or_create_conversation_monitor(group_id)
+            group_files_dir = _group_monitor._get_conversation_dir() / "files" / "screenshots"
             group_files_dir.mkdir(parents=True, exist_ok=True)
             file_path = group_files_dir / filename
             if file_path.exists():
@@ -4908,7 +4914,9 @@ class CoreService:
             extension = mime_type.split("/")[-1].split(";")[0].strip()
             audio_filename = f"voice_{timestamp}.{extension}"
 
-            group_files_dir = DPC_HOME_DIR / "conversations" / group_id / "files"
+            # Use slug folder so path matches conversation monitor's directory
+            _group_monitor = self._get_or_create_conversation_monitor(group_id)
+            group_files_dir = _group_monitor._get_conversation_dir() / "files"
             group_files_dir.mkdir(parents=True, exist_ok=True)
             file_path = group_files_dir / audio_filename
             if file_path.exists():

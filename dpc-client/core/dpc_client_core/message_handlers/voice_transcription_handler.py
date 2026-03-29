@@ -34,6 +34,7 @@ class VoiceTranscriptionHandler(MessageHandler):
         language = payload.get("language", "unknown")
         timestamp = payload.get("timestamp")
         remote_provider_node_id = payload.get("remote_provider_node_id")  # Optional
+        group_id = payload.get("group_id")  # Present for group voice messages (v0.21.0+)
 
         # 1.5. Validate transcription is not empty (v0.13.3+ - prevent empty/malicious transcriptions)
         transcription_text = transcription_text.strip()
@@ -78,7 +79,9 @@ class VoiceTranscriptionHandler(MessageHandler):
 
         # 3. Update conversation history with transcription
         # Find the voice message in conversation history and attach transcription
-        conversation_monitor = self.service.conversation_monitors.get(sender_node_id)
+        # For group voice messages, key on group_id not sender_node_id
+        monitor_key = group_id if group_id else sender_node_id
+        conversation_monitor = self.service.conversation_monitors.get(monitor_key)
         if conversation_monitor:
             # A. Update message_history attachments (existing code)
             for message in conversation_monitor.message_history:
@@ -109,6 +112,13 @@ class VoiceTranscriptionHandler(MessageHandler):
             "node_id": sender_node_id,
             **transcription_data
         })
+
+        # 5. Relay to group members that can't reach the transcriber directly (star topology)
+        if group_id:
+            dedup_key = f"vt:{transfer_id}"
+            if dedup_key not in self.service._processed_message_ids:
+                self.service._processed_message_ids.add(dedup_key)
+                await self._relay_to_group("VOICE_TRANSCRIPTION", payload, sender_node_id, group_id)
 
         self.logger.debug(f"Processed VOICE_TRANSCRIPTION for {transfer_id}")
         return None
