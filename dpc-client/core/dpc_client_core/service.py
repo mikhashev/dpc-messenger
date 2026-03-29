@@ -6384,7 +6384,8 @@ class CoreService:
 
             # Get token usage from the agent monitor (set during process_message)
             session_state = agent_manager.get_session_state(conversation_id)
-            tokens_used = session_state.get("tokens_used", 0)
+            # "history_tokens" is the canonical key (renamed from "tokens_used" in agent_manager)
+            tokens_used = session_state.get("history_tokens", session_state.get("tokens_used", 0))
             token_limit = session_state.get("tokens_limit", 128000)
 
             # Token warning — mirror the same threshold check as local AI chat

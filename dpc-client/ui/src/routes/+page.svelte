@@ -4144,7 +4144,8 @@
         });
 
         // Update token usage map with data from response (Phase 2)
-        if (message.status === "OK" && message.payload.tokens_used && message.payload.token_limit) {
+        // Use !== undefined (not truthiness) so tokens_used=0 still updates the counter
+        if (message.status === "OK" && message.payload.tokens_used !== undefined && message.payload.token_limit) {
           tokenUsageMap = new Map(tokenUsageMap);
           tokenUsageMap.set(chatId, {
             used: message.payload.tokens_used,
