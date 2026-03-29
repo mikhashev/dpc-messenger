@@ -53,8 +53,17 @@
   let dialogPercent = $derived(dialogAvailable > 0 ? historyTokens / dialogAvailable : 0);
   let totalContextPercent = $derived(effectiveLimit > 0 ? contextEstimated / effectiveLimit : 0);
 
+  let dialogWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
+    ? historyTokens + estimatedTokens
+    : historyTokens);
+  let totalWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
+    ? contextEstimated + estimatedTokens
+    : contextEstimated);
+  let dialogPercentWithInput = $derived(dialogAvailable > 0 ? dialogWithInput / dialogAvailable : 0);
+  let totalContextPercentWithInput = $derived(effectiveLimit > 0 ? totalWithInput / effectiveLimit : 0);
+
   let showWarning = $derived(
-    showThreeMetrics ? totalContextPercent >= 0.8 : tokenUsagePercent >= 0.8
+    showThreeMetrics ? totalContextPercentWithInput >= 0.8 : tokenUsagePercent >= 0.8
   );
 
   // End session is disabled only for P2P chats when peer is offline
@@ -75,13 +84,13 @@
     {#if showThreeMetrics}
       <div class="token-row">
         <span class="token-label">Dialog</span>
-        <span class="token-value">{historyTokens.toLocaleString()} / {dialogAvailable.toLocaleString()}</span>
-        <span class="token-percentage" class:warning={dialogPercent >= 0.8}>({Math.round(dialogPercent * 100)}%)</span>
+        <span class="token-value">{historyTokens.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {dialogAvailable.toLocaleString()}</span>
+        <span class="token-percentage" class:warning={dialogPercentWithInput >= 0.8}>({Math.round(dialogPercentWithInput * 100)}%)</span>
       </div>
       <div class="token-row">
         <span class="token-label">Total</span>
-        <span class="token-value">{contextEstimated.toLocaleString()} / {effectiveLimit.toLocaleString()}</span>
-        <span class="token-percentage" class:warning={totalContextPercent >= 0.8}>({Math.round(totalContextPercent * 100)}%)</span>
+        <span class="token-value">{contextEstimated.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}</span>
+        <span class="token-percentage" class:warning={totalContextPercentWithInput >= 0.8}>({Math.round(totalContextPercentWithInput * 100)}%)</span>
       </div>
       <div class="token-row token-row--muted" title="System prompt + contexts + tool schemas">
         <span class="token-label">Static</span>
