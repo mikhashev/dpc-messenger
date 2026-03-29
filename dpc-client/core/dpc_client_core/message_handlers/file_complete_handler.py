@@ -119,21 +119,33 @@ class FileCompleteHandler(MessageHandler):
             }
 
             if transfer.group_id:
-                message_event["group_id"] = transfer.group_id
-                await self.service.local_api.broadcast_event("group_file_received", message_event)
+                # Dedup: for group sends, one transfer per recipient all complete separately.
+                # Only show in UI and add to history once (on the first FILE_COMPLETE).
+                ui_dedup_key = f"group_file_ui:{transfer.group_id}:{transfer.filename}"
+                if ui_dedup_key not in self.service._processed_message_ids:
+                    self.service._processed_message_ids.add(ui_dedup_key)
+                    message_event["group_id"] = transfer.group_id
+                    await self.service.local_api.broadcast_event("group_file_received", message_event)
+
+                    monitor_key = transfer.group_id
+                    conversation_monitor = self.service._get_or_create_conversation_monitor(monitor_key)
+                    if conversation_monitor:
+                        file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
+                        message_content = f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
+                        conversation_monitor.add_message("user", message_content, [attachment])
+                        self.logger.debug(f"Added sent {file_type} to conversation history: {transfer.filename}")
+                else:
+                    self.logger.debug(f"Group file UI already shown for {transfer.filename}, skipping duplicate")
             else:
                 await self.service.local_api.broadcast_event("new_p2p_message", message_event)
 
-            # Add to conversation history (SENDER SIDE)
-            # Create monitor if it doesn't exist (in case user sends voice/file before making AI query)
-            # For group transfers, key on group_id; for P2P, key on sender_node_id
-            monitor_key = transfer.group_id if transfer.group_id else sender_node_id
-            conversation_monitor = self.service._get_or_create_conversation_monitor(monitor_key)
-            if conversation_monitor:
-                file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
-                message_content = f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
-                conversation_monitor.add_message("user", message_content, [attachment])
-                self.logger.debug(f"Added sent {file_type} to conversation history: {transfer.filename}")
+                # Add to conversation history (SENDER SIDE, P2P only — group handled above)
+                conversation_monitor = self.service._get_or_create_conversation_monitor(sender_node_id)
+                if conversation_monitor:
+                    file_type = 'screenshot' if is_image else ('voice message' if is_voice else 'file')
+                    message_content = f"Sent {file_type}: {transfer.filename} ({size_mb} MB)"
+                    conversation_monitor.add_message("user", message_content, [attachment])
+                    self.logger.debug(f"Added sent {file_type} to conversation history: {transfer.filename}")
 
             # Auto-transcribe if sender_transcribes enabled (v0.13.2+)
             if is_voice:

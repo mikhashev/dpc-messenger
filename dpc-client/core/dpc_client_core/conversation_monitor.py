@@ -1000,14 +1000,16 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                         except Exception as local_error:
                             logger.error("Local inference fallback also failed: %s", local_error)
 
-                    # Case 2: Local failed (or wasn't configured), try remote as fallback for peer conversations
-                    elif not compute_host and self.conversation_id.startswith("dpc-node-"):
-                        logger.warning("Local inference failed, trying remote inference as fallback: %s", primary_error)
+                    # Case 2: Local failed (or wasn't configured), try remote as fallback
+                    # Works for peer conversations (dpc-node-) and group conversations (last_compute_host set)
+                    elif not compute_host and (self.conversation_id.startswith("dpc-node-") or self.last_compute_host):
+                        remote_host = self.last_compute_host or self.conversation_id
+                        logger.warning("Local inference failed, trying remote compute %s as fallback: %s", remote_host[:20], primary_error)
                         fallback_attempted = True
                         try:
                             inference_result = await self.ai_query_func(
                                 prompt=prompt,
-                                compute_host=self.conversation_id,  # Try peer compute
+                                compute_host=remote_host,
                                 model=self.last_model,
                                 provider=None
                             )

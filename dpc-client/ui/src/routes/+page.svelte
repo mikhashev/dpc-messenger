@@ -1987,8 +1987,9 @@
       const messageCount = $groupHistorySynced.message_count || 0;
       console.log(`[GroupHistorySync] Group ${syncedGroupId} synced with ${messageCount} messages`);
 
-      // Only reload if this is the active chat
-      if (activeChatId === syncedGroupId && messageCount > 0) {
+      // Only reload if this is the active chat AND backend has more messages than we do
+      const existingCount = $chatHistories.get(syncedGroupId)?.length || 0;
+      if (activeChatId === syncedGroupId && messageCount > existingCount) {
         console.log(`[GroupHistorySync] Reloading history for active group ${syncedGroupId}`);
 
         // Load history from backend (async IIFE to allow await in reactive statement)
