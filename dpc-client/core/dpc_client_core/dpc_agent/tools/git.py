@@ -204,7 +204,7 @@ def git_diff(ctx: ToolContext, path: str = ".", staged: bool = False, repo_path:
     return f"Git diff:\n{output}"
 
 
-def git_log(ctx: ToolContext, path: str = ".", count: int = 10, repo_path: Optional[str] = None) -> str:
+def git_log(ctx: ToolContext, path: str = ".", count: int = 10, repo_path: Optional[str] = None, branch: Optional[str] = None) -> str:
     """
     View git log.
 
@@ -214,16 +214,15 @@ def git_log(ctx: ToolContext, path: str = ".", count: int = 10, repo_path: Optio
         count: Number of commits to show
         repo_path: Optional absolute path to an external git repository.
                    When provided, queries history there instead of the agent sandbox.
+        branch: Optional branch (or any ref) to query. Reads the current branch when omitted.
 
     Returns:
         Git log output with full commit subjects and bodies
     """
-    args = [
-        "log",
-        f"-{count}",
-        "--format=%C(yellow)%h%C(reset) %C(cyan)%D%C(reset)%n%s%n%b",
-        path,
-    ]
+    args = ["log", f"-{count}", "--format=%C(yellow)%h%C(reset) %C(cyan)%D%C(reset)%n%s%n%b"]
+    if branch:
+        args.append(branch)
+    args.append(path)
 
     if repo_path is not None:
         result = _run_git_external(repo_path, args)
@@ -238,7 +237,8 @@ def git_log(ctx: ToolContext, path: str = ".", count: int = 10, repo_path: Optio
         return "No commits found"
 
     location = repo_path if repo_path is not None else "agent sandbox"
-    return f"Git log ({count} most recent) [{location}]:\n{output}"
+    ref = branch or "current branch"
+    return f"Git log ({count} most recent, {ref}) [{location}]:\n{output}"
 
 
 def git_add(ctx: ToolContext, files: List[str], path: str = ".") -> str:
@@ -619,6 +619,14 @@ def get_tools() -> List[ToolEntry]:
                                 "Absolute path to an external git repository "
                                 "(e.g. 'C:\\\\Users\\\\mike\\\\Documents\\\\dpc-messenger'). "
                                 "When provided, queries history there instead of the agent sandbox."
+                            )
+                        },
+                        "branch": {
+                            "type": "string",
+                            "description": (
+                                "Branch or ref to query (e.g. 'main', 'refactor/grand', 'HEAD~5'). "
+                                "Reads the currently checked-out branch when omitted. "
+                                "Use this instead of git_checkout to inspect any branch without switching."
                             )
                         }
                     },
