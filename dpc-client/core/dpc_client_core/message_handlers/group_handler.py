@@ -96,6 +96,29 @@ class GroupTextHandler(MessageHandler):
             for mid in to_remove:
                 self.service._processed_message_ids.discard(mid)
 
+        # Relay to group members the sender may not be directly connected to.
+        # In a star topology (B↔A↔C, but B↛C), A must relay B's message to C.
+        # Dedup key already set above prevents relay loops.
+        group = self.service.group_manager.get_group(group_id)
+        if group:
+            relay_msg = {"command": "GROUP_TEXT", "payload": payload}
+            for member_id in group.members:
+                if member_id == self.service.p2p_manager.node_id:
+                    continue  # Skip self
+                if member_id == sender_node_id:
+                    continue  # Skip original sender
+                if member_id in self.service.p2p_manager.peers:
+                    try:
+                        await self.service.p2p_manager.send_message_to_peer(member_id, relay_msg)
+                        self.logger.debug(
+                            "Relayed GROUP_TEXT %s from %s to %s",
+                            message_id[:8], sender_node_id[:20], member_id[:20]
+                        )
+                    except Exception as e:
+                        self.logger.error(
+                            "Failed to relay group message to %s: %s", member_id[:20], e
+                        )
+
         # Use sender-provided timestamp if available (v0.20.0)
         timestamp = payload.get("timestamp", datetime.now(timezone.utc).isoformat())
 
