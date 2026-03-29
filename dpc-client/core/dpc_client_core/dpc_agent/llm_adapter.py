@@ -996,6 +996,20 @@ class DpcLlmAdapter:
                 except json.JSONDecodeError:
                     log.debug(f"GLM newline fallback: failed to parse args for <tool_call>{tool_name}")
 
+        # 6th fallback: <tool_call>tool_name arguments={json} (equals sign separator)
+        # Seen in GLM output: <tool_call>list_extended_sandbox_paths arguments={}
+        # Multiple calls may be separated by --- on its own line
+        if not matches:
+            glm_equals_pattern = r'<tool_call>\s*([A-Za-z0-9_-]+)\s+arguments\s*=\s*(\{.*?\})'
+            for tool_name, args_str in re.findall(glm_equals_pattern, content, re.DOTALL):
+                try:
+                    args = json.loads(args_str)
+                    normalized = json.dumps({"name": tool_name, "arguments": args}, ensure_ascii=False)
+                    matches.append(normalized)
+                    log.debug(f"GLM equals fallback: parsed <tool_call>{tool_name} arguments={{...}}")
+                except json.JSONDecodeError:
+                    log.debug(f"GLM equals fallback: failed to parse args for <tool_call>{tool_name}")
+
         for i, match in enumerate(matches):
             try:
                 # Clean up and parse JSON
