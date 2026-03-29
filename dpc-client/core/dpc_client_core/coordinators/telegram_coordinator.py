@@ -380,7 +380,8 @@ class TelegramBridge:
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
                     auto_detect=self.service.auto_knowledge_detection_enabled,
-                    instruction_set_name=self.service.instruction_set.default
+                    instruction_set_name=self.service.instruction_set.default,
+                    display_name=sender_name,
                 )
                 self.service.conversation_monitors[conversation_id] = monitor
 
@@ -616,7 +617,8 @@ class TelegramBridge:
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
                     auto_detect=self.service.auto_knowledge_detection_enabled,
-                    instruction_set_name=self.service.instruction_set.default
+                    instruction_set_name=self.service.instruction_set.default,
+                    display_name=sender_name,
                 )
                 self.service.conversation_monitors[conversation_id] = monitor
 
@@ -727,7 +729,8 @@ class TelegramBridge:
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
                     auto_detect=self.service.auto_knowledge_detection_enabled,
-                    instruction_set_name=self.service.instruction_set.default
+                    instruction_set_name=self.service.instruction_set.default,
+                    display_name=sender_name,
                 )
                 self.service.conversation_monitors[conversation_id] = monitor
 
@@ -837,7 +840,8 @@ class TelegramBridge:
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
                     auto_detect=self.service.auto_knowledge_detection_enabled,
-                    instruction_set_name=self.service.instruction_set.default
+                    instruction_set_name=self.service.instruction_set.default,
+                    display_name=sender_name,
                 )
                 self.service.conversation_monitors[conversation_id] = monitor
 
@@ -948,7 +952,8 @@ class TelegramBridge:
                     settings=self.service.settings,
                     ai_query_func=self.service.send_ai_query,
                     auto_detect=self.service.auto_knowledge_detection_enabled,
-                    instruction_set_name=self.service.instruction_set.default
+                    instruction_set_name=self.service.instruction_set.default,
+                    display_name=sender_name,
                 )
                 self.service.conversation_monitors[conversation_id] = monitor
 

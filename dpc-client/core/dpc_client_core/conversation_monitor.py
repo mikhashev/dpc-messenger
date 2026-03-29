@@ -54,7 +54,8 @@ class ConversationMonitor:
         settings = None,  # Settings instance (optional, for config like cultural_perspectives_enabled)
         ai_query_func = None,  # Callable for AI queries (supports both local and remote inference)
         auto_detect: bool = True,  # Enable/disable automatic detection
-        instruction_set_name: str = "general"  # NEW: Which instruction set to use for this conversation
+        instruction_set_name: str = "general",  # NEW: Which instruction set to use for this conversation
+        display_name: str = None,  # Human-readable name appended to folder (e.g. "Work", "Mike MacOS")
     ):
         """Initialize conversation monitor
 
@@ -68,8 +69,10 @@ class ConversationMonitor:
                           If provided, enables remote inference for knowledge detection.
             auto_detect: If True, automatically detect and propose commits. If False, only buffer messages for manual extraction.
             instruction_set_name: Key of the instruction set to use for AI queries in this conversation (default: "general")
+            display_name: Optional human-readable label appended to the conversation folder name for easy navigation
         """
         self.conversation_id = conversation_id
+        self.display_name = display_name
         self.participants = participants
         self.llm_manager = llm_manager
         self.knowledge_threshold = knowledge_threshold
@@ -1631,13 +1634,44 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
     # --- Conversation History Persistence (v0.21.0: Unified storage) ---
 
+    @staticmethod
+    def _slugify(name: str) -> str:
+        """Convert a display name to a filesystem-safe slug."""
+        import re
+        slug = name.lower()
+        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+        slug = re.sub(r'\s+', '-', slug)
+        slug = re.sub(r'-+', '-', slug).strip('-')
+        return slug[:20]
+
+    def _get_folder_name(self) -> str:
+        """Return the folder name for this conversation, with display_name suffix if set."""
+        if self.display_name:
+            slug = self._slugify(self.display_name)
+            if slug:
+                return f"{self.conversation_id}-{slug}"
+        return self.conversation_id
+
     def _get_conversation_dir(self) -> Path:
         """Get the conversation folder path.
 
         Returns:
-            Path to ~/.dpc/conversations/{conversation_id}/
+            Path to ~/.dpc/conversations/{conversation_id}-{slug}/
+            Falls back to ~/.dpc/conversations/{conversation_id}/ if no display_name.
+            Auto-migrates old unnamed folder to new named folder on first access.
         """
-        return Path.home() / ".dpc" / "conversations" / self.conversation_id
+        base = Path.home() / ".dpc" / "conversations"
+        folder = self._get_folder_name()
+        new_dir = base / folder
+        old_dir = base / self.conversation_id
+        if folder != self.conversation_id and old_dir.exists() and not new_dir.exists():
+            try:
+                old_dir.rename(new_dir)
+                logger.info("Renamed conversation folder: %s → %s", old_dir.name, new_dir.name)
+            except Exception as e:
+                logger.warning("Could not rename conversation folder %s: %s", old_dir.name, e)
+                return old_dir
+        return new_dir
 
     def _get_history_path(self) -> Path:
         """Get path to history file for this conversation

@@ -222,6 +222,14 @@ class KnowledgeService:
                     },
                 ]
 
+            # Determine display_name for readable folder suffix
+            if conversation_id.startswith("group-"):
+                display_name = group.name if group else None
+            elif not conversation_id.startswith(("local_ai", "ai_", "agent-")):
+                display_name = self.peer_metadata.get(conversation_id, {}).get("name") or None
+            else:
+                display_name = None
+
             self.conversation_monitors[conversation_id] = ConversationMonitor(
                 conversation_id=conversation_id,
                 participants=participants,
@@ -231,6 +239,7 @@ class KnowledgeService:
                 ai_query_func=self._send_ai_query,
                 auto_detect=self.auto_knowledge_detection_enabled,
                 instruction_set_name=instruction_set_name or self.instruction_set.default,
+                display_name=display_name,
             )
 
             # Load persisted history from disk — only for group chats
