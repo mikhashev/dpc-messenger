@@ -115,19 +115,26 @@ class DpcAgentProvider(AIProvider):
         from dpc_client_core.managers.agent_manager import DpcAgentManager
         from dpc_client_core.dpc_agent.utils import load_agent_config
 
-        # Load per-agent config to pick up compute_host (remote LLM peer)
+        # Load per-agent config to pick up compute_host, provider_alias, context_window
         agent_file_config = load_agent_config(agent_id) or {}
         compute_host = agent_file_config.get("compute_host", "")
+        provider_alias = agent_file_config.get("provider_alias", "")
+        context_window = agent_file_config.get("context_window")
 
         # Create new manager for this agent
         logger.debug(f"DpcAgentProvider '{self.alias}': Creating new manager for agent '{agent_id}'")
-        manager = DpcAgentManager(self._service, {
+        manager_config = {
             "tools": self.enabled_tools,
             "background_consciousness": self.background_consciousness,
             "budget_usd": self.budget_usd,
             "max_rounds": self.max_rounds,
             "compute_host": compute_host,
-        }, agent_id=agent_id)  # Pass agent_id for per-agent configuration
+        }
+        if provider_alias:
+            manager_config["provider_alias"] = provider_alias
+        if context_window:
+            manager_config["context_window"] = int(context_window)
+        manager = DpcAgentManager(self._service, manager_config, agent_id=agent_id)  # Pass agent_id for per-agent configuration
 
         # Cache for reuse
         self._managers[agent_id] = manager
