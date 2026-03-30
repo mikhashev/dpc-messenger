@@ -70,8 +70,8 @@
       // Special display for dpc_agent: show underlying provider
       let displayText = `${p.alias} (${p.model}) - local`;
       if (p.alias === 'dpc_agent') {
-        if (selectedComputeHost !== 'local' && agentLlmProvider) {
-          // Remote-host agent: show the actual remote LLM provider being used
+        if (agentLlmProvider) {
+          // Show the actual LLM provider configured for this agent (local or remote)
           displayText = `Agent (uses ${agentLlmProvider})`;
         } else {
           const underlying = defaultProviders?.agent_provider || defaultProviders?.default_provider;

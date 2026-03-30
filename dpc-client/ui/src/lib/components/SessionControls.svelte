@@ -94,7 +94,7 @@
       </div>
       <div class="token-row token-row--muted" title="System prompt + contexts + tool schemas">
         <span class="token-label">Static</span>
-        <span class="token-value">~{staticMemory.toLocaleString()}</span>
+        <span class="token-value">≈{staticMemory.toLocaleString()}</span>
         <span class="token-percentage"></span>
       </div>
     {:else}
