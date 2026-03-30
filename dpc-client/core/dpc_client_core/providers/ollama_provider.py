@@ -12,7 +12,8 @@ logger = logging.getLogger(__name__)
 
 # Vision-capable Ollama models (for auto-detection)
 OLLAMA_VISION_MODELS = [
-    "qwen3-vl",         # Qwen3-VL (all variants: 2b, 4b, 8b, 30b, etc.)
+    "qwen3.5",          # Qwen3.5 family — all sizes (0.8b-122b) are natively multimodal
+    "qwen3-vl",         # Qwen3-VL dedicated vision variants
     "llava",            # LLaVA variants
     "llama3.2-vision",  # Llama 3.2 vision models
     "ministral-3",      # Ministral 3 vision models (3b, 8b, 14b)
@@ -25,6 +26,7 @@ OLLAMA_VISION_MODELS = [
 OLLAMA_THINKING_MODELS = [
     "deepseek-r1",      # DeepSeek R1 (all variants)
     "deepseek-reasoner",
+    "qwen3",            # Qwen3 family (3b, 8b, 14b, 30b, 32b, 235b) — native think param
 ]
 
 
@@ -32,6 +34,7 @@ class OllamaProvider(AIProvider):
     def __init__(self, alias: str, config: Dict[str, Any]):
         super().__init__(alias, config)
         self.client = ollama.AsyncClient(host=config.get("host"))
+        self._last_thinking: Optional[str] = None
 
     def supports_vision(self) -> bool:
         """Check if this Ollama model supports vision/multimodal inputs."""
@@ -42,6 +45,7 @@ class OllamaProvider(AIProvider):
         return any(tm in self.model.lower() for tm in OLLAMA_THINKING_MODELS)
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
+        self._last_thinking = None  # clear from previous call
         try:
             message = {'role': 'user', 'content': prompt}
 
@@ -55,20 +59,29 @@ class OllamaProvider(AIProvider):
             if temp != 0.7:  # Only pass if non-default to avoid unnecessary API params
                 options["temperature"] = temp
 
-            # Add a timeout to the request
+            # Timeout: configurable via providers.json "timeout" field (default 300s).
+            # Large models (9B+) can take >60s for initial VRAM load on first query.
+            timeout = self.config.get("timeout", 300.0)
+
             response = await asyncio.wait_for(
                 self.client.chat(
                     model=self.model,
                     messages=[message],
-                    options=options if options else None
+                    options=options if options else None,
+                    think=True if self.supports_thinking() else None,
                 ),
-                timeout=60.0 # 60 second timeout
+                timeout=timeout
             )
+            self._last_thinking = response['message'].thinking
             return response['message']['content']
         except asyncio.TimeoutError:
-            raise RuntimeError(f"Ollama provider '{self.alias}' timed out after 60 seconds.")
+            raise RuntimeError(f"Ollama provider '{self.alias}' timed out after {timeout}s.")
         except Exception as e:
             raise RuntimeError(f"Ollama provider '{self.alias}' failed: {e}") from e
+
+    def get_last_thinking(self) -> Optional[str]:
+        """Return thinking content from the most recent generate_response call."""
+        return self._last_thinking
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
         """
@@ -115,20 +128,22 @@ class OllamaProvider(AIProvider):
             if self.config.get("context_window"):
                 options["num_ctx"] = self.config["context_window"]
 
-            # Vision queries may take longer - use configurable timeout
-            timeout = kwargs.get("timeout", 120.0)  # Default 120s for vision
+            # Vision queries may take longer; respect provider config timeout first
+            timeout = kwargs.get("timeout", self.config.get("timeout", 300.0))
 
             response = await asyncio.wait_for(
                 self.client.chat(
                     model=self.model,
                     messages=[message],
-                    options=options if options else None
+                    options=options if options else None,
+                    think=True if self.supports_thinking() else None,
                 ),
                 timeout=timeout
             )
+            self._last_thinking = response['message'].thinking
             return response['message']['content']
         except asyncio.TimeoutError:
-            raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {kwargs.get('timeout', 120)}s.")
+            raise RuntimeError(f"Ollama vision query '{self.alias}' timed out after {timeout}s.")
         except Exception as e:
             raise RuntimeError(f"Ollama vision API failed for '{self.alias}': {e}") from e
 

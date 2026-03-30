@@ -57,10 +57,11 @@ class TokenCountManager:
         # Mistral family - use public Instruct variant
         "mistral": "mistralai/Mistral-7B-Instruct-v0.2",
         "mixtral": "mistralai/Mistral-7B-Instruct-v0.2",
-        # Qwen family - publicly accessible
-        "qwen": "Qwen/Qwen-7B",
-        "qwen2": "Qwen/Qwen2-7B",
+        # Qwen family - more-specific prefixes must precede shorter ones (startswith matching)
+        "qwen3": "Qwen/Qwen2.5-7B",    # Qwen3/3.5 uses Qwen2.5 tokenizer; no trust_remote_code
         "qwen2.5": "Qwen/Qwen2.5-7B",
+        "qwen2": "Qwen/Qwen2-7B",
+        "qwen": "Qwen/Qwen2-7B",        # Legacy Qwen1 → Qwen2 tokenizer (no trust_remote_code)
         # Gemma - use smaller public variant
         "gemma": "google/gemma-2b",
         # Phi - publicly accessible
