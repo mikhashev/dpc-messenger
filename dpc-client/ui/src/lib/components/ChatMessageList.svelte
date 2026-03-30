@@ -1,4 +1,4 @@
-<!-- ChatPanel.svelte - Extracted chat window component -->
+<!-- ChatMessageList.svelte - Extracted chat window component -->
 <!-- Displays message history with auto-scroll, attachments, and markdown support -->
 
 <script lang="ts">
@@ -101,7 +101,7 @@
   // Debug: Log when progress props change
   $effect(() => {
     if (agentProgressTool || agentProgressMessage) {
-      console.log(`[ChatPanel] Progress props: tool=${agentProgressTool}, msg=${agentProgressMessage?.substring(0,50)}, round=${agentProgressRound}`);
+      console.log(`[ChatMessageList] Progress props: tool=${agentProgressTool}, msg=${agentProgressMessage?.substring(0,50)}, round=${agentProgressRound}`);
     }
   });
 

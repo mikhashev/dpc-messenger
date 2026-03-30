@@ -18,7 +18,7 @@
   import Toast from "$lib/components/Toast.svelte";
   import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
   import ImageMessage from "$lib/components/ImageMessage.svelte";
-  import ChatPanel from "$lib/components/ChatPanel.svelte";
+  import ChatMessageList from "$lib/components/ChatMessageList.svelte";
   import SessionControls from "$lib/components/SessionControls.svelte";
   import TelegramStatus from "$lib/components/TelegramStatus.svelte";
   import FileTransferUI from "$lib/components/FileTransferUI.svelte";
@@ -4666,7 +4666,7 @@
         {/if}
       </div>
 
-      <ChatPanel
+      <ChatMessageList
         messages={activeMessages}
         conversationId={activeChatId}
         bind:enableMarkdown
