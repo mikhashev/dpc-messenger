@@ -1486,6 +1486,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         self._history_dirty = False
         self.peer_context_hashes = {}
         self.current_token_count = 0
+        self._last_context_estimated = 0  # reset so token counter shows 0 on fresh session
         self.message_buffer = []
         self.knowledge_score = 0.0
         # Clear peer context caches
