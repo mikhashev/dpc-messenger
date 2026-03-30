@@ -579,7 +579,16 @@ class DpcAgentManager:
 
             # Store full context estimate from this request so next request's session_state
             # can expose it. One request stale, but accurate — context grows incrementally.
-            if hasattr(agent, '_last_cap_info') and agent._last_cap_info:
+            # Prefer accurate token count from LLM adapter (first_prompt_tokens = round-1 context
+            # before tool results inflate it); fall back to chars/4 estimate from cap_info.
+            if hasattr(agent, '_last_usage') and agent._last_usage:
+                accurate = (agent._last_usage.get("first_prompt_tokens")
+                            or agent._last_usage.get("prompt_tokens", 0))
+                if accurate:
+                    monitor._last_context_estimated = accurate
+                elif hasattr(agent, '_last_cap_info') and agent._last_cap_info:
+                    monitor._last_context_estimated = agent._last_cap_info.get("estimated_tokens_before", 0)
+            elif hasattr(agent, '_last_cap_info') and agent._last_cap_info:
                 monitor._last_context_estimated = agent._last_cap_info.get("estimated_tokens_before", 0)
 
             # Update token count in monitor after agent response.
@@ -588,10 +597,18 @@ class DpcAgentManager:
             # This excludes constant overhead (system prompt, tool schemas, agent memory) so the
             # counter reflects only the growing conversation portion, consistent with the intent
             # of the local AI chat token counter.
-            conversation_tokens = sum(
-                len(msg.get("content", "") or "")
+            # Use accurate tokenizer if available (via agent's LLM adapter).
+            _history_text = " ".join(
+                msg.get("content", "") or ""
                 for msg in monitor.message_history
-            ) // 4
+            )
+            _token_counter = getattr(getattr(agent, 'llm_adapter', None), '_token_counter', None)
+            _model_name = (getattr(agent.llm_adapter, 'default_model', lambda: None)()
+                           if hasattr(agent, 'llm_adapter') else None)
+            if _token_counter and _model_name and _history_text:
+                conversation_tokens = _token_counter.count_tokens(_history_text, _model_name)
+            else:
+                conversation_tokens = len(_history_text) // 4
             if conversation_tokens:
                 llm_manager = getattr(self.service, "llm_manager", None)
                 if llm_manager:
