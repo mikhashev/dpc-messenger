@@ -30,6 +30,7 @@
   import GroupPanel from "$lib/panels/GroupPanel.svelte";
   import TelegramPanel from "$lib/panels/TelegramPanel.svelte";
   import MessageRouterPanel from "$lib/panels/MessageRouterPanel.svelte";
+  import HistorySyncPanel from "$lib/panels/HistorySyncPanel.svelte";
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
 
@@ -1024,108 +1025,7 @@
 
 
   // Voice transcription effects moved to VoicePanel.svelte (Step 6)
-  // Reactive: Handle chat history restored (v0.11.2)
-  $effect(() => {
-    if ($historyRestored) {
-      console.log(`Restoring ${$historyRestored.message_count} messages to chat with ${$historyRestored.conversation_id}`);
-
-      // Update chatHistories store - convert backend format to UI format
-      chatHistories.update(map => {
-        const newMap = new Map(map);
-        const restoredMessages = $historyRestored.messages.map((msg: any, index: number) => ({
-          id: `restored-${index}-${Date.now()}`,
-          sender: msg.role === 'user' ? 'user' : $historyRestored.conversation_id,
-          senderName: msg.role === 'user' ? 'You' : getPeerDisplayName($historyRestored.conversation_id),
-          text: msg.content,
-          timestamp: Date.now() - ($historyRestored.messages.length - index) * 1000,  // Stagger timestamps
-          attachments: msg.attachments || []
-        }));
-        newMap.set($historyRestored.conversation_id, restoredMessages);
-        return newMap;
-      });
-
-      // Scroll to bottom after restoring history
-      setTimeout(() => {
-        if (chatWindow) {
-          chatWindow.scrollTop = chatWindow.scrollHeight;
-        }
-      }, 100);
-
-      // Show success toast
-      agentToastMessage = `✓ Chat history restored: ${$historyRestored.message_count} messages`;
-      agentToastType = 'info';
-      showAgentToast = true;
-      setTimeout(() => showAgentToast = false, 3000);
-    }
-  });
-
-  // Reactive: Handle group history synced (v0.20.0) - reload when P2P sync completes
-  $effect(() => {
-    if ($groupHistorySynced && $groupHistorySynced.group_id) {
-      const syncedGroupId = $groupHistorySynced.group_id;
-      const messageCount = $groupHistorySynced.message_count || 0;
-      console.log(`[GroupHistorySync] Group ${syncedGroupId} synced with ${messageCount} messages`);
-
-      // Only reload if this is the active chat AND backend has more messages than we do
-      const existingCount = $chatHistories.get(syncedGroupId)?.length || 0;
-      if (activeChatId === syncedGroupId && messageCount > existingCount) {
-        console.log(`[GroupHistorySync] Reloading history for active group ${syncedGroupId}`);
-
-        // Load history from backend (async IIFE to allow await in reactive statement)
-        (async () => {
-          try {
-            const response = await sendCommand('get_conversation_history', { conversation_id: syncedGroupId });
-            if (response.status === 'success' && response.messages?.length > 0) {
-              console.log(`[GroupHistorySync] Loaded ${response.messages.length} messages from backend`);
-
-              // Update chatHistories store (merge to preserve real-time messages not yet in backend)
-              chatHistories.update(map => {
-                const newMap = new Map(map);
-                const syncedMessages = response.messages.map((msg: any, index: number) => {
-                  const stableId = msg.message_id || msg.id || `synced-${index}-${Date.now()}`;
-                  return {
-                    id: stableId,
-                    sender: msg.sender_node_id || msg.node_id || (msg.role === 'user' ? 'user' : syncedGroupId),
-                    senderName: msg.sender_name || msg.display_name || (msg.role === 'user' ? 'You' : getPeerDisplayName(msg.sender_node_id || msg.node_id || syncedGroupId)),
-                    text: msg.content || msg.text,
-                    timestamp: new Date(msg.timestamp).getTime() || Date.now() - (response.messages.length - index) * 1000,
-                    attachments: msg.attachments || []
-                  };
-                });
-                // Populate processedMessageIds so real-time duplicates are ignored
-                syncedMessages.forEach((m: any) => {
-                  if (m.id && !m.id.startsWith('synced-')) processedMessageIds.add(m.id);
-                });
-                // Merge: keep frontend-only messages not yet in backend
-                const backendIds = new Set(syncedMessages.map((m: any) => m.id).filter(Boolean));
-                const existingMsgs = map.get(syncedGroupId) || [];
-                const frontendOnly = existingMsgs.filter((m: any) => m.id && !backendIds.has(m.id));
-                const merged = [...syncedMessages, ...frontendOnly].sort((a: any, b: any) => a.timestamp - b.timestamp);
-                newMap.set(syncedGroupId, merged);
-                return newMap;
-              });
-
-              // Show success toast
-              agentToastMessage = `✓ Group history synced: ${response.messages.length} messages`;
-              agentToastType = 'info';
-              showAgentToast = true;
-              setTimeout(() => showAgentToast = false, 3000);
-
-              // Scroll to bottom
-              setTimeout(() => {
-                if (chatWindow) {
-                  chatWindow.scrollTop = chatWindow.scrollHeight;
-                }
-              }, 100);
-            }
-          } catch (err: any) {
-            console.error('[GroupHistorySync] Error loading synced history:', err);
-          }
-        })();
-      }
-    }
-  });
-
+  // historyRestored + groupHistorySynced effects moved to HistorySyncPanel.svelte (Step 8)
 
   // Reactive: Reset compute host if selected peer disconnects
   $effect(() => {
@@ -2406,6 +2306,21 @@
 
 <!-- ModelDownloadPanel: model download dialog + effects (Step 8) -->
 <ModelDownloadPanel />
+
+<!-- HistorySyncPanel: handles $historyRestored and $groupHistorySynced effects (Step 8) -->
+<HistorySyncPanel
+  {activeChatId}
+  {chatHistories}
+  chatWindow={chatWindow ?? null}
+  {processedMessageIds}
+  {getPeerDisplayName}
+  onAgentToast={(message, type) => {
+    agentToastMessage = message;
+    agentToastType = type;
+    showAgentToast = true;
+    setTimeout(() => { showAgentToast = false; }, 3000);
+  }}
+/>
 
 <!-- Knowledge Architecture UI Components -->
 <KnowledgeCommitDialog
