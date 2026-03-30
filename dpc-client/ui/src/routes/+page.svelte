@@ -10,7 +10,6 @@
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
   import ModelDownloadDialog from "$lib/components/ModelDownloadDialog.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
-  import AgentTaskBoard from "$lib/components/AgentTaskBoard.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
@@ -21,16 +20,14 @@
   import ChatMessageList from "$lib/components/ChatMessageList.svelte";
   import SessionControls from "$lib/components/SessionControls.svelte";
   import TelegramStatus from "$lib/components/TelegramStatus.svelte";
-  import FileTransferUI from "$lib/components/FileTransferUI.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
-  import GroupInviteDialog from "$lib/components/GroupInviteDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
-  import TokenWarningBanner from "$lib/components/TokenWarningBanner.svelte";
-  import IntegrityWarningBanner from "$lib/components/IntegrityWarningBanner.svelte";
-  import VoiceRecorder from "$lib/components/VoiceRecorder.svelte";
   import VoicePlayer from "$lib/components/VoicePlayer.svelte";
-  import MentionAutocomplete from "$lib/components/MentionAutocomplete.svelte";
+  import ChatPanel from "$lib/panels/ChatPanel.svelte";
+  import AgentPanel from "$lib/panels/AgentPanel.svelte";
+  import VoicePanel from "$lib/panels/VoicePanel.svelte";
+  import GroupPanel from "$lib/panels/GroupPanel.svelte";
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
 
@@ -99,16 +96,8 @@
   ]));
   
   let activeChatId = $state('local_ai');
-  let currentInput = $state("");
   let chatLoadingStates = $state(new Map<string, boolean>());  // Per-chat loading state
   let chatWindow = $state<HTMLElement>();  // Bound to ChatPanel's chatWindowElement
-
-  // Mention autocomplete state (group chats only)
-  let mentionAutocompleteVisible = $state(false);
-  let mentionQuery = $state("");
-  let mentionStartPosition = $state(0);
-  let mentionDropdownPosition = $state({ top: 0, left: 0 });
-  let mentionSelectedIndex = $state(0);
 
   // Helper to check if a specific chat is loading
   function isChatLoading(chatId: string): boolean {
@@ -125,40 +114,23 @@
   let peerInput = $state("");  // RENAMED from peerUri for clarity
   let selectedComputeHost = $state("local");  // "local" or node_id for remote inference
   let selectedRemoteModel = $state("");  // Selected model when using remote compute host
-  let selectedPeerContexts = $state(new Set<string>());  // Set of peer node_ids to fetch context from
-
-  // Store draft input text per chat (preserves text when switching chats)
-  let chatDraftInputs = $state(new Map<string, string>());
-
-  // Voice message state (v0.13.0 - Voice Messages)
-  let voicePreview = $state<{ blob: Blob; duration: number; filePath?: string } | null>(null);
-
-  // Auto-transcribe toggle state (v0.13.2+ Auto-Transcription)
-  let autoTranscribeEnabled = $state(true);  // Default ON
-
-  // Whisper model loading state (v0.13.3+ Model Pre-loading)
+  // Voice state — owned by VoicePanel (Step 6), bound here for chat header template
+  let autoTranscribeEnabled = $state(true);
   let whisperModelLoading = $state(false);
   let whisperModelLoadError = $state<string | null>(null);
+  let voicePanelComp: VoicePanel | null = $state(null);
 
-  // DPC Agent progress state (v0.15.0+ - real-time agent progress)
+  // DPC Agent progress state — owned by AgentPanel (Step 5), bound here for ChatMessageList
   let agentProgressMessage = $state<string | null>(null);
   let agentProgressTool = $state<string | null>(null);
   let agentProgressRound = $state<number>(0);
-  let agentStreamingText = $state<string>("");  // Accumulated streaming text from agent
-  let lastActiveChatId: string | null = null;  // Non-reactive tracker for chat switches
+  let agentStreamingText = $state<string>('');
+  // Component ref — used to call flushAndCapture() in the AI response handler
+  let agentPanelComp: AgentPanel | null = $state(null);
 
-  // Throttled streaming: accumulate chunks in non-reactive buffer, flush to state periodically
-  let streamingBuffer = "";  // Non-reactive buffer for chunks
-  let streamingFlushTimeout: ReturnType<typeof setTimeout> | null = null;
-
-  // Helper to clear streaming state (buffer + state)
+  // Helper: clear streaming state — delegates to AgentPanel (kept for compatibility)
   function clearAgentStreaming() {
-    if (streamingFlushTimeout) {
-      clearTimeout(streamingFlushTimeout);
-      streamingFlushTimeout = null;
-    }
-    streamingBuffer = "";
-    agentStreamingText = "";
+    agentPanelComp?.flushAndCapture(); // discard captured value
   }
 
   // Dual provider selection (Phase 1: separate text and vision providers)
@@ -167,32 +139,11 @@
   let selectedVisionProvider = $state("");  // Provider for image queries
   let selectedVoiceProvider = $state("");  // v0.13.0+: Provider for voice transcription
 
-  // Helper function to parse provider selection (Phase 2.3)
-  // Used by parent for routing remote inference requests
-  function parseProviderSelection(uniqueId: string): { source: 'local' | 'remote', alias: string, nodeId?: string } {
-    if (!uniqueId) return { source: 'local', alias: '' };
-
-    if (uniqueId.startsWith('remote:')) {
-      const parts = uniqueId.split(':');
-      return {
-        source: 'remote',
-        nodeId: parts[1],  // Extract node_id
-        alias: parts.slice(2).join(':')  // Rejoin alias (in case it contains ':')
-      };
-    }
-
-    return { source: 'local', alias: uniqueId.replace('local:', '') };
-  }
-
-  // Resizable chat panel state
+  // Resizable chat panel state (ChatPanel manages resize; +page.svelte owns height for outer div style)
   let chatPanelHeight = $state((() => {
-    // Load saved height from localStorage, default to calc(100vh - 120px)
     const saved = localStorage.getItem('chatPanelHeight');
     return saved ? parseInt(saved, 10) : 600;
   })());
-  let isResizing = $state(false);
-  let resizeStartY: number = 0;
-  let resizeStartHeight: number = 0;
 
   // Store provider selection per chat (chatId -> provider alias)
   const chatProviders = writable<Map<string, string>>(new Map());
@@ -216,8 +167,7 @@
   let showCommitDialog = $state(false);
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
   let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
-  let showGroupInviteDialog = $state(false);  // v0.19.0: accept/decline group invite
-  let pendingGroupInvite = $state<any>(null);  // v0.19.0: pending group invite data
+  // showGroupInviteDialog + pendingGroupInvite moved to GroupPanel.svelte (Step 7)
   let showGroupSettingsDialog = $state(false);  // v0.19.0: group settings/members panel
   // Initialize from localStorage (browser-safe)
   let autoKnowledgeDetection = $state(
@@ -283,16 +233,6 @@
   };
   let availableInstructionSets = $state<InstructionSets | null>(null);
 
-  // Selected instruction set for active chat (derived from aiChats metadata)
-  let selectedInstructionSet = $derived($aiChats.get(activeChatId)?.instruction_set_name || 'general');
-
-  // Personal context inclusion toggle
-  let includePersonalContext = $state(false);
-
-  // AI Scope selection (for filtering what local AI can access)
-  let selectedAIScope = $state(""); // Empty = no filtering (full context)
-  let availableAIScopes = $state<string[]>([]); // List of scope names from privacy rules
-  let aiScopesLoaded = $state(false); // Guard flag to prevent infinite loop
 
   // Markdown rendering toggle (with localStorage persistence)
   let enableMarkdown = $state((() => {
@@ -312,283 +252,17 @@
     }
   });
 
-  // Whisper model loading event handlers (v0.13.3+ Model Pre-loading)
-  $effect(() => {
-    if ($whisperModelLoadingStarted) {
-      console.log(`[Whisper] Model loading started: ${$whisperModelLoadingStarted.provider}`);
-      whisperModelLoading = true;
-      whisperModelLoadError = null;
-    }
-  });
+  // Whisper loading effects moved to VoicePanel.svelte (Step 6)
 
-  $effect(() => {
-    if ($whisperModelLoaded) {
-      console.log(`[Whisper] Model loaded successfully: ${$whisperModelLoaded.provider}`);
-      whisperModelLoading = false;
-      whisperModelLoadError = null;
-    }
-  });
+  // Agent progress and streaming effects moved to AgentPanel.svelte (Step 5)
 
-  $effect(() => {
-    if ($whisperModelLoadingFailed) {
-      console.error(`[Whisper] Model loading failed: ${$whisperModelLoadingFailed.error}`);
-      whisperModelLoading = false;
-      whisperModelLoadError = $whisperModelLoadingFailed.error;
-    }
-  });
-
-  // DPC Agent progress (v0.15.0+): Show real-time agent progress in chat
-  $effect(() => {
-    if ($agentProgress) {
-      const { conversation_id, message, round, tool_name, ts } = $agentProgress;
-      console.log(`[AgentProgress] Conv: ${conversation_id}, Tool: ${tool_name}, Round: ${round}`);
-      console.log(`[AgentProgress] activeChatId: ${activeChatId}, match: ${isActiveChatConv(conversation_id)}`);
-
-      // Only show progress for the active AI chat
-      if (isActiveChatConv(conversation_id)) {
-        console.log(`[AgentProgress] Setting progress: tool=${tool_name}, round=${round}`);
-        agentProgressMessage = message || null;
-        agentProgressTool = tool_name || null;
-        agentProgressRound = round || 0;
-
-        // Append tool call activity to streaming buffer so it appears in Raw output
-        if (tool_name) {
-          streamingBuffer += `\n⚙ ${tool_name}…\n`;
-        } else if (message && (message.startsWith('✓') || message.startsWith('❌'))) {
-          streamingBuffer += `${message}\n`;
-        }
-      } else {
-        console.log(`[AgentProgress] SKIPPED - conversation_id mismatch`);
-      }
-    }
-  });
-
-  // Clear agent progress when switching chats (only when activeChatId actually changes)
-  $effect(() => {
-    // This effect tracks activeChatId - only runs when it changes
-    if (activeChatId !== lastActiveChatId) {
-      // Clear progress and streaming state when switching chats
-      agentProgressMessage = null;
-      agentProgressTool = null;
-      agentProgressRound = 0;
-      clearAgentStreaming();
-      lastActiveChatId = activeChatId;
-      console.log(`[ChatSwitch] Cleared progress for chat switch to: ${activeChatId}`);
-
-      // Restore compute host from agent metadata when switching to an agent chat
-      const chatMeta = $aiChats.get(activeChatId);
-      if (chatMeta?.compute_host) {
-        selectedComputeHost = chatMeta.compute_host;
-      } else if (activeChatId.startsWith('agent_') && selectedComputeHost !== 'local') {
-        // Agent with no compute_host should use local
-        selectedComputeHost = "local";
-      }
-    }
-  });
-
-  $effect(() => {
-    if ($agentProgressClear) {
-      const { conversation_id } = $agentProgressClear;
-      // Clear progress when task completes/fails
-      if (isActiveChatConv(conversation_id)) {
-        agentProgressMessage = null;
-        agentProgressTool = null;
-        agentProgressRound = 0;
-        // NOTE: Do NOT call clearAgentStreaming() here — the streaming buffer
-        // needs to survive until the final response handler captures it as
-        // capturedStreamingText. Clearing here would wipe the Raw output before
-        // the final answer renders it. clearAgentStreaming() is called by the
-        // chat-switch effect above when the user changes conversations.
-      }
-    }
-  });
-
-  // DPC Agent streaming text (v0.16.0+ - real-time text streaming)
-  // Throttled approach: accumulate chunks in buffer, flush to state every 100ms
-  $effect(() => {
-    if ($agentTextChunk) {
-      const { conversation_id, chunk } = $agentTextChunk;
-      // Only accumulate chunks for the active AI chat
-      if (isActiveChatConv(conversation_id)) {
-        // Add to non-reactive buffer
-        streamingBuffer += chunk;
-
-        // Throttle state updates - flush buffer to state every 100ms
-        if (!streamingFlushTimeout) {
-          streamingFlushTimeout = setTimeout(() => {
-            agentStreamingText += streamingBuffer;
-            streamingBuffer = "";
-            streamingFlushTimeout = null;
-          }, 100);
-        }
-      }
-    }
-  });
-
-  // Clear streaming state when switching away from AI chats
-  // This prevents stale "Generating..." indicators when returning to an AI chat
-  $effect(() => {
-    // Track the current chat ID reactively
-    const currentChatId = activeChatId;
-
-    // Clear streaming state when chat changes
-    return () => {
-      // This cleanup runs when activeChatId changes
-      clearAgentStreaming();
-      agentProgressMessage = null;
-      agentProgressTool = null;
-      agentProgressRound = 0;
-    };
-  });
-
-  // Reactive: Handle agent Telegram linked event (v0.15.0+)
-  $effect(() => {
-    if ($agentTelegramLinked) {
-      const { agent_id, chat_id } = $agentTelegramLinked;
-      console.log(`[AgentTelegram] Agent ${agent_id} linked to Telegram chat ${chat_id}`);
-
-      // Show success toast
-      agentToastMessage = `Agent linked to Telegram successfully`;
-      agentToastType = 'info';
-      showAgentToast = true;
-      setTimeout(() => { showAgentToast = false; }, 3000);
-
-      // Refresh agent list to update Telegram status
-      (async () => {
-        try {
-          const agentsResult = await listAgents();
-          if (agentsResult?.status === 'success' && agentsResult.agents) {
-            agentsList.set(agentsResult.agents);
-          }
-        } catch (error) {
-          console.error('Failed to refresh agents list:', error);
-        }
-      })();
-    }
-  });
-
-  // Reactive: Handle agent Telegram unlinked event (v0.15.0+)
-  $effect(() => {
-    if ($agentTelegramUnlinked) {
-      const { agent_id } = $agentTelegramUnlinked;
-      console.log(`[AgentTelegram] Agent ${agent_id} unlinked from Telegram`);
-
-      // Show info toast
-      agentToastMessage = `Agent unlinked from Telegram`;
-      agentToastType = 'info';
-      showAgentToast = true;
-      setTimeout(() => { showAgentToast = false; }, 3000);
-
-      // Refresh agent list to update Telegram status
-      (async () => {
-        try {
-          const agentsResult = await listAgents();
-          if (agentsResult?.status === 'success' && agentsResult.agents) {
-            agentsList.set(agentsResult.agents);
-          }
-        } catch (error) {
-          console.error('Failed to refresh agents list:', error);
-        }
-      })();
-    }
-  });
-
-  // Reactive: Handle Telegram→agent messages in unified_conversation mode
-  // Silently refreshes the agent chat history when Telegram bridge processes a message
-  $effect(() => {
-    if ($agentHistoryUpdated) {
-      const { conversation_id, messages, tokens_used, token_limit, thinking } = $agentHistoryUpdated;
-      console.log(`[AgentTelegramMsg] Refreshing chat history for ${conversation_id} (${messages?.length} messages)`);
-
-      // All side-effects are wrapped in untrack() to ensure this effect ONLY re-runs when
-      // $agentHistoryUpdated changes (i.e., a new Telegram message arrives).
-      // The streaming buffer capture is ALSO inside untrack() — keeping it outside would
-      // subscribe to streamingBuffer/agentStreamingText ($state), causing this effect to
-      // re-fire on every streaming token with the STALE agentHistoryUpdated payload, which
-      // overwrites chat history repeatedly and drops user messages and DPC responses in flight.
-      // Without untrack():
-      //   - chatHistories.update() makes Svelte track chatHistories as a dependency
-      //     (store access inside $effect creates a subscription), causing this effect
-      //     to re-run every time chatHistories changes → [ChatHistory] effect loops
-      //   - activeChatId read tracks it as a dependency, causing re-run on chat switch
-      //     while $agentHistoryUpdated still holds the old payload → same loop
-      untrack(() => {
-        // Capture accumulated streaming text NOW (before chatHistories update).
-        // agentStreamingText holds tool-call traces + LLM chunks accumulated during this
-        // task. Because _execute_task now uses reply_conversation_id (e.g. "agent_001"),
-        // streaming events arrive with the correct conversation_id and populate this buffer.
-        let capturedAgentStreaming = "";
-        if (isActiveChatConv(conversation_id)) {
-          // Flush any pending buffer content that hasn't been moved to agentStreamingText yet
-          if (streamingBuffer) {
-            agentStreamingText += streamingBuffer;
-            streamingBuffer = "";
-            if (streamingFlushTimeout) { clearTimeout(streamingFlushTimeout); streamingFlushTimeout = null; }
-          }
-          capturedAgentStreaming = agentStreamingText;
-          if (capturedAgentStreaming) clearAgentStreaming();
-        }
-
-        // Update token usage map so the token counter reflects the agent's LLM usage
-        if (tokens_used !== undefined && token_limit !== undefined && token_limit > 0) {
-          tokenUsageMap = new Map(tokenUsageMap);
-          tokenUsageMap.set(conversation_id, { used: tokens_used, limit: token_limit });
-        }
-
-        chatHistories.update(map => {
-          const newMap = new Map(map);
-
-          // Preserve any pending DPC execute_ai_query placeholders so they survive
-          // this Telegram broadcast overwrite. Pending messages have a commandId and
-          // are waiting for a DPC response — if we drop them here, the response handler
-          // can't find them (m.commandId === responseCommandId never matches) and the
-          // DPC reply is silently discarded (visible in task board but not in chat).
-          const existing = map.get(conversation_id) || [];
-          const pendingMsgs = existing.filter((m: any) => m.commandId);
-
-          const mappedMessages = (messages || []).map((msg: any, index: number) => {
-            const isUser = msg.role === 'user';
-            // Use a stable ID derived from conversation_id + backend timestamp (or index
-            // as fallback). Avoids Date.now() which forces Svelte to destroy/recreate all
-            // DOM nodes on every Telegram broadcast, causing flicker and scroll issues.
-            const stableId = `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
-            const mapped: any = {
-              id: stableId,
-              sender: isUser ? 'user' : conversation_id,
-              senderName: isUser ? (msg.sender_name || 'User') : getPeerDisplayName(conversation_id),
-              text: msg.content,
-              timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
-              attachments: msg.attachments || []
-            };
-            return mapped;
-          });
-          // Attach streamingRaw and thinking to the last assistant message.
-          // Prefer capturedAgentStreaming (tool calls + LLM chunks) over plain text.
-          const lastAssistantIdx = [...mappedMessages].reverse().findIndex(m => m.sender !== 'user');
-          if (lastAssistantIdx !== -1) {
-            const idx = mappedMessages.length - 1 - lastAssistantIdx;
-            mappedMessages[idx] = {
-              ...mappedMessages[idx],
-              streamingRaw: capturedAgentStreaming || mappedMessages[idx].text || undefined,
-              thinking: thinking || undefined,
-            };
-          }
-
-          // Re-append pending DPC placeholders after the synced history so they are still
-          // findable by the execute_ai_query response handler (m.commandId === responseCommandId).
-          newMap.set(conversation_id, [...mappedMessages, ...pendingMsgs]);
-          return newMap;
-        });
-
-        // Scroll to bottom if this is the active chat.
-        // Two rAF calls: first frame = Svelte flushes DOM updates,
-        // second frame = browser lays out new nodes so scrollHeight is accurate.
-        if (isActiveChatConv(conversation_id)) {
-          requestAnimationFrame(() => requestAnimationFrame(() => {
-            if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
-          }));
-        }
-      });
+  // Keep: Restore compute host from agent metadata on chat switch
+  (() => {
+    const chatMeta = $aiChats.get(activeChatId);
+    if (chatMeta?.compute_host) {
+      selectedComputeHost = chatMeta.compute_host;
+    } else if (activeChatId.startsWith('agent_') && selectedComputeHost !== 'local') {
+      selectedComputeHost = 'local';
     }
   });
 
@@ -952,34 +626,12 @@
   let peerContextHashes = $state(new Map<string, string>());  // Per-peer: current hash from backend
   let lastSentPeerHashes = $state(new Map<string, Map<string, string>>());  // Per-conversation, per-peer: last hash sent
 
-  // File transfer UI state (Week 1)
-  let showFileOfferDialog = $state(false);
-  let currentFileOffer = $state<any>(null);
-  let fileOfferToastMessage = $state("");
-  let showFileOfferToast = $state(false);
-
   // Connection state (Phase 2: UX improvements)
   let isConnecting = $state(false);
   let connectionError = $state("");
   let showConnectionError = $state(false);
 
-  // Send file confirmation dialog
-  let showSendFileDialog = $state(false);
-  let pendingFileSend = $state<{
-    filePath: string;
-    fileName: string;
-    recipientId: string;
-    recipientName: string;
-    imageData?: { dataUrl: string; filename: string; sizeBytes: number };  // For screenshots
-    caption?: string;  // Optional caption for images
-  } | null>(null);
-  let isSendingFile = $state(false);  // Prevent double-click bug
-
-  // Image paste state (Phase 2.4: Screenshot + Vision - improved UX)
-  let pendingImage = $state<{ dataUrl: string; filename: string; sizeBytes: number } | null>(null);
-
   // UI collapse states
-  let contextPanelCollapsed = $state(false);  // Context toggle panel collapsible
   let modeSectionCollapsed = $state(true);  // Mode section collapsible (collapsed by default)
   let chatHeaderCollapsed = $state(false);  // Chat header collapsible
 
@@ -1448,24 +1100,9 @@
     contextEstimated: currentTokenUsage.contextEstimated ?? 0,
   });
 
-  // Reactive: Estimate token usage including current input (real-time feedback)
+  // Reactive: Estimate token usage (currentInput owned by ChatPanel; use '' here for SessionControls)
   let estimatedUsage = $derived(
-    estimateConversationUsage(effectiveTokenUsage, currentInput)
-  );
-
-  // Reactive: Determine warning level based on estimated usage
-  let tokenWarningLevel = $derived(
-    !$aiChats.has(activeChatId)
-      ? 'none'
-      : estimatedUsage.percentage >= 1.0
-        ? 'critical'
-        : estimatedUsage.percentage >= 0.9
-          ? 'warning'
-          : 'none'
-  );
-
-  let showTokenBanner = $derived(
-    tokenWarningLevel === 'critical' || tokenWarningLevel === 'warning'
+    estimateConversationUsage(effectiveTokenUsage, '')
   );
 
   // Reactive: Check if current peer/group is connected (for enabling/disabling send controls)
@@ -1647,45 +1284,6 @@
     }
   });
 
-  // Clear input state when switching chats (prevent cross-chat pollution)
-  // Track previous chat to detect actual chat switches
-  let previousChatId: string = '';
-
-  $effect(() => {
-    // Track activeChatId dependency
-    const currentChat = activeChatId;
-
-    // Skip first run (just initialize)
-    if (previousChatId === '') {
-      previousChatId = currentChat;
-      return;
-    }
-
-    // When actually switching to a different chat
-    if (currentChat !== previousChatId) {
-      // 1. Save draft for previous chat
-      chatDraftInputs = new Map(chatDraftInputs).set(previousChatId, currentInput);
-
-      // 2. Restore draft for new chat (if exists)
-      const draft = chatDraftInputs.get(currentChat);
-      currentInput = draft !== undefined ? draft : "";
-
-      // 3. Clear pending image and voice preview
-      if (pendingImage !== null) {
-        pendingImage = null;
-      }
-      if (voicePreview !== null) {
-        voicePreview = null;
-      }
-
-      // 4. Update tracking
-      previousChatId = currentChat;
-    }
-  });
-
-  // Phase 7: Reactive: Check if context window is full (100% or more) - uses estimated total
-  // Only applies to actual AI chats (not Telegram, which are in aiChats for sidebar)
-  let isContextWindowFull = $derived(isActuallyAIChat && estimatedUsage.percentage >= 1.0);
 
   // Reactive: Handle knowledge extraction failures (Phase 4)
   $effect(() => {
@@ -1765,187 +1363,8 @@
     }
   });
 
-  // File transfer event handlers (Week 1)
-  $effect(() => {
-    if ($fileTransferOffer) {
-      const { node_id, filename, size_bytes, transfer_id, sender_name, group_id } = $fileTransferOffer;
 
-      // Skip acceptance dialog for group files (auto-accepted by backend v0.19.1+)
-      if (group_id) {
-        console.log(`Group file offer received (auto-accepted): ${filename} from ${sender_name || node_id.slice(0, 15)}...`);
-        // Show toast notification instead of dialog
-        fileOfferToastMessage = `Receiving file: ${filename} from ${sender_name || 'group member'}`;
-        showFileOfferToast = true;
-        setTimeout(() => showFileOfferToast = false, 3000);
-        return;
-      }
-
-      currentFileOffer = $fileTransferOffer;
-      showFileOfferDialog = true;
-      console.log(`File offer received: ${filename} (${(size_bytes / 1024).toFixed(1)} KB) from ${node_id.slice(0, 15)}...`);
-
-      // Send notification for file offer
-      (async () => {
-        const notified = await showNotificationIfBackground({
-          title: `File from ${sender_name || node_id.slice(0, 16)}`,
-          body: `${filename} (${(size_bytes / 1048576).toFixed(2)} MB)`
-        });
-        console.log(`[Notifications] File offer notification: ${notified ? 'system' : 'skip'}`);
-      })();
-    }
-  });
-
-  $effect(() => {
-    if ($fileTransferComplete) {
-      const { filename, node_id, direction } = $fileTransferComplete;
-      fileOfferToastMessage = direction === "download"
-        ? `✓ File downloaded: ${filename}`
-        : `✓ File sent: ${filename}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-
-      // Send notification for file transfer complete
-      (async () => {
-        const notified = await showNotificationIfBackground({
-          title: 'File Transfer Complete',
-          body: `${filename} (${direction})`
-        });
-        console.log(`[Notifications] File complete notification: ${notified ? 'system' : 'skip'}`);
-      })();
-    }
-  });
-
-  $effect(() => {
-    if ($fileTransferCancelled) {
-      const { filename, reason } = $fileTransferCancelled;
-      fileOfferToastMessage = `✗ Transfer cancelled: ${filename} (${reason})`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-
-      // Send notification for file transfer cancelled
-      (async () => {
-        const notified = await showNotificationIfBackground({
-          title: 'Transfer Cancelled',
-          body: `${filename} (${reason})`
-        });
-        console.log(`[Notifications] File cancelled notification: ${notified ? 'system' : 'skip'}`);
-      })();
-    }
-  });
-
-  // Reactive: Handle voice transcription complete (v0.13.2+)
-  $effect(() => {
-    if ($voiceTranscriptionComplete) {
-      const { transfer_id, node_id, text, transcriber_node_id, provider, confidence, language, timestamp, remote_provider_node_id } = $voiceTranscriptionComplete;
-      console.log(`[VoiceTranscription] Received transcription for ${transfer_id}: "${text}"`);
-
-      // Find the message with this transfer_id and add transcription to attachment
-      // CRITICAL: Must create NEW objects at every level to trigger Svelte reactivity
-      chatHistories.update(histories => {
-        const updatedHistories = new Map();
-
-        for (const [chatId, messages] of histories) {
-          // Create NEW messages array for this chat
-          const updatedMessages = messages.map(message => {
-            // Check if this message has the voice attachment we're looking for
-            if (message.attachments) {
-              const hasTargetVoice = message.attachments.some(
-                att => att.type === 'voice' && att.transfer_id === transfer_id
-              );
-
-              if (hasTargetVoice) {
-                // Create NEW message with NEW attachments array
-                return {
-                  ...message,
-                  attachments: message.attachments.map(attachment => {
-                    if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
-                      // Create NEW attachment with transcription
-                      console.log(`[VoiceTranscription] Adding transcription to message in chat ${chatId}`);
-                      return {
-                        ...attachment,
-                        transcription: {
-                          text,
-                          provider,
-                          transcriber_node_id,
-                          confidence,
-                          language,
-                          timestamp,
-                          remote_provider_node_id
-                        }
-                      };
-                    }
-                    return attachment;
-                  })
-                };
-              }
-            }
-            return message;
-          });
-
-          updatedHistories.set(chatId, updatedMessages);
-        }
-
-        return updatedHistories;
-      });
-    }
-  });
-
-  // Reactive: Handle voice transcription received from peer (v0.13.2+)
-  $effect(() => {
-    if ($voiceTranscriptionReceived) {
-      const { transfer_id, node_id, text, transcriber_node_id, provider, confidence, language, timestamp } = $voiceTranscriptionReceived;
-      console.log(`[VoiceTranscription] Received transcription from peer for ${transfer_id}: "${text}"`);
-
-      // Find the message with this transfer_id and add transcription to attachment
-      // CRITICAL: Must create NEW objects at every level to trigger Svelte reactivity
-      chatHistories.update(histories => {
-        const updatedHistories = new Map();
-
-        for (const [chatId, messages] of histories) {
-          // Create NEW messages array for this chat
-          const updatedMessages = messages.map(message => {
-            // Check if this message has the voice attachment we're looking for
-            if (message.attachments) {
-              const hasTargetVoice = message.attachments.some(
-                att => att.type === 'voice' && att.transfer_id === transfer_id
-              );
-
-              if (hasTargetVoice) {
-                // Create NEW message with NEW attachments array
-                return {
-                  ...message,
-                  attachments: message.attachments.map(attachment => {
-                    if (attachment.type === 'voice' && attachment.transfer_id === transfer_id) {
-                      // Create NEW attachment with transcription from peer
-                      console.log(`[VoiceTranscription] Adding peer transcription to message in chat ${chatId}`);
-                      return {
-                        ...attachment,
-                        transcription: {
-                          text,
-                          provider,
-                          transcriber_node_id,
-                          confidence,
-                          language,
-                          timestamp
-                        }
-                      };
-                    }
-                    return attachment;
-                  })
-                };
-              }
-            }
-            return message;
-          });
-
-          updatedHistories.set(chatId, updatedMessages);
-        }
-
-        return updatedHistories;
-      });
-    }
-  });
-
+  // Voice transcription effects moved to VoicePanel.svelte (Step 6)
   // Reactive: Handle chat history restored (v0.11.2)
   $effect(() => {
     if ($historyRestored) {
@@ -1974,9 +1393,10 @@
       }, 100);
 
       // Show success toast
-      fileOfferToastMessage = `✓ Chat history restored: ${$historyRestored.message_count} messages`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 3000);
+      agentToastMessage = `✓ Chat history restored: ${$historyRestored.message_count} messages`;
+      agentToastType = 'info';
+      showAgentToast = true;
+      setTimeout(() => showAgentToast = false, 3000);
     }
   });
 
@@ -2027,9 +1447,10 @@
               });
 
               // Show success toast
-              fileOfferToastMessage = `✓ Group history synced: ${response.messages.length} messages`;
-              showFileOfferToast = true;
-              setTimeout(() => showFileOfferToast = false, 3000);
+              agentToastMessage = `✓ Group history synced: ${response.messages.length} messages`;
+              agentToastType = 'info';
+              showAgentToast = true;
+              setTimeout(() => showAgentToast = false, 3000);
 
               // Scroll to bottom
               setTimeout(() => {
@@ -2046,17 +1467,6 @@
     }
   });
 
-  // Phase 7: Reactive: Check if local context has changed (not yet sent to AI)
-  let localContextUpdated = $derived(currentContextHash && lastSentContextHash.get(activeChatId) !== currentContextHash);
-
-  // Phase 7: Reactive: Check which peer contexts have changed (not yet sent to AI)
-  let peerContextsUpdated = $derived(new Set(
-    Array.from(peerContextHashes.keys()).filter(nodeId => {
-      const conversationPeerHashes = lastSentPeerHashes.get(activeChatId);
-      if (!conversationPeerHashes) return true;  // Never sent
-      return conversationPeerHashes.get(nodeId) !== peerContextHashes.get(nodeId);
-    })
-  ));
 
   // Reactive: Reset compute host if selected peer disconnects
   $effect(() => {
@@ -2070,24 +1480,6 @@
     }
   });
 
-  // Reactive: Reset selected peer contexts if peers disconnect
-  $effect(() => {
-    if (selectedPeerContexts.size > 0 && $nodeStatus?.p2p_peers) {
-      const connectedPeers = new Set($nodeStatus.p2p_peers);
-      let needsUpdate = false;
-      for (const peerId of selectedPeerContexts) {
-        if (!connectedPeers.has(peerId)) {
-          selectedPeerContexts.delete(peerId);
-          needsUpdate = true;
-          console.log(`Peer ${peerId} disconnected, removing from selected contexts`);
-        }
-      }
-      if (needsUpdate) {
-        // Trigger reactivity by creating new Set instance (required for Svelte 5 $state)
-        selectedPeerContexts = new Set(selectedPeerContexts);
-      }
-    }
-  });
 
   // Helper: Group peers by connection strategy
   function getPeersByStrategy(peerInfo: any[]) {
@@ -2179,528 +1571,8 @@
     return peerDisplayNames.get(peerId) || peerId;
   }
 
-  // --- MENTION AUTOCOMPLETE (Group Chats) ---
-  // Get mentionable members for the current group chat (excludes self)
-  function getMentionableMembers(): Array<{ node_id: string; name: string }> {
-    if (!activeChatId.startsWith('group-')) return [];
+  // handleSendMessage moved to ChatPanel.svelte (Step 4)
 
-    const group = $groupChats.get(activeChatId);
-    if (!group?.members) return [];
-
-    const selfId = $nodeStatus?.node_id || '';
-
-    // Filter out self and map to display names (full name, no truncation)
-    return group.members
-      .filter((nodeId: string) => nodeId !== selfId)
-      .map((nodeId: string) => ({
-        node_id: nodeId,
-        name: peerDisplayNames.get(nodeId)?.split(' | ')[0] || nodeId
-      }));
-  }
-
-  // Filter mentionable members by query
-  let filteredMentionMembers = $derived.by(() => {
-    const members = getMentionableMembers();
-    if (!mentionQuery) return members;
-
-    const lowerQuery = mentionQuery.toLowerCase();
-    return members.filter(
-      m => m.name.toLowerCase().includes(lowerQuery) || m.node_id.toLowerCase().includes(lowerQuery)
-    );
-  });
-
-  // Handle input changes to detect @ mentions
-  function handleMentionInput(event: Event) {
-    const textarea = event.target as HTMLTextAreaElement;
-    const value = textarea.value;
-    const cursorPos = textarea.selectionStart;
-
-    // Only enable in group chats
-    if (!activeChatId.startsWith('group-')) {
-      mentionAutocompleteVisible = false;
-      return;
-    }
-
-    // Find @ before cursor
-    const lastAtIndex = value.lastIndexOf('@', cursorPos - 1);
-    if (lastAtIndex !== -1) {
-      const textAfterAt = value.slice(lastAtIndex + 1, cursorPos);
-      // Check for space (ends mention) or newline
-      if (!textAfterAt.includes(' ') && !textAfterAt.includes('\n')) {
-        mentionQuery = textAfterAt;
-        mentionStartPosition = lastAtIndex;
-        mentionSelectedIndex = 0;
-
-        // Calculate dropdown position (approximate)
-        const textareaRect = textarea.getBoundingClientRect();
-        mentionDropdownPosition = {
-          top: textareaRect.bottom + 4,
-          left: textareaRect.left + (lastAtIndex * 8) // Approximate char width
-        };
-
-        mentionAutocompleteVisible = true;
-        return;
-      }
-    }
-
-    mentionAutocompleteVisible = false;
-  }
-
-  // Handle mention selection
-  function handleMentionSelect(member: { node_id: string; name: string }) {
-    // Replace @query with @Name | node_id (full format)
-    const before = currentInput.slice(0, mentionStartPosition);
-    const after = currentInput.slice(mentionStartPosition + mentionQuery.length + 1);
-    currentInput = `${before}@${member.name} | ${member.node_id} ${after}`;
-
-    mentionAutocompleteVisible = false;
-    mentionSelectedIndex = 0;
-  }
-
-  // Handle mention navigation (from keyboard events)
-  function handleMentionNavigate(direction: 'up' | 'down') {
-    const maxIndex = filteredMentionMembers.length - 1;
-    if (direction === 'down') {
-      mentionSelectedIndex = Math.min(mentionSelectedIndex + 1, maxIndex);
-    } else {
-      mentionSelectedIndex = Math.max(mentionSelectedIndex - 1, 0);
-    }
-  }
-
-  // Close mention autocomplete
-  function closeMentionAutocomplete() {
-    mentionAutocompleteVisible = false;
-    mentionSelectedIndex = 0;
-  }
-
-  // --- PEER CONTEXT SELECTION ---
-  function togglePeerContext(peerId: string) {
-    if (selectedPeerContexts.has(peerId)) {
-      selectedPeerContexts.delete(peerId);
-    } else {
-      selectedPeerContexts.add(peerId);
-    }
-    // Trigger reactivity by creating new Set instance (required for Svelte 5 $state)
-    selectedPeerContexts = new Set(selectedPeerContexts);
-  }
-
-  // Update instruction set for active chat
-  function updateInstructionSet(newInstructionSet: string) {
-    const chatMetadata = $aiChats.get(activeChatId);
-    if (chatMetadata) {
-      chatMetadata.instruction_set_name = newInstructionSet;
-      // Trigger reactivity by creating new Map instance
-      aiChats.update(map => new Map(map));
-    }
-  }
-
-  // --- CHAT PANEL RESIZE HANDLERS ---
-  function startResize(e: MouseEvent) {
-    isResizing = true;
-    resizeStartY = e.clientY;
-    resizeStartHeight = chatPanelHeight;
-
-    // Prevent text selection during resize
-    e.preventDefault();
-
-    // Add body class to prevent text selection
-    document.body.classList.add('resizing');
-
-    // Add global listeners for mouse move and up
-    document.addEventListener('mousemove', handleResize);
-    document.addEventListener('mouseup', stopResize);
-  }
-
-  function handleResize(e: MouseEvent) {
-    if (!isResizing) return;
-
-    // Calculate new height (add because we want to grow downward)
-    const deltaY = e.clientY - resizeStartY;
-    const newHeight = resizeStartHeight + deltaY;
-
-    // Enforce minimum constraint only (no maximum)
-    chatPanelHeight = Math.max(300, newHeight);
-  }
-
-  function stopResize() {
-    isResizing = false;
-
-    // Remove body class
-    document.body.classList.remove('resizing');
-
-    // Remove global listeners
-    document.removeEventListener('mousemove', handleResize);
-    document.removeEventListener('mouseup', stopResize);
-
-    // Save the new height to localStorage
-    localStorage.setItem('chatPanelHeight', chatPanelHeight.toString());
-  }
-
-  // --- CHAT FUNCTIONS ---
-  async function handleSendMessage() {
-    // Handle image + text
-    if (pendingImage) {
-      const text = currentInput.trim();
-      const imageData = pendingImage;
-
-      // Clear input, draft, and pending image
-      currentInput = "";
-      chatDraftInputs = new Map(chatDraftInputs).set(activeChatId, "");
-      pendingImage = null;
-
-      // Check if this is an AI chat, Telegram chat, or P2P chat (Phase 2.3: Fix P2P screenshot sharing)
-      // Note: Telegram chats are in $aiChats but should be handled separately (not as AI chats)
-      if ($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')) {
-        // AI chat: Add to conversation history with attachment
-        chatHistories.update(h => {
-          const newMap = new Map(h);
-          const hist = newMap.get(activeChatId) || [];
-          newMap.set(activeChatId, [...hist, {
-            id: crypto.randomUUID(),
-            sender: 'user',
-            text: text || '[Image]',
-            timestamp: Date.now(),
-            attachments: [{
-              type: 'image',
-              filename: imageData.filename,
-              thumbnail: imageData.dataUrl,
-              size_bytes: imageData.sizeBytes
-            }]
-          }]);
-          return newMap;
-        });
-
-        // AI chat: Send for vision analysis
-        try {
-          setChatLoading(activeChatId, true);
-
-          // Parse vision provider to extract compute_host for remote vision
-          const visionProvider = parseProviderSelection(selectedVisionProvider);
-
-          const payload: any = {
-            conversation_id: agentChatToAgentId.get(activeChatId) ?? activeChatId,
-            image_base64: imageData.dataUrl,
-            filename: imageData.filename,
-            caption: text,
-            provider_alias: visionProvider.alias,
-            chat_provider: $chatProviders.get(activeChatId) || null
-          };
-
-          // Add compute_host if using remote vision provider
-          if (visionProvider.source === 'remote' && visionProvider.nodeId) {
-            payload.compute_host = visionProvider.nodeId;
-          }
-
-          await sendCommand('send_image', payload);
-          autoScroll();
-          // Note: Don't clear loading here!
-          // The ai_response_with_image event handler will clear it when the vision response arrives
-        } catch (error) {
-          console.error('Error sending image:', error);
-
-          // Parse error into user-friendly message
-          let userMessage = 'Failed to analyze image';
-          let errorDetails = '';
-
-          const errorStr = String(error);
-
-          if (errorStr.includes('Failed to connect to Ollama')) {
-            userMessage = 'Ollama Connection Failed';
-            errorDetails = 'Ollama is not running. Please start Ollama and try again.\n\nDownload from: https://ollama.com/download';
-          } else if (errorStr.includes('memory layout cannot be allocated') || errorStr.includes('out of memory') || errorStr.includes('OOM') || errorStr.includes('VRAM')) {
-            userMessage = 'Out of Memory';
-            errorDetails = 'Not enough GPU memory for vision analysis. Try closing other GPU-intensive apps or using a smaller model.';
-          } else if (errorStr.includes('Ollama vision API failed')) {
-            // Generic Ollama vision failure (not connection or memory specific)
-            userMessage = 'Ollama Vision Failed';
-            errorDetails = 'The vision model encountered an error. Check Ollama logs for details.';
-          } else if (errorStr.includes('connection refused') || errorStr.includes('Connection refused')) {
-            userMessage = 'Connection Refused';
-            errorDetails = 'The AI service is not accepting connections. Please check if it\'s running.';
-          } else if (errorStr.includes('timeout') || errorStr.includes('Timeout')) {
-            userMessage = 'Request Timeout';
-            errorDetails = 'The AI service took too long to respond. Try again or use a smaller model.';
-          } else {
-            // Extract meaningful part of generic errors
-            const match = errorStr.match(/RuntimeError:\s*(.+)/);
-            if (match) {
-              errorDetails = match[1];
-            } else {
-              errorDetails = errorStr.slice(0, 200); // Truncate long errors
-            }
-          }
-
-          // Add error message to chat history (like AI response but with error styling)
-          chatHistories.update(h => {
-            const newMap = new Map(h);
-            const hist = newMap.get(activeChatId) || [];
-            newMap.set(activeChatId, [
-              ...hist,
-              {
-                id: crypto.randomUUID(),
-                sender: 'ai',
-                text: `⚠️ **${userMessage}**\n\n${errorDetails}`,
-                timestamp: Date.now(),
-                isError: true
-              }
-            ]);
-            return newMap;
-          });
-
-          autoScroll();
-          setChatLoading(activeChatId, false);
-        }
-      } else if (activeChatId.startsWith('telegram-')) {
-        // Telegram chat: Save image to temp file and send via Telegram
-        try {
-          // Convert data URL to blob and save to temp file
-          const response = await fetch(imageData.dataUrl);
-          const blob = await response.blob();
-          const arrayBuffer = await blob.arrayBuffer();
-          const uint8Array = new Uint8Array(arrayBuffer);
-
-          // Check if Tauri environment (same detection as line 424)
-          const isTauriEnv = typeof window !== 'undefined' && (
-            (window as any).isTauri === true ||
-            !!(window as any).__TAURI__
-          );
-
-          if (isTauriEnv) {
-            const { writeFile, BaseDirectory, mkdir } = await import('@tauri-apps/plugin-fs');
-            const { invoke } = await import('@tauri-apps/api/core');
-
-            const timestamp = Date.now();
-            const filename = imageData.filename || `screenshot_${timestamp}.png`;
-            const relativePath = `.dpc/temp/${filename}`;
-
-            // Ensure temp directory exists
-            await mkdir('.dpc/temp', { baseDir: BaseDirectory.Home, recursive: true });
-
-            // Write file to home directory
-            await writeFile(relativePath, uint8Array, { baseDir: BaseDirectory.Home });
-
-            // Get home directory path and construct full path for backend
-            const homeDir = await invoke<string>('get_home_directory');
-            const fullPath = `${homeDir}/${relativePath}`;
-
-            // Send to Telegram with the full file path
-            await sendToTelegram(activeChatId, text || '', [], undefined, undefined, undefined, fullPath);
-
-            // Add to local history
-            chatHistories.update(h => {
-              const newMap = new Map(h);
-              const hist = newMap.get(activeChatId) || [];
-              newMap.set(activeChatId, [...hist, {
-                id: crypto.randomUUID(),
-                sender: 'user',
-                text: text || '',
-                timestamp: Date.now(),
-                attachments: [{
-                  type: 'image',
-                  filename: filename,
-                  file_path: fullPath,
-                  size_bytes: uint8Array.length
-                }]
-              }]);
-              return newMap;
-            });
-
-            console.log('[Telegram] Screenshot sent to Telegram');
-          } else {
-            throw new Error('Telegram file transfer requires Tauri desktop app');
-          }
-        } catch (error) {
-          console.error('Error sending screenshot to Telegram:', error);
-          fileOfferToastMessage = `Failed to send screenshot to Telegram: ${error}`;
-          showFileOfferToast = true;
-          setTimeout(() => showFileOfferToast = false, 5000);
-        }
-      } else if (activeChatId.startsWith('group-')) {
-        // Group chat: Send screenshot via group fan-out (v0.19.0)
-        // Use custom Svelte dialog for confirmation (fixes Tauri auto-accept bug)
-        const group = $groupChats.get(activeChatId);
-        const groupName = group?.name || 'group';
-        pendingFileSend = {
-          filePath: '',
-          fileName: imageData.filename,
-          recipientId: activeChatId,
-          recipientName: `group "${groupName}"`,
-          imageData: imageData,
-          caption: text
-        };
-        showSendFileDialog = true;
-        return;  // Exit early - actual send happens in handleConfirmSendFile
-      } else {
-        // P2P chat: Send screenshot via file transfer
-        try {
-          // Check image size and warn if large
-          const imageSizeBytes = imageData.dataUrl.length * 0.75; // Approximate base64 overhead
-          const imageSizeMB = imageSizeBytes / (1024 * 1024);
-
-          if (imageSizeMB > 25) {
-            const confirm = window.confirm(
-              `This screenshot is ${imageSizeMB.toFixed(1)} MB. Large images may take time to upload. Continue?`
-            );
-            if (!confirm) {
-              pendingImage = null;
-              return;
-            }
-          }
-
-          // Send screenshot to peer via backend
-          await sendCommand("send_p2p_image", {
-            node_id: activeChatId,
-            image_base64: imageData.dataUrl,
-            filename: imageData.filename,
-            text: text  // Include user caption with screenshot
-          });
-
-          // Success - backend will broadcast new_p2p_message when transfer completes
-          console.log("Screenshot transfer initiated successfully");
-        } catch (error) {
-          console.error('Error sending screenshot:', error);
-          // Extract error message from Error object
-          const errorMsg = error instanceof Error ? error.message : String(error);
-          fileOfferToastMessage = `Failed to send screenshot: ${errorMsg}`;
-          showFileOfferToast = true;
-          setTimeout(() => showFileOfferToast = false, 5000);
-        }
-        // Note: currentInput and pendingImage already cleared at top of function
-      }
-      return;
-    }
-
-    // Handle text-only message
-    if (!currentInput.trim()) return;
-
-    const text = currentInput.trim();
-    currentInput = "";
-
-    // Clear draft for this chat after sending
-    chatDraftInputs = new Map(chatDraftInputs).set(activeChatId, "");
-
-    // Clear streaming text when sending a new message
-    clearAgentStreaming();
-
-    chatHistories.update(h => {
-      const newMap = new Map(h);
-      const hist = newMap.get(activeChatId) || [];
-      newMap.set(activeChatId, [...hist, { id: crypto.randomUUID(), sender: 'user', text, timestamp: Date.now() }]);
-      return newMap;
-    });
-
-    // Check if this is an AI chat (local_ai or ai_chat_*), but NOT a Telegram chat
-    // Telegram chats are in $aiChats for sidebar display but should NOT trigger AI queries
-    if ($aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')) {
-      setChatLoading(activeChatId, true);
-      const commandId = crypto.randomUUID();
-
-      // Track which chat this command belongs to
-      commandToChatMap.set(commandId, activeChatId);
-
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        const hist = newMap.get(activeChatId) || [];
-        newMap.set(activeChatId, [...hist, {
-          id: crypto.randomUUID(),
-          sender: 'ai',
-          text: 'Thinking...',
-          timestamp: Date.now(),
-          commandId: commandId
-        }]);
-        return newMap;
-      });
-
-      // Get chat metadata for instruction set
-      const chatMetadata = $aiChats.get(activeChatId);
-
-      // Prepare AI query payload with optional compute host and provider/model
-      // For agent chats created via "New Chat", activeChatId is ai_chat_XXX but the backend
-      // needs the real agent_XXX ID so it uses the correct per-agent storage folder.
-      const backendConversationId = agentChatToAgentId.get(activeChatId) ?? activeChatId;
-      const payload: any = {
-        prompt: text,
-        include_context: includePersonalContext,  // Add context inclusion flag
-        conversation_id: backendConversationId,  // Phase 7: Pass conversation ID for history tracking
-        ai_scope: selectedAIScope || null,  // AI Scope for filtering (null = no filtering)
-        instruction_set_name: chatMetadata?.instruction_set_name || 'general'  // Instruction set for this conversation
-      };
-
-      // Add peer contexts if any are selected
-      if (selectedPeerContexts.size > 0) {
-        payload.context_ids = Array.from(selectedPeerContexts);
-      }
-
-      // Determine provider: use chat-specific provider if set, otherwise use dropdown selection
-      const chatSpecificProvider = $chatProviders.get(activeChatId);
-
-      if (chatSpecificProvider) {
-        // Use chat-specific provider (e.g., dpc_agent for agent chats)
-        payload.provider = chatSpecificProvider;
-
-        // Pass compute_host if the chat was created with a remote AI host
-        if (chatMetadata?.compute_host) {
-          payload.compute_host = chatMetadata.compute_host;
-        }
-
-        // For DPC Agent, pass the underlying LLM provider (Phase 3: per-agent provider selection)
-        if (chatSpecificProvider === 'dpc_agent' && chatMetadata?.llm_provider) {
-          payload.agent_llm_provider = chatMetadata.llm_provider;
-        }
-      } else {
-        // Fall back to dropdown selection (supports remote inference)
-        const textProvider = parseProviderSelection(selectedTextProvider);
-
-        if (textProvider.source === 'remote' && textProvider.nodeId) {
-          // Remote inference - send compute_host and provider alias
-          payload.compute_host = textProvider.nodeId;
-          payload.provider = textProvider.alias;
-        } else {
-          // Local inference - pass provider alias
-          if (textProvider.alias) {
-            payload.provider = textProvider.alias;
-          }
-        }
-      }
-
-      const success = sendCommand("execute_ai_query", payload, commandId);
-      if (!success) {
-        setChatLoading(activeChatId, false);
-        chatHistories.update(h => {
-          const newMap = new Map(h);
-          const hist = newMap.get(activeChatId) || [];
-          newMap.set(activeChatId, hist.map(m =>
-            m.commandId === commandId ? { ...m, sender: 'system', text: 'Error: Not connected' } : m
-          ));
-          return newMap;
-        });
-        // Clean up the command mapping
-        commandToChatMap.delete(commandId);
-      }
-    } else if (activeChatId.startsWith('telegram-')) {
-      // Telegram chat: Send message to Telegram
-      try {
-        const linkedChatId = $telegramLinkedChats.get(activeChatId);
-        if (linkedChatId) {
-          await sendToTelegram(activeChatId, text);
-          console.log(`[Telegram] Sent message to Telegram chat ${linkedChatId}`);
-        } else {
-          console.warn(`[Telegram] No linked chat ID for ${activeChatId}, message not sent to Telegram`);
-        }
-      } catch (error) {
-        console.error('[Telegram] Failed to send message:', error);
-      }
-    } else if (activeChatId.startsWith('group-')) {
-      // Group chat: Send via group fan-out (v0.19.0)
-      sendGroupMessage(activeChatId, text);
-    } else {
-      // P2P chat: Send via P2P
-      sendCommand("send_p2p_message", { target_node_id: activeChatId, text });
-    }
-    
-    autoScroll();
-  }
-  
   // --- PEER CONNECTION FUNCTIONS ---
   // Connection strategy: Direct TLS (if dpc:// URI) or DHT-first (if node_id)
   async function handleConnectPeer() {
@@ -2776,57 +1648,7 @@
     showFirewallEditor = true;
   }
 
-  // Load AI scopes from firewall rules (privacy_rules.json)
-  // IMPORTANT PATTERN: If you add UI components that display data from privacy_rules.json
-  // (e.g., node_groups dropdown, compute settings toggle, device_sharing rules), follow this pattern:
-  // 1. Create a load function (like loadAIScopes below)
-  // 2. Add a guard flag (like aiScopesLoaded) to prevent infinite reactive loops
-  // 3. Add reactive statements to reload on connection and firewall rules updates
-  // 4. Subscribe to $firewallRulesUpdated store to trigger reload when user saves rules
-  // This ensures UI stays in sync with privacy_rules.json without requiring page refresh.
-  async function loadAIScopes() {
-    try {
-      const result = await sendCommand("get_firewall_rules", {});
-      if (result.status === "success" && result.rules?.ai_scopes) {
-        // Extract scope names (excluding _comment fields)
-        availableAIScopes = Object.keys(result.rules.ai_scopes).filter(key => !key.startsWith('_'));
-      } else {
-        availableAIScopes = [];
-      }
-    } catch (error) {
-      console.error("Error loading AI scopes:", error);
-      availableAIScopes = [];
-    } finally {
-      // Mark as loaded regardless of success/failure to prevent infinite loop
-      aiScopesLoaded = true;
-    }
-  }
-
-  // Load AI scopes when WebSocket connects (only once per connection)
-  $effect(() => {
-    if ($connectionStatus === "connected" && !aiScopesLoaded) {
-      loadAIScopes();
-    }
-  });
-
-  // Reset AI scopes loaded flag on disconnection (to reload on reconnect)
-  $effect(() => {
-    if ($connectionStatus === "disconnected" || $connectionStatus === "error") {
-      aiScopesLoaded = false;
-    }
-  });
-
-  // Reload AI scopes when firewall rules are updated (via FirewallEditor)
-  // IMPORTANT: This reactive statement ensures UI updates immediately after saving firewall rules.
-  // If you add more UI components that read from privacy_rules.json, add similar reactive
-  // statements here to reload their data when $firewallRulesUpdated changes.
-  // Example: if ($firewallRulesUpdated && $connectionStatus === "connected") { loadNodeGroups(); }
-  $effect(() => {
-    if ($firewallRulesUpdated && $connectionStatus === "connected") {
-      aiScopesLoaded = false;
-      loadAIScopes();
-    }
-  });
+  // loadAIScopes and its 3 effects moved to ChatPanel.svelte (Step 4)
 
   function openProvidersEditor() {
     showProvidersEditor = true;
@@ -3541,566 +2363,8 @@
     }
   }
 
-  // File transfer handlers (Week 1)
-  async function handleSendFile() {
-    // Only allow file transfer to P2P chats and Telegram chats (not local_ai or ai_xxx chats)
-    if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_')) {
-      if (ask) {
-        await ask("File transfer is only available in P2P and Telegram chats.", { title: "D-PC Messenger", kind: "info" });
-      } else {
-        alert("File transfer is only available in P2P and Telegram chats.");
-      }
-      return;
-    }
-
-    // Check if running in Tauri
-    if (!open) {
-      alert("File transfer requires the Tauri desktop app. Please use the desktop version.");
-      return;
-    }
-
-    try {
-      const selected = await open({
-        multiple: false,
-        directory: false
-      });
-
-      if (!selected) {
-        console.log('File selection cancelled');
-        return;
-      }
-
-      const filePath = selected as string;
-      console.log(`Selected file: ${filePath}`);
-
-      // Get file name from path
-      const fileName = filePath.split(/[\\/]/).pop() || filePath;
-
-      // Check if this is a Telegram chat
-      if (activeChatId.startsWith('telegram-')) {
-        // Send directly to Telegram (no confirmation dialog needed)
-        console.log(`[Telegram] Sending file to Telegram: ${fileName}`);
-        await sendToTelegram(activeChatId, '', [], undefined, undefined, undefined, filePath);
-
-        // Add to local chat history (with minimal attachment data for UI display)
-        chatHistories.update(h => {
-          const newMap = new Map(h);
-          const hist = newMap.get(activeChatId) || [];
-          newMap.set(activeChatId, [...hist, {
-            id: crypto.randomUUID(),
-            sender: 'user',
-            text: '',
-            timestamp: Date.now(),
-            attachments: [{
-              type: 'file',
-              filename: fileName,
-              file_path: filePath,
-              size_bytes: 0  // Placeholder - actual size handled by backend
-            }]
-          }]);
-          return newMap;
-        });
-      } else if (activeChatId.startsWith('group-')) {
-        // Group chat: Send file via group fan-out (v0.19.0)
-        // Use custom Svelte dialog instead of native confirm() (fixes Tauri auto-accept bug)
-        const group = $groupChats.get(activeChatId);
-        const groupName = group?.name || 'group';
-        pendingFileSend = {
-          filePath,
-          fileName,
-          recipientId: activeChatId,
-          recipientName: `group "${groupName}"`
-        };
-        showSendFileDialog = true;
-      } else {
-        // P2P file transfer with confirmation dialog (existing behavior)
-        // Get recipient name from peer info
-        const peer = $nodeStatus.peer_info.find((p: any) => p.node_id === activeChatId);
-        const recipientName = peer?.name || activeChatId.slice(0, 20) + '...';
-
-        // Store pending file send and show confirmation dialog
-        pendingFileSend = {
-          filePath,
-          fileName,
-          recipientId: activeChatId,
-          recipientName
-        };
-        showSendFileDialog = true;
-      }
-    } catch (error) {
-      console.error('Error sending file:', error);
-      fileOfferToastMessage = `Failed to send file: ${error}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-    }
-  }
-
-  async function handleAcceptFile() {
-    if (!currentFileOffer) return;
-
-    try {
-      const filename = currentFileOffer.filename;
-      await acceptFileTransfer(currentFileOffer.transfer_id);
-      showFileOfferDialog = false;
-      currentFileOffer = null;
-      console.log(`Accepted file transfer: ${filename}`);
-    } catch (error) {
-      console.error('Error accepting file:', error);
-      fileOfferToastMessage = `Failed to accept file: ${error}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-    }
-  }
-
-  async function handleRejectFile() {
-    if (!currentFileOffer) return;
-
-    try {
-      const filename = currentFileOffer.filename;
-      await cancelFileTransfer(currentFileOffer.transfer_id, "user_rejected");
-      showFileOfferDialog = false;
-      currentFileOffer = null;
-      console.log(`Rejected file transfer: ${filename}`);
-    } catch (error) {
-      console.error('Error rejecting file:', error);
-    }
-  }
-
-  // Image paste handlers (Phase 2.4: Screenshot + Vision - improved UX)
-  async function handlePaste(event: ClipboardEvent) {
-    console.log('[Paste] Paste event triggered');
-
-    // First try the standard ClipboardEvent API
-    const items = event.clipboardData?.items;
-    if (items && items.length > 0) {
-      console.log(`[Paste] Found ${items.length} clipboard items via standard API`);
-      for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        console.log(`[Paste] Item ${i}: type="${item.type}", kind="${item.kind}"`);
-
-        if (item.type.startsWith('image/')) {
-          console.log('[Paste] Image item detected, processing...');
-          event.preventDefault();
-          const blob = item.getAsFile();
-
-          // Check if blob is valid
-          if (!blob) {
-            console.log('[Paste] Failed to get file blob from clipboard item');
-            continue;
-          }
-
-          console.log(`[Paste] Got blob: size=${blob.size} bytes, type=${blob.type}`);
-
-          // Validate size (5MB limit)
-          if (blob.size > 5 * 1024 * 1024) {
-            fileOfferToastMessage = `Image too large (${(blob.size / (1024 * 1024)).toFixed(2)}MB). Max: 5MB`;
-            showFileOfferToast = true;
-            setTimeout(() => showFileOfferToast = false, 5000);
-            return;
-          }
-
-          // Convert to data URL and show as preview chip
-          const reader = new FileReader();
-          reader.onload = (e) => {
-            console.log('[Paste] Image converted to data URL, setting pendingImage');
-            pendingImage = {
-              dataUrl: e.target?.result as string,
-              filename: `screenshot_${Date.now()}.png`,
-              sizeBytes: blob.size
-            };
-          };
-          reader.onerror = (e) => {
-            console.error('[Paste] FileReader error:', e);
-          };
-          reader.readAsDataURL(blob);
-          return;
-        }
-      }
-    }
-
-    // Fallback: Try navigator.clipboard.read() for Linux compatibility
-    try {
-      console.log('[Paste] Standard API failed, trying navigator.clipboard.read()...');
-      const clipboardItems = await navigator.clipboard.read();
-
-      for (const clipboardItem of clipboardItems) {
-        console.log('[Paste] ClipboardItem types:', clipboardItem.types);
-
-        for (const type of clipboardItem.types) {
-          if (type.startsWith('image/')) {
-            console.log(`[Paste] Found image type: ${type}`);
-            event.preventDefault();
-            const blob = await clipboardItem.getType(type);
-
-            console.log(`[Paste] Got blob from navigator.clipboard: size=${blob.size} bytes, type=${blob.type}`);
-
-            // Validate size (5MB limit)
-            if (blob.size > 5 * 1024 * 1024) {
-              fileOfferToastMessage = `Image too large (${(blob.size / (1024 * 1024)).toFixed(2)}MB). Max: 5MB`;
-              showFileOfferToast = true;
-              setTimeout(() => showFileOfferToast = false, 5000);
-              return;
-            }
-
-            // Convert to data URL and show as preview chip
-            const reader = new FileReader();
-            reader.onload = (e) => {
-              console.log('[Paste] Image converted to data URL (fallback), setting pendingImage');
-              pendingImage = {
-                dataUrl: e.target?.result as string,
-                filename: `screenshot_${Date.now()}.png`,
-                sizeBytes: blob.size
-              };
-            };
-            reader.onerror = (e) => {
-              console.error('[Paste] FileReader error (fallback):', e);
-            };
-            reader.readAsDataURL(blob);
-            return;
-          }
-        }
-      }
-
-      console.log('[Paste] No image found in clipboard via fallback API');
-    } catch (err) {
-      console.error('[Paste] navigator.clipboard.read() failed:', err);
-      // Might fail due to permissions or not being supported
-    }
-
-    console.log('[Paste] Paste handling complete');
-  }
-
-  function clearPendingImage() {
-    pendingImage = null;
-  }
-
-  async function handleConfirmSendFile() {
-    if (!pendingFileSend || isSendingFile) return;  // Guard against double-click
-
-    isSendingFile = true;  // Set flag immediately to block subsequent clicks
-
-    try {
-      // Check if this is image data (screenshot) or file path
-      if (pendingFileSend.imageData) {
-        // Screenshot/image paste
-        console.log(`Sending screenshot: ${pendingFileSend.fileName} to ${pendingFileSend.recipientId}`);
-        if (pendingFileSend.recipientId.startsWith('group-')) {
-          await sendGroupImage(pendingFileSend.recipientId, pendingFileSend.imageData.dataUrl, pendingFileSend.imageData.filename, pendingFileSend.caption || '');
-          console.log(`[Group] Screenshot transfer initiated: ${pendingFileSend.fileName}`);
-        } else {
-          // P2P screenshot
-          await sendCommand("send_p2p_image", {
-            node_id: pendingFileSend.recipientId,
-            image_base64: pendingFileSend.imageData.dataUrl,
-            filename: pendingFileSend.imageData.filename,
-            text: pendingFileSend.caption || ''
-          });
-          console.log(`Screenshot transfer initiated: ${pendingFileSend.fileName}`);
-        }
-      } else {
-        // Regular file
-        console.log(`Sending file: ${pendingFileSend.filePath} to ${pendingFileSend.recipientId}`);
-        if (pendingFileSend.recipientId.startsWith('group-')) {
-          await sendGroupFile(pendingFileSend.recipientId, pendingFileSend.filePath);
-          console.log(`[Group] File transfer initiated: ${pendingFileSend.fileName}`);
-        } else {
-          await sendFile(pendingFileSend.recipientId, pendingFileSend.filePath);
-        }
-      }
-
-      showSendFileDialog = false;
-      pendingFileSend = null;
-
-      fileOfferToastMessage = `Sending...`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 3000);
-    } catch (error) {
-      console.error('Error sending file:', error);
-      fileOfferToastMessage = `Failed to send: ${error}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-    } finally {
-      isSendingFile = false;  // Reset flag after completion
-      // Clear file preparation state
-      filePreparationStarted.set(null);
-      filePreparationProgress.set(null);
-      filePreparationCompleted.set(null);
-    }
-  }
-
-  function handleCancelSendFile() {
-    showSendFileDialog = false;
-    pendingFileSend = null;
-    // Clear file preparation state
-    filePreparationStarted.set(null);
-    filePreparationProgress.set(null);
-    filePreparationCompleted.set(null);
-    console.log('File send cancelled by user');
-  }
-
-  async function handleCancelTransfer(transferId: string, filename: string) {
-    try {
-      console.log(`Cancelling file transfer: ${transferId}`);
-      await cancelFileTransfer(transferId, 'user_cancelled');
-
-      // Show toast notification
-      fileOfferToastMessage = `Cancelled: ${filename}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 3000);
-    } catch (error) {
-      console.error('Error cancelling file transfer:', error);
-      fileOfferToastMessage = `Failed to cancel: ${error}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-    }
-  }
-
-  // Voice message handlers (v0.13.0 - Voice Messages)
-  async function handleRecordingComplete(blob: Blob, duration: number, filePath?: string) {
-    voicePreview = { blob, duration, filePath };
-  }
-
-  async function handleSendVoiceMessage() {
-    if (!voicePreview) return;
-
-    try {
-      // Store blob and duration locally to avoid null check issues after await
-      const blob = voicePreview.blob;
-      const duration = voicePreview.duration;
-
-      // Check if this is a Telegram chat
-      if (activeChatId.startsWith('telegram-')) {
-        // Convert blob to base64
-        const arrayBuffer = await blob.arrayBuffer();
-        const uint8Array = new Uint8Array(arrayBuffer);
-
-        // Convert to base64 in chunks to avoid "Maximum call stack size exceeded"
-        let binaryString = '';
-        const chunkSize = 8192;
-        for (let i = 0; i < uint8Array.length; i += chunkSize) {
-          const chunk = uint8Array.subarray(i, i + chunkSize);
-          binaryString += String.fromCharCode(...chunk);
-        }
-        const base64Audio = btoa(binaryString);
-
-        // Send to Telegram
-        await sendToTelegram(
-          activeChatId,
-          '', // Empty text for voice-only message
-          [],
-          base64Audio,
-          duration,
-          blob.type || 'audio/webm'
-        );
-
-        // Add message to local history
-        chatHistories.update(h => {
-          const newMap = new Map(h);
-          const hist = newMap.get(activeChatId) || [];
-          newMap.set(activeChatId, [...hist, {
-            id: crypto.randomUUID(),
-            sender: 'user',
-            text: 'Voice message',
-            timestamp: Date.now(),
-            attachments: [{
-              type: 'voice',
-              filename: `voice_${Date.now()}.${(blob.type || 'audio/webm').split('/')[1]}`,
-              file_path: '', // Will be filled by backend response
-              size_bytes: blob.size,
-              mime_type: blob.type || 'audio/webm',
-              voice_metadata: {
-                duration_seconds: duration,
-                sample_rate: 48000,
-                channels: 1,
-                codec: 'opus',
-                recorded_at: new Date().toISOString()
-              }
-            }]
-          }]);
-          return newMap;
-        });
-
-        console.log(`[Telegram] Sent voice message to Telegram`);
-      } else if (activeChatId.startsWith('group-')) {
-        // Group chat: Convert blob to base64 and send via group voice fan-out (v0.19.0)
-        const arrayBuffer = await blob.arrayBuffer();
-        const uint8Array = new Uint8Array(arrayBuffer);
-        let binaryString = '';
-        const chunkSize = 8192;
-        for (let i = 0; i < uint8Array.length; i += chunkSize) {
-          const chunk = uint8Array.subarray(i, i + chunkSize);
-          binaryString += String.fromCharCode(...chunk);
-        }
-        const base64Audio = btoa(binaryString);
-        await sendGroupVoiceMessage(activeChatId, base64Audio, duration, blob.type || 'audio/webm');
-      } else if (activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_')) {
-        // For AI/agent chats, transcribe audio into the input field
-        await handleTranscribeVoiceMessage();
-        return; // handleTranscribeVoiceMessage clears voicePreview itself
-      } else {
-        // For P2P chats, send via file transfer
-        await sendVoiceMessage(activeChatId, blob, duration);
-      }
-
-      // Delete Tauri temp WAV file (blob is already in memory / queued for transfer)
-      const tempFilePath = voicePreview?.filePath;
-      if (tempFilePath) {
-        try {
-          const { remove } = await import('@tauri-apps/plugin-fs');
-          await remove(tempFilePath);
-        } catch (e) {
-          console.warn('[VoiceRecorder] Could not delete temp file:', tempFilePath, e);
-        }
-      }
-
-      // Clear preview
-      voicePreview = null;
-    } catch (error) {
-      console.error('Error sending voice message:', error);
-      fileOfferToastMessage = `Failed to send voice: ${error}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-    }
-  }
-
-  async function handleTranscribeVoiceMessage() {
-    if (!voicePreview) return;
-
-    try {
-      // Show loading state
-      fileOfferToastMessage = 'Transcribing voice message...';
-      showFileOfferToast = true;
-
-      // Get selected voice provider (v0.15.1+: Pass full provider ID for remote support)
-      const selectedProviderId = selectedVoiceProvider || selectedTextProvider;
-
-      // Prefer file path (Tauri mode) — avoids sending large audio data over the local WebSocket
-      let transcribeArgs: Record<string, string>;
-      if (voicePreview.filePath) {
-        transcribeArgs = {
-          file_path: voicePreview.filePath,
-          mime_type: voicePreview.blob.type || 'audio/wav',
-          provider_alias: selectedProviderId
-        };
-      } else {
-        // Browser fallback: encode blob as base64
-        const arrayBuffer = await voicePreview.blob.arrayBuffer();
-        const uint8Array = new Uint8Array(arrayBuffer);
-        let binaryString = '';
-        const chunkSize = 8192;
-        for (let i = 0; i < uint8Array.length; i += chunkSize) {
-          const chunk = uint8Array.subarray(i, i + chunkSize);
-          binaryString += String.fromCharCode(...chunk);
-        }
-        transcribeArgs = {
-          audio_base64: btoa(binaryString),
-          mime_type: voicePreview.blob.type || 'audio/webm',
-          provider_alias: selectedProviderId
-        };
-      }
-
-      // Call backend for transcription
-      const response = await sendCommand('transcribe_audio', transcribeArgs);
-
-      if (response.error) {
-        throw new Error(response.error);
-      }
-
-      // Insert transcribed text into textarea
-      const transcription = response.text || '';
-      if (transcription) {
-        currentInput = currentInput + (currentInput ? ' ' : '') + transcription;
-      }
-
-      // Delete the Tauri-created temp WAV file (it was recorded to ~/.dpc/temp/
-      // and is no longer needed once we have the transcription text).
-      const tempFilePath = voicePreview?.filePath;
-      if (tempFilePath) {
-        try {
-          const { remove } = await import('@tauri-apps/plugin-fs');
-          await remove(tempFilePath);
-          console.log('[VoiceRecorder] Deleted temp file:', tempFilePath);
-        } catch (e) {
-          console.warn('[VoiceRecorder] Could not delete temp file:', tempFilePath, e);
-        }
-      }
-
-      // Clear preview and hide toast
-      voicePreview = null;
-      showFileOfferToast = false;
-
-      // Focus textarea
-      const textarea = document.getElementById('message-input') as HTMLTextAreaElement;
-      if (textarea) {
-        textarea.focus();
-        textarea.setSelectionRange(currentInput.length, currentInput.length);
-      }
-    } catch (error) {
-      console.error('Error transcribing voice message:', error);
-      fileOfferToastMessage = `Transcription failed: ${error}`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-    }
-  }
-
-  function handleCancelVoicePreview() {
-    // Delete temp WAV if user cancels without sending
-    if (voicePreview?.filePath) {
-      import('@tauri-apps/plugin-fs').then(({ remove }) => {
-        remove(voicePreview!.filePath!).catch(() => {});
-      });
-    }
-    voicePreview = null;
-  }
-
-  // Auto-transcribe setting management (v0.13.2+ Auto-Transcription)
-  async function saveAutoTranscribeSetting() {
-    // Only save for P2P chats (not AI chats or local_ai)
-    if ($aiChats.has(activeChatId) || activeChatId === 'local_ai') {
-      return;
-    }
-
-    try {
-      const result = await setConversationTranscription(activeChatId, autoTranscribeEnabled);
-      console.log(`[AutoTranscribe] Saved setting for ${activeChatId}: ${autoTranscribeEnabled}`, result);
-
-      // Model will load lazily on first voice message recording
-      // No need to preload here - this speeds up app startup significantly
-    } catch (error) {
-      console.error(`[AutoTranscribe] Failed to save setting for ${activeChatId}:`, error);
-    }
-  }
-
-  async function loadAutoTranscribeSetting(chatId: string) {
-    // Only load for P2P chats (not AI chats or local_ai)
-    if ($aiChats.has(chatId) || chatId === 'local_ai') {
-      autoTranscribeEnabled = true;  // Not applicable for AI chats
-      return;
-    }
-
-    try {
-      const result = await getConversationTranscription(chatId);
-      if (result.status === 'success') {
-        autoTranscribeEnabled = result.enabled;
-        console.log(`[AutoTranscribe] Loaded setting for ${chatId}: ${autoTranscribeEnabled}`);
-      } else {
-        // Default to true on error
-        autoTranscribeEnabled = true;
-        console.warn(`[AutoTranscribe] Failed to load setting for ${chatId}, defaulting to true`);
-      }
-    } catch (error) {
-      console.error(`[AutoTranscribe] Error loading setting for ${chatId}:`, error);
-      autoTranscribeEnabled = true;  // Default to true on error
-    }
-  }
-
-  // Load auto-transcribe setting when chat changes
-  $effect(() => {
-    if (activeChatId && $connectionStatus === 'connected') {
-      loadAutoTranscribeSetting(activeChatId);
-    }
-  });
-
+  // File transfer and voice handler functions moved to ChatPanel.svelte (Step 4)
+  // saveAutoTranscribeSetting + loadAutoTranscribeSetting moved to VoicePanel.svelte (Step 6)
   // --- HANDLE INCOMING MESSAGES ---
   $effect(() => {
     if ($coreMessages?.id) {
@@ -4115,19 +2379,8 @@
       }
       processedMessageIds.add(messageId);
 
-      // Flush any pending streaming buffer before capturing (handles batch-mode single-chunk delivery
-      // where the chunk and final response arrive within milliseconds — before the 100ms throttle fires)
-      if (streamingBuffer) {
-        if (streamingFlushTimeout) {
-          clearTimeout(streamingFlushTimeout);
-          streamingFlushTimeout = null;
-        }
-        agentStreamingText += streamingBuffer;
-        streamingBuffer = "";
-      }
-      // Capture streaming text before clearing (for collapsible raw output)
-      const capturedStreamingText = agentStreamingText;
-      clearAgentStreaming();  // Clear streaming text when final response arrives
+      // Flush pending buffer and capture streaming text (AgentPanel owns buffer + state)
+      const capturedStreamingText = agentPanelComp?.flushAndCapture() ?? '';
 
       const newText = message.status === "OK"
         ? message.payload.content
@@ -4141,9 +2394,10 @@
       // Show toast notification for errors (helps remote users see host failures)
       if (message.status !== "OK") {
         console.error(`[TokenCounter] AI query failed: ${message.payload?.message}`);
-        fileOfferToastMessage = `⚠️ AI Query Failed: ${message.payload?.message || 'Unknown error'}`;
-        showFileOfferToast = true;
-        setTimeout(() => showFileOfferToast = false, 7000);  // 7s for errors (longer than success)
+        agentToastMessage = `⚠️ AI Query Failed: ${message.payload?.message || 'Unknown error'}`;
+        agentToastType = 'error';
+        showAgentToast = true;
+        setTimeout(() => showAgentToast = false, 7000);  // 7s for errors (longer than success)
       }
 
       const responseCommandId = message.id;
@@ -4221,19 +2475,7 @@
             console.log(`[Context Sent] Marked context as sent for ${chatId}`);
           }
 
-          // Also mark peer contexts as sent if they were included (independent of local context)
-          if (selectedPeerContexts.size > 0) {
-            const chatPeerHashes = new Map();
-            for (const peerId of selectedPeerContexts) {
-              const peerHash = peerContextHashes.get(peerId);
-              if (peerHash) {
-                chatPeerHashes.set(peerId, peerHash);
-              }
-            }
-            lastSentPeerHashes = new Map(lastSentPeerHashes);
-            lastSentPeerHashes.set(chatId, chatPeerHashes);
-            console.log(`[Peer Contexts Sent] Marked ${chatPeerHashes.size} peer contexts as sent for ${chatId}`);
-          }
+          // Note: peer context "sent" tracking (selectedPeerContexts) is now owned by ChatPanel (Step 4)
         }
 
         // Clean up the command mapping
@@ -4422,39 +2664,7 @@
     }
   });
 
-  // Group invite accept/decline dialog (v0.19.0)
-  $effect(() => {
-    if ($groupInviteReceived) {
-      pendingGroupInvite = $groupInviteReceived;
-      showGroupInviteDialog = true;
-    }
-  });
-
-  function handleGroupInviteAccept(event: CustomEvent<{ group_id: string }>) {
-    const groupId = event.detail.group_id;
-    // Group is already stored by backend — just init chat history and show in sidebar
-    chatHistories.update(h => {
-      if (!h.has(groupId)) {
-        const newMap = new Map(h);
-        newMap.set(groupId, []);
-        return newMap;
-      }
-      return h;
-    });
-    const name = pendingGroupInvite?.name || 'group';
-    fileOfferToastMessage = `Joined group "${name}"`;
-    showFileOfferToast = true;
-    setTimeout(() => showFileOfferToast = false, 3000);
-    activeChatId = groupId;
-    pendingGroupInvite = null;
-  }
-
-  async function handleGroupInviteDecline(event: CustomEvent<{ group_id: string }>) {
-    const groupId = event.detail.group_id;
-    // Leave the group (backend already stored it, so we need to remove)
-    await leaveGroup(groupId);
-    pendingGroupInvite = null;
-  }
+  // Group invite/deletion/memberLeft effects moved to GroupPanel.svelte (Step 7)
 
   // Group settings: add/remove member (v0.19.0)
   async function handleGroupAddMember(event: CustomEvent<{ group_id: string; node_id: string }>) {
@@ -4474,41 +2684,6 @@
       console.error("Failed to remove group member:", e);
     }
   }
-
-  // Group deletion notification (v0.19.0)
-  $effect(() => {
-    if ($groupDeleted) {
-      const deleted = $groupDeleted;
-      fileOfferToastMessage = `Group "${deleted.group_name || deleted.group_id}" was deleted`;
-      showFileOfferToast = true;
-      setTimeout(() => showFileOfferToast = false, 5000);
-
-      // Switch away if viewing deleted group
-      if (activeChatId === deleted.group_id) {
-        activeChatId = 'local_ai';
-      }
-      // Clean up chat history
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        newMap.delete(deleted.group_id);
-        return newMap;
-      });
-    }
-  });
-
-  // Group member left notification (v0.19.0)
-  $effect(() => {
-    if ($groupMemberLeft) {
-      const left = $groupMemberLeft;
-      const memberName = left.member_name || left.node_id?.slice(0, 16) || 'A member';
-      const group = $groupChats.get(left.group_id);
-      if (group) {
-        fileOfferToastMessage = `${memberName} left "${group.name}"`;
-        showFileOfferToast = true;
-        setTimeout(() => showFileOfferToast = false, 4000);
-      }
-    }
-  });
 
   let activeMessages = $derived($chatHistories.get(activeChatId) || []);
 
@@ -4610,7 +2785,7 @@
               <input
                 type="checkbox"
                 bind:checked={autoTranscribeEnabled}
-                onchange={saveAutoTranscribeSetting}
+                onchange={() => voicePanelComp?.saveAutoTranscribeSetting()}
                 disabled={whisperModelLoading}
               />
               <span>Auto Transcribe</span>
@@ -4681,245 +2856,80 @@
         selfName={$personalContext?.profile?.name || ''}
       />
 
-      <div class="chat-input">
-        {#if $aiChats.has(activeChatId) && !activeChatId.startsWith('telegram-')}
-          <!-- Personal Context Toggle (hidden for Telegram chats - not applicable) -->
-          <div class="context-toggle">
-            <button
-              type="button"
-              class="context-toggle-header"
-              onclick={() => contextPanelCollapsed = !contextPanelCollapsed}
-              aria-expanded={!contextPanelCollapsed}
-            >
-              <span class="context-toggle-title">
-                {contextPanelCollapsed ? '▶' : '▼'} Context Settings
-              </span>
-            </button>
-
-            {#if !contextPanelCollapsed}
-            <label class="context-checkbox">
-              <input
-                id="include-personal-context"
-                name="include-personal-context"
-                type="checkbox"
-                bind:checked={includePersonalContext}
-              />
-              <span>
-                Include Personal Context (profile, instructions, device info)
-                {#if localContextUpdated}
-                  <span class="status-badge updated">Updated</span>
-                {/if}
-              </span>
-            </label>
-            {#if !includePersonalContext}
-              <span class="context-hint">⚠️ AI won't know your preferences or device specs</span>
-            {/if}
-
-            <!-- AI Scope Selector (only show when context is enabled) -->
-            {#if includePersonalContext && availableAIScopes.length > 0}
-              <div class="ai-scope-selector">
-                <label for="ai-scope-select">
-                  AI Context Mode:
-                </label>
-                <select id="ai-scope-select" bind:value={selectedAIScope}>
-                  <option value="">Full Access (no filtering)</option>
-                  {#each availableAIScopes as scopeName}
-                    <option value={scopeName}>{scopeName}</option>
-                  {/each}
-                </select>
-                <span class="context-hint">
-                  {#if selectedAIScope}
-                    🔒 AI can only access: {selectedAIScope} scope
-                  {:else}
-                    🔓 AI has full context access
-                  {/if}
-                </span>
-              </div>
-            {/if}
-
-            <!-- Instruction Set Selector (only show when context is enabled) -->
-            {#if includePersonalContext && (activeChatId === 'local_ai' || activeChatId.startsWith('ai_'))}
-              <div class="ai-scope-selector">
-                <label for="instruction-set-select">
-                  AI Instruction Set:
-                </label>
-                <select
-                  id="instruction-set-select"
-                  value={selectedInstructionSet}
-                  onchange={(e) => updateInstructionSet((e.target as HTMLSelectElement).value)}
-                >
-                  <option value="none">None (No Instructions)</option>
-                  {#if availableInstructionSets}
-                    {#each Object.entries(availableInstructionSets.sets) as [key, set]}
-                      <option value={key}>
-                        {set.name} {availableInstructionSets.default === key ? '⭐' : ''}
-                      </option>
-                    {/each}
-                  {:else}
-                    <option value="general">General Purpose</option>
-                  {/if}
-                </select>
-                <span class="context-hint">
-                  Controls AI behavior and responses
-                </span>
-              </div>
-            {/if}
-
-            <!-- Peer Context Selector (show for all AI chats) -->
-            {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
-            <div class="peer-context-selector">
-              <div class="peer-context-header">
-                <span class="peer-context-label">Include Peer Context:</span>
-                <span class="peer-context-hint">
-                  ({selectedPeerContexts.size} selected)
-                </span>
-              </div>
-              <div class="peer-context-checkboxes">
-                {#each $nodeStatus.peer_info as peer}
-                  {@const displayName = peer.name
-                    ? `${peer.name} | ${peer.node_id.slice(0, 15)}...`
-                    : `${peer.node_id.slice(0, 20)}...`}
-                  {@const isPeerContextUpdated = peerContextsUpdated.has(peer.node_id)}
-                  <label class="peer-context-checkbox">
-                    <input
-                      id={`peer-context-${peer.node_id}`}
-                      name={`peer-context-${peer.node_id}`}
-                      type="checkbox"
-                      checked={selectedPeerContexts.has(peer.node_id)}
-                      onchange={() => togglePeerContext(peer.node_id)}
-                    />
-                    <span>
-                      {displayName}
-                      {#if isPeerContextUpdated}
-                        <span class="status-badge updated">Updated</span>
-                      {/if}
-                    </span>
-                  </label>
-                {/each}
-              </div>
-            </div>
-            {/if}
-            {/if}
-          </div>
-        {/if}
-
-        <!-- FileTransferUI component: Image/voice preview appears here, modals/panels are positioned -->
-        <FileTransferUI
-          pendingImage={pendingImage}
-          onClearPendingImage={clearPendingImage}
-          voicePreview={voicePreview}
-          onClearVoicePreview={handleCancelVoicePreview}
-          onSendVoiceMessage={handleSendVoiceMessage}
-          onTranscribeVoiceMessage={handleTranscribeVoiceMessage}
-          isLocalAIChat={activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
-          showFileOfferDialog={showFileOfferDialog}
-          currentFileOffer={currentFileOffer}
-          onAcceptFile={handleAcceptFile}
-          onRejectFile={handleRejectFile}
-          showSendFileDialog={showSendFileDialog}
-          pendingFileSend={pendingFileSend}
-          isSendingFile={isSendingFile}
-          filePreparationStarted={$filePreparationStarted}
-          filePreparationProgress={$filePreparationProgress}
-          filePreparationCompleted={$filePreparationCompleted}
-          onConfirmSendFile={handleConfirmSendFile}
-          onCancelSendFile={handleCancelSendFile}
-          activeFileTransfers={$activeFileTransfers}
-          onCancelTransfer={handleCancelTransfer}
-          showFileOfferToast={showFileOfferToast}
-          fileOfferToastMessage={fileOfferToastMessage}
-          onDismissToast={() => showFileOfferToast = false}
-        />
-
-        <div class="input-row">
-          <!-- Knowledge Integrity Warning Banner (shown on startup if tampered/corrupted commits detected) -->
-          {#if $integrityWarnings && $integrityWarnings.count > 0 && !$integrityWarnings.dismissed}
-            <IntegrityWarningBanner
-              count={$integrityWarnings.count}
-              warnings={$integrityWarnings.warnings}
-              onDismiss={() => integrityWarnings.update(w => w ? { ...w, dismissed: true } : w)}
-            />
-          {/if}
-
-          <!-- Token Warning Banner (90% and 100% warnings) -->
-          {#if showTokenBanner}
-            <TokenWarningBanner
-              severity={tokenWarningLevel === 'critical' ? 'critical' : 'warning'}
-              percentage={estimatedUsage.percentage}
-              onEndSession={() => handleEndSession(activeChatId)}
-              dismissible={tokenWarningLevel !== 'critical'}
-            />
-          {/if}
-
-          <textarea
-            id="message-input"
-            name="message-input"
-            bind:value={currentInput}
-            placeholder={
-              isContextWindowFull ? 'Context window full - Delete text or end session to continue' :
-              ($connectionStatus === 'connected' ? (pendingImage ? 'Add a caption (optional)...' : 'Type a message or paste an image... (Enter to send, Shift+Enter for new line)') : 'Connect to Core Service first...')
-            }
-            disabled={$connectionStatus !== 'connected' || isLoading}
-            oninput={handleMentionInput}
-            onkeydown={(e) => {
-              // If mention autocomplete is open, let the component handle all navigation
-              if (mentionAutocompleteVisible && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Tab' || e.key === 'Enter' || e.key === 'Escape')) {
-                if (e.key === 'Enter' || e.key === 'Tab' || e.key === 'Escape') {
-                  e.preventDefault(); // Prevent sending message when autocomplete is open
-                }
-                return; // Let MentionAutocomplete handle it
-              }
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                // Send if: peer connected, OR local AI chat, OR Telegram chat, OR AI_xxx chat, OR agent chat (including 'default') AND (has text OR has pending image)
-                if ((isPeerConnected || isTelegramChat || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_') || activeChatId === 'default') && (currentInput.trim() || pendingImage)) {
-                  handleSendMessage();
-                }
-              }
-            }}
-            onpaste={handlePaste}
-          ></textarea>
-
-          <!-- Voice Recorder (v0.13.0) -->
-          <VoiceRecorder
-            disabled={$connectionStatus !== 'connected' || isLoading || (autoTranscribeEnabled && whisperModelLoading)}
-            maxDuration={300}
-            onRecordingComplete={handleRecordingComplete}
-          />
-
-          <button
-            class="file-button"
-            onclick={handleSendFile}
-            disabled={$connectionStatus !== 'connected' || isLoading || activeChatId === 'local_ai' || activeChatId.startsWith('ai_') || activeChatId.startsWith('agent_') || activeChatId === 'default' || (!isPeerConnected && !isTelegramChat)}
-            title={isPeerConnected || isTelegramChat || activeChatId.startsWith('agent_') || activeChatId === 'default' ? "Send file" : "Peer disconnected"}
-          >
-            📎
-          </button>
-          <button
-            onclick={handleSendMessage}
-            disabled={$connectionStatus !== 'connected' || isLoading || (!currentInput.trim() && !pendingImage) || isContextWindowFull || (!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') && activeChatId !== 'default')}
-            title={!isPeerConnected && !isTelegramChat && activeChatId !== 'local_ai' && !activeChatId.startsWith('ai_') && !activeChatId.startsWith('agent_') && activeChatId !== 'default' ? "Peer disconnected" : ""}
-          >
-            {#if isLoading}Sending...{:else}Send{/if}
-          </button>
-        </div>
-      </div>
-
-      <!-- Resize Handle -->
-      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
-      <div
-        class="resize-handle"
-        class:resizing={isResizing}
-        onmousedown={startResize}
-        role="separator"
-        aria-orientation="horizontal"
-        aria-label="Resize chat panel"
-      >
-        <div class="resize-handle-line"></div>
-      </div>
+      <ChatPanel
+        {activeChatId}
+        {chatHistories}
+        {commandToChatMap}
+        {agentChatToAgentId}
+        {aiChats}
+        {chatProviders}
+        {selectedTextProvider}
+        {selectedVisionProvider}
+        {selectedVoiceProvider}
+        {clearAgentStreaming}
+        {autoScroll}
+        {setChatLoading}
+        {isLoading}
+        {tokenUsageMap}
+        {availableInstructionSets}
+        {currentContextHash}
+        {lastSentContextHash}
+        {peerContextHashes}
+        {lastSentPeerHashes}
+        {peerDisplayNames}
+        {autoTranscribeEnabled}
+        {whisperModelLoading}
+        bind:chatPanelHeight
+        bind:showAgentBoard
+      />
     </div>
   </div>
 </main>
+
+<!-- AgentPanel: logic-only, manages agent progress/streaming/history effects (Step 5) -->
+<AgentPanel
+  bind:this={agentPanelComp}
+  {activeChatId}
+  {agentChatToAgentId}
+  {chatHistories}
+  {getPeerDisplayName}
+  chatWindow={chatWindow ?? null}
+  onUpdateTokenUsage={(convId, usage) => {
+    tokenUsageMap = new Map(tokenUsageMap);
+    tokenUsageMap.set(convId, usage);
+  }}
+  onAgentToast={(message, type) => {
+    agentToastMessage = message;
+    agentToastType = type;
+    showAgentToast = true;
+    setTimeout(() => { showAgentToast = false; }, 3000);
+  }}
+  onRefreshAgents={async () => {
+    try {
+      const result = await listAgents();
+      if (result?.status === 'success' && result.agents) {
+        agentsList.set(result.agents);
+      }
+    } catch (error) {
+      console.error('Failed to refresh agents list:', error);
+    }
+  }}
+  bind:agentProgressMessage
+  bind:agentProgressTool
+  bind:agentProgressRound
+  bind:agentStreamingText
+/>
+
+<!-- VoicePanel: logic-only, manages whisper loading + transcription effects (Step 6) -->
+<VoicePanel
+  bind:this={voicePanelComp}
+  {activeChatId}
+  {aiChats}
+  {chatHistories}
+  bind:autoTranscribeEnabled
+  bind:whisperModelLoading
+  bind:whisperModelLoadError
+/>
 
 <!-- Knowledge Architecture UI Components -->
 <KnowledgeCommitDialog
@@ -4944,12 +2954,17 @@
   on:cancel={() => showNewGroupDialog = false}
 />
 
-<!-- Group Invite Accept/Decline Dialog (v0.19.0) -->
-<GroupInviteDialog
-  bind:open={showGroupInviteDialog}
-  invite={pendingGroupInvite}
-  on:accept={handleGroupInviteAccept}
-  on:decline={handleGroupInviteDecline}
+<!-- GroupPanel: group invite/deletion/memberLeft effects (Step 7) -->
+<GroupPanel
+  {activeChatId}
+  {chatHistories}
+  onSetActiveChatId={(id) => { activeChatId = id; }}
+  onAgentToast={(message, type) => {
+    agentToastMessage = message;
+    agentToastType = type;
+    showAgentToast = true;
+    setTimeout(() => { showAgentToast = false; }, 4000);
+  }}
 />
 
 <!-- Group Settings Dialog (v0.19.0) -->
@@ -5012,11 +3027,12 @@
             showNotificationPermissionDialog = false;
 
             // Show result toast
-            fileOfferToastMessage = granted
+            agentToastMessage = granted
               ? 'Notifications enabled'
               : 'Notifications disabled - you can enable them later in settings';
-            showFileOfferToast = true;
-            setTimeout(() => showFileOfferToast = false, 3000);
+            agentToastType = 'info';
+            showAgentToast = true;
+            setTimeout(() => showAgentToast = false, 3000);
           }}
         >
           Enable Notifications
@@ -5042,31 +3058,6 @@
   on:close={() => showContextViewer = false}
 />
 
-<AgentTaskBoard
-  bind:open={showAgentBoard}
-  agentId={activeChatId && agentChatToAgentId.has(activeChatId)
-    ? (agentChatToAgentId.get(activeChatId) ?? 'agent_001')
-    : 'agent_001'}
-  onSendToAgent={(msg) => {
-    if (activeChatId && agentChatToAgentId.has(activeChatId)) {
-      currentInput = msg;
-      handleSendMessage();
-    }
-  }}
-  on:close={() => showAgentBoard = false}
-/>
-
-<!-- Mention Autocomplete (Group Chats) -->
-<MentionAutocomplete
-  visible={mentionAutocompleteVisible}
-  query={mentionQuery}
-  members={getMentionableMembers()}
-  position={mentionDropdownPosition}
-  selectedIndex={mentionSelectedIndex}
-  on:select={(e) => handleMentionSelect(e.detail)}
-  on:navigate={(e) => handleMentionNavigate(e.detail.direction)}
-  on:close={closeMentionAutocomplete}
-/>
 
 <InstructionsEditor
   bind:open={showInstructionsEditor}
@@ -5464,309 +3455,6 @@
     color: #ff9800;
   }
 
-  /* Resize Handle */
-  .resize-handle {
-    height: 8px;
-    background: linear-gradient(to bottom, #f9f9f9 0%, #e0e0e0 50%, #f9f9f9 100%);
-    cursor: ns-resize;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    position: relative;
-    transition: background 0.2s;
-    user-select: none;
-  }
-
-  .resize-handle:hover {
-    background: linear-gradient(to bottom, #e0e0e0 0%, #007bff 50%, #e0e0e0 100%);
-  }
-
-  .resize-handle:active,
-  .resize-handle.resizing {
-    background: linear-gradient(to bottom, #d0d0d0 0%, #0056b3 50%, #d0d0d0 100%);
-  }
-
-  .resize-handle-line {
-    width: 60px;
-    height: 3px;
-    background: #999;
-    border-radius: 2px;
-    pointer-events: none;
-  }
-
-  .resize-handle:hover .resize-handle-line {
-    background: #007bff;
-  }
-
-  .resize-handle:active .resize-handle-line {
-    background: #0056b3;
-  }
-
-  .chat-input {
-    padding: 1rem;
-    border-top: 1px solid #eee;
-    display: flex;
-    flex-direction: column;
-    gap: 0.5rem;
-    overflow-x: hidden; /* Prevent horizontal overflow */
-    max-width: 100%; /* Constrain to parent width */
-  }
-
-  /* Personal Context Toggle Styles */
-  .context-toggle {
-    padding: 0.75rem;
-    background: linear-gradient(135deg, #fff9f3 0%, #fff4e6 100%);
-    border-radius: 8px;
-    border: 1px solid #ffd4a3;
-    margin-bottom: 0.5rem;
-    position: relative;
-  }
-
-  .context-toggle-header {
-    width: 100%;
-    text-align: left;
-    cursor: pointer;
-    user-select: none;
-    padding: 0.5rem;
-    margin: -0.75rem -0.75rem 0.75rem -0.75rem;
-    background: rgba(255, 212, 163, 0.3);
-    border: none;
-    border-radius: 8px 8px 0 0;
-    border-bottom: 1px solid #ffd4a3;
-    transition: background 0.2s ease;
-  }
-
-  .context-toggle-header:hover {
-    background: rgba(255, 212, 163, 0.5);
-  }
-
-  .context-toggle-title {
-    font-weight: 600;
-    color: #c45500;
-    font-size: 0.95rem;
-  }
-
-  .context-checkbox {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    cursor: pointer;
-    user-select: none;
-    font-size: 0.9rem;
-    font-weight: 500;
-    color: #374151;
-  }
-
-  .context-checkbox input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    cursor: pointer;
-    accent-color: #f59e0b;
-  }
-
-  .context-hint {
-    display: block;
-    margin-top: 0.5rem;
-    font-size: 0.75rem;
-    color: #d97706;
-    font-weight: 500;
-    padding: 0.3rem 0.6rem;
-    background: white;
-    border-radius: 6px;
-    border-left: 3px solid #f59e0b;
-  }
-
-  .ai-scope-selector {
-    margin-top: 0.75rem;
-    padding-top: 0.75rem;
-    border-top: 1px solid #ffd4a3;
-  }
-
-  .ai-scope-selector label {
-    display: block;
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #374151;
-    margin-bottom: 0.4rem;
-  }
-
-  .ai-scope-selector select {
-    width: 100%;
-    padding: 0.5rem;
-    border: 1px solid #d1d5db;
-    border-radius: 6px;
-    font-size: 0.9rem;
-    background: white;
-    cursor: pointer;
-    transition: border-color 0.2s;
-  }
-
-  .ai-scope-selector select:hover {
-    border-color: #f59e0b;
-  }
-
-  .ai-scope-selector select:focus {
-    outline: none;
-    border-color: #f59e0b;
-    box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1);
-  }
-
-  /* Phase 7: Status Badge Styles (for context update indicators) */
-  .status-badge {
-    display: inline-block;
-    margin-left: 0.5rem;
-    padding: 0.15rem 0.5rem;
-    font-size: 0.7rem;
-    font-weight: 600;
-    border-radius: 12px;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }
-
-  .status-badge.updated {
-    background: #10b981;
-    color: white;
-    box-shadow: 0 2px 4px rgba(16, 185, 129, 0.3);
-    animation: pulse-badge 2s ease-in-out infinite;
-  }
-
-  @keyframes pulse-badge {
-    0%, 100% {
-      opacity: 1;
-      transform: scale(1);
-    }
-    50% {
-      opacity: 0.8;
-      transform: scale(0.98);
-    }
-  }
-
-  /* Peer Context Selector Styles */
-  .peer-context-selector {
-    padding: 0.75rem;
-    background: linear-gradient(135deg, #f8f3ff 0%, #f0f4ff 100%);
-    border-radius: 8px;
-    border: 1px solid #d4c5f9;
-    margin-bottom: 0.5rem;
-  }
-
-  .peer-context-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 0.5rem;
-  }
-
-  .peer-context-label {
-    font-size: 0.9rem;
-    font-weight: 600;
-    color: #5b21b6;
-    margin: 0;
-  }
-
-  .peer-context-hint {
-    font-size: 0.75rem;
-    color: #8b5cf6;
-    font-weight: 500;
-    padding: 0.2rem 0.5rem;
-    background: white;
-    border-radius: 12px;
-  }
-
-  .peer-context-checkboxes {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5rem;
-  }
-
-  .peer-context-checkbox {
-    display: flex;
-    align-items: center;
-    gap: 0.4rem;
-    padding: 0.4rem 0.7rem;
-    background: white;
-    border: 2px solid #e0e0e0;
-    border-radius: 6px;
-    cursor: pointer;
-    transition: all 0.2s;
-    font-size: 0.85rem;
-    user-select: none;
-  }
-
-  .peer-context-checkbox:hover {
-    border-color: #8b5cf6;
-    background: #faf5ff;
-  }
-
-  .peer-context-checkbox input[type="checkbox"] {
-    width: 16px;
-    height: 16px;
-    cursor: pointer;
-    margin: 0;
-    padding: 0;
-  }
-
-  .peer-context-checkbox input[type="checkbox"]:checked {
-    accent-color: #8b5cf6;
-  }
-
-  .peer-context-checkbox span {
-    color: #374151;
-    font-weight: 500;
-  }
-
-  .input-row {
-    display: flex;
-    gap: 0.5rem;
-    overflow-x: hidden; /* Prevent horizontal overflow */
-    max-width: 100%; /* Constrain to parent width */
-  }
-
-  .input-row textarea {
-    flex: 1;
-    min-height: 120px;
-    max-height: 240px;
-    resize: vertical;
-    overflow-wrap: break-word; /* Break long words */
-    word-break: break-word; /* Break long unbreakable strings */
-    overflow-x: auto; /* Allow horizontal scroll in textarea if needed */
-    padding: 0.75rem; /* Add padding inside textarea */
-    border: 1px solid #ddd;
-    border-radius: 8px;
-    font-family: inherit;
-    font-size: 1rem;
-  }
-
-  .input-row button {
-    min-width: 100px;
-    height: 45px; /* Match file button height */
-    padding: 0 16px; /* Horizontal padding only, height is fixed */
-    align-self: flex-end;
-    background: #5a67d8;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 1rem;
-    font-weight: 500;
-    transition: all 0.2s;
-    box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .input-row button:hover:not(:disabled) {
-    background: #4c51bf;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4);
-  }
-
-  .input-row button:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
-  }
-  
   /* Modal Dialog Styles */
   .modal-overlay {
     position: fixed;
@@ -5874,43 +3562,6 @@
   .btn-confirm:active {
     transform: translateY(0);
     box-shadow: 0 1px 3px rgba(76, 175, 80, 0.2);
-  }
-
-  /* Prevent text selection during resize */
-  :global(body.resizing) {
-    cursor: ns-resize !important;
-    user-select: none !important;
-  }
-
-  /* File Transfer UI Styles (Week 1) */
-  .file-button {
-    min-width: 45px;
-    width: 45px; /* Fixed width for icon button */
-    height: 45px; /* Square button */
-    padding: 8px;
-    font-size: 20px;
-    cursor: pointer;
-    background: #5a67d8;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    transition: all 0.2s;
-    box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
-    align-self: flex-end;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-  }
-
-  .file-button:hover:not(:disabled) {
-    background: #4c51bf;
-    transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4);
-  }
-
-  .file-button:disabled {
-    opacity: 0.4;
-    cursor: not-allowed;
   }
 
   /* Notification Permission Dialog */
