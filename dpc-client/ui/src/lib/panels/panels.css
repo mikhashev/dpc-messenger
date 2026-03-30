@@ -1,0 +1,35 @@
+/*
+ * panels.css — CSS Organization Strategy for lib/panels/
+ *
+ * DECISION (Phase 3 Step 3a, 2026-03-31):
+ *
+ * Follow the existing codebase pattern: each panel uses its own scoped <style> block.
+ * No shared panel Chrome layer needed — component isolation is sufficient.
+ *
+ * STYLE ASSIGNMENT:
+ *   +page.svelte <style>        Layout shell only: .grid, .container, .chat-panel wrapper,
+ *                               .chat-header, modal overlays (.modal-overlay, .modal-content),
+ *                               .dialog-actions, .btn-cancel/.btn-confirm.
+ *
+ *   ChatPanel.svelte <style>    Chat input: .chat-input, .input-row, textarea, send/file buttons.
+ *                               Resize handle: .resize-handle, .resize-handle-line.
+ *                               Context toggle: .context-toggle, .context-checkbox, .peer-context-selector.
+ *                               Global override: :global(body.resizing) — moved here because
+ *                               ChatPanel owns the resize interaction.
+ *
+ *   AgentPanel.svelte <style>   Logic-only panel — no markup, no styles needed.
+ *
+ *   VoicePanel.svelte <style>   Logic-only panel — no markup, no styles needed.
+ *
+ *   GroupPanel.svelte <style>   Group invite dialog if extracted from +page.svelte.
+ *
+ * WHAT NOT TO DO:
+ *   - Do NOT introduce CSS custom properties (--vars) during this refactor.
+ *     The entire codebase uses hardcoded values; a token system is a separate initiative.
+ *   - Do NOT import panels.css into panel components — they are self-contained.
+ *   - Do NOT put scoped panel styles here; they belong in each panel's <style> block.
+ *
+ * FUTURE (post-Phase 3):
+ *   If a design token system is introduced, this file is the right home for --var definitions
+ *   that span multiple panels (colors, spacing scale, z-index layers, animation keyframes).
+ */
