@@ -557,11 +557,12 @@ Respond in JSON format:
             monitor = None
             if conversation_id.startswith("agent_"):
                 dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    if conversation_id in dpc_agent_provider._managers:
-                        agent_manager = dpc_agent_provider._managers[conversation_id]
-                        if hasattr(agent_manager, '_agent_monitors'):
-                            monitor = agent_manager._agent_monitors.get(conversation_id)
+                if dpc_agent_provider and hasattr(dpc_agent_provider, 'get_manager'):
+                    try:
+                        agent_manager = dpc_agent_provider.get_manager(conversation_id)
+                        monitor = agent_manager._get_or_create_agent_monitor(conversation_id)
+                    except Exception as _e:
+                        logger.warning("Could not get agent manager for %s: %s", conversation_id, _e)
             if monitor is None:
                 monitor = self._get_or_create_conversation_monitor(conversation_id)
 

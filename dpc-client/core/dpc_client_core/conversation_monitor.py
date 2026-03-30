@@ -1378,7 +1378,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
     def add_message(self, role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None,
                     timestamp: Optional[str] = None, sender_node_id: Optional[str] = None,
-                    sender_name: Optional[str] = None, message_id: Optional[str] = None):
+                    sender_name: Optional[str] = None, message_id: Optional[str] = None,
+                    thinking: Optional[str] = None, streaming_raw: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1390,8 +1391,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             sender_node_id: Optional sender node ID (for proper attribution in chat history)
             sender_name: Optional sender display name
             message_id: Optional unique message ID (auto-generated if not provided)
+            thinking: Optional extended chain-of-thought from reasoning models (persisted to history.json)
+            streaming_raw: Optional full streamed text output (persisted to history.json, for UI restore)
 
         Note: This also adds to message_buffer and full_conversation for knowledge extraction.
+        thinking and streaming_raw are stored in history.json but excluded from knowledge extraction.
         """
         import uuid
 
@@ -1409,6 +1413,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["sender_node_id"] = sender_node_id
         if sender_name:
             message_dict["sender_name"] = sender_name
+        if thinking:
+            message_dict["thinking"] = thinking
+        if streaming_raw:
+            message_dict["streaming_raw"] = streaming_raw
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)

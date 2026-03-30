@@ -514,8 +514,12 @@ class DpcAgentManager:
             def emit_progress_with_context(msg: str, tool: str = None, round: int = None):
                 self._emit_progress(msg, conversation_id, tool, round)
 
+            # Accumulate streaming chunks for persistence to history.json
+            _stream_chunks: list = []
+
             # Create streaming callback that broadcasts text chunks via local_api
             async def emit_stream_chunk(chunk: str, conv_id: str):
+                _stream_chunks.append(chunk)
                 # Broadcast text_chunk event for WebSocket (UI streaming display)
                 try:
                     local_api = getattr(self.service, "local_api", None)
@@ -557,12 +561,19 @@ class DpcAgentManager:
             # since they contain no real content for knowledge extraction or continuity
             _THINKING_FALLBACK = "(thinking completed - see reasoning for details)"
             if response and response.strip() != _THINKING_FALLBACK:
+                # Capture thinking from last LLM usage (set by dpc_agent/loop.py during execution)
+                _thinking = agent._last_usage.get("thinking") if agent._last_usage else None
+                # Capture full streamed text (accumulated above); skip if identical to final content
+                _raw = "".join(_stream_chunks) if _stream_chunks else None
+                _streaming_raw = _raw if _raw and _raw.strip() != (response or "").strip() else None
                 monitor.add_message(
                     role="assistant",
                     content=response,
                     timestamp=utc_now_iso(),
                     sender_node_id=conversation_id,
-                    sender_name=agent_display_name
+                    sender_name=agent_display_name,
+                    thinking=_thinking,
+                    streaming_raw=_streaming_raw,
                 )
                 monitor.save_history()  # Save to disk immediately
 

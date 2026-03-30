@@ -1206,9 +1206,9 @@
                     text: msg.content,
                     timestamp: ts,
                     attachments: msg.attachments || [],
-                    // Preserve UI metadata from localStorage snapshot (if message existed before)
-                    thinking: local?.thinking,
-                    streamingRaw: local?.streamingRaw,
+                    // Restore rich metadata: prefer persisted history.json fields, fall back to localStorage
+                    thinking: msg.thinking || local?.thinking,
+                    streamingRaw: msg.streaming_raw || local?.streamingRaw,
                   };
                 });
                 newMap.set(conv_id, msgs);
