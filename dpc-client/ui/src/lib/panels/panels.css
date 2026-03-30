@@ -1,35 +1,261 @@
 /*
- * panels.css — CSS Organization Strategy for lib/panels/
+ * panels.css — ChatPanel component styles (Phase 3 Step 3a / CSS extraction)
  *
- * DECISION (Phase 3 Step 3a, 2026-03-31):
+ * DECISION UPDATE (2026-03-31):
+ * ChatPanel's <style> block was extracted here to reduce ChatPanel.svelte line count.
+ * Imported via @import './panels.css' in ChatPanel.svelte's <style> block.
+ * Note: @import in Svelte <style> blocks is resolved by Vite post-compilation,
+ * so these styles are effectively global (no Svelte scope hash). Class names are
+ * specific enough that global scope is acceptable (e.g., .resize-handle, .chat-input).
  *
- * Follow the existing codebase pattern: each panel uses its own scoped <style> block.
- * No shared panel Chrome layer needed — component isolation is sufficient.
- *
- * STYLE ASSIGNMENT:
- *   +page.svelte <style>        Layout shell only: .grid, .container, .chat-panel wrapper,
- *                               .chat-header, modal overlays (.modal-overlay, .modal-content),
- *                               .dialog-actions, .btn-cancel/.btn-confirm.
- *
- *   ChatPanel.svelte <style>    Chat input: .chat-input, .input-row, textarea, send/file buttons.
- *                               Resize handle: .resize-handle, .resize-handle-line.
- *                               Context toggle: .context-toggle, .context-checkbox, .peer-context-selector.
- *                               Global override: :global(body.resizing) — moved here because
- *                               ChatPanel owns the resize interaction.
- *
- *   AgentPanel.svelte <style>   Logic-only panel — no markup, no styles needed.
- *
- *   VoicePanel.svelte <style>   Logic-only panel — no markup, no styles needed.
- *
- *   GroupPanel.svelte <style>   Group invite dialog if extracted from +page.svelte.
- *
- * WHAT NOT TO DO:
- *   - Do NOT introduce CSS custom properties (--vars) during this refactor.
- *     The entire codebase uses hardcoded values; a token system is a separate initiative.
- *   - Do NOT import panels.css into panel components — they are self-contained.
- *   - Do NOT put scoped panel styles here; they belong in each panel's <style> block.
- *
- * FUTURE (post-Phase 3):
- *   If a design token system is introduced, this file is the right home for --var definitions
- *   that span multiple panels (colors, spacing scale, z-index layers, animation keyframes).
+ * OTHER PANELS: Use their own scoped <style> blocks (not this file).
  */
+
+/* Resize Handle */
+.resize-handle {
+  height: 8px;
+  background: linear-gradient(to bottom, #f9f9f9 0%, #e0e0e0 50%, #f9f9f9 100%);
+  cursor: ns-resize;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  transition: background 0.2s;
+  user-select: none;
+}
+.resize-handle:hover {
+  background: linear-gradient(to bottom, #e0e0e0 0%, #007bff 50%, #e0e0e0 100%);
+}
+.resize-handle:active,
+.resize-handle.resizing {
+  background: linear-gradient(to bottom, #d0d0d0 0%, #0056b3 50%, #d0d0d0 100%);
+}
+.resize-handle-line {
+  width: 60px;
+  height: 3px;
+  background: #999;
+  border-radius: 2px;
+  pointer-events: none;
+}
+.resize-handle:hover .resize-handle-line { background: #007bff; }
+.resize-handle:active .resize-handle-line { background: #0056b3; }
+
+/* Chat Input */
+.chat-input {
+  padding: 1rem;
+  border-top: 1px solid #eee;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  overflow-x: hidden;
+  max-width: 100%;
+}
+
+/* Personal Context Toggle */
+.context-toggle {
+  padding: 0.75rem;
+  background: linear-gradient(135deg, #fff9f3 0%, #fff4e6 100%);
+  border-radius: 8px;
+  border: 1px solid #ffd4a3;
+  margin-bottom: 0.5rem;
+  position: relative;
+}
+.context-toggle-header {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  user-select: none;
+  padding: 0.5rem;
+  margin: -0.75rem -0.75rem 0.75rem -0.75rem;
+  background: rgba(255, 212, 163, 0.3);
+  border: none;
+  border-radius: 8px 8px 0 0;
+  border-bottom: 1px solid #ffd4a3;
+  transition: background 0.2s ease;
+}
+.context-toggle-header:hover { background: rgba(255, 212, 163, 0.5); }
+.context-toggle-title {
+  font-weight: 600;
+  color: #c45500;
+  font-size: 0.95rem;
+}
+.context-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  user-select: none;
+  font-size: 0.9rem;
+  font-weight: 500;
+  color: #374151;
+}
+.context-checkbox input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #f59e0b;
+}
+.context-hint {
+  display: block;
+  margin-top: 0.5rem;
+  font-size: 0.75rem;
+  color: #d97706;
+  font-weight: 500;
+  padding: 0.3rem 0.6rem;
+  background: white;
+  border-radius: 6px;
+  border-left: 3px solid #f59e0b;
+}
+
+/* AI Scope Selector */
+.ai-scope-selector {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #ffd4a3;
+}
+.ai-scope-selector label {
+  display: block;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 0.4rem;
+}
+.ai-scope-selector select {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  background: white;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+.ai-scope-selector select:hover { border-color: #f59e0b; }
+.ai-scope-selector select:focus { outline: none; border-color: #f59e0b; box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1); }
+
+/* Status Badge */
+.status-badge {
+  display: inline-block;
+  margin-left: 0.5rem;
+  padding: 0.15rem 0.5rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+  border-radius: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.status-badge.updated {
+  background: #10b981;
+  color: white;
+  box-shadow: 0 2px 4px rgba(16, 185, 129, 0.3);
+  animation: pulse-badge 2s ease-in-out infinite;
+}
+@keyframes pulse-badge {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.8; transform: scale(0.98); }
+}
+
+/* Peer Context Selector */
+.peer-context-selector {
+  padding: 0.75rem;
+  background: linear-gradient(135deg, #f8f3ff 0%, #f0f4ff 100%);
+  border-radius: 8px;
+  border: 1px solid #d4c5f9;
+  margin-bottom: 0.5rem;
+}
+.peer-context-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+.peer-context-label { font-size: 0.9rem; font-weight: 600; color: #5b21b6; margin: 0; }
+.peer-context-hint { font-size: 0.75rem; color: #8b5cf6; font-weight: 500; padding: 0.2rem 0.5rem; background: white; border-radius: 12px; }
+.peer-context-checkboxes { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.peer-context-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.7rem;
+  background: white;
+  border: 2px solid #e0e0e0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 0.85rem;
+  user-select: none;
+}
+.peer-context-checkbox:hover { border-color: #8b5cf6; background: #faf5ff; }
+.peer-context-checkbox input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; margin: 0; padding: 0; }
+.peer-context-checkbox input[type="checkbox"]:checked { accent-color: #8b5cf6; }
+.peer-context-checkbox span { color: #374151; font-weight: 500; }
+
+/* Input Row */
+.input-row {
+  display: flex;
+  gap: 0.5rem;
+  overflow-x: hidden;
+  max-width: 100%;
+}
+.input-row textarea {
+  flex: 1;
+  min-height: 120px;
+  max-height: 240px;
+  resize: vertical;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  overflow-x: auto;
+  padding: 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 1rem;
+}
+.input-row button {
+  min-width: 100px;
+  height: 45px;
+  padding: 0 16px;
+  align-self: flex-end;
+  background: #5a67d8;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 1rem;
+  font-weight: 500;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.input-row button:hover:not(:disabled) { background: #4c51bf; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4); }
+.input-row button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* File button */
+.file-button {
+  min-width: 45px;
+  width: 45px;
+  height: 45px;
+  padding: 8px;
+  font-size: 20px;
+  cursor: pointer;
+  background: #5a67d8;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  transition: all 0.2s;
+  box-shadow: 0 2px 8px rgba(90, 103, 216, 0.3);
+  align-self: flex-end;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.file-button:hover:not(:disabled) { background: #4c51bf; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(90, 103, 216, 0.4); }
+.file-button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* Prevent text selection during resize */
+:global(body.resizing) {
+  cursor: ns-resize !important;
+  user-select: none !important;
+}

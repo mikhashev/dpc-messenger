@@ -101,6 +101,8 @@
   let activeChatId = $state('local_ai');
   let chatLoadingStates = $state(new Map<string, boolean>());  // Per-chat loading state
   let chatWindow = $state<HTMLElement>();  // Bound to ChatPanel's chatWindowElement
+  let chatPanelRef = $state<any>(null);   // Ref to ChatPanel for mention input delegation
+  let groupPanelRef = $state<any>(null);  // Ref to GroupPanel for mention autocomplete
 
   // Helper to check if a specific chat is loading
   function isChatLoading(chatId: string): boolean {
@@ -2218,6 +2220,7 @@
       />
 
       <ChatPanel
+        bind:this={chatPanelRef}
         {activeChatId}
         {chatHistories}
         {commandToChatMap}
@@ -2240,6 +2243,7 @@
         {peerDisplayNames}
         {autoTranscribeEnabled}
         {whisperModelLoading}
+        {groupPanelRef}
         bind:chatPanelHeight
         bind:showAgentBoard
       />
@@ -2345,10 +2349,14 @@
   on:cancel={() => showNewGroupDialog = false}
 />
 
-<!-- GroupPanel: group invite/deletion/memberLeft effects (Step 7) -->
+<!-- GroupPanel: group invite/deletion/memberLeft effects + mention autocomplete (Steps 7 & 8) -->
 <GroupPanel
+  bind:this={groupPanelRef}
   {activeChatId}
   {chatHistories}
+  {peerDisplayNames}
+  getCurrentInput={() => chatPanelRef?.getInputValue() ?? ''}
+  onSetCurrentInput={(val) => chatPanelRef?.setInputValue(val)}
   onSetActiveChatId={(id) => { activeChatId = id; }}
   onAgentToast={(message, type) => {
     agentToastMessage = message;
