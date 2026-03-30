@@ -8,7 +8,7 @@
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
-  import ModelDownloadDialog from "$lib/components/ModelDownloadDialog.svelte";
+  import ModelDownloadPanel from "$lib/panels/ModelDownloadPanel.svelte";
   import ContextViewer from "$lib/components/ContextViewer.svelte";
   import InstructionsEditor from "$lib/components/InstructionsEditor.svelte";
   import FirewallEditor from "$lib/components/FirewallEditor.svelte";
@@ -193,12 +193,7 @@
   let currentVoteResult = $state<any>(null);
 
   // Model download dialog state (v0.13.5)
-  let showModelDownloadDialog = $state(false);
-  let modelDownloadInfo = $state<any>(null);
-  let isDownloadingModel = $state(false);
-  let showModelDownloadToast = $state(false);
-  let modelDownloadToastMessage = $state("");
-  let modelDownloadToastType = $state<"info" | "error" | "warning">("info");
+  // Model download state moved to ModelDownloadPanel.svelte (Step 8)
 
   // Agent operation toast state (v0.19.0+)
   let showAgentToast = $state(false);
@@ -695,56 +690,7 @@
     }
   });
 
-  // Reactive: Open model download dialog when model not cached (v0.13.5)
-  $effect(() => {
-    if ($whisperModelDownloadRequired) {
-      console.log('[ModelDownload] Model download required:', $whisperModelDownloadRequired);
-      modelDownloadInfo = $whisperModelDownloadRequired;
-      showModelDownloadDialog = true;
-      isDownloadingModel = false;
-    }
-  });
-
-  // Reactive: Update download status when download starts (v0.13.5)
-  $effect(() => {
-    if ($whisperModelDownloadStarted) {
-      console.log('[ModelDownload] Download started:', $whisperModelDownloadStarted);
-      isDownloadingModel = true;
-    }
-  });
-
-  // Reactive: Close dialog and show success when download completes (v0.13.5)
-  $effect(() => {
-    if ($whisperModelDownloadCompleted) {
-      console.log('[ModelDownload] Download completed:', $whisperModelDownloadCompleted);
-      isDownloadingModel = false;
-      showModelDownloadDialog = false;
-
-      // Show success toast
-      modelDownloadToastMessage = '✅ Model download successful! Voice transcription is now available.';
-      modelDownloadToastType = 'info';
-      showModelDownloadToast = true;
-
-      // Clear the event
-      whisperModelDownloadCompleted.set(null);
-    }
-  });
-
-  // Reactive: Show error and reset when download fails (v0.13.5)
-  $effect(() => {
-    if ($whisperModelDownloadFailed) {
-      console.error('[ModelDownload] Download failed:', $whisperModelDownloadFailed);
-      isDownloadingModel = false;
-
-      // Show error toast
-      modelDownloadToastMessage = `❌ Model download failed: ${$whisperModelDownloadFailed.error}`;
-      modelDownloadToastType = 'error';
-      showModelDownloadToast = true;
-
-      // Clear the event
-      whisperModelDownloadFailed.set(null);
-    }
-  });
+  // Model download effects moved to ModelDownloadPanel.svelte (Step 8)
 
   // Reactive: Clear chat window on conversation reset (v0.11.3 - for AI chats and P2P resets)
   $effect(() => {
@@ -1486,38 +1432,7 @@
   }
 
   // Model download dialog handlers (v0.13.5)
-  async function handleModelDownload(event: CustomEvent) {
-    const { provider_alias } = event.detail;
-    console.log('[ModelDownload] Starting download for provider:', provider_alias);
-
-    try {
-      const result = await sendCommand('download_whisper_model', {
-        provider_alias
-      });
-
-      if (result.status === 'success') {
-        console.log('[ModelDownload] Download initiated successfully');
-      } else {
-        console.error('[ModelDownload] Download failed:', result.error);
-        modelDownloadToastMessage = `❌ Download failed: ${result.error}`;
-        modelDownloadToastType = 'error';
-        showModelDownloadToast = true;
-        isDownloadingModel = false;
-      }
-    } catch (error) {
-      console.error('[ModelDownload] Error initiating download:', error);
-      modelDownloadToastMessage = `❌ Error: ${error}`;
-      modelDownloadToastType = 'error';
-      showModelDownloadToast = true;
-      isDownloadingModel = false;
-    }
-  }
-
-  function handleModelDownloadCancel() {
-    console.log('[ModelDownload] User cancelled download');
-    showModelDownloadDialog = false;
-    whisperModelDownloadRequired.set(null);
-  }
+  // handleModelDownload + handleModelDownloadCancel moved to ModelDownloadPanel.svelte (Step 8)
 
   function handleEndSession(conversationId: string) {
     if (confirm("End this conversation session and extract knowledge?")) {
@@ -2489,6 +2404,9 @@
   onSetChatLoading={setChatLoading}
 />
 
+<!-- ModelDownloadPanel: model download dialog + effects (Step 8) -->
+<ModelDownloadPanel />
+
 <!-- Knowledge Architecture UI Components -->
 <KnowledgeCommitDialog
   bind:open={showCommitDialog}
@@ -2536,17 +2454,6 @@
   on:removeMember={handleGroupRemoveMember}
 />
 
-<!-- Model Download Dialog (v0.13.5) -->
-<ModelDownloadDialog
-  bind:open={showModelDownloadDialog}
-  modelName={modelDownloadInfo?.model_name || ''}
-  downloadSizeGb={modelDownloadInfo?.download_size_gb || 3.0}
-  cachePath={modelDownloadInfo?.cache_path || ''}
-  providerAlias={modelDownloadInfo?.provider_alias || ''}
-  downloading={isDownloadingModel}
-  on:download={handleModelDownload}
-  on:cancel={handleModelDownloadCancel}
-/>
 
 <!-- Notification Permission Dialog -->
 {#if showNotificationPermissionDialog}
@@ -2691,19 +2598,6 @@
   />
 {/if}
 
-<!-- Model Download Toast (v0.13.5) -->
-{#if showModelDownloadToast}
-  <Toast
-    message={modelDownloadToastMessage}
-    type={modelDownloadToastType}
-    duration={modelDownloadToastType === 'error' ? 10000 : 5000}
-    dismissible={true}
-    onDismiss={() => {
-      showModelDownloadToast = false;
-      modelDownloadToastMessage = "";
-    }}
-  />
-{/if}
 
 <!-- Agent Operation Toast (v0.19.0+) -->
 {#if showAgentToast}
