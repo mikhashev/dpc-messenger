@@ -4,27 +4,40 @@
 import { writable, get } from 'svelte/store';
 import { setLogSender, clearLogSender } from '$lib/logger';
 
-// TypeScript types for dual provider system
-export interface ProviderInfo {
-    alias: string;
-    model: string;
-    type: string;
-    supports_vision: boolean;
-    supports_voice?: boolean;  // v0.13.0+: Voice transcription support
-}
+// Import and re-export all shared interfaces from types.ts for backward compatibility
+import type {
+    ProviderInfo,
+    DefaultProvidersResponse,
+    ProvidersListResponse,
+    AgentInfo,
+    AgentConfig,
+    FileTransfer,
+    GroupChat,
+    NodeStatus,
+    PeerInfo,
+    P2PMessage,
+    MessageAttachment,
+    KnowledgeCommit,
+    VoteTally,
+    VoiceTranscription,
+} from '$lib/types';
 
-export interface DefaultProvidersResponse {
-    default_provider: string;
-    vision_provider: string;
-    voice_provider?: string;  // v0.13.0+
-    agent_provider?: string;  // v0.18.0+
-}
-
-export interface ProvidersListResponse {
-    providers: ProviderInfo[];
-    default_provider: string;
-    vision_provider: string;
-}
+export type {
+    ProviderInfo,
+    DefaultProvidersResponse,
+    ProvidersListResponse,
+    AgentInfo,
+    AgentConfig,
+    FileTransfer,
+    GroupChat,
+    NodeStatus,
+    PeerInfo,
+    P2PMessage,
+    MessageAttachment,
+    KnowledgeCommit,
+    VoteTally,
+    VoiceTranscription,
+};
 
 export const connectionStatus = writable<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
 export const nodeStatus = writable<any>(null);
@@ -1441,40 +1454,7 @@ export async function deleteConversation(conversationId: string): Promise<any> {
 }
 
 // --- DPC Agent Management (v0.19.0+) ---
-
-export interface AgentInfo {
-    agent_id: string;
-    name: string;
-    provider_alias: string;
-    profile_name: string;
-    instruction_set_name: string;
-    created_at: string;
-    updated_at?: string;
-    compute_host?: string;  // Remote peer node_id for LLM inference (if set)
-    // Telegram integration fields (v0.22.0+)
-    telegram_enabled?: boolean;
-    telegram_bot_token?: string;
-    telegram_allowed_chat_ids?: string[];
-    telegram_event_filter?: string[];
-    telegram_max_events_per_minute?: number;
-    telegram_cooldown_seconds?: number;
-    telegram_transcription_enabled?: boolean;
-    telegram_linked_at?: string;
-    // Legacy field (deprecated in favor of telegram_allowed_chat_ids)
-    telegram_chat_id?: string;
-}
-
-export interface AgentConfig {
-    agent_id: string;
-    name: string;
-    provider_alias: string;
-    profile_name: string;
-    instruction_set_name: string;
-    created_at: string;
-    updated_at?: string;
-    budget_usd?: number;
-    max_rounds?: number;
-}
+// AgentInfo and AgentConfig interfaces are in src/lib/types.ts
 
 // Agent stores
 export const agentsList = writable<AgentInfo[]>([]);
