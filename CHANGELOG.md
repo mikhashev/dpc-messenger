@@ -2,6 +2,39 @@
 
 All notable changes to D-PC Messenger will be documented in this file.
 
+## [0.21.0] - 2026-04-01
+
+### MAJOR REFACTORING (refactor/grand)
+
+#### Backend Service Decomposition
+- **`service.py` decomposed** — Extracted 4 domain services, reducing from ~9,630 to ~7,096 lines
+  - `voice_service.py` — Whisper model lifecycle and voice message handling
+  - `knowledge_service.py` — Knowledge commit flows (wired to ConversationMonitor via callbacks)
+  - `telegram_service.py` — Telegram bot initialization glue
+  - `agent_service.py` — Agent lifecycle wiring (LLMManager, AgentManager, KnowledgeService)
+
+#### LLM Manager Decomposition
+- **`llm_manager.py` split into providers** — Reduced from ~3,074 to ~716 lines
+  - All provider implementations moved to `providers/` directory
+  - New providers: `gemini_provider.py`, `gigachat_provider.py`, `github_models_provider.py`, `remote_peer_provider.py`, `dpc_agent_provider.py`
+  - Clean `AbstractLLMProvider` ABC in `providers/base.py`
+
+#### Frontend Decomposition
+- **`+page.svelte` decomposed** — Reduced from ~6,000 to ~1,567 lines
+  - 15 domain panels extracted to `src/lib/panels/`
+  - 10 domain services extracted to `src/lib/services/`
+
+### BUG FIXES (Sprint 5)
+- **Connection call-graph** — `connect_via_dht` now correctly routes through `ConnectionOrchestrator` (was bypassing all 6 fallback strategies)
+- **Pre-flight timeout** — `connect_directly()` now respects the `timeout` argument (was hardcoded 60s)
+- **Orchestrator empty DHT** — `ConnectionOrchestrator` falls back to peer cache when DHT returns no results
+
+### DOCUMENTATION
+- `specs/dptp_v1.md` updated to v1.5: vision queries use `REMOTE_INFERENCE_REQUEST` + `images` field (no separate `SEND_IMAGE` command), section numbering fixed, group chat commands documented
+- `CLAUDE.md` accuracy pass: providers list, managers, message handlers, domain services all updated to match current code
+
+---
+
 ## [0.20.0] - 2026-03-22
 
 ### MAJOR FEATURES

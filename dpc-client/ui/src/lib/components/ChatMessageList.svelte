@@ -1,4 +1,4 @@
-<!-- ChatPanel.svelte - Extracted chat window component -->
+<!-- ChatMessageList.svelte - Extracted chat window component -->
 <!-- Displays message history with auto-scroll, attachments, and markdown support -->
 
 <script lang="ts">
@@ -6,63 +6,7 @@
   import ImageMessage from './ImageMessage.svelte';
   import VoicePlayer from './VoicePlayer.svelte';
   import ThinkingBlock from './ThinkingBlock.svelte';
-
-  // Message type definition
-  type Mention = {
-    node_id: string;
-    name: string;
-    start: number;
-    end: number;
-  };
-
-  type Message = {
-    id: string;
-    sender: string;
-    senderName?: string;  // Display name for the sender (peer name or model name)
-    text: string;
-    timestamp: number;
-    commandId?: string;
-    model?: string;  // AI model name (for AI responses)
-    thinking?: string;  // Thinking/reasoning content (v1.4+)
-    thinkingTokens?: number;  // Tokens used for thinking (v1.4+)
-    streamingRaw?: string;  // v0.16.0+: Raw streaming text (shown in collapsible)
-    mentions?: Mention[];  // @-mentions in group chat messages
-    attachments?: Array<{  // File attachments (Week 1) + Images (Phase 2.4) + Voice (v0.13.0)
-      type: 'file' | 'image' | 'voice';
-      filename: string;
-      file_path?: string;  // Full-size image file path (for P2P file transfers)
-      size_bytes: number;
-      size_mb?: number;
-      hash?: string;
-      mime_type?: string;
-      transfer_id?: string;
-      status?: string;
-      // Image-specific fields (Phase 2.4):
-      dimensions?: { width: number; height: number };
-      thumbnail?: string;  // Base64 data URL
-      vision_analyzed?: boolean;  // AI chat only: was vision API used?
-      vision_result?: string;  // AI chat only: vision analysis text
-      // Voice-specific fields (v0.13.0):
-      voice_metadata?: {
-        duration_seconds: number;
-        sample_rate: number;
-        channels: number;
-        codec: string;
-        recorded_at: string;
-      };
-      // Voice transcription (v0.13.2+):
-      transcription?: {
-        text: string;
-        provider: string;
-        transcriber_node_id?: string;
-        confidence?: number;
-        language?: string;
-        timestamp?: string;
-        remote_provider_node_id?: string;
-      };
-    }>;
-    isError?: boolean;  // Error message styling (v0.19.2+)
-  };
+  import type { Message, Mention } from '$lib/types.js';
 
   // Props (Svelte 5 runes mode)
   let {
@@ -101,7 +45,7 @@
   // Debug: Log when progress props change
   $effect(() => {
     if (agentProgressTool || agentProgressMessage) {
-      console.log(`[ChatPanel] Progress props: tool=${agentProgressTool}, msg=${agentProgressMessage?.substring(0,50)}, round=${agentProgressRound}`);
+      console.log(`[ChatMessageList] Progress props: tool=${agentProgressTool}, msg=${agentProgressMessage?.substring(0,50)}, round=${agentProgressRound}`);
     }
   });
 

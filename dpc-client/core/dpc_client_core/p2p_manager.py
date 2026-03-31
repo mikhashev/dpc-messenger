@@ -152,6 +152,21 @@ class P2PManager:
         """Get the current display name."""
         return self.display_name
 
+    def get_state(self) -> dict:
+        """Snapshot of P2PManager state for diagnostics and CoreService.get_state()."""
+        peer_types: dict[str, int] = {}
+        for conn in self.peers.values():
+            t = getattr(conn, "connection_type", "unknown")
+            peer_types[t] = peer_types.get(t, 0) + 1
+        return {
+            "node_id": self.node_id,
+            "connected_peers": len(self.peers),
+            "peer_types": peer_types,
+            "pending_webrtc": len(self._pending_webrtc),
+            "server_running": self._server_task is not None and not self._server_task.done(),
+            "dht_running": self.dht_manager is not None,
+        }
+
     async def _notify_peer_change(self):
         if self.on_peer_list_change:
             await self.on_peer_list_change()
