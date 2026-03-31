@@ -48,14 +48,19 @@
 
   // Three-metric display (shown when context_estimated is available from backend)
   let showThreeMetrics = $derived(contextEstimated > 0);
-  let staticMemory = $derived(showThreeMetrics ? contextEstimated - historyTokens : 0);
+  // historyTokens is a rough chars÷4 estimate; contextEstimated is the actual total from the LLM
+  // API. Clamp so the estimate never exceeds the measured total (prevents negative staticMemory).
+  let effectiveHistoryTokens = $derived(
+    showThreeMetrics ? Math.min(historyTokens, contextEstimated) : historyTokens
+  );
+  let staticMemory = $derived(showThreeMetrics ? contextEstimated - effectiveHistoryTokens : 0);
   let dialogAvailable = $derived(showThreeMetrics ? effectiveLimit - staticMemory : effectiveLimit);
-  let dialogPercent = $derived(dialogAvailable > 0 ? historyTokens / dialogAvailable : 0);
+  let dialogPercent = $derived(dialogAvailable > 0 ? effectiveHistoryTokens / dialogAvailable : 0);
   let totalContextPercent = $derived(effectiveLimit > 0 ? contextEstimated / effectiveLimit : 0);
 
   let dialogWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
-    ? historyTokens + estimatedTokens
-    : historyTokens);
+    ? effectiveHistoryTokens + estimatedTokens
+    : effectiveHistoryTokens);
   let totalWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
     ? contextEstimated + estimatedTokens
     : contextEstimated);
