@@ -2,26 +2,28 @@
 // Voice messages, transcription, and Whisper model lifecycle.
 
 import { writable, get } from 'svelte/store';
+import type { VoiceTranscription, FileTransferOfferEvent, WhisperModelEvent, WhisperModelFailedEvent } from '$lib/types';
 
-// Voice message incoming
-export const voiceOfferReceived = writable<any>(null);
+// Voice message incoming (voice_offer_received event — file transfer with voice_metadata)
+export const voiceOfferReceived = writable<FileTransferOfferEvent | null>(null);
 
 // Transcription events
-export const voiceTranscriptionReceived = writable<any>(null);
-export const voiceTranscriptionComplete = writable<any>(null);
+export const voiceTranscriptionReceived = writable<VoiceTranscription | null>(null);
+export const voiceTranscriptionComplete = writable<VoiceTranscription | null>(null);
+// Voice transcription config — free-form config object, intentionally untyped
 export const voiceTranscriptionConfig = writable<any>(null);
 
 // Whisper model lifecycle
-export const whisperModelLoadingStarted = writable<any>(null);
-export const whisperModelLoaded = writable<any>(null);
-export const whisperModelLoadingFailed = writable<any>(null);
-export const whisperModelUnloaded = writable<any>(null);
+export const whisperModelLoadingStarted = writable<WhisperModelEvent | null>(null);
+export const whisperModelLoaded = writable<WhisperModelEvent | null>(null);
+export const whisperModelLoadingFailed = writable<WhisperModelFailedEvent | null>(null);
+export const whisperModelUnloaded = writable<WhisperModelEvent | null>(null);
 
 // Whisper model download
-export const whisperModelDownloadRequired = writable<any>(null);
-export const whisperModelDownloadStarted = writable<any>(null);
-export const whisperModelDownloadCompleted = writable<any>(null);
-export const whisperModelDownloadFailed = writable<any>(null);
+export const whisperModelDownloadRequired = writable<WhisperModelEvent | null>(null);
+export const whisperModelDownloadStarted = writable<WhisperModelEvent | null>(null);
+export const whisperModelDownloadCompleted = writable<WhisperModelEvent | null>(null);
+export const whisperModelDownloadFailed = writable<WhisperModelFailedEvent | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;

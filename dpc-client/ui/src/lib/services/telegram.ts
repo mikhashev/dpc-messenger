@@ -2,11 +2,21 @@
 // Telegram bot integration stores and command functions.
 
 import { writable, get } from 'svelte/store';
+import type {
+    TelegramStatusEvent,
+    TelegramMessageEvent,
+    TelegramVoiceEvent,
+    TelegramImageEvent,
+    TelegramFileEvent,
+    AgentTelegramLinkedEvent,
+    AgentTelegramUnlinkedEvent,
+    AgentHistoryUpdatedEvent,
+} from '$lib/types';
 
 // Connection state
 export const telegramEnabled = writable<boolean>(false);
 export const telegramConnected = writable<boolean>(false);
-export const telegramStatus = writable<any>(null);
+export const telegramStatus = writable<TelegramStatusEvent | null>(null);
 export const telegramError = writable<{ title: string; message: string; timestamp: string } | null>(null);
 
 // Conversation linking: conversation_id -> telegram_chat_id
@@ -16,17 +26,17 @@ export const telegramLinkedChats = writable<Map<string, string>>(new Map());
 export const telegramMessages = writable<Map<string, any[]>>(new Map());
 
 // Incoming event stores
-export const telegramMessageReceived = writable<any>(null);
-export const telegramVoiceReceived = writable<any>(null);
-export const telegramImageReceived = writable<any>(null);
-export const telegramFileReceived = writable<any>(null);
+export const telegramMessageReceived = writable<TelegramMessageEvent | null>(null);
+export const telegramVoiceReceived = writable<TelegramVoiceEvent | null>(null);
+export const telegramImageReceived = writable<TelegramImageEvent | null>(null);
+export const telegramFileReceived = writable<TelegramFileEvent | null>(null);
 
 // Agent <-> Telegram linking events (v0.15.0+)
-export const agentTelegramLinked = writable<any>(null);
-export const agentTelegramUnlinked = writable<any>(null);
+export const agentTelegramLinked = writable<AgentTelegramLinkedEvent | null>(null);
+export const agentTelegramUnlinked = writable<AgentTelegramUnlinkedEvent | null>(null);
 
 // Silent history refresh from Telegram bridge (unified_conversation mode)
-export const agentHistoryUpdated = writable<any>(null);
+export const agentHistoryUpdated = writable<AgentHistoryUpdatedEvent | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;

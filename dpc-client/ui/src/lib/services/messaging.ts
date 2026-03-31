@@ -2,8 +2,9 @@
 // P2P direct messages and unread message counts.
 
 import { writable, get } from 'svelte/store';
+import type { P2PMessage } from '$lib/types';
 
-export const p2pMessages = writable<any>(null);
+export const p2pMessages = writable<P2PMessage | null>(null);
 export const unreadMessageCounts = writable<Map<string, number>>(new Map());
 
 // Track currently active chat to prevent unread badges on open chats

@@ -476,7 +476,7 @@
 
 
   // Helper: Group peers by connection strategy
-  function getPeersByStrategy(peerInfo: any[]) {
+  function getPeersByStrategy(peerInfo: any[] | undefined) {
     const strategyMap: Record<string, any[]> = {};
 
     if (!peerInfo) return strategyMap;

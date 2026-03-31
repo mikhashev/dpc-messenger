@@ -2,19 +2,26 @@
 // Group chat stores and command functions.
 
 import { writable } from 'svelte/store';
-import type { GroupChat } from '$lib/types';
+import type {
+    GroupChat,
+    GroupMessageEvent,
+    GroupFileEvent,
+    GroupMemberLeftEvent,
+    GroupDeletedEvent,
+    GroupHistorySyncedEvent,
+} from '$lib/types';
 
 // Group state
 export const groupChats = writable<Map<string, GroupChat>>(new Map());
 
 // Group events
-export const groupTextReceived = writable<any>(null);
-export const groupFileReceived = writable<any>(null);
-export const groupInviteReceived = writable<any>(null);
-export const groupUpdated = writable<any>(null);
-export const groupMemberLeft = writable<any>(null);
-export const groupDeleted = writable<any>(null);
-export const groupHistorySynced = writable<any>(null);
+export const groupTextReceived = writable<GroupMessageEvent | null>(null);
+export const groupFileReceived = writable<GroupFileEvent | null>(null);
+export const groupInviteReceived = writable<GroupChat | null>(null);
+export const groupUpdated = writable<GroupChat | null>(null);
+export const groupMemberLeft = writable<GroupMemberLeftEvent | null>(null);
+export const groupDeleted = writable<GroupDeletedEvent | null>(null);
+export const groupHistorySynced = writable<GroupHistorySyncedEvent | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;

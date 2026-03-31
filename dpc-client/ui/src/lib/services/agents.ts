@@ -2,19 +2,24 @@
 // DPC Agent management stores and command functions.
 
 import { writable, get } from 'svelte/store';
-import type { AgentInfo } from '$lib/types';
+import type {
+    AgentInfo,
+    AgentProgressEvent,
+    AgentProgressClearEvent,
+    AgentTextChunkEvent,
+} from '$lib/types';
 
 // Agent state
 export const agentsList = writable<AgentInfo[]>([]);
-export const agentCreated = writable<any>(null);
-export const agentUpdated = writable<any>(null);
-export const agentDeleted = writable<any>(null);
+export const agentCreated = writable<AgentInfo | null>(null);
+export const agentUpdated = writable<AgentInfo | null>(null);
+export const agentDeleted = writable<{ agent_id: string } | null>(null);
 export const agentProfiles = writable<string[]>([]);
 
 // Agent execution / streaming
-export const agentProgress = writable<any>(null);
-export const agentProgressClear = writable<any>(null);
-export const agentTextChunk = writable<any>(null);
+export const agentProgress = writable<AgentProgressEvent | null>(null);
+export const agentProgressClear = writable<AgentProgressClearEvent | null>(null);
+export const agentTextChunk = writable<AgentTextChunkEvent | null>(null);
 
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;
