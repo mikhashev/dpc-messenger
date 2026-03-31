@@ -269,6 +269,17 @@ class ConnectionOrchestrator:
             "active_strategies": [s.name for s in self.strategies],
         }
 
+    def get_state(self) -> dict:
+        """Snapshot of orchestrator state for CoreService.get_state()."""
+        return {
+            **self.get_stats(),
+            "strategy_count": len(self.strategies),
+            "hub_available": self.hub_client is not None,
+            "hole_punch_available": self.hole_punch_manager is not None,
+            "relay_available": self.relay_manager is not None,
+            "gossip_available": self.gossip_manager is not None,
+        }
+
     def add_strategy(self, strategy: ConnectionStrategy):
         """
         Add a new connection strategy.

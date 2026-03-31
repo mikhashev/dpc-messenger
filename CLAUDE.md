@@ -273,12 +273,18 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 **Client Backend (`dpc-client/core`):**
 
 **Service Layer:**
-- `service.py` - Main orchestrator (CoreService, ~9,630 lines — refactor/grand in progress)
+- `service.py` - Main orchestrator (CoreService, ~7,100 lines)
   - Lifecycle management (startup/shutdown)
   - Component initialization
   - Configuration loading
   - WebSocket API server coordination
   - MessageRouter integration for command dispatch
+
+**Extracted Domain Services (refactor/grand, v0.21.0):**
+- `voice_service.py` - Whisper model lifecycle and voice message handling
+- `knowledge_service.py` - Knowledge commit flows (wired to ConversationMonitor via callbacks)
+- `telegram_service.py` - Telegram bot initialization glue (managers in `managers/`)
+- `agent_service.py` - Agent lifecycle wiring (LLMManager, AgentManager, KnowledgeService)
 
 **Message Routing System (v0.8.0+):**
 - `message_router.py` - Command dispatcher for P2P messages
@@ -367,7 +373,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
   - Per-peer storage: `~/.dpc/conversations/{peer_id}/files/`
 - `webrtc_peer.py` - WebRTC peer wrapper (aiortc)
 - `hub_client.py` - Federation Hub communication (OAuth, WebSocket signaling)
-- `llm_manager.py` - AI provider integration (Ollama, OpenAI, Anthropic)
+- `llm_manager.py` - AI provider registry and routing (~716 lines; implementations in `providers/`)
 - `firewall.py` - Context access control system
 - `local_api.py` - WebSocket API for UI (localhost:9999)
 - `settings.py` - Configuration management
@@ -410,9 +416,11 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 
 **Client Frontend (`dpc-client/ui`):**
 - Built with SvelteKit 5.0 + Tauri 2.x
-- Entry point: `src/routes/+page.svelte`
-- Backend communication: `src/lib/coreService.ts` (WebSocket client)
+- Entry point: `src/routes/+page.svelte` (~1,567 lines layout shell; down from ~6,000 pre-refactor)
+- Backend communication: `src/lib/coreService.ts` (WebSocket client, thin bootstrapper)
 - SSG mode with adapter-static (SPA fallback)
+- **Domain panels** (`src/lib/panels/`, 15 files): ChatPanel, AgentPanel, VoicePanel, GroupPanel, TelegramPanel, KnowledgeEventsPanel, ModelDownloadPanel, HistorySyncPanel, ChatHistorySyncPanel, SessionEventsPanel, MessageRouterPanel, PersistencePanel, AgentManagementPanel, GroupManagementPanel, AddAIChatPanel
+- **Domain services** (`src/lib/services/`, 10 files): chatService, agentService, connectionService, voiceService, knowledgeService, telegramService, groupsService, fileTransferService, sessionService, providersService
 
 **Notification System (v0.11.3+):**
 - `notificationService.ts` - Native desktop notifications
@@ -491,7 +499,7 @@ Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CH
 - Models unload when auto-transcribe disabled
 - `torch.cuda.empty_cache()` called after unloading
 - **CRITICAL TODO**: Whisper model must be unloaded before loading a different Whisper model to prevent VRAM conflicts
-- See `llm_manager.py:792-814` for implementation
+- See `providers/whisper_provider.py:265-357` for implementation
 
 **Voice Metadata Fields:**
 - `duration_seconds` (number): Recording duration in seconds
