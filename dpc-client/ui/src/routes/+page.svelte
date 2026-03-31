@@ -35,7 +35,7 @@
   import AddAIChatPanel from "$lib/panels/AddAIChatPanel.svelte";
   import AgentManagementPanel from "$lib/panels/AgentManagementPanel.svelte";
   import GroupManagementPanel from "$lib/panels/GroupManagementPanel.svelte";
-  import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
+  import { showNotificationIfBackground } from '$lib/notificationService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
 
   // Tauri APIs - will be loaded in onMount if in Tauri environment
@@ -339,7 +339,6 @@
 
   // Notification state
   let windowFocused = $state(true);
-  let showNotificationPermissionDialog = $state(false);
 
   // Chat history loading state (prevent infinite loop)
   let loadingHistory = new Set<string>();
@@ -1520,69 +1519,6 @@
   on:removeMember={handleGroupRemoveMember}
 />
 
-
-<!-- Notification Permission Dialog -->
-{#if showNotificationPermissionDialog}
-  <div
-    class="dialog-overlay"
-    role="button"
-    tabindex="0"
-    onclick={() => showNotificationPermissionDialog = false}
-    onkeydown={(e) => {
-      if (e.key === 'Escape' || e.key === 'Enter') {
-        showNotificationPermissionDialog = false;
-      }
-    }}
-  >
-    <div
-      class="notification-dialog-box"
-      role="dialog"
-      aria-labelledby="notification-dialog-title"
-      tabindex="-1"
-      onclick={(e) => e.stopPropagation()}
-      onkeydown={(e) => e.stopPropagation()}
-    >
-      <h2 id="notification-dialog-title">Enable Desktop Notifications</h2>
-      <p>Get notified when:</p>
-      <ul>
-        <li>You receive new messages</li>
-        <li>Someone sends you a file</li>
-        <li>You're asked to vote on knowledge</li>
-        <li>Session requests are made</li>
-      </ul>
-      <div class="dialog-actions">
-        <button
-          class="btn-primary"
-          onclick={async () => {
-            const granted = await requestNotificationPermission();
-            showNotificationPermissionDialog = false;
-
-            // Show result toast
-            agentToastMessage = granted
-              ? 'Notifications enabled'
-              : 'Notifications disabled - you can enable them later in settings';
-            agentToastType = 'info';
-            showAgentToast = true;
-            setTimeout(() => showAgentToast = false, 3000);
-          }}
-        >
-          Enable Notifications
-        </button>
-        <button
-          class="btn-secondary"
-          onclick={() => {
-            showNotificationPermissionDialog = false;
-            localStorage.setItem('notificationPreference', 'disabled');
-            localStorage.setItem('permissionRequestedAt', new Date().toISOString());
-          }}
-        >
-          Maybe Later
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
-
 <ContextViewer
   bind:open={showContextViewer}
   context={$personalContext}
@@ -1893,84 +1829,4 @@
     color: #ff9800;
   }
 
-  /* Notification Permission Dialog */
-  .dialog-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: rgba(0, 0, 0, 0.5);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    z-index: 10001;
-  }
-
-  .notification-dialog-box {
-    background: white;
-    border-radius: 8px;
-    padding: 2rem;
-    max-width: 400px;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
-  }
-
-  .notification-dialog-box h2 {
-    margin-top: 0;
-    margin-bottom: 1rem;
-    color: #333;
-  }
-
-  .notification-dialog-box p {
-    margin-bottom: 0.5rem;
-    color: #666;
-  }
-
-  .notification-dialog-box ul {
-    margin: 1rem 0;
-    padding-left: 1.5rem;
-  }
-
-  .notification-dialog-box li {
-    margin: 0.5rem 0;
-    color: #666;
-  }
-
-  .dialog-actions {
-    display: flex;
-    gap: 1rem;
-    margin-top: 1.5rem;
-    justify-content: flex-end;
-  }
-
-  .btn-primary {
-    background: #2196F3;
-    color: white;
-    border: none;
-    padding: 0.75rem 1.5rem;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 0.95rem;
-    font-weight: 500;
-    transition: background 0.2s ease;
-  }
-
-  .btn-primary:hover {
-    background: #1976D2;
-  }
-
-  .btn-secondary {
-    background: #f5f5f5;
-    color: #666;
-    border: 1px solid #ddd;
-    padding: 0.75rem 1.5rem;
-    border-radius: 6px;
-    cursor: pointer;
-    font-size: 0.95rem;
-    transition: background 0.2s ease;
-  }
-
-  .btn-secondary:hover {
-    background: #e0e0e0;
-  }
 </style>
