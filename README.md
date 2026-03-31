@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Infrastructure for Human-AI-Team Collaboration
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.20.0
+> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.21.0
 > **Platforms:** Windows | Linux | macOS
 > **Note:** This software is for educational/research use. Please review the full [Legal Notice](#%EF%B8%8F-legal-notice--compliance) before use.
 
@@ -95,7 +95,7 @@ We're racing against a closing window: the infrastructure being built TODAY will
 
 ### For Developers
 - **Open Protocol** - Extensible [DPTP (D-PC Transfer Protocol)](./specs/dptp_v1.md)
-  - **Note:** DPTP spec updated to v1.4 with thinking fields for reasoning models (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3).
+  - **Note:** DPTP spec updated to v1.5 with thinking fields for reasoning models (DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3) and vision inference via `REMOTE_INFERENCE_REQUEST`.
 - **Modular Design** - Clear separation of concerns
 - **Knowledge Architecture** - Git-like knowledge commits with cognitive bias mitigation ([architecture doc](./docs/KNOWLEDGE_ARCHITECTURE.md))
 - **Agent Extensibility** - Custom task types, tool registry with firewall integration, sandboxed execution
@@ -344,7 +344,7 @@ docker-compose -f docker-compose.prod.yml up -d
 
 ### Architecture & Design
 - **[KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md)** - Knowledge management architecture with cognitive bias mitigation
-- **[specs/dptp_v1.md](./specs/dptp_v1.md)** - DPTP v1.4 protocol specification (thinking fields, reasoning models)
+- **[specs/dptp_v1.md](./specs/dptp_v1.md)** - DPTP v1.5 protocol specification (thinking fields, reasoning models, vision inference)
 - **[specs/hub_api_v1.md](./specs/hub_api_v1.md)** - Hub API specification
 
 ### Legal

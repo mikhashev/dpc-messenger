@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.4
+# DPTP Specification: D-PC Transfer Protocol v1.5
 
-**Version:** 1.4
+**Version:** 1.5
 **Status:** Draft / PoC
 **Date:** February 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -186,6 +186,13 @@ Requests the peer to execute an AI inference query using their local compute res
     "prompt": "What is the capital of France?",
     "model": "llama3.1:70b",  // Optional
     "provider": "ollama",     // Optional
+    "images": [               // Optional: vision queries (v0.12.0+)
+      {
+        "path": "screenshot.png",
+        "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg...",
+        "mime_type": "image/png"
+      }
+    ],
     "thinking": {             // Optional: thinking mode configuration
       "enabled": true,
       "budget_tokens": 10000  // For Claude Extended Thinking
@@ -199,6 +206,10 @@ Requests the peer to execute an AI inference query using their local compute res
 - `prompt` (string, required): AI query text
 - `model` (string, optional): Specific model to use
 - `provider` (string, optional): AI provider (ollama, openai, anthropic)
+- `images` (array, optional): Image objects for vision queries (v0.12.0+). Peer must support vision (`supports_vision: true` in PROVIDERS_RESPONSE).
+  - `path` (string, optional): Original filename
+  - `base64` (string, required): Base64-encoded image data (data URL format)
+  - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
 - `thinking` (object, optional): Thinking mode configuration
   - `enabled` (boolean): Enable extended thinking/reasoning
   - `budget_tokens` (integer): Token budget for thinking (Claude Extended Thinking)
@@ -1372,45 +1383,12 @@ Clients select relays using weighted scoring:
 
 ---
 
-### 3.13 Vision & Image Messages (v0.12.0)
+### 3.14 Vision & Image Queries (v0.12.0)
 
-Remote vision inference and image analysis capabilities.
-
-#### SEND_IMAGE
-
-Requests remote vision inference on one or more images.
-
-**Format:**
-```json
-{
-  "command": "SEND_IMAGE",
-  "payload": {
-    "request_id": "550e8400-e29b-41d4-a716-446655440000",
-    "prompt": "What's in this screenshot?",
-    "images": [
-      {
-        "path": "screenshot_20251225_103045.png",
-        "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg...",
-        "mime_type": "image/png"
-      }
-    ],
-    "model": "llava:13b",
-    "provider": "ollama"
-  }
-}
-```
-
-**Fields:**
-- `request_id` (string, required): UUID for request/response correlation
-- `prompt` (string, required): Text prompt for vision model
-- `images` (array, required): List of image objects
-  - `path` (string, optional): Original filename
-  - `base64` (string, required): Base64-encoded image data (data URL format)
-  - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
-- `model` (string, optional): Specific vision model to use (e.g., llava:13b, gpt-4-vision)
-- `provider` (string, optional): AI provider (ollama, openai, anthropic)
-
-**Response:** REMOTE_INFERENCE_RESPONSE (reuses existing message type)
+> **Implementation note:** There is no separate `SEND_IMAGE` wire command. Remote vision inference
+> uses **REMOTE_INFERENCE_REQUEST** (§3.4) with the optional `images` field (added v0.12.0).
+> The peer must advertise `supports_vision: true` in PROVIDERS_RESPONSE before vision queries
+> are sent. The response uses the standard REMOTE_INFERENCE_RESPONSE format.
 
 **Use Cases:**
 - Screenshot analysis and OCR
@@ -1423,7 +1401,7 @@ Requests remote vision inference on one or more images.
 
 ---
 
-### 3.14 Session Management Messages (v0.12.0)
+### 3.15 Session Management Messages (v0.12.0)
 
 Collaborative session reset with voting to prevent accidental data loss in multi-party conversations.
 
@@ -1520,7 +1498,7 @@ Notifies all participants of voting outcome.
 
 ---
 
-### 3.15 Chat History Synchronization (v0.12.0)
+### 3.16 Chat History Synchronization (v0.12.0)
 
 Enables peers to synchronize conversation history after reconnection or page refresh.
 
@@ -1591,7 +1569,7 @@ Returns conversation history to requesting peer.
 
 ---
 
-### 3.16 Skill Sharing Messages (v0.21.0)
+### 3.17 Skill Sharing Messages (v0.21.0)
 
 Enables agents to discover and exchange procedural skills (SKILL.md strategies) directly
 over P2P connections without involving a central server.
@@ -2022,9 +2000,9 @@ DPTP is designed to be extensible. New commands can be added by:
   - Reuses file transfer infrastructure (FILE_OFFER/FILE_CHUNK/FILE_COMPLETE)
 
 ### v1.2 (December 2025)
-- **New message types: Vision & Image Support (v0.12.0)**
-  - SEND_IMAGE - Remote vision inference with image payload
-  - Reuses REMOTE_INFERENCE_RESPONSE for vision responses
+- **Vision & Image Support (v0.12.0)**
+  - Added optional `images` field to REMOTE_INFERENCE_REQUEST for vision queries
+  - No separate wire command — vision reuses the existing inference request/response pair
   - Enables screenshot analysis, OCR, diagram interpretation, visual Q&A
 - **New message types: Session Management (v0.12.0)**
   - PROPOSE_NEW_SESSION, VOTE_NEW_SESSION, NEW_SESSION_RESULT

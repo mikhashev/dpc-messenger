@@ -273,7 +273,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 **Client Backend (`dpc-client/core`):**
 
 **Service Layer:**
-- `service.py` - Main orchestrator (CoreService, ~7,100 lines)
+- `service.py` - Main orchestrator (CoreService)
   - Lifecycle management (startup/shutdown)
   - Component initialization
   - Configuration loading
@@ -312,12 +312,21 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `message_handlers/gossip_handler.py` - Gossip protocol handlers
   - GossipSyncHandler - GOSSIP_SYNC anti-entropy reconciliation
   - GossipMessageHandler - GOSSIP_MESSAGE epidemic routing (v0.10.2 target)
-- `message_handlers/file_transfer_handlers.py` - File transfer handlers (v0.11.0)
-  - FileOfferHandler - FILE_OFFER (incoming file offer, firewall check, user prompt)
-  - FileAcceptHandler - FILE_ACCEPT (start chunked transfer)
-  - FileChunkHandler - FILE_CHUNK (receive and reassemble chunks)
-  - FileCompleteHandler - FILE_COMPLETE (verify hash, finalize transfer)
-  - FileCancelHandler - FILE_CANCEL (cleanup on cancellation)
+- `message_handlers/group_handler.py` - Group chat message routing
+- `message_handlers/skill_handler.py` - Agent skill invocation requests
+- `message_handlers/relay_register_handler.py` - Relay node registration
+- `message_handlers/relay_message_handler.py` - Relay message forwarding
+- `message_handlers/relay_response_handler.py` - Relay response handling
+- `message_handlers/relay_disconnect_handler.py` - Relay disconnect cleanup
+- `message_handlers/transcription_handler.py` - Transcription request/response
+- `message_handlers/voice_transcription_handler.py` - Voice message transcription sharing
+- File transfer handlers (v0.11.0) — split into individual files:
+  - `message_handlers/file_offer_handler.py` - FILE_OFFER (incoming offer, firewall check, user prompt)
+  - `message_handlers/file_accept_handler.py` - FILE_ACCEPT (start chunked transfer)
+  - `message_handlers/file_chunk_handler.py` - FILE_CHUNK (receive and reassemble chunks)
+  - `message_handlers/file_chunk_retry_handler.py` - FILE_CHUNK_RETRY (retransmit failed chunk)
+  - `message_handlers/file_complete_handler.py` - FILE_COMPLETE (verify hash, finalize transfer)
+  - `message_handlers/file_cancel_handler.py` - FILE_CANCEL (cleanup on cancellation)
 
 **Coordinators (v0.10.0+):**
 - `connection_orchestrator.py` - 6-tier connection fallback coordinator (v0.10.0)
@@ -338,6 +347,20 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
   - Direct TLS connections (via dpc:// URIs)
   - WebRTC connections (via Hub signaling)
   - Peer messaging and broadcasting
+- `coordinators/telegram_coordinator.py` - Telegram ↔ DPC message bridge and routing
+- `skill_coordinator.py` - Agent skill discovery, routing, and result delivery
+
+**Embedded Agent System (`dpc_agent/`, v0.18.0+):**
+- `dpc_agent/agent.py` - Core agent class (tool dispatch, memory, task execution)
+- `dpc_agent/loop.py` - Autonomous agent run loop
+- `dpc_agent/memory.py` - Per-agent persistent memory
+- `dpc_agent/evolution.py` - Agent skill evolution and self-improvement
+- `dpc_agent/consciousness.py` - Agent self-awareness and introspection
+- `dpc_agent/task_queue.py` - Async task queue with priority scheduling
+- `dpc_agent/budget.py` - Token/compute budget enforcement
+- `dpc_agent/skill_store.py` - Dynamic skill registry and versioning
+- `dpc_agent/tools/` - Agent tool implementations (shell, editor, browser, etc.)
+- See [docs/DPC_AGENT_GUIDE.md](docs/DPC_AGENT_GUIDE.md) for usage
 
 **Knowledge & Consensus System (v0.9.0+):**
 - `consensus_manager.py` - Multi-party knowledge voting
@@ -353,6 +376,12 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 
 **Managers:**
 - `p2p_manager.py` - Low-level P2P connection manager (TLS + WebRTC)
+- `agent_manager.py` - Agent lifecycle, task execution, tool dispatch
+- `agent_telegram_bridge.py` - Bridge between agent system and Telegram
+- `group_manager.py` - Group chat membership, history, metadata
+- `instruction_manager.py` - Per-peer custom AI instruction management
+- `prompt_manager.py` - Prompt template assembly and caching
+- `token_count_manager.py` - Token counting and context window tracking
 - `hole_punch_manager.py` - UDP hole punching coordinator (v0.10.0)
   - DHT-based endpoint discovery (reflexive address from 3 random DHT peers)
   - NAT type detection (cone vs symmetric)
@@ -373,7 +402,13 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
   - Per-peer storage: `~/.dpc/conversations/{peer_id}/files/`
 - `webrtc_peer.py` - WebRTC peer wrapper (aiortc)
 - `hub_client.py` - Federation Hub communication (OAuth, WebSocket signaling)
-- `llm_manager.py` - AI provider registry and routing (~716 lines; implementations in `providers/`)
+- `llm_manager.py` - AI provider registry and routing (implementations in `providers/`)
+  - `providers/base.py` - AbstractLLMProvider ABC
+  - `providers/ollama_provider.py`, `openai_provider.py`, `anthropic_provider.py`, `zai_provider.py`
+  - `providers/gemini_provider.py`, `gigachat_provider.py`, `github_models_provider.py`
+  - `providers/whisper_provider.py` - local Whisper transcription
+  - `providers/remote_peer_provider.py` - remote inference over P2P
+  - `providers/dpc_agent_provider.py` - agent-to-agent inference
 - `firewall.py` - Context access control system
 - `local_api.py` - WebSocket API for UI (localhost:9999)
 - `settings.py` - Configuration management
@@ -416,7 +451,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 
 **Client Frontend (`dpc-client/ui`):**
 - Built with SvelteKit 5.0 + Tauri 2.x
-- Entry point: `src/routes/+page.svelte` (~1,567 lines layout shell; down from ~6,000 pre-refactor)
+- Entry point: `src/routes/+page.svelte` (layout shell; domain logic in `src/lib/panels/`)
 - Backend communication: `src/lib/coreService.ts` (WebSocket client, thin bootstrapper)
 - SSG mode with adapter-static (SPA fallback)
 - **Domain panels** (`src/lib/panels/`, 15 files): ChatPanel, AgentPanel, VoicePanel, GroupPanel, TelegramPanel, KnowledgeEventsPanel, ModelDownloadPanel, HistorySyncPanel, ChatHistorySyncPanel, SessionEventsPanel, MessageRouterPanel, PersistencePanel, AgentManagementPanel, GroupManagementPanel, AddAIChatPanel
@@ -443,6 +478,9 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `crypto.py` - Node identity, RSA keys, X.509 certificates
 - `protocol.py` - Message serialization (10-byte header + JSON)
 - `pcm_core.py` - Personal Context Model data structures
+- `knowledge_commit.py` - Knowledge commit data structures and signing
+- `commit_integrity.py` - Commit hash verification and chain integrity
+- `markdown_manager.py` - Markdown rendering utilities
 - See [dpc-protocol/README.md](dpc-protocol/README.md) for comprehensive library documentation
 
 ### Message Protocol (DPTP)
@@ -498,8 +536,8 @@ Voice messages use the existing file transfer infrastructure (FILE_OFFER/FILE_CH
 **VRAM Management (v0.15.0):**
 - Models unload when auto-transcribe disabled
 - `torch.cuda.empty_cache()` called after unloading
-- **CRITICAL TODO**: Whisper model must be unloaded before loading a different Whisper model to prevent VRAM conflicts
-- See `providers/whisper_provider.py:265-357` for implementation
+- Unload-before-load enforced in `providers/whisper_provider.py` — VRAM conflict fixed in Sprint 1
+- See `providers/whisper_provider.py` (`_unload_model`, `unload_model_async`) for implementation
 
 **Voice Metadata Fields:**
 - `duration_seconds` (number): Recording duration in seconds
@@ -924,8 +962,8 @@ When adding new UI components that display data from `privacy_rules.json` (e.g.,
 3. In UI component, create a load function with a guard flag (like `aiScopesLoaded`) to prevent infinite reactive loops
 4. Add reactive statement to reload data when `$firewallRulesUpdated` changes and connection is active
 5. This ensures UI stays in sync with `privacy_rules.json` without requiring page refresh
-- **Example**: AI scopes dropdown (`+page.svelte:499-543`) reloads immediately after user saves firewall rules
-- **Pattern documented in**: `firewall.py:75-84`, `coreService.ts:32-39`, `+page.svelte:499-543`
+- **Example**: AI scopes dropdown reloads immediately after user saves firewall rules
+- **Pattern documented in**: `firewall.py`, `coreService.ts`, `+page.svelte`
 
 **Example Workflow** (Firewall Rules):
 1. Click "🛡️ Firewall Rules" button
@@ -1203,7 +1241,7 @@ poetry run pytest tests/test_turn_connectivity.py
 - `VISION.md` - Business vision, market opportunity, and mission (investor/co-founder focused)
 - `PRODUCT_VISION.md` - Product vision and technical philosophy
 - `docs/decisions/` - Architecture Decision Records (ADRs) for major structural choices
-  - `001-service-split.md` - Why and how service.py is being split (refactor/grand)
+  - `001-service-split.md` - Why and how service.py was split into domain services (refactor/grand)
   - `002-provider-abc.md` - LLM provider abstract base class design
   - `003-frontend-stores.md` - Frontend hybrid local/global store strategy
 - `docs/REFACTORING_GUIDELINES_FOR_CLAUDE_CODE.md` - AI-assisted refactoring principles
@@ -1219,6 +1257,11 @@ D-PC Messenger supports multiple AI providers for local and cloud-based inferenc
 - **OpenAI Compatible**: OpenAI and compatible APIs (OpenAI, LM Studio, etc.)
 - **Anthropic**: Claude models (Claude 3.5 Sonnet, Claude Opus, etc.)
 - **Z.AI**: GLM models (GLM-4.7, GLM-4.6, GLM-4.5, etc.)
+- **Gemini**: Google Gemini models via `gemini_provider.py`
+- **GigaChat**: Sber GigaChat models via `gigachat_provider.py`
+- **GitHub Models**: GitHub-hosted models via `github_models_provider.py`
+- **Remote Peer**: Offload inference to a connected peer via `remote_peer_provider.py`
+- **Whisper**: Local transcription-only provider via `whisper_provider.py`
 
 ### Z.AI Setup
 
