@@ -2,6 +2,69 @@
 // Shared TypeScript interfaces for coreService stores.
 // All domain services import from here; coreService.ts re-exports for backward compat.
 
+// --- Chat Message Types ---
+// Canonical definitions used across +page.svelte, ChatPanel, AgentPanel, ChatMessageList.
+// Single source of truth — do not redefine locally in components.
+
+export type Mention = {
+  node_id: string;
+  name: string;
+  start: number;
+  end: number;
+};
+
+export type MessageAttachment = {
+  type: 'file' | 'image' | 'voice';
+  filename: string;
+  file_path?: string;          // Full-size image file path (P2P file transfers)
+  size_bytes: number;
+  size_mb?: number;
+  hash?: string;
+  mime_type?: string;
+  transfer_id?: string;
+  status?: string;
+  data_url?: string;           // Base64 data URL (used in ChatPanel image preview)
+  thumbnail?: string;          // Base64 thumbnail data URL
+  // Image-specific fields (Phase 2.4):
+  dimensions?: { width: number; height: number };
+  vision_analyzed?: boolean;   // AI chat only: was vision API used?
+  vision_result?: string;      // AI chat only: vision analysis text
+  // Voice-specific fields (v0.13.0):
+  voice_metadata?: {
+    duration_seconds: number;
+    sample_rate: number;
+    channels: number;
+    codec: string;
+    recorded_at: string;
+  };
+  // Voice transcription (v0.13.2+):
+  transcription?: {
+    text: string;
+    provider: string;
+    transcriber_node_id?: string;
+    confidence?: number;
+    language?: string;
+    timestamp?: string;
+    remote_provider_node_id?: string;
+  };
+};
+
+export type Message = {
+  id: string;
+  sender: string;
+  senderName?: string;         // Display name for the sender (peer name or model name)
+  text: string;
+  timestamp: number;
+  commandId?: string;
+  model?: string;              // AI model name (for AI responses)
+  streamingRaw?: string;       // v0.16.0+: Raw streaming text (shown in collapsible)
+  thinking?: string;           // Thinking/reasoning content (v1.4+)
+  thinkingTokens?: number;     // Tokens used for thinking (v1.4+)
+  mentions?: Mention[];        // @-mentions in group chat messages
+  attachments?: MessageAttachment[];
+  isError?: boolean;           // Error message styling (v0.19.2+)
+};
+
 // --- Provider System ---
 
 export interface ProviderInfo {
@@ -103,14 +166,6 @@ export interface NodeStatus {
 }
 
 // --- P2P Messaging ---
-
-export interface MessageAttachment {
-    type: 'file' | 'image' | 'voice';
-    filename?: string;
-    thumbnail?: string;
-    size_bytes?: number;
-    voice_metadata?: Record<string, unknown>;
-}
 
 export interface P2PMessage {
     message_id: string;

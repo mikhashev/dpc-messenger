@@ -37,48 +37,7 @@
   } from '$lib/coreService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
   import { showNotificationIfBackground } from '$lib/notificationService';
-
-  // ---------------------------------------------------------------------------
-  // Types (local copy — Message defined in +page.svelte, shared by ChatPanel)
-  // ---------------------------------------------------------------------------
-  type Mention = { node_id: string; name: string; start: number; end: number };
-
-  type MessageAttachment = {
-    type: 'file' | 'image' | 'voice';
-    filename: string;
-    thumbnail?: string;
-    file_path?: string;
-    size_bytes: number;
-    size_mb?: number;
-    hash?: string;
-    mime_type?: string;
-    transfer_id?: string;
-    status?: string;
-    data_url?: string;
-    voice_metadata?: Record<string, unknown>;
-    transcription?: {
-      text: string;
-      provider: string;
-      confidence?: number;
-      language?: string;
-    };
-  };
-
-  type Message = {
-    id: string;
-    sender: string;
-    senderName?: string;
-    text: string;
-    timestamp: number;
-    commandId?: string;
-    model?: string;
-    streamingRaw?: string;
-    thinking?: string;
-    thinkingTokens?: number;
-    mentions?: Mention[];
-    attachments?: MessageAttachment[];
-    isError?: boolean;
-  };
+  import type { Message, Mention, MessageAttachment } from '$lib/types.js';
 
   type AIChatMeta = {
     name: string;

@@ -19,24 +19,7 @@
     sendCommand,
     connectionStatus,
   } from '$lib/coreService';
-
-  // ---------------------------------------------------------------------------
-  // Types
-  // ---------------------------------------------------------------------------
-  type Message = {
-    id: string;
-    sender: string;
-    senderName?: string;
-    text: string;
-    timestamp: number;
-    commandId?: string;
-    model?: string;
-    streamingRaw?: string;
-    thinking?: string;
-    thinkingTokens?: number;
-    attachments?: unknown[];
-    isError?: boolean;
-  };
+  import type { Message } from '$lib/types.js';
 
   // ---------------------------------------------------------------------------
   // Props
