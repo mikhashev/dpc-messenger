@@ -6,7 +6,7 @@
 
 <script lang="ts">
   import type { Writable } from 'svelte/store';
-  import { onMount, untrack } from 'svelte';
+  import { untrack } from 'svelte';
   import {
     agentProgress,
     agentProgressClear,
@@ -17,6 +17,7 @@
     agentsList,
     listAgents,
     sendCommand,
+    connectionStatus,
   } from '$lib/coreService';
 
   // ---------------------------------------------------------------------------
@@ -118,10 +119,17 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Mount: Load agents from backend and restore conversation histories (v0.19.0+)
+  // Load agents from backend once connected (v0.19.0+)
+  // Uses $effect on connectionStatus instead of onMount to ensure WebSocket is ready.
   // ---------------------------------------------------------------------------
 
-  onMount(async () => {
+  let agentsLoaded = false;
+
+  $effect(() => {
+    if ($connectionStatus !== 'connected' || agentsLoaded) return;
+    agentsLoaded = true;
+
+    (async () => {
     try {
       const agentsResult = await listAgents();
       if (agentsResult?.status === 'success' && agentsResult.agents) {
@@ -175,6 +183,7 @@
     } catch (error) {
       console.error('[Agents] Failed to load agents:', error);
     }
+    })();
   });
 
   // ---------------------------------------------------------------------------
@@ -247,7 +256,7 @@
 
   // Cleanup effect: clear streaming state when chat changes
   $effect(() => {
-    const _currentChatId = activeChatId; // track reactively
+    void activeChatId; // track reactively — suppress unused-var lint
     return () => {
       clearAgentStreaming();
       agentProgressMessage = null;
