@@ -1,7 +1,8 @@
 <!-- src/lib/panels/MessageRouterPanel.svelte -->
 <!-- Incoming message routing panel (Phase 3 Step 8) -->
 <!-- Logic-only panel — no markup, no styles. -->
-<!-- Manages: $p2pMessages, $groupTextReceived, $groupFileReceived, $aiResponseWithImage routing effects -->
+<!-- Manages: $p2pMessages, $groupTextReceived, $groupFileReceived, $aiResponseWithImage,         -->
+<!--           $coreMessages (execute_ai_query response) routing effects                          -->
 
 <script lang="ts">
   import type { Writable } from 'svelte/store';
@@ -10,6 +11,7 @@
     groupTextReceived,
     groupFileReceived,
     aiResponseWithImage,
+    coreMessages,
   } from '$lib/coreService';
   import { showNotificationIfBackground } from '$lib/notificationService';
 
@@ -21,13 +23,27 @@
     chatHistories,
     chatWindow,
     processedMessageIds,
+    commandToChatMap,
+    currentContextHash,
+    aiChats,
     onSetChatLoading,
+    onUpdateTokenUsage,
+    onMarkContextSent,
+    onAgentToast,
+    getStreamingText,
   }: {
     activeChatId: string;
     chatHistories: Writable<Map<string, any[]>>;
     chatWindow: HTMLElement | null;
     processedMessageIds: Set<string>;
+    commandToChatMap: Map<string, string>;
+    currentContextHash: string;
+    aiChats: Writable<Map<string, any>>;
     onSetChatLoading: (chatId: string, loading: boolean) => void;
+    onUpdateTokenUsage: (chatId: string, usage: { used: number; limit: number; historyTokens?: number; contextEstimated?: number }) => void;
+    onMarkContextSent: (chatId: string, hash: string) => void;
+    onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
+    getStreamingText: () => string;
   } = $props();
 
   // ---------------------------------------------------------------------------
@@ -208,6 +224,118 @@
 
       autoScroll();
       aiResponseWithImage.set(null);
+    }
+  });
+
+  // AI query response handler ($coreMessages execute_ai_query)
+  $effect(() => {
+    if ($coreMessages?.id) {
+      const message = $coreMessages;
+      const messageId = message.id;
+
+      if (message.command === 'execute_ai_query') {
+        // Guard: Skip if already processed (prevents reactive loops in Svelte 5)
+        if (processedMessageIds.has(messageId)) {
+          console.log(`[execute_ai_query] Skipping already processed message: ${messageId}`);
+          return;
+        }
+        processedMessageIds.add(messageId);
+
+        // Flush pending buffer and capture streaming text (AgentPanel owns buffer + state)
+        const capturedStreamingText = getStreamingText();
+
+        const newText = message.status === 'OK'
+          ? message.payload.content
+          : `Error: ${message.payload?.message || 'Unknown error'}`;
+        const newSender = message.status === 'OK' ? 'ai' : 'system';
+        const modelName = message.status === 'OK' ? message.payload.model : undefined;
+        // v1.4+: Extract thinking fields for reasoning models
+        const thinkingContent = message.status === 'OK' ? message.payload.thinking : undefined;
+        const thinkingTokenCount = message.status === 'OK' ? message.payload.thinking_tokens : undefined;
+
+        // Show toast notification for errors (helps remote users see host failures)
+        if (message.status !== 'OK') {
+          console.error(`[TokenCounter] AI query failed: ${message.payload?.message}`);
+          onAgentToast(`⚠️ AI Query Failed: ${message.payload?.message || 'Unknown error'}`, 'error');
+        }
+
+        const responseCommandId = message.id;
+
+        // Find which chat this command belongs to
+        let chatId = commandToChatMap.get(responseCommandId);
+
+        // Debug: Log if chatId not found (helps diagnose race conditions)
+        if (!chatId) {
+          console.warn(`[execute_ai_query] No chatId found for commandId=${responseCommandId}, using activeChatId=${activeChatId} as fallback`);
+          chatId = activeChatId;
+        }
+
+        // Clear loading state for the specific chat that received the response
+        if (chatId) {
+          onSetChatLoading(chatId, false);
+          console.log(`[TokenCounter] Loading cleared for chatId=${chatId}`);
+        }
+
+        if (chatId) {
+          console.log(`[execute_ai_query] Looking for commandId=${responseCommandId} in chatId=${chatId}`);
+
+          chatHistories.update(h => {
+            const newMap = new Map(h);
+            const hist = newMap.get(chatId) || [];
+
+            const commandIds = hist.filter((m: any) => m.commandId).map((m: any) => m.commandId);
+            console.log(`[execute_ai_query] History commandIds:`, commandIds);
+
+            const found = hist.some((m: any) => m.commandId === responseCommandId);
+            console.log(`[execute_ai_query] Found matching message: ${found}`);
+
+            // For agent chats, use the agent's display name as senderName
+            const agentSenderName = chatId?.startsWith('agent_') ? ($aiChats.get(chatId)?.name || undefined) : undefined;
+
+            newMap.set(chatId, hist.map((m: any) =>
+              m.commandId === responseCommandId ? {
+                ...m,
+                sender: newSender,
+                senderName: agentSenderName,
+                text: newText,
+                model: modelName,
+                thinking: thinkingContent,
+                thinkingTokens: thinkingTokenCount,
+                streamingRaw: capturedStreamingText || undefined,
+                commandId: undefined
+              } : m
+            ));
+            return newMap;
+          });
+
+          // Update token usage map with data from response (Phase 2)
+          if (message.status === 'OK' && message.payload.tokens_used !== undefined && message.payload.token_limit) {
+            onUpdateTokenUsage(chatId, {
+              used: message.payload.tokens_used,
+              limit: message.payload.token_limit,
+              historyTokens: message.payload.history_tokens ?? 0,
+              contextEstimated: message.payload.context_estimated ?? 0,
+            });
+          }
+
+          // Phase 7: Mark context as sent (clears "Updated" status)
+          if (message.status === 'OK' && currentContextHash) {
+            onMarkContextSent(chatId, currentContextHash);
+            console.log(`[Context Sent] Marked context as sent for ${chatId}`);
+          }
+
+          // Clean up the command mapping
+          commandToChatMap.delete(responseCommandId);
+        }
+
+        // Cleanup old processed IDs to prevent memory leak
+        if (processedMessageIds.size > 500) {
+          const firstId = processedMessageIds.values().next().value;
+          if (firstId) processedMessageIds.delete(firstId);
+        }
+
+        autoScroll();
+      }
     }
   });
 </script>

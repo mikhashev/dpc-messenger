@@ -1170,137 +1170,8 @@
     agentManagementPanelRef?.handleUnlinkAgentTelegram(agentId);
   }
 
-    // File transfer and voice handler functions moved to ChatPanel.svelte (Step 4)
-  // saveAutoTranscribeSetting + loadAutoTranscribeSetting moved to VoicePanel.svelte (Step 6)
-  // --- HANDLE INCOMING MESSAGES ---
-  $effect(() => {
-    if ($coreMessages?.id) {
-      const message = $coreMessages;
-      const messageId = message.id;  // Unique ID for deduplication
 
-    if (message.command === "execute_ai_query") {
-      // Guard: Skip if already processed (prevents reactive loops in Svelte 5)
-      if (processedMessageIds.has(messageId)) {
-        console.log(`[execute_ai_query] Skipping already processed message: ${messageId}`);
-        return;
-      }
-      processedMessageIds.add(messageId);
-
-      // Flush pending buffer and capture streaming text (AgentPanel owns buffer + state)
-      const capturedStreamingText = agentPanelComp?.flushAndCapture() ?? '';
-
-      const newText = message.status === "OK"
-        ? message.payload.content
-        : `Error: ${message.payload?.message || 'Unknown error'}`;
-      const newSender = message.status === "OK" ? 'ai' : 'system';
-      const modelName = message.status === "OK" ? message.payload.model : undefined;
-      // v1.4+: Extract thinking fields for reasoning models
-      const thinkingContent = message.status === "OK" ? message.payload.thinking : undefined;
-      const thinkingTokenCount = message.status === "OK" ? message.payload.thinking_tokens : undefined;
-
-      // Show toast notification for errors (helps remote users see host failures)
-      if (message.status !== "OK") {
-        console.error(`[TokenCounter] AI query failed: ${message.payload?.message}`);
-        agentToastMessage = `⚠️ AI Query Failed: ${message.payload?.message || 'Unknown error'}`;
-        agentToastType = 'error';
-        showAgentToast = true;
-        setTimeout(() => showAgentToast = false, 7000);  // 7s for errors (longer than success)
-      }
-
-      const responseCommandId = message.id;
-
-      // Find which chat this command belongs to
-      let chatId = commandToChatMap.get(responseCommandId);
-
-      // Debug: Log if chatId not found (helps diagnose race conditions)
-      if (!chatId) {
-        console.warn(`[execute_ai_query] No chatId found for commandId=${responseCommandId}, using activeChatId=${activeChatId} as fallback`);
-        // Fallback: use active chat if command mapping not found
-        // This handles edge cases where the map was cleared or response arrived late
-        chatId = activeChatId;
-      }
-
-      // Clear loading state for the specific chat that received the response
-      if (chatId) {
-        setChatLoading(chatId, false);
-        console.log(`[TokenCounter] Loading cleared for chatId=${chatId}`);
-      }
-
-      if (chatId) {
-        // Debug: Log what we're searching for
-        console.log(`[execute_ai_query] Looking for commandId=${responseCommandId} in chatId=${chatId}`);
-
-        chatHistories.update(h => {
-          const newMap = new Map(h);
-          const hist = newMap.get(chatId) || [];
-
-          // Debug: Log all commandIds in history
-          const commandIds = hist.filter(m => m.commandId).map(m => m.commandId);
-          console.log(`[execute_ai_query] History commandIds:`, commandIds);
-
-          // Check if we found a match
-          const found = hist.some(m => m.commandId === responseCommandId);
-          console.log(`[execute_ai_query] Found matching message: ${found}`);
-
-          // For agent chats, use the agent's display name as senderName
-          const agentSenderName = chatId?.startsWith('agent_') ? ($aiChats.get(chatId)?.name || undefined) : undefined;
-
-          newMap.set(chatId, hist.map(m =>
-            m.commandId === responseCommandId ? {
-              ...m,
-              sender: newSender,
-              senderName: agentSenderName,
-              text: newText,
-              model: modelName,
-              thinking: thinkingContent,  // v1.4+: Thinking/reasoning content
-              thinkingTokens: thinkingTokenCount,  // v1.4+: Thinking token count
-              streamingRaw: capturedStreamingText || undefined,  // v0.16.0+: Raw streaming text
-              commandId: undefined
-            } : m
-          ));
-          return newMap;
-        });
-
-        // Update token usage map with data from response (Phase 2)
-        // Use !== undefined (not truthiness) so tokens_used=0 still updates the counter
-        if (message.status === "OK" && message.payload.tokens_used !== undefined && message.payload.token_limit) {
-          tokenUsageMap = new Map(tokenUsageMap);
-          tokenUsageMap.set(chatId, {
-            used: message.payload.tokens_used,
-            limit: message.payload.token_limit,
-            historyTokens: message.payload.history_tokens ?? 0,
-            contextEstimated: message.payload.context_estimated ?? 0,
-          });
-        }
-
-        // Phase 7: Mark context as sent (clears "Updated" status)
-        if (message.status === "OK") {
-          // Update local context hash if it exists
-          if (currentContextHash) {
-            lastSentContextHash = new Map(lastSentContextHash);
-            lastSentContextHash.set(chatId, currentContextHash);
-            console.log(`[Context Sent] Marked context as sent for ${chatId}`);
-          }
-
-          // Note: peer context "sent" tracking (selectedPeerContexts) is now owned by ChatPanel (Step 4)
-        }
-
-        // Clean up the command mapping
-        commandToChatMap.delete(responseCommandId);
-      }
-
-      // Cleanup old processed IDs to prevent memory leak
-      if (processedMessageIds.size > 500) {
-        const firstId = processedMessageIds.values().next().value;
-        if (firstId) {
-          processedMessageIds.delete(firstId);
-        }
-      }
-
-      autoScroll();
-    }
-    }
-  });
+  // execute_ai_query response moved to MessageRouterPanel.svelte (Step 8)
 
   // P2P, group text/file, and AI vision effects moved to MessageRouterPanel.svelte (Step 8)
 
@@ -1551,13 +1422,31 @@
 <!-- TelegramPanel: logic-only, handles incoming Telegram message events (Step 8) -->
 <TelegramPanel {aiChats} {chatHistories} />
 
-<!-- MessageRouterPanel: logic-only, routes P2P/group/vision messages to chatHistories (Step 8) -->
+<!-- MessageRouterPanel: logic-only, routes P2P/group/vision/AI-query messages to chatHistories (Step 8) -->
 <MessageRouterPanel
   {activeChatId}
   {chatHistories}
   chatWindow={chatWindow ?? null}
   {processedMessageIds}
+  {commandToChatMap}
+  {currentContextHash}
+  {aiChats}
   onSetChatLoading={setChatLoading}
+  onUpdateTokenUsage={(chatId, usage) => {
+    tokenUsageMap = new Map(tokenUsageMap);
+    tokenUsageMap.set(chatId, usage);
+  }}
+  onMarkContextSent={(chatId, hash) => {
+    lastSentContextHash = new Map(lastSentContextHash);
+    lastSentContextHash.set(chatId, hash);
+  }}
+  onAgentToast={(message, type) => {
+    agentToastMessage = message;
+    agentToastType = type;
+    showAgentToast = true;
+    setTimeout(() => { showAgentToast = false; }, 7000);
+  }}
+  getStreamingText={() => agentPanelComp?.flushAndCapture() ?? ''}
 />
 
 <!-- ModelDownloadPanel: model download dialog + effects (Step 8) -->
