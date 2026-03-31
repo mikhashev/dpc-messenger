@@ -16,6 +16,7 @@
     onClearVoicePreview,
     onSendVoiceMessage,
     onTranscribeVoiceMessage,
+    isTranscribing = false,
     isLocalAIChat = false,
 
     // File offer dialog state
@@ -49,6 +50,7 @@
     onClearVoicePreview: () => void;
     onSendVoiceMessage: () => void;
     onTranscribeVoiceMessage?: () => Promise<void>;
+    isTranscribing?: boolean;
     isLocalAIChat?: boolean;
     showFileOfferDialog?: boolean;
     currentFileOffer?: any;
@@ -106,9 +108,14 @@
       <button
         class="voice-transcribe-button"
         onclick={onTranscribeVoiceMessage}
-        title="Transcribe and send to AI"
+        disabled={isTranscribing}
+        title={isTranscribing ? "Loading Whisper model…" : "Transcribe and send to AI"}
       >
-        📝 Send
+        {#if isTranscribing}
+          <span class="transcribe-spinner" aria-hidden="true"></span> Loading…
+        {:else}
+          📝 Send
+        {/if}
       </button>
     {:else}
       <button
@@ -363,6 +370,27 @@
 
   .voice-transcribe-button {
     background: #2196F3;
+  }
+
+  .voice-transcribe-button:disabled {
+    background: #78909c;
+    cursor: not-allowed;
+    opacity: 0.8;
+  }
+
+  .transcribe-spinner {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid rgba(255,255,255,0.4);
+    border-top-color: white;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+    vertical-align: middle;
+  }
+
+  @keyframes spin {
+    to { transform: rotate(360deg); }
   }
 
   .voice-send-button:hover {

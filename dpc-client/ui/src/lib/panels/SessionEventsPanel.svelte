@@ -19,11 +19,13 @@
     getPeerDisplayName,
     onOpenNewSessionDialog,
     onClearStateForConversation,
+    onConversationReset,
   }: {
     chatHistories: Writable<Map<string, any[]>>;
     getPeerDisplayName: (id: string) => string;
     onOpenNewSessionDialog: () => void;
     onClearStateForConversation: (conversationId: string) => void;
+    onConversationReset?: (conversationId: string, clear: () => void) => void;
   } = $props();
 
   // ---------------------------------------------------------------------------
@@ -81,16 +83,24 @@
   $effect(() => {
     if ($conversationReset) {
       const conversationId = $conversationReset.conversation_id;
-      console.log('[ConversationReset] Clearing chat for:', conversationId);
-
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        newMap.set(conversationId, []);
-        return newMap;
-      });
-
-      onClearStateForConversation(conversationId);
+      console.log('[ConversationReset] Received for:', conversationId);
       conversationReset.set(null);
+
+      const doClear = () => {
+        chatHistories.update(h => {
+          const newMap = new Map(h);
+          newMap.set(conversationId, []);
+          return newMap;
+        });
+        onClearStateForConversation(conversationId);
+      };
+
+      if (onConversationReset) {
+        // Parent decides whether to clear (shows confirm dialog)
+        onConversationReset(conversationId, doClear);
+      } else {
+        doClear();
+      }
     }
   });
 </script>

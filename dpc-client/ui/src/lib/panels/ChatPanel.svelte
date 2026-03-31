@@ -825,8 +825,11 @@
     }
   }
 
+  let isTranscribing = $state(false);
+
   async function handleTranscribeVoiceMessage() {
     if (!voicePreview) return;
+    isTranscribing = true;
     try {
       fileOfferToastMessage = 'Transcribing voice message...';
       showFileOfferToast = true;
@@ -855,6 +858,8 @@
       fileOfferToastMessage = `Transcription failed: ${error}`;
       showFileOfferToast = true;
       setTimeout(() => (showFileOfferToast = false), 5000);
+    } finally {
+      isTranscribing = false;
     }
   }
 
@@ -970,6 +975,7 @@
     onClearVoicePreview={handleCancelVoicePreview}
     onSendVoiceMessage={handleSendVoiceMessage}
     onTranscribeVoiceMessage={handleTranscribeVoiceMessage}
+    {isTranscribing}
     isLocalAIChat={activeChatId === 'local_ai' || activeChatId.startsWith('ai_')}
     showFileOfferDialog={showFileOfferDialog}
     currentFileOffer={currentFileOffer}

@@ -207,6 +207,10 @@
   let peerContextHashes = $state(new Map<string, string>());  // Per-peer: current hash from backend
   let lastSentPeerHashes = $state(new Map<string, Map<string, string>>());  // Per-conversation, per-peer: last hash sent
 
+  // "Clear messages after knowledge extraction?" confirmation state
+  let showClearConfirm = $state(false);
+  let pendingClearFn = $state<(() => void) | null>(null);
+
   // Connection state (Phase 2: UX improvements)
   let isConnecting = $state(false);
   let connectionError = $state("");
@@ -1190,6 +1194,24 @@
   />
 {/if}
 
+<!-- Clear messages after knowledge extraction? -->
+{#if showClearConfirm}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="confirm-overlay" role="dialog" aria-modal="true" aria-label="Clear messages?">
+    <div class="confirm-dialog">
+      <p>Knowledge saved. Clear conversation messages?</p>
+      <div class="confirm-actions">
+        <button class="btn-confirm-yes" onclick={() => { pendingClearFn?.(); showClearConfirm = false; pendingClearFn = null; }}>
+          Yes, clear
+        </button>
+        <button class="btn-confirm-no" onclick={() => { showClearConfirm = false; pendingClearFn = null; }}>
+          No, keep
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
 <!-- Connection Error Toast -->
 {#if showConnectionError}
   <Toast
@@ -1288,6 +1310,10 @@
   {chatHistories}
   {getPeerDisplayName}
   onOpenNewSessionDialog={() => { showNewSessionDialog = true; }}
+  onConversationReset={(_convId, clear) => {
+    pendingClearFn = clear;
+    showClearConfirm = true;
+  }}
   onClearStateForConversation={(convId) => {
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.delete(convId);
@@ -1316,6 +1342,62 @@
 />
 
 <style>
+  .confirm-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 9000;
+  }
+
+  .confirm-dialog {
+    background: #1e1e2e;
+    border: 1px solid #45475a;
+    border-radius: 10px;
+    padding: 1.5rem 2rem;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+    text-align: center;
+    min-width: 280px;
+  }
+
+  .confirm-dialog p {
+    margin: 0 0 1.25rem;
+    color: #cdd6f4;
+    font-size: 1rem;
+  }
+
+  .confirm-actions {
+    display: flex;
+    gap: 0.75rem;
+    justify-content: center;
+  }
+
+  .btn-confirm-yes {
+    padding: 0.5rem 1.25rem;
+    background: #f44336;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+
+  .btn-confirm-yes:hover { background: #d32f2f; }
+
+  .btn-confirm-no {
+    padding: 0.5rem 1.25rem;
+    background: #4caf50;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+
+  .btn-confirm-no:hover { background: #388e3c; }
+
   .container {
     padding: 1.5rem;
     width: auto;
