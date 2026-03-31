@@ -100,6 +100,9 @@
   let selectedVisionProvider = $state("");  // Provider for image queries
   let selectedVoiceProvider = $state("");  // v0.13.0+: Provider for voice transcription
 
+  // Current input text (bound to ChatPanel) — needed for real-time token estimation in SessionControls
+  let currentInput = $state('');
+
   // Resizable chat panel state (ChatPanel manages resize; +page.svelte owns height for outer div style)
   let chatPanelHeight = $state((() => {
     const saved = localStorage.getItem('chatPanelHeight');
@@ -411,9 +414,9 @@
     contextEstimated: currentTokenUsage.contextEstimated ?? 0,
   });
 
-  // Reactive: Estimate token usage (currentInput owned by ChatPanel; use '' here for SessionControls)
+  // Reactive: Estimate token usage including current input (real-time feedback in SessionControls)
   let estimatedUsage = $derived(
-    estimateConversationUsage(effectiveTokenUsage, '')
+    estimateConversationUsage(effectiveTokenUsage, currentInput)
   );
 
   // Reactive: Check if current peer/group is connected (for enabling/disabling send controls)
@@ -954,6 +957,7 @@
         {groupPanelRef}
         bind:chatPanelHeight
         bind:showAgentBoard
+        bind:currentInput
       />
     </div>
   </div>

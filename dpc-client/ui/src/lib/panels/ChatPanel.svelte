@@ -92,6 +92,7 @@
     groupPanelRef = null,
     chatPanelHeight = $bindable(600),
     showAgentBoard = $bindable(false),
+    currentInput = $bindable(''),
   }: {
     activeChatId: string;
     chatHistories: Writable<Map<string, Message[]>>;
@@ -118,6 +119,7 @@
     groupPanelRef?: any;
     chatPanelHeight?: number;
     showAgentBoard?: boolean;
+    currentInput?: string;
   } = $props();
 
   // Expose input value for GroupPanel's handleMentionSelect
@@ -127,7 +129,6 @@
   // ---------------------------------------------------------------------------
   // State (owned by ChatPanel)
   // ---------------------------------------------------------------------------
-  let currentInput = $state('');
   let chatDraftInputs = $state(new Map<string, string>());
   let voicePreview = $state<{ blob: Blob; duration: number; filePath?: string } | null>(null);
   let pendingImage = $state<{ dataUrl: string; filename: string; sizeBytes: number } | null>(null);
