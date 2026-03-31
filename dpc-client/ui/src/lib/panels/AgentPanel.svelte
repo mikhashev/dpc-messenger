@@ -6,7 +6,7 @@
 
 <script lang="ts">
   import type { Writable } from 'svelte/store';
-  import { untrack } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import {
     agentProgress,
     agentProgressClear,
@@ -16,6 +16,7 @@
     agentTelegramUnlinked,
     agentsList,
     listAgents,
+    sendCommand,
   } from '$lib/coreService';
 
   // ---------------------------------------------------------------------------
@@ -115,6 +116,66 @@
     return activeChatId === conversation_id ||
            agentChatToAgentId.get(activeChatId) === conversation_id;
   }
+
+  // ---------------------------------------------------------------------------
+  // Mount: Load agents from backend and restore conversation histories (v0.19.0+)
+  // ---------------------------------------------------------------------------
+
+  onMount(async () => {
+    try {
+      const agentsResult = await listAgents();
+      if (agentsResult?.status === 'success' && agentsResult.agents) {
+        agentsList.set(agentsResult.agents);
+        console.log(`[Agents] Loaded ${agentsResult.agents.length} agents from backend`);
+
+        // Proactively fetch each agent's conversation history from the backend.
+        // The backend is authoritative (includes Telegram messages received while app was closed).
+        // We merge with any localStorage snapshot so that UI metadata (thinking blocks,
+        // raw tool-call output) is preserved for messages that already exist locally.
+        // New messages that arrived while the app was closed are added without metadata.
+        for (const agent of agentsResult.agents) {
+          const conv_id = agent.agent_id;
+          try {
+            const histResult = await sendCommand('get_conversation_history', { conversation_id: conv_id });
+            if (histResult?.status === 'success' && histResult.messages?.length > 0) {
+              chatHistories.update(map => {
+                const newMap = new Map(map);
+
+                // Build a lookup of existing localStorage messages by stable ID so we can
+                // carry over thinking blocks and streamingRaw onto matching backend messages.
+                const localHistory: any[] = newMap.get(conv_id) || [];
+                const localById = new Map(localHistory.map((m: any) => [m.id, m]));
+
+                const msgs = histResult.messages.map((msg: any, index: number) => {
+                  const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (histResult.messages.length - index) * 1000;
+                  const stableId = `${conv_id}-${msg.timestamp ? ts : index}`;
+                  const local = localById.get(stableId);
+                  return {
+                    id: stableId,
+                    sender: msg.role === 'user' ? 'user' : conv_id,
+                    senderName: msg.role === 'user' ? (msg.sender_name || 'You') : (agent.name || conv_id),
+                    text: msg.content,
+                    timestamp: ts,
+                    attachments: msg.attachments || [],
+                    // Restore rich metadata: prefer persisted history.json fields, fall back to localStorage
+                    thinking: msg.thinking || local?.thinking,
+                    streamingRaw: msg.streaming_raw || local?.streamingRaw,
+                  };
+                });
+                newMap.set(conv_id, msgs);
+                return newMap;
+              });
+              console.log(`[Agents] Restored ${histResult.message_count} messages for ${conv_id}`);
+            }
+          } catch (err) {
+            console.warn(`[Agents] Failed to load history for ${conv_id}:`, err);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[Agents] Failed to load agents:', error);
+    }
+  });
 
   // ---------------------------------------------------------------------------
   // Effects

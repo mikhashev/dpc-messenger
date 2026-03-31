@@ -2,9 +2,9 @@
 <!-- FIXED VERSION - Proper URI detection for Direct TLS vs WebRTC -->
 
 <script lang="ts">
-  import { onMount, onDestroy, untrack } from "svelte";
+  import { onMount } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, knowledgeCommitResult, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, contextUpdated, peerContextUpdated, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, newSessionResult, proposeNewSession, voteNewSession, conversationReset, defaultProviders, providersList, telegramLinkedChats, agentProgress, groupChats, loadGroups, listAgents, agentsList } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -15,15 +15,12 @@
   import ProvidersEditor from "$lib/components/ProvidersEditor.svelte";
   import ProviderSelector from "$lib/components/ProviderSelector.svelte";
   import Toast from "$lib/components/Toast.svelte";
-  import MarkdownMessage from "$lib/components/MarkdownMessage.svelte";
-  import ImageMessage from "$lib/components/ImageMessage.svelte";
   import ChatMessageList from "$lib/components/ChatMessageList.svelte";
   import SessionControls from "$lib/components/SessionControls.svelte";
   import TelegramStatus from "$lib/components/TelegramStatus.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
   import NewGroupDialog from "$lib/components/NewGroupDialog.svelte";
   import GroupSettingsDialog from "$lib/components/GroupSettingsDialog.svelte";
-  import VoicePlayer from "$lib/components/VoicePlayer.svelte";
   import ChatPanel from "$lib/panels/ChatPanel.svelte";
   import AgentPanel from "$lib/panels/AgentPanel.svelte";
   import VoicePanel from "$lib/panels/VoicePanel.svelte";
@@ -35,7 +32,9 @@
   import AddAIChatPanel from "$lib/panels/AddAIChatPanel.svelte";
   import AgentManagementPanel from "$lib/panels/AgentManagementPanel.svelte";
   import GroupManagementPanel from "$lib/panels/GroupManagementPanel.svelte";
-  import { showNotificationIfBackground } from '$lib/notificationService';
+  import SessionEventsPanel from "$lib/panels/SessionEventsPanel.svelte";
+  import KnowledgeEventsPanel from "$lib/panels/KnowledgeEventsPanel.svelte";
+  import PersistencePanel from "$lib/panels/PersistencePanel.svelte";
   import { estimateConversationUsage } from '$lib/tokenEstimator';
 
   // Tauri APIs - will be loaded in onMount if in Tauri environment
@@ -244,81 +243,9 @@
   });
 
   // Whisper loading effects moved to VoicePanel.svelte (Step 6)
-
   // Agent progress and streaming effects moved to AgentPanel.svelte (Step 5)
 
-  // Keep: Restore compute host from agent metadata on chat switch
-  (() => {
-    const chatMeta = $aiChats.get(activeChatId);
-    if (chatMeta?.compute_host) {
-      selectedComputeHost = chatMeta.compute_host;
-    } else if (activeChatId.startsWith('agent_') && selectedComputeHost !== 'local') {
-      selectedComputeHost = 'local';
-    }
-  });
-
-  // Persist AI chats (including Agent chats) to localStorage for page refresh recovery
-  // Debounced to avoid excessive writes
-  let aiChatsSaveTimeout: ReturnType<typeof setTimeout> | null = null;
-  $effect(() => {
-    // Track aiChats reactively
-    $aiChats;
-
-    // Clear any pending save
-    if (aiChatsSaveTimeout) {
-      clearTimeout(aiChatsSaveTimeout);
-    }
-
-    // Debounce save by 500ms
-    aiChatsSaveTimeout = setTimeout(() => {
-      try {
-        // Only save AI chats and agent chats (excluding Telegram and local_ai)
-        const aiChatsToSave = Object.fromEntries(
-          Array.from($aiChats.entries())
-            .filter(([id, info]) =>
-              (id.startsWith('ai_') || id.startsWith('agent_') || id === 'default') &&
-              !id.startsWith('telegram-') &&
-              info.provider !== 'telegram'
-            )
-        );
-        localStorage.setItem('dpc-ai-chats', JSON.stringify(aiChatsToSave));
-        console.log(`[AI Chats] Persisted ${Object.keys(aiChatsToSave).length} AI chats to localStorage`);
-      } catch (error) {
-        console.error('[AI Chats] Failed to persist chats:', error);
-      }
-    }, 500);
-  });
-
-  // Persist AI chat histories to localStorage for page refresh recovery
-  // Debounced to avoid excessive writes
-  let chatHistoriesSaveTimeout: ReturnType<typeof setTimeout> | null = null;
-  $effect(() => {
-    // Track chatHistories reactively
-    $chatHistories;
-
-    // Clear any pending save
-    if (chatHistoriesSaveTimeout) {
-      clearTimeout(chatHistoriesSaveTimeout);
-    }
-
-    // Debounce save by 500ms
-    chatHistoriesSaveTimeout = setTimeout(() => {
-      try {
-        // Save histories for AI chats and agent chats (excluding Telegram).
-        // Agent chats are also included so that thinking blocks and raw tool-call
-        // output survive UI/app restarts. On startup, backend messages are merged
-        // onto the localStorage snapshot so new Telegram messages received while
-        // the app was closed are picked up without losing the UI metadata.
-        const historiesToSave = Object.fromEntries(
-          Array.from($chatHistories.entries())
-            .filter(([id, _]) => (id.startsWith('ai_') || id.startsWith('agent_')) && !id.startsWith('telegram-'))
-        );
-        localStorage.setItem('dpc-ai-chat-histories', JSON.stringify(historiesToSave));
-      } catch (error) {
-        console.error('[AI Chats] Failed to persist chat histories:', error);
-      }
-    }, 500);
-  });
+  // AI chat + history localStorage persistence moved to PersistencePanel.svelte
 
   // Telegram message effects moved to TelegramPanel.svelte (Step 8)
 
@@ -337,14 +264,8 @@
   let modeSectionCollapsed = $state(true);  // Mode section collapsible (collapsed by default)
   let chatHeaderCollapsed = $state(false);  // Chat header collapsible
 
-  // Notification state
-  let windowFocused = $state(true);
-
   // Chat history loading state (prevent infinite loop)
   let loadingHistory = new Set<string>();
-
-  // Window focus tracking cleanup
-  let unlistenFocus: (() => void) | null = null;
 
   // Initialize window focus tracking and notification permission (runs once on mount)
   onMount(async () => {
@@ -364,27 +285,6 @@
         console.log('[Tauri] Dialog API loaded');
       } catch (err) {
         console.error('[Tauri] Failed to load dialog API:', err);
-      }
-    }
-
-    if (typeof window !== 'undefined') {
-      try {
-        // Load window tracking API if in Tauri
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        const appWindow = getCurrentWindow();
-
-        // Listen to focus changes (store unlisten function for cleanup)
-        unlistenFocus = await appWindow.onFocusChanged(({ payload: focused }) => {
-          windowFocused = focused;
-          console.log(`[Notifications] Window focus changed: ${focused}`);
-        });
-
-        // Check initial focus state
-        windowFocused = await appWindow.isFocused();
-      } catch (error) {
-        console.log('[Notifications] Window tracking not available (running in browser)');
-        // In browser, assume window is always focused
-        windowFocused = true;
       }
     }
 
@@ -523,68 +423,6 @@
       console.error('[Groups] Failed to load group chats:', error);
     }
 
-    // Load agents from backend (v0.19.0+)
-    try {
-      const agentsResult = await listAgents();
-      if (agentsResult?.status === 'success' && agentsResult.agents) {
-        agentsList.set(agentsResult.agents);
-        console.log(`[Agents] Loaded ${agentsResult.agents.length} agents from backend`);
-
-        // Proactively fetch each agent's conversation history from the backend.
-        // The backend is authoritative (includes Telegram messages received while app was closed).
-        // We merge with any localStorage snapshot so that UI metadata (thinking blocks,
-        // raw tool-call output) is preserved for messages that already exist locally.
-        // New messages that arrived while the app was closed are added without metadata.
-        for (const agent of agentsResult.agents) {
-          const conv_id = agent.agent_id;
-          try {
-            const histResult = await sendCommand('get_conversation_history', { conversation_id: conv_id });
-            if (histResult?.status === 'success' && histResult.messages?.length > 0) {
-              chatHistories.update(map => {
-                const newMap = new Map(map);
-
-                // Build a lookup of existing localStorage messages by stable ID so we can
-                // carry over thinking blocks and streamingRaw onto matching backend messages.
-                const localHistory: any[] = newMap.get(conv_id) || [];
-                const localById = new Map(localHistory.map((m: any) => [m.id, m]));
-
-                const msgs = histResult.messages.map((msg: any, index: number) => {
-                  const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (histResult.messages.length - index) * 1000;
-                  const stableId = `${conv_id}-${msg.timestamp ? ts : index}`;
-                  const local = localById.get(stableId);
-                  return {
-                    id: stableId,
-                    sender: msg.role === 'user' ? 'user' : conv_id,
-                    senderName: msg.role === 'user' ? (msg.sender_name || 'You') : (agent.name || conv_id),
-                    text: msg.content,
-                    timestamp: ts,
-                    attachments: msg.attachments || [],
-                    // Restore rich metadata: prefer persisted history.json fields, fall back to localStorage
-                    thinking: msg.thinking || local?.thinking,
-                    streamingRaw: msg.streaming_raw || local?.streamingRaw,
-                  };
-                });
-                newMap.set(conv_id, msgs);
-                return newMap;
-              });
-              console.log(`[Agents] Restored ${histResult.message_count} messages for ${conv_id}`);
-            }
-          } catch (err) {
-            console.warn(`[Agents] Failed to load history for ${conv_id}:`, err);
-          }
-        }
-      }
-    } catch (error) {
-      console.error('[Agents] Failed to load agents:', error);
-    }
-  });
-
-  // Cleanup focus listener on component destroy
-  onDestroy(() => {
-    if (unlistenFocus) {
-      unlistenFocus();
-      unlistenFocus = null;
-    }
   });
 
   // Reactive: Update active chat in coreService to prevent unread badges on open chats
@@ -606,139 +444,11 @@
     }
   });
 
-  // Reactive: Open commit dialog when proposal received
-  $effect(() => {
-    if ($knowledgeCommitProposal) {
-      showCommitDialog = true;
-
-      // Send notification for knowledge commit proposal
-      (async () => {
-        const notified = await showNotificationIfBackground({
-          title: 'Vote Requested',
-          body: $knowledgeCommitProposal.proposal?.topic || 'Knowledge commit proposal'
-        });
-        console.log(`[Notifications] Knowledge proposal notification: ${notified ? 'system' : 'skip'}`);
-      })();
-    }
-  });
-
-  // Reactive: Open new session dialog when proposal received (v0.11.3)
-  $effect(() => {
-    if ($newSessionProposal) {
-      showNewSessionDialog = true;
-
-      // Send notification for new session proposal
-      (async () => {
-        const initiatorName = getPeerDisplayName($newSessionProposal.initiator_node_id);
-        const notified = await showNotificationIfBackground({
-          title: 'New Session Requested',
-          body: `${initiatorName} wants to start a new session`
-        });
-        console.log(`[Notifications] New session proposal notification: ${notified ? 'system' : 'skip'}`);
-      })();
-    }
-  });
-
-  // Reactive: Clear frontend state when new session approved (v0.11.3)
-  $effect(() => {
-    if ($newSessionResult && $newSessionResult.result === "approved") {
-      // v0.20.0 FIX: Prioritize conversation_id over sender_node_id
-      // For group chats, conversation_id is the group_id (correct)
-      // sender_node_id is only used as fallback for legacy peer chats
-      const conversationId = $newSessionResult.conversation_id || $newSessionResult.sender_node_id;
-
-      // Send notification for new session result
-      (async () => {
-        const notified = await showNotificationIfBackground({
-          title: `Session ${$newSessionResult.result}`,
-          body: `New session ${$newSessionResult.result}`
-        });
-        console.log(`[Notifications] New session result notification: ${notified ? 'system' : 'skip'}`);
-      })();
-
-      console.log('[NewSession] Clearing chat for:', conversationId);
-      console.log('[NewSession] sender_node_id:', $newSessionResult.sender_node_id);
-      console.log('[NewSession] conversation_id:', $newSessionResult.conversation_id);
-      console.log('[NewSession] Current chatHistories keys:', Array.from($chatHistories.keys()));
-
-      // Clear message history for this chat
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        newMap.set(conversationId, []);
-        return newMap;
-      });
-
-      // Clear token usage
-      tokenUsageMap = new Map(tokenUsageMap);
-      tokenUsageMap.delete(conversationId);
-
-      // Clear context tracking (will show "Updated" badge again on next query)
-      lastSentContextHash = new Map(lastSentContextHash);
-      lastSentContextHash.delete(conversationId);
-      lastSentPeerHashes = new Map(lastSentPeerHashes);
-      lastSentPeerHashes.delete(conversationId);
-
-      // Clear the result to prevent re-triggering this reactive statement
-      newSessionResult.set(null);
-    }
-  });
+  // Knowledge commit/context/token warning effects moved to KnowledgeEventsPanel.svelte
 
   // Model download effects moved to ModelDownloadPanel.svelte (Step 8)
+  // Session proposal/result/reset effects moved to SessionEventsPanel.svelte
 
-  // Reactive: Clear chat window on conversation reset (v0.11.3 - for AI chats and P2P resets)
-  $effect(() => {
-    if ($conversationReset) {
-      const conversationId = $conversationReset.conversation_id;
-      console.log('[ConversationReset] Clearing chat for:', conversationId);
-
-      // Clear message history for this chat
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        newMap.set(conversationId, []);
-        return newMap;
-      });
-
-      // Clear token usage
-      tokenUsageMap = new Map(tokenUsageMap);
-      tokenUsageMap.delete(conversationId);
-
-      // Clear context tracking
-      lastSentContextHash = new Map(lastSentContextHash);
-      lastSentContextHash.delete(conversationId);
-      lastSentPeerHashes = new Map(lastSentPeerHashes);
-      lastSentPeerHashes.delete(conversationId);
-
-      // Clear the event to prevent re-triggering
-      conversationReset.set(null);
-    }
-  });
-
-  // Reactive: Handle token warnings (Phase 2)
-  $effect(() => {
-    if ($tokenWarning) {
-      const {conversation_id, tokens_used, token_limit, usage_percent,
-             history_tokens, context_estimated} = $tokenWarning;
-
-      // Guard: Only update if values actually changed (prevent infinite loop)
-      const existing = tokenUsageMap.get(conversation_id);
-      if (existing && existing.used === tokens_used && existing.limit === token_limit) {
-        return; // Values unchanged, skip update
-      }
-
-      // Update token usage map
-      tokenUsageMap = new Map(tokenUsageMap);
-      tokenUsageMap.set(conversation_id, {
-        used: tokens_used,
-        limit: token_limit,
-        historyTokens: history_tokens ?? 0,
-        contextEstimated: context_estimated ?? 0,
-      });
-
-      // Show warning toast
-      showTokenWarning = true;
-      tokenWarningMessage = `Context window ${Math.round(usage_percent * 100)}% full. Consider ending session to save knowledge.`;
-    }
-  });
 
   // Reactive: Get current chat's token usage
   const DEFAULT_TOKEN_LIMIT = 16384; // Default limit for new AI chats (before first message)
@@ -798,83 +508,6 @@
   // Chat history sync on chat switch moved to ChatHistorySyncPanel.svelte
 
 
-  // Reactive: Handle knowledge extraction failures (Phase 4)
-  $effect(() => {
-    if ($extractionFailure) {
-      const {conversation_id, reason} = $extractionFailure;
-      showExtractionFailure = true;
-      extractionFailureMessage = `Knowledge extraction failed for ${conversation_id}: ${reason}`;
-    }
-  });
-
-  // Reactive: Handle knowledge commit voting results
-  $effect(() => {
-    if ($knowledgeCommitResult) {
-      const { status, topic, vote_tally } = $knowledgeCommitResult;
-
-      // Store full result for detailed view
-      currentVoteResult = $knowledgeCommitResult;
-
-      if (status === "approved") {
-        commitResultMessage = `✅ Knowledge commit approved: ${topic} (${vote_tally.approve}/${vote_tally.total} votes) - Click for details`;
-        commitResultType = "info";
-      } else if (status === "rejected") {
-        commitResultMessage = `❌ Knowledge commit rejected: ${topic} (${vote_tally.reject} reject, ${vote_tally.request_changes} change requests) - Click for details`;
-        commitResultType = "error";
-      } else if (status === "revision_needed") {
-        commitResultMessage = `📝 Changes requested for: ${topic} (${vote_tally.request_changes}/${vote_tally.total} requested changes) - Click for details`;
-        commitResultType = "warning";
-      } else if (status === "timeout") {
-        commitResultMessage = `⏱️ Voting timeout for: ${topic} (${vote_tally.total} votes received) - Click for details`;
-        commitResultType = "warning";
-      }
-
-      showCommitResultToast = true;
-      closeCommitDialog();
-
-      // Send notification for knowledge commit result
-      (async () => {
-        const notified = await showNotificationIfBackground({
-          title: 'Vote Complete',
-          body: `${topic} - ${status}`
-        });
-        console.log(`[Notifications] Knowledge commit result notification: ${notified ? 'system' : 'skip'}`);
-      })();
-
-      // Clear the result from store after showing
-      knowledgeCommitResult.set(null);
-    }
-  });
-
-  // Phase 7: Handle personal context updates (for "Updated" status indicator)
-  $effect(() => {
-    if ($contextUpdated) {
-      const { context_hash } = $contextUpdated;
-      if (context_hash) {
-        // Guard: Only update if hash actually changed (prevent infinite loop)
-        if (currentContextHash !== context_hash) {
-          currentContextHash = context_hash;
-          console.log(`[Context Updated] New hash: ${context_hash.slice(0, 8)}...`);
-        }
-      }
-    }
-  });
-
-  // Phase 7: Handle peer context updates (for "Updated" status indicators)
-  $effect(() => {
-    if ($peerContextUpdated) {
-      const { node_id, context_hash } = $peerContextUpdated;
-      if (node_id && context_hash) {
-        // Guard: Only update if hash actually changed (prevent infinite loop)
-        const currentHash = peerContextHashes.get(node_id);
-        if (currentHash !== context_hash) {
-          peerContextHashes = new Map(peerContextHashes);
-          peerContextHashes.set(node_id, context_hash);
-          console.log(`[Peer Context Updated] ${node_id.slice(0, 15)}... - hash: ${context_hash.slice(0, 8)}...`);
-        }
-      }
-    }
-  });
 
 
   // Voice transcription effects moved to VoicePanel.svelte (Step 6)
@@ -1642,6 +1275,56 @@
   {chatHistories}
   onSetActiveChatId={(id) => { activeChatId = id; }}
   onCloseNewGroupDialog={() => { showNewGroupDialog = false; }}
+/>
+
+<!-- PersistencePanel: debounced localStorage persistence for aiChats + chatHistories -->
+<PersistencePanel {aiChats} {chatHistories} />
+
+<!-- KnowledgeEventsPanel: commit/token/extraction/context hash events -->
+<KnowledgeEventsPanel
+  onOpenCommitDialog={() => { showCommitDialog = true; }}
+  onUpdateTokenUsage={(convId, usage) => {
+    tokenUsageMap = new Map(tokenUsageMap);
+    tokenUsageMap.set(convId, usage);
+  }}
+  onShowTokenWarning={(message) => {
+    showTokenWarning = true;
+    tokenWarningMessage = message;
+  }}
+  onShowExtractionFailure={(message) => {
+    showExtractionFailure = true;
+    extractionFailureMessage = message;
+  }}
+  onShowCommitResult={(message, type, result) => {
+    commitResultMessage = message;
+    commitResultType = type;
+    currentVoteResult = result;
+    showCommitResultToast = true;
+  }}
+  onCloseCommitDialog={() => {
+    showCommitDialog = false;
+    knowledgeCommitProposal.set(null);
+  }}
+  onUpdateContextHash={(hash) => { currentContextHash = hash; }}
+  onUpdatePeerContextHash={(nodeId, hash) => {
+    peerContextHashes = new Map(peerContextHashes);
+    peerContextHashes.set(nodeId, hash);
+  }}
+/>
+
+<!-- SessionEventsPanel: session proposal/result/reset effects -->
+<SessionEventsPanel
+  {chatHistories}
+  {getPeerDisplayName}
+  onOpenNewSessionDialog={() => { showNewSessionDialog = true; }}
+  onClearStateForConversation={(convId) => {
+    tokenUsageMap = new Map(tokenUsageMap);
+    tokenUsageMap.delete(convId);
+    lastSentContextHash = new Map(lastSentContextHash);
+    lastSentContextHash.delete(convId);
+    lastSentPeerHashes = new Map(lastSentPeerHashes);
+    lastSentPeerHashes.delete(convId);
+  }}
 />
 
 <!-- AgentManagementPanel: agent select/delete/Telegram-link handlers (Step 8) -->
