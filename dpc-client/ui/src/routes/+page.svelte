@@ -33,6 +33,7 @@
   import HistorySyncPanel from "$lib/panels/HistorySyncPanel.svelte";
   import AddAIChatPanel from "$lib/panels/AddAIChatPanel.svelte";
   import AgentManagementPanel from "$lib/panels/AgentManagementPanel.svelte";
+  import GroupManagementPanel from "$lib/panels/GroupManagementPanel.svelte";
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
 
@@ -101,12 +102,14 @@
   ]));
   
   let activeChatId = $state('local_ai');
+  const activeMessages = $derived($chatHistories.get(activeChatId) ?? []);
   let chatLoadingStates = $state(new Map<string, boolean>());  // Per-chat loading state
   let chatWindow = $state<HTMLElement>();  // Bound to ChatPanel's chatWindowElement
   let chatPanelRef = $state<any>(null);      // Ref to ChatPanel for mention input delegation
   let groupPanelRef = $state<any>(null);     // Ref to GroupPanel for mention autocomplete
   let addAIChatPanelRef = $state<any>(null);         // Ref to AddAIChatPanel for open/openForAgent/handleDelete
-  let agentManagementPanelRef = $state<any>(null);  // Ref to AgentManagementPanel for agent handlers
+  let agentManagementPanelRef = $state<any>(null);   // Ref to AgentManagementPanel for agent handlers
+  let groupManagementPanelRef = $state<any>(null);   // Ref to GroupManagementPanel for group handlers
 
   // Helper to check if a specific chat is loading
   function isChatLoading(chatId: string): boolean {
@@ -1235,99 +1238,12 @@
     newSessionProposal.set(null);
   }
 
-  // Group chat handlers (v0.19.0)
-  async function handleCreateGroup(event: CustomEvent) {
-    const { name, topic, member_node_ids } = event.detail;
-    try {
-      const result = await createGroupChat(name, topic, member_node_ids);
-      if (result && result.status === "success" && result.group) {
-        const groupId = result.group.group_id;
+  // handleCreateGroup, handleLeaveGroup, handleDeleteGroup moved to GroupManagementPanel.svelte
+  async function handleCreateGroup(event: CustomEvent) { groupManagementPanelRef?.handleCreateGroup(event); }
+  async function handleLeaveGroup(groupId: string) { groupManagementPanelRef?.handleLeaveGroup(groupId, activeChatId); }
+  async function handleDeleteGroup(groupId: string) { groupManagementPanelRef?.handleDeleteGroup(groupId, activeChatId, ask); }
 
-        // Update groupChats store so group appears in sidebar
-        groupChats.update(map => {
-          const newMap = new Map(map);
-          newMap.set(groupId, result.group);
-          return newMap;
-        });
-
-        // Ensure chatHistories entry exists
-        chatHistories.update(h => {
-          if (!h.has(groupId)) {
-            const newMap = new Map(h);
-            newMap.set(groupId, []);
-            return newMap;
-          }
-          return h;
-        });
-        // Switch to the new group chat
-        activeChatId = groupId;
-      }
-      showNewGroupDialog = false;
-    } catch (e) {
-      console.error("Failed to create group:", e);
-    }
-  }
-
-  async function handleLeaveGroup(groupId: string) {
-    try {
-      await leaveGroup(groupId);
-      if (activeChatId === groupId) {
-        activeChatId = 'local_ai';
-      }
-      // Remove from groupChats store so it disappears from sidebar
-      groupChats.update(map => {
-        const newMap = new Map(map);
-        newMap.delete(groupId);
-        return newMap;
-      });
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        newMap.delete(groupId);
-        return newMap;
-      });
-    } catch (e) {
-      console.error("Failed to leave group:", e);
-    }
-  }
-
-  async function handleDeleteGroup(groupId: string) {
-    // Show confirmation dialog before deletion
-    let shouldDelete = false;
-    if (ask) {
-      shouldDelete = await ask(
-        "Delete this group chat? This will permanently remove all messages and data for all members.",
-        { title: "Confirm Group Deletion", kind: "warning" }
-      );
-    } else {
-      shouldDelete = confirm("Delete this group chat? This will permanently remove all messages and data for all members.");
-    }
-
-    if (!shouldDelete) {
-      return;
-    }
-
-    try {
-      await deleteGroup(groupId);
-      if (activeChatId === groupId) {
-        activeChatId = 'local_ai';
-      }
-      // Remove from groupChats store so it disappears from sidebar
-      groupChats.update(map => {
-        const newMap = new Map(map);
-        newMap.delete(groupId);
-        return newMap;
-      });
-      chatHistories.update(h => {
-        const newMap = new Map(h);
-        newMap.delete(groupId);
-        return newMap;
-      });
-    } catch (e) {
-      console.error("Failed to delete group:", e);
-    }
-  }
-
-  // Model download dialog handlers (v0.13.5)
+    // Model download dialog handlers (v0.13.5)
   // handleModelDownload + handleModelDownloadCancel moved to ModelDownloadPanel.svelte (Step 8)
 
   function handleEndSession(conversationId: string) {
@@ -1528,36 +1444,11 @@
 
   // Group invite/deletion/memberLeft effects moved to GroupPanel.svelte (Step 7)
 
-  // Group settings: add/remove member (v0.19.0)
-  async function handleGroupAddMember(event: CustomEvent<{ group_id: string; node_id: string }>) {
-    const { group_id, node_id } = event.detail;
-    try {
-      await addGroupMember(group_id, node_id);
-    } catch (e) {
-      console.error("Failed to add group member:", e);
-    }
-  }
+  // handleGroupAddMember, handleGroupRemoveMember moved to GroupManagementPanel.svelte
+  async function handleGroupAddMember(event: CustomEvent<{ group_id: string; node_id: string }>) { groupManagementPanelRef?.handleGroupAddMember(event); }
+  async function handleGroupRemoveMember(event: CustomEvent<{ group_id: string; node_id: string }>) { groupManagementPanelRef?.handleGroupRemoveMember(event); }
 
-  async function handleGroupRemoveMember(event: CustomEvent<{ group_id: string; node_id: string }>) {
-    const { group_id, node_id } = event.detail;
-    try {
-      await removeGroupMember(group_id, node_id);
-    } catch (e) {
-      console.error("Failed to remove group member:", e);
-    }
-  }
-
-  let activeMessages = $derived($chatHistories.get(activeChatId) || []);
-
-  // Auto-scroll when activeMessages change (for all chat types)
-  $effect(() => {
-    // Track activeMessages length to detect new messages
-    activeMessages.length;
-    // Scroll to bottom when messages are added for the active chat
-    autoScroll();
-  });
 </script>
-
 <main class="container">
   <div class="grid">
     <!-- Sidebar -->
@@ -2054,6 +1945,14 @@
     showAgentToast = true;
     setTimeout(() => { showAgentToast = false; }, 3000);
   }}
+/>
+
+<!-- GroupManagementPanel: group create/leave/delete/member handlers (Step 8) -->
+<GroupManagementPanel
+  bind:this={groupManagementPanelRef}
+  {chatHistories}
+  onSetActiveChatId={(id) => { activeChatId = id; }}
+  onCloseNewGroupDialog={() => { showNewGroupDialog = false; }}
 />
 
 <!-- AgentManagementPanel: agent select/delete/Telegram-link handlers (Step 8) -->
