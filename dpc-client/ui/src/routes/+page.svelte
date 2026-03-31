@@ -216,13 +216,6 @@
   // Map: AI chat ID -> backend agent_id (for agent chats)
   let agentChatToAgentId = $state<Map<string, string>>(new Map());
 
-  // Returns true if the given backend conversation_id matches the active chat.
-  // Handles the case where activeChatId is ai_chat_XXX but the backend uses agent_XXX.
-  function isActiveChatConv(conversation_id: string): boolean {
-    return activeChatId === conversation_id ||
-           agentChatToAgentId.get(activeChatId) === conversation_id;
-  }
-
   // Instruction Sets state
   type InstructionSets = {
     schema_version: string;
@@ -937,12 +930,6 @@
   // Reactive statement to compute peer counts
   let peersByStrategy = $derived(getPeersByStrategy($nodeStatus?.peer_info));
 
-  function isNearBottom(element: HTMLElement | undefined, threshold: number = 150): boolean {
-    if (!element) return true;
-    const { scrollTop, scrollHeight, clientHeight } = element;
-    return scrollHeight - scrollTop - clientHeight < threshold;
-  }
-  
   function autoScroll() {
     setTimeout(() => {
       if (chatWindow) {
