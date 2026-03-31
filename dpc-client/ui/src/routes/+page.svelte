@@ -518,7 +518,23 @@
       }
     }, 100);
   }
-  
+
+  // Scroll to bottom when switching chats (double-rAF ensures DOM is updated)
+  $effect(() => {
+    void activeChatId;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+    }));
+  });
+
+  // Show connection error toast when backend becomes unreachable after exhausting reconnects
+  $effect(() => {
+    if ($connectionStatus === 'error') {
+      connectionError = "Backend unreachable — check that the service is running";
+      showConnectionError = true;
+    }
+  });
+
   // Reactive derived value that maps peer IDs to display names
   // This ensures Svelte tracks changes to peer_info properly
   let peerDisplayNames = $derived.by(() => {
@@ -540,8 +556,9 @@
     }
     console.log('[PeerNames] Building display names map from peer_info:', $nodeStatus.peer_info);
     for (const peer of $nodeStatus.peer_info) {
-      if (peer.name) {
-        const displayName = `${peer.name} | ${peer.node_id}`;
+      const peerName = peer.name || peer.display_name;
+      if (peerName) {
+        const displayName = `${peerName} | ${peer.node_id}`;
         console.log(`[PeerNames] ${peer.node_id} -> ${displayName}`);
         names.set(peer.node_id, displayName);
       } else {

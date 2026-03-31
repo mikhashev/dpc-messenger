@@ -974,6 +974,19 @@ export function connectToCoreService() {
         socket.addEventListener('close', (event) => {
             clearLogSender();
             console.log("WebSocket closed:", event.code, event.reason);
+            nodeStatus.set(null);
+            socket = null;
+
+            // Reconnect unless manually disconnected (disconnectFromCoreService sets reconnectAttempts = MAX)
+            if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                connectionStatus.set('disconnected');
+                reconnectAttempts++;
+                const delay = Math.min(RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1), 30000);
+                console.log(`Reconnecting in ${delay}ms... (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+                reconnectTimeout = setTimeout(() => connectToCoreService(), delay);
+            } else {
+                connectionStatus.set('error');
+            }
         });
 
     } catch (error) {
