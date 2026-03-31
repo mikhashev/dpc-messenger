@@ -48,7 +48,7 @@
   let mentionAutocompleteVisible = $state(false);
   let mentionQuery = $state('');
   let mentionStartPosition = $state(0);
-  let mentionDropdownPosition = $state({ top: 0, left: 0 });
+  let mentionDropdownPosition = $state({ bottom: 0, left: 0 });
   let mentionSelectedIndex = $state(0);
 
   // ---------------------------------------------------------------------------
@@ -165,7 +165,10 @@
         mentionStartPosition = lastAtIndex;
         mentionSelectedIndex = 0;
         const rect = textarea.getBoundingClientRect();
-        mentionDropdownPosition = { top: rect.bottom + 4, left: rect.left + lastAtIndex * 8 };
+        // Anchor above the textarea — chat input is at the bottom of the screen,
+        // so "top: rect.bottom" would push the dropdown off-screen below.
+        // Use CSS bottom offset to pin the dropdown's bottom edge above the textarea top.
+        mentionDropdownPosition = { bottom: window.innerHeight - rect.top + 4, left: rect.left };
         mentionAutocompleteVisible = true;
         return;
       }
