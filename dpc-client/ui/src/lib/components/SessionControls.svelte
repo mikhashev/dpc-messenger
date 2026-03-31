@@ -14,6 +14,7 @@
     showEstimation = false,
     historyTokens = 0,
     contextEstimated = 0,
+    messageCount = 0,
     enableMarkdown = $bindable(true),
     onNewSession,
     onEndSession
@@ -28,6 +29,7 @@
     showEstimation?: boolean;
     historyTokens?: number;
     contextEstimated?: number;
+    messageCount?: number;
     enableMarkdown?: boolean;
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
@@ -100,6 +102,11 @@
       <div class="token-row token-row--muted" title="System prompt + contexts + tool schemas">
         <span class="token-label">Static</span>
         <span class="token-value">≈{staticMemory.toLocaleString()}</span>
+        <span class="token-percentage"></span>
+      </div>
+      <div class="token-row token-row--muted" title="Number of messages in current conversation">
+        <span class="token-label">Messages</span>
+        <span class="token-value">{messageCount}</span>
         <span class="token-percentage"></span>
       </div>
     {:else}

@@ -908,6 +908,7 @@
             showEstimation={estimatedUsage.isEstimated}
             historyTokens={effectiveTokenUsage.historyTokens ?? 0}
             contextEstimated={effectiveTokenUsage.contextEstimated ?? 0}
+            messageCount={$chatHistories.get(activeChatId)?.length ?? 0}
             bind:enableMarkdown
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
