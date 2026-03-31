@@ -32,6 +32,7 @@
   import MessageRouterPanel from "$lib/panels/MessageRouterPanel.svelte";
   import HistorySyncPanel from "$lib/panels/HistorySyncPanel.svelte";
   import AddAIChatPanel from "$lib/panels/AddAIChatPanel.svelte";
+  import AgentManagementPanel from "$lib/panels/AgentManagementPanel.svelte";
   import { showNotificationIfBackground, requestNotificationPermission } from '$lib/notificationService';
   import { estimateConversationUsage } from '$lib/tokenEstimator';
 
@@ -104,7 +105,8 @@
   let chatWindow = $state<HTMLElement>();  // Bound to ChatPanel's chatWindowElement
   let chatPanelRef = $state<any>(null);      // Ref to ChatPanel for mention input delegation
   let groupPanelRef = $state<any>(null);     // Ref to GroupPanel for mention autocomplete
-  let addAIChatPanelRef = $state<any>(null); // Ref to AddAIChatPanel for open/openForAgent/handleDelete
+  let addAIChatPanelRef = $state<any>(null);         // Ref to AddAIChatPanel for open/openForAgent/handleDelete
+  let agentManagementPanelRef = $state<any>(null);  // Ref to AgentManagementPanel for agent handlers
 
   // Helper to check if a specific chat is loading
   function isChatLoading(chatId: string): boolean {
@@ -1375,246 +1377,22 @@
     if (deleted && activeChatId === deleted) activeChatId = 'local_ai';
   }
 
-  // Agent handlers (Phase 4)
+  // handleSelectAgent, handleDeleteAgent, handleLinkAgentTelegram, handleUnlinkAgentTelegram
+  // moved to AgentManagementPanel.svelte — delegate via agentManagementPanelRef
   function handleSelectAgent(agentId: string) {
-    console.log('Selected agent:', agentId);
-
-    // Find the agent in the agents list
-    const agent = $agentsList.find(a => a.agent_id === agentId);
-    if (!agent) {
-      console.error('Agent not found:', agentId);
-      return;
-    }
-
-    // Check if there's already a chat associated with this agent
-    // by looking through agentChatToAgentId map
-    let existingChatId: string | null = null;
-    for (const [chatId, mappedAgentId] of agentChatToAgentId) {
-      if (mappedAgentId === agentId) {
-        existingChatId = chatId;
-        break;
-      }
-    }
-
-    if (existingChatId && $aiChats.has(existingChatId)) {
-      // Switch to existing chat for this agent
-      activeChatId = existingChatId;
-      resetUnreadCount(existingChatId);
-      console.log('Switched to existing agent chat:', existingChatId);
-      return;
-    }
-
-    // Also check if there's a chat with the agent ID as key (legacy format)
-    if ($aiChats.has(agentId)) {
-      activeChatId = agentId;
-      resetUnreadCount(agentId);
-      console.log('Switched to existing agent chat (legacy):', agentId);
-      return;
-    }
-
-    // Create a new chat for this agent using agentId directly as chatId
-    aiChats.update(chats => {
-      const newMap = new Map(chats);
-      newMap.set(agentId, {
-        name: agent.name,
-        provider: 'dpc_agent',
-        profile_name: agent.profile_name,
-        llm_provider: agent.provider_alias,
-        ...(agent.compute_host ? { compute_host: agent.compute_host } : {}),
-      });
-      return newMap;
-    });
-
-    // Restore compute host for this agent
-    selectedComputeHost = agent.compute_host || "local";
-
-    // Set the chat provider
-    chatProviders.update(map => {
-      const newMap = new Map(map);
-      newMap.set(agentId, 'dpc_agent');
-      return newMap;
-    });
-
-    // Store the mapping
-    agentChatToAgentId.set(agentId, agentId);
-
-    // Switch to the new chat
-    activeChatId = agentId;
-    console.log('Created new agent chat:', agentId);
+    agentManagementPanelRef?.handleSelectAgent(agentId, agentChatToAgentId, activeChatId);
   }
-
   async function handleDeleteAgent(agentId: string) {
-    console.log('Delete agent:', agentId);
-
-    let shouldDelete = false;
-    if (ask) {
-      shouldDelete = await ask(
-        "Delete this agent? This will permanently remove the agent's memory, knowledge, and all associated data.",
-        { title: "Confirm Agent Deletion", kind: "warning" }
-      );
-    } else {
-      shouldDelete = confirm("Delete this agent? This will permanently remove the agent's memory, knowledge, and all associated data.");
-    }
-
-    if (!shouldDelete) {
-      return;
-    }
-
-    try {
-      // Delete from backend
-      const result = await deleteAgent(agentId);
-      if (result.status === 'error') {
-        console.error('Failed to delete agent:', result.message);
-        agentToastMessage = `Failed to delete agent: ${result.message}`;
-        agentToastType = 'error';
-        showAgentToast = true;
-        setTimeout(() => { showAgentToast = false; }, 5000);
-        return;
-      }
-
-      // Remove agent chat if exists
-      const chatId = `agent_${agentId}`;
-      if ($aiChats.has(chatId)) {
-        aiChats.update(chats => {
-          const newMap = new Map(chats);
-          newMap.delete(chatId);
-          return newMap;
-        });
-
-        chatProviders.update(map => {
-          const newMap = new Map(map);
-          newMap.delete(chatId);
-          return newMap;
-        });
-
-        chatHistories.update(h => {
-          const newMap = new Map(h);
-          newMap.delete(chatId);
-          return newMap;
-        });
-
-        if (activeChatId === chatId) {
-          activeChatId = 'local_ai';
-        }
-      }
-
-      // Show success toast
-      agentToastMessage = 'Agent deleted successfully';
-      agentToastType = 'info';
-      showAgentToast = true;
-      setTimeout(() => { showAgentToast = false; }, 3000);
-
-      console.log('Agent deleted successfully');
-    } catch (error) {
-      console.error('Error deleting agent:', error);
-      agentToastMessage = `Error deleting agent: ${error}`;
-      agentToastType = 'error';
-      showAgentToast = true;
-      setTimeout(() => { showAgentToast = false; }, 5000);
-    }
+    agentManagementPanelRef?.handleDeleteAgent(agentId, ask, activeChatId);
   }
-
-  async function handleLinkAgentTelegram(agentId: string, config: {
-    bot_token: string;
-    chat_ids: string[];
-    event_filter?: string[];
-    max_events_per_minute?: number;
-    cooldown_seconds?: number;
-    transcription_enabled?: boolean;
-    unified_conversation?: boolean;
-  }) {
-    console.log('Link agent to Telegram:', agentId, 'config:', { ...config, bot_token: '***' });
-
-    try {
-      const result = await sendCommand('link_agent_telegram', {
-        agent_id: agentId,
-        bot_token: config.bot_token,
-        chat_ids: config.chat_ids,
-        event_filter: config.event_filter,
-        max_events_per_minute: config.max_events_per_minute || 20,
-        cooldown_seconds: config.cooldown_seconds || 3.0,
-        transcription_enabled: config.transcription_enabled !== false,
-        unified_conversation: config.unified_conversation === true,
-      });
-
-      if (result.status === 'error') {
-        console.error('Failed to link agent to Telegram:', result.message);
-        agentToastMessage = `Failed to link agent: ${result.message}`;
-        agentToastType = 'error';
-        showAgentToast = true;
-        setTimeout(() => { showAgentToast = false; }, 5000);
-        throw new Error(result.message);
-      }
-
-      // Show success toast
-      agentToastMessage = 'Agent Telegram configuration updated successfully';
-      agentToastType = 'info';
-      showAgentToast = true;
-      setTimeout(() => { showAgentToast = false; }, 3000);
-
-      // Refresh agent list to update Telegram status
-      try {
-        const agentsResult = await listAgents();
-        if (agentsResult?.status === 'success' && agentsResult.agents) {
-          agentsList.set(agentsResult.agents);
-        }
-      } catch (error) {
-        console.error('Failed to refresh agents list:', error);
-      }
-
-      console.log('Agent Telegram configuration updated successfully');
-    } catch (error) {
-      console.error('Error linking agent to Telegram:', error);
-      agentToastMessage = `Error linking agent: ${error}`;
-      agentToastType = 'error';
-      showAgentToast = true;
-      setTimeout(() => { showAgentToast = false; }, 5000);
-      throw error;
-    }
+  async function handleLinkAgentTelegram(agentId: string, config: any) {
+    return agentManagementPanelRef?.handleLinkAgentTelegram(agentId, config);
   }
-
   async function handleUnlinkAgentTelegram(agentId: string) {
-    console.log('Unlink agent from Telegram:', agentId);
-
-    try {
-      const result = await sendCommand('unlink_agent_telegram', { agent_id: agentId });
-
-      if (result.status === 'error') {
-        console.error('Failed to unlink agent from Telegram:', result.message);
-        agentToastMessage = `Failed to unlink agent: ${result.message}`;
-        agentToastType = 'error';
-        showAgentToast = true;
-        setTimeout(() => { showAgentToast = false; }, 5000);
-        return;
-      }
-
-      // Show success toast
-      agentToastMessage = 'Agent unlinked from Telegram successfully';
-      agentToastType = 'info';
-      showAgentToast = true;
-      setTimeout(() => { showAgentToast = false; }, 3000);
-
-      // Refresh agent list to update Telegram status
-      try {
-        const agentsResult = await listAgents();
-        if (agentsResult?.status === 'success' && agentsResult.agents) {
-          agentsList.set(agentsResult.agents);
-        }
-      } catch (error) {
-        console.error('Failed to refresh agents list:', error);
-      }
-
-      console.log('Agent unlinked from Telegram successfully');
-    } catch (error) {
-      console.error('Error unlinking agent from Telegram:', error);
-      agentToastMessage = `Error unlinking agent: ${error}`;
-      agentToastType = 'error';
-      showAgentToast = true;
-      setTimeout(() => { showAgentToast = false; }, 5000);
-    }
+    agentManagementPanelRef?.handleUnlinkAgentTelegram(agentId);
   }
 
-  // File transfer and voice handler functions moved to ChatPanel.svelte (Step 4)
+    // File transfer and voice handler functions moved to ChatPanel.svelte (Step 4)
   // saveAutoTranscribeSetting + loadAutoTranscribeSetting moved to VoicePanel.svelte (Step 6)
   // --- HANDLE INCOMING MESSAGES ---
   $effect(() => {
@@ -2275,6 +2053,23 @@
     agentToastType = type;
     showAgentToast = true;
     setTimeout(() => { showAgentToast = false; }, 3000);
+  }}
+/>
+
+<!-- AgentManagementPanel: agent select/delete/Telegram-link handlers (Step 8) -->
+<AgentManagementPanel
+  bind:this={agentManagementPanelRef}
+  {aiChats}
+  {chatHistories}
+  {chatProviders}
+  onSetActiveChatId={(id) => { activeChatId = id; }}
+  onSetSelectedComputeHost={(host) => { selectedComputeHost = host; }}
+  onSetAgentChatToAgentId={(chatId, agentId) => { agentChatToAgentId.set(chatId, agentId); agentChatToAgentId = new Map(agentChatToAgentId); }}
+  onAgentToast={(message, type) => {
+    agentToastMessage = message;
+    agentToastType = type;
+    showAgentToast = true;
+    setTimeout(() => { showAgentToast = false; }, type === 'error' ? 5000 : 3000);
   }}
 />
 
