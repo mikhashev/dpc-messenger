@@ -145,6 +145,7 @@ class KnowledgeCommit:
     # Commit identification
     commit_id: str = field(default_factory=lambda: f"commit-{uuid.uuid4().hex[:8]}")
     parent_commit_id: Optional[str] = None
+    proposal_id: Optional[str] = None  # Source proposal (for store-and-poll via get_proposal_result)
 
     # Commit message (git-style)
     summary: str = ""  # One-line summary

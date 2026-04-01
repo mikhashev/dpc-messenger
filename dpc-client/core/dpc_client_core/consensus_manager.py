@@ -360,7 +360,8 @@ class ConsensusManager:
                 extraction_host=proposal.extraction_host,  # Track which compute host was used
                 # Use the proposer's HEAD anchored in the proposal so all nodes compute
                 # the same commit_hash (parent_commit_id is part of the hash input).
-                parent_commit_id=proposal.parent_commit_id
+                parent_commit_id=proposal.parent_commit_id,
+                proposal_id=proposal.proposal_id,
             )
 
             # Apply commit to local context; only fire success callbacks if write succeeded
