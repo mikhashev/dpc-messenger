@@ -479,14 +479,6 @@ class GroupDeletedStatusHandler(MessageHandler):
             sender_node_id[:20], len(deleted_groups)
         )
 
-        # Send our deleted groups back
-        our_deleted = self.service.group_manager.get_deleted_group_ids()
-        if our_deleted:
-            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-                "command": "GROUP_DELETED_STATUS",
-                "payload": {"deleted_groups": our_deleted}
-            })
-
         # Check if we have any of the deleted groups
         removed_count = 0
         for group_id in deleted_groups:
