@@ -402,6 +402,13 @@ class KnowledgeService:
                 conversation_history=conversation_history,
             )
 
+            if ai_decision is None:
+                logger.warning(
+                    "AI agent %s could not evaluate proposal %s — abstaining (no vote cast)",
+                    ai_agent_node_id, proposal_id,
+                )
+                return
+
             logger.info(
                 "AI agent %s voting on proposal %s: %s - %s",
                 ai_agent_node_id,
@@ -433,7 +440,7 @@ class KnowledgeService:
         proposal,
         provider_alias: Optional[str] = None,
         conversation_history: Optional[list] = None,
-    ) -> Dict[str, Any]:
+    ) -> Optional[Dict[str, Any]]:
         """Evaluate a knowledge proposal and return an AI vote decision."""
         try:
             entries_text = ""
@@ -527,17 +534,15 @@ Respond in JSON format:
             return {"vote": vote, "comment": comment[:500]}
 
         except json.JSONDecodeError as e:
-            logger.warning("AI vote evaluation returned invalid JSON: %s", e)
-            return {
-                "vote": "approve",
-                "comment": "AI evaluation completed (defaulting to approve due to parsing issue)",
-            }
+            logger.warning(
+                "AI vote evaluation returned invalid JSON, agent will abstain: %s", e
+            )
+            return None
         except Exception as e:
-            logger.error("Error in AI vote evaluation: %s", e, exc_info=True)
-            return {
-                "vote": "approve",
-                "comment": "AI evaluation encountered an error, defaulting to user's judgment",
-            }
+            logger.error(
+                "Error in AI vote evaluation, agent will abstain: %s", e, exc_info=True
+            )
+            return None
 
     # ─────────────────────────────────────────────────────────────
     # End conversation session + knowledge proposal flow
