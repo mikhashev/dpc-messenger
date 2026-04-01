@@ -1593,7 +1593,7 @@ class ContextFirewall:
                                 # Messaging tools (v0.18.0+)
                                 'send_user_message',
                                 # Knowledge extraction tools (v0.18.0+)
-                                'extract_knowledge', 'deduplicate_identity',
+                                'extract_knowledge', 'deduplicate_identity', 'get_proposal_result',
                                 # Task type management tools (v0.18.0+)
                                 'register_task_type', 'list_task_types', 'unregister_task_type',
                                 # Memento-Skills tools (v0.20.0+)

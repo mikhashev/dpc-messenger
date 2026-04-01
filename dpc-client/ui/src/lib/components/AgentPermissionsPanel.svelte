@@ -65,6 +65,7 @@
         { key: 'knowledge_list', label: 'List Knowledge', desc: 'List knowledge topics' },
         { key: 'get_task_board', label: 'Progress Board', desc: 'Read task history and learning progress from the shared Agent Progress Board' },
         { key: 'extract_knowledge', label: 'Extract Knowledge', desc: 'Extract knowledge from conversation' },
+        { key: 'get_proposal_result', label: 'Get Proposal Result', desc: 'Poll for knowledge commit result after voting (required for Knowledge→Git linking)' },
         { key: 'execute_skill', label: 'Execute Skill', desc: 'Load and follow skill strategies (Memento-Skills router — Read phase)' },
         { key: 'list_local_agents', label: 'List Local Agents', desc: 'List all agents registered on this device (read-only)' },
         { key: 'list_agent_skills', label: 'List Agent Skills', desc: 'Browse shareable skills of another local agent (read-only)' },
