@@ -106,3 +106,6 @@ ideas/
 
 # 15. Audit folder (codebase analysis - local only)
 audit/
+
+# 16. Sprint logs (internal team workflow - not for public repo)
+sprint-logs/
