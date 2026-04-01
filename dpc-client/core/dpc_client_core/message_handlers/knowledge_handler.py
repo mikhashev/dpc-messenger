@@ -7,6 +7,11 @@ from . import MessageHandler
 class ContextUpdatedHandler(MessageHandler):
     """Handles CONTEXT_UPDATED messages (peer notifying of context changes)."""
 
+    def __init__(self, service):
+        super().__init__(service)
+        # Deduplicate UI broadcasts: only emit peer_context_updated when hash actually changes
+        self._last_broadcast_hash: Dict[str, str] = {}
+
     @property
     def command_name(self) -> str:
         return "CONTEXT_UPDATED"
@@ -38,11 +43,20 @@ class ContextUpdatedHandler(MessageHandler):
                 monitor.conversation_id
             )
 
-        # Broadcast event to UI so "Updated" badge appears
-        await self.service.local_api.broadcast_event("peer_context_updated", {
-            "node_id": sender_node_id,
-            "context_hash": context_hash
-        })
+        # Broadcast event to UI so "Updated" badge appears, but deduplicate:
+        # if we already broadcast this exact hash for this peer, skip to avoid flooding
+        # (can happen with leaked connections, reconnects, or relay fanout)
+        if context_hash != self._last_broadcast_hash.get(sender_node_id):
+            self._last_broadcast_hash[sender_node_id] = context_hash
+            await self.service.local_api.broadcast_event("peer_context_updated", {
+                "node_id": sender_node_id,
+                "context_hash": context_hash
+            })
+        else:
+            self.logger.debug(
+                "Skipping duplicate peer_context_updated broadcast for %s (same hash)",
+                sender_node_id[:20]
+            )
 
         return None
 
