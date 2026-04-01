@@ -208,13 +208,18 @@ class DpcAgentProvider(AIProvider):
             RuntimeError: If agent processing fails
         """
         try:
-            # NEW: Extract agent_id from conversation_id for per-agent manager selection
+            # Extract agent_id from conversation_id for per-agent manager selection
             agent_id = None
             if conversation_id and conversation_id.startswith("agent_"):
                 agent_id = conversation_id
                 logger.debug(f"DpcAgentProvider '{self.alias}': Extracted agent_id '{agent_id}' from conversation_id")
 
-            # NEW: Pass agent_id to _ensure_manager for per-agent manager selection
+            if not agent_id:
+                raise ValueError(
+                    "DpcAgentProvider requires a conversation_id starting with 'agent_' "
+                    "(e.g. 'agent_001'). Got: conversation_id=%r" % conversation_id
+                )
+
             manager = await self._ensure_manager(agent_id=agent_id)
 
             # Use provided conversation_id or generate one

@@ -59,10 +59,9 @@ class DpcAgentManager:
         # Get firewall reference from CoreService
         self.firewall = getattr(service, "firewall", None)
 
-        # Storage paths — use "singleton" as directory name when no agent_id provided
-        effective_agent_id = agent_id or "singleton"
-        self.agent_root = get_agent_root(effective_agent_id)
-        ensure_agent_dirs(effective_agent_id)
+        # Storage paths
+        self.agent_root = get_agent_root(agent_id)
+        ensure_agent_dirs(agent_id)
 
         # Agent instances (Phase 3: per-provider agents)
         # Key: provider_alias, Value: DpcAgent instance

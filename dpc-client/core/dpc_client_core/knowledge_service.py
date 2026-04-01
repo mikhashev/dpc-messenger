@@ -510,6 +510,7 @@ Respond in JSON format:
                 prompt=prompt,
                 provider_alias=provider_alias,
                 max_tokens=500,
+                conversation_id=proposal.conversation_id,
             )
 
             response_text = response
