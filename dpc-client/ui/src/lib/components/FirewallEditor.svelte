@@ -49,6 +49,10 @@
         interval_minutes: number;
         auto_apply: boolean;
       };
+      history?: {
+        preserve_on_reset: boolean;
+        max_archived_sessions: number;
+      };
     };
     agent_profiles?: Record<string, {
       _comment?: string;
@@ -67,6 +71,10 @@
         enabled: boolean;
         interval_minutes: number;
         auto_apply: boolean;
+      };
+      history?: {
+        preserve_on_reset: boolean;
+        max_archived_sessions: number;
       };
     }>;
     file_transfer?: {
@@ -96,6 +104,31 @@
   let agents: Array<{ agent_id: string; name: string; provider_alias?: string; profile_name?: string }> = [];
   let selectedAgentId: string = 'default';
   let newProfileName: string = '';
+
+  // Archive info for selected agent (loaded reactively)
+  let archiveInfo: { count: number; max_sessions: number; archive_path: string; sessions: any[] } | null = null;
+
+  $: if (selectedAgentId && selectedAgentId !== 'default' && open) {
+    loadArchiveInfo(selectedAgentId);
+  } else {
+    archiveInfo = null;
+  }
+
+  async function loadArchiveInfo(conversationId: string) {
+    try {
+      const result = await sendCommand('get_session_archive_info', { conversation_id: conversationId });
+      if (result.status === 'success') {
+        archiveInfo = {
+          count: result.count ?? 0,
+          max_sessions: result.max_sessions ?? 10,
+          archive_path: result.archive_path ?? '',
+          sessions: result.sessions ?? [],
+        };
+      }
+    } catch (e) {
+      console.error('Failed to load archive info:', e);
+    }
+  }
 
   let rules: FirewallRules | null = null;
   let selectedTab: 'hub' | 'groups' | 'file-groups' | 'ai-scopes' | 'device-sharing' | 'compute' | 'file-transfer' | 'image-transfer' | 'notifications' | 'dpc-agent' | 'agent-profiles' | 'peers' = 'hub';
@@ -2049,6 +2082,8 @@
               agentName={selectedAgentId === 'default' ? '' : (agents.find(a => a.agent_id === selectedAgentId)?.name || selectedAgentId)}
               hasCustomProfile={selectedAgentId !== 'default' && !agentUsesInheritedSettings}
               onResetToGlobal={selectedAgentId !== 'default' && !agentUsesInheritedSettings ? resetAgentToGlobal : undefined}
+              archiveInfo={selectedAgentId !== 'default' ? archiveInfo : null}
+              conversationId={selectedAgentId !== 'default' ? selectedAgentId : ''}
             />
           </div>
         {:else if selectedTab === 'peers'}

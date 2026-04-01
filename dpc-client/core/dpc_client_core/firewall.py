@@ -207,6 +207,11 @@ class ContextFirewall:
         self.evolution_interval_minutes = evolution.get('interval_minutes', 60)
         self.evolution_auto_apply = evolution.get('auto_apply', False)
 
+        # Parse history settings (v0.22.0+)
+        history = dpc_agent.get('history', {})
+        self.history_preserve_on_reset = history.get('preserve_on_reset', True)
+        self.history_max_archived_sessions = max(1, min(50, int(history.get('max_archived_sessions', 10))))
+
         logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s",
                      self.dpc_agent_enabled,
                      self.dpc_agent_personal_context_access,

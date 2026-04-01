@@ -3,6 +3,8 @@
    * AgentPermissionsPanel - Unified panel for editing agent permissions
    * Works for both global settings (dpc_agent) and individual agent profiles
    */
+  import { sendCommand } from '$lib/coreService';
+  import { openPath } from '@tauri-apps/plugin-opener';
 
   export let displaySettings: any = null;  // Settings for display mode
   export let editSettings: any = null;     // Settings for edit mode (bindable)
@@ -11,6 +13,9 @@
   export let agentName: string = '';       // Name of the selected agent (for info text)
   export let hasCustomProfile: boolean = false;  // True if agent has its own profile
   export let onResetToGlobal: (() => void) | undefined = undefined;  // Reset button callback
+  // Archive status passed from FirewallEditor after get_session_archive_info
+  export let archiveInfo: { count: number; max_sessions: number; archive_path: string; sessions: any[] } | null = null;
+  export let conversationId: string = '';  // agent_id used as conversation_id for archive commands
 
   // Tool definitions by category
   const toolCategories = [
@@ -196,6 +201,61 @@
       };
     }
   }
+
+  // Auto-initialize history settings when entering edit mode
+  $: if (editMode && editSettings && !editSettings.history) {
+    ensureHistorySettings();
+  }
+
+  // Initialize history object if missing
+  function ensureHistorySettings() {
+    if (!editSettings) return;
+    if (!editSettings.history) {
+      editSettings.history = {
+        preserve_on_reset: true,
+        max_archived_sessions: 10,
+      };
+    }
+  }
+
+  // Archive action state
+  let clearingArchives = false;
+  let clearArchiveMessage = '';
+
+  async function handleClearArchives() {
+    if (!conversationId) return;
+    clearingArchives = true;
+    clearArchiveMessage = '';
+    try {
+      const result = await sendCommand('clear_session_archives', { conversation_id: conversationId, keep_latest: 0 });
+      if (result.status === 'success') {
+        clearArchiveMessage = `Deleted ${result.deleted_count} archive(s).`;
+        // Update local archiveInfo count
+        if (archiveInfo) archiveInfo = { ...archiveInfo, count: result.remaining ?? 0, sessions: [] };
+      } else {
+        clearArchiveMessage = `Error: ${result.message}`;
+      }
+    } catch (e) {
+      clearArchiveMessage = `Error: ${e}`;
+    } finally {
+      clearingArchives = false;
+    }
+  }
+
+  async function handleViewArchive() {
+    if (!archiveInfo?.archive_path) return;
+    try {
+      await openPath(archiveInfo.archive_path);
+    } catch (e) {
+      console.error('Failed to open archive folder:', e);
+    }
+  }
+
+  // Derived: near-limit warning threshold
+  $: archiveNearLimit = archiveInfo ? archiveInfo.count >= Math.floor(archiveInfo.max_sessions * 0.8) : false;
+  $: archivePercent = archiveInfo && archiveInfo.max_sessions > 0
+    ? Math.round((archiveInfo.count / archiveInfo.max_sessions) * 100)
+    : 0;
 </script>
 
 {#if displaySettings}
@@ -408,6 +468,97 @@
               Self-modify allows appending "Lessons Learned" sections after tasks with ≥5 LLM rounds.
               Peer skills require explicit opt-in and are sandboxed to the agent's storage.
             </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if !isGlobal}
+        <!-- Session History Section (per-agent) -->
+        <div class="subsection">
+          <h4>Session History</h4>
+          <p class="help-text-small">Control whether sessions are preserved when a conversation is reset.</p>
+
+          <div class="setting-item">
+            <label>
+              {#if editMode && editSettings}
+                <input
+                  type="checkbox"
+                  id="agent-history-preserve"
+                  bind:checked={editSettings.history.preserve_on_reset}
+                />
+              {:else}
+                <input
+                  type="checkbox"
+                  checked={displaySettings.history?.preserve_on_reset ?? true}
+                  disabled
+                />
+              {/if}
+              <span>Preserve session history on reset</span>
+            </label>
+            <p class="help-text-small">Archive the conversation before clearing it so you can review old sessions.</p>
+          </div>
+
+          {#if (editMode ? editSettings?.history?.preserve_on_reset : (displaySettings.history?.preserve_on_reset ?? true))}
+            <div class="setting-item" style="margin-top: 0.75rem;">
+              <span><strong>Max archived sessions:</strong></span>
+              {#if editMode && editSettings?.history}
+                <input
+                  type="number"
+                  id="agent-history-max"
+                  min="1"
+                  max="50"
+                  bind:value={editSettings.history.max_archived_sessions}
+                  style="width: 70px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
+                />
+              {:else}
+                <span class="value">{displaySettings.history?.max_archived_sessions ?? 10}</span>
+              {/if}
+              <span class="help-text-small" style="margin-left: 0.5rem;">Oldest archives are pruned automatically (1–50)</span>
+            </div>
+
+            {#if archiveInfo && !editMode}
+              <!-- Archive status display -->
+              <div class="archive-status" style="margin-top: 1rem;">
+                <div class="archive-count-row">
+                  <span>Archived sessions:</span>
+                  <strong style="color: {archiveNearLimit ? 'var(--warning, #f59e0b)' : 'var(--text-primary)'}">
+                    {archiveInfo.count}/{archiveInfo.max_sessions}
+                    {#if archiveNearLimit} &nbsp;⚠ approaching limit{/if}
+                  </strong>
+                </div>
+
+                <!-- Progress bar -->
+                <div class="archive-progress-track" title="{archivePercent}% of limit used">
+                  <div
+                    class="archive-progress-fill"
+                    style="width: {Math.min(archivePercent, 100)}%; background: {archiveNearLimit ? 'var(--warning, #f59e0b)' : 'var(--primary, #2196F3)'};"
+                  ></div>
+                </div>
+
+                {#if clearArchiveMessage}
+                  <p class="help-text-small" style="margin-top: 0.25rem; color: var(--text-secondary);">{clearArchiveMessage}</p>
+                {/if}
+
+                <!-- Action buttons -->
+                <div class="archive-actions">
+                  <button
+                    type="button"
+                    class="btn-archive-action"
+                    on:click={handleViewArchive}
+                    title="Open archive folder in file manager"
+                  >View archive</button>
+                  <button
+                    type="button"
+                    class="btn-archive-action btn-archive-danger"
+                    on:click={handleClearArchives}
+                    disabled={clearingArchives || archiveInfo.count === 0}
+                    title="Delete all archived sessions"
+                  >{clearingArchives ? 'Clearing…' : 'Clear all archives'}</button>
+                </div>
+              </div>
+            {:else if !editMode}
+              <p class="help-text-small" style="font-style: italic; margin-top: 0.5rem;">No archive data — select an individual agent to view stats.</p>
+            {/if}
           {/if}
         </div>
       {/if}
@@ -813,5 +964,64 @@
     border-radius: 4px;
     background: var(--bg-secondary);
     color: var(--text-primary);
+  }
+
+  /* Session History archive status */
+  .archive-status {
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    padding: 0.75rem 1rem;
+  }
+
+  .archive-count-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 0.5rem;
+    font-size: 0.9rem;
+  }
+
+  .archive-progress-track {
+    height: 6px;
+    background: var(--bg-tertiary, #e5e7eb);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 0.75rem;
+  }
+
+  .archive-progress-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.3s ease;
+  }
+
+  .archive-actions {
+    display: flex;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+  }
+
+  .btn-archive-action {
+    padding: 0.3rem 0.8rem;
+    font-size: 0.82rem;
+    background: var(--primary, #2196F3);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+
+  .btn-archive-action:hover:not(:disabled) {
+    opacity: 0.85;
+  }
+
+  .btn-archive-action:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .btn-archive-danger {
+    background: var(--danger, #ef4444);
   }
 </style>

@@ -1771,12 +1771,48 @@ def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool
             f"**Topic:** {proposal.topic}\n"
             f"**Summary:** {proposal.summary[:200]}...\n"
             f"**Entries:** {len(proposal.entries)}\n"
-            f"**Saved to:** knowledge/{filename}"
+            f"**Saved to:** knowledge/{filename}\n"
+            f"**Proposal ID:** {proposal.proposal_id}\n\n"
+            f"Call `get_proposal_result(\"{proposal.proposal_id}\")` after voting completes to get the commit_id for git linking."
         )
 
     except Exception as e:
         log.error(f"Knowledge extraction error: {e}", exc_info=True)
         return f"⚠️ Knowledge extraction error: {e}"
+
+
+# ---------------------------------------------------------------------------
+# Knowledge Proposal Result (store-and-poll)
+# ---------------------------------------------------------------------------
+
+def get_proposal_result(ctx: ToolContext, proposal_id: str) -> str:
+    """
+    Poll for the result of a knowledge commit proposal.
+
+    Returns the commit_id once voting is complete (approved or rejected).
+    Call this after extract_knowledge to retrieve the commit_id for git linking.
+
+    Args:
+        ctx: Tool context
+        proposal_id: The proposal_id returned by extract_knowledge
+
+    Returns:
+        JSON string with status, commit_id (if approved), topic, and markdown_file.
+    """
+    service = getattr(ctx, 'dpc_service', None)
+    if not service:
+        return json.dumps({"status": "error", "message": "DPC service unavailable"})
+
+    knowledge_service = getattr(service, 'knowledge_service', None)
+    if not knowledge_service:
+        return json.dumps({"status": "error", "message": "Knowledge service unavailable"})
+
+    result = knowledge_service.pending_results.get(proposal_id)
+    if result is None:
+        return json.dumps({"status": "pending", "proposal_id": proposal_id,
+                           "message": "Voting in progress — call again after participants vote"})
+
+    return json.dumps(result)
 
 
 # ---------------------------------------------------------------------------
@@ -2134,7 +2170,27 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=15,
         ),
 
-        # Knowledge extraction from conversation
+        # Knowledge extraction and result polling
+        ToolEntry(
+            name="get_proposal_result",
+            schema={
+                "name": "get_proposal_result",
+                "description": "Poll for the result of a knowledge commit proposal. Call this after extract_knowledge to get the commit_id once voting completes. Returns status (pending/approved/rejected) and commit_id for git linking.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "proposal_id": {
+                            "type": "string",
+                            "description": "The proposal_id returned by extract_knowledge (format: proposal-XXXXXXXX)"
+                        }
+                    },
+                    "required": ["proposal_id"]
+                }
+            },
+            handler=get_proposal_result,
+            timeout_sec=10,
+        ),
+
         ToolEntry(
             name="extract_knowledge",
             schema={

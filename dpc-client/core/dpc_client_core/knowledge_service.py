@@ -97,6 +97,9 @@ class KnowledgeService:
         self._broadcast_to_group_func = broadcast_to_group
         self._compute_context_hash = compute_context_hash
 
+        # Results cache for agent store-and-poll (proposal_id → result dict)
+        self.pending_results: Dict[str, Dict] = {}
+
         # Register all consensus callbacks on the manager we own
         self.consensus_manager.on_commit_applied = self._on_commit_applied
         self.consensus_manager.on_commit_signed = self._on_commit_signed
@@ -722,6 +725,19 @@ Respond in JSON format:
     async def _on_commit_approved(self, commit) -> None:
         """Notify the UI that consensus was reached and the commit was approved."""
         try:
+            # Store result for agent store-and-poll (get_proposal_result tool)
+            safe_topic = "".join(
+                c if c.isalnum() or c in "_-" else "_"
+                for c in (commit.topic or "knowledge")
+            )[:50].strip() or "knowledge"
+            markdown_file = f"knowledge/{safe_topic}_{commit.commit_id}.md"
+            self.pending_results[commit.proposal_id] = {
+                "status": "approved",
+                "commit_id": commit.commit_id,
+                "topic": commit.topic,
+                "markdown_file": markdown_file,
+            }
+
             await self.local_api.broadcast_event("knowledge_commit_approved", {
                 "commit_id": commit.commit_id,
                 "topic": commit.topic,
@@ -743,6 +759,14 @@ Respond in JSON format:
     async def _on_commit_rejected(self, proposal, votes: Dict[str, Any]) -> None:
         """Notify the UI that the proposal was rejected, including rejection reasons."""
         try:
+            # Store result for agent store-and-poll
+            self.pending_results[proposal.proposal_id] = {
+                "status": "rejected",
+                "commit_id": None,
+                "topic": proposal.topic,
+                "markdown_file": None,
+            }
+
             rejection_comments = {
                 v.voter_node_id: v.comment
                 for v in votes.values()

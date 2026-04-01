@@ -1479,8 +1479,70 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         old_hash = self.peer_context_hashes.get(node_id, "")
         return new_hash != old_hash
 
-    def reset_conversation(self):
-        """Reset conversation history and context tracking (for "New Chat" button)"""
+    def _archive_current_session(self, reason: str = "reset", max_sessions: int = 10) -> int:
+        """Archive the current history.json to archive/ before clearing.
+
+        Writes to ~/.dpc/conversations/{conversation_id}/archive/{timestamp}_{reason}_session.json
+        Keeps the last max_sessions archives, pruning oldest when exceeded.
+
+        Args:
+            reason: Label for why the session was archived (e.g. "reset", "new_session")
+            max_sessions: Maximum number of archived sessions to retain
+
+        Returns:
+            Number of archives in the folder after archiving (0 if skipped or error).
+        """
+        if not self.message_history:
+            return 0
+
+        path = self._get_history_path()
+        if not path.exists():
+            return 0
+
+        try:
+            archive_dir = path.parent / "archive"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+
+            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+            archive_path = archive_dir / f"{ts}_{reason}_session.json"
+
+            # Read current file content and inject archive metadata
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            data["archived_at"] = datetime.now(timezone.utc).isoformat()
+            data["session_reason"] = reason
+
+            with open(archive_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            logger.info(f"Archived session to {archive_path}")
+
+            # Prune oldest archives beyond max_sessions
+            archives = sorted(archive_dir.glob("*_session.json"))
+            if len(archives) > max_sessions:
+                for old in archives[: len(archives) - max_sessions]:
+                    old.unlink()
+                    logger.debug(f"Pruned old archive: {old.name}")
+
+            return len(sorted(archive_dir.glob("*_session.json")))
+
+        except Exception as e:
+            logger.warning(f"Failed to archive session for {self.conversation_id}: {e}")
+            return 0
+
+    def reset_conversation(self, preserve: bool = True, max_sessions: int = 10) -> int:
+        """Reset conversation history and context tracking (for "New Chat" button).
+
+        Args:
+            preserve: If True, archive the current session before clearing.
+            max_sessions: Maximum archived sessions to keep (passed to _archive_current_session).
+
+        Returns:
+            Archive count after reset (0 if preserve=False or nothing was archived).
+        """
+        # Archive before wiping
+        archive_count = self._archive_current_session(reason="reset", max_sessions=max_sessions) if preserve else 0
+
         self.message_history = []
         self.message_ids = set()
         self._history_dirty = False
@@ -1501,6 +1563,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 logger.info(f"Deleted history file on reset: {path}")
             except Exception as e:
                 logger.error(f"Failed to delete history file {path}: {e}")
+
+        return archive_count
 
     def _remap_attachment_paths(self, attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Remap file paths in attachments from peer's filesystem to local filesystem.
@@ -2046,11 +2110,21 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         return added
 
-    def clear_history(self):
-        """Clear all message history and delete persisted file
+    def clear_history(self, preserve: bool = True, max_sessions: int = 10) -> int:
+        """Clear all message history and delete persisted file.
 
         Called when a new session is approved.
+
+        Args:
+            preserve: If True, archive the current session before clearing.
+            max_sessions: Maximum archived sessions to keep.
+
+        Returns:
+            Archive count after clearing (0 if preserve=False or nothing was archived).
         """
+        # Archive before wiping
+        archive_count = self._archive_current_session(reason="new_session", max_sessions=max_sessions) if preserve else 0
+
         self.message_history = []
         self.message_ids = set()
         self._history_dirty = False
@@ -2063,6 +2137,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 logger.info(f"Deleted history file: {path}")
             except Exception as e:
                 logger.error(f"Failed to delete history file {path}: {e}")
+
+        return archive_count
 
     def delete_conversation_folder(self) -> bool:
         """Delete the entire conversation folder including history, settings, and files.
