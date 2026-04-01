@@ -1689,7 +1689,7 @@ class ContextFirewall:
                                         'extended_path_read', 'extended_path_list', 'extended_path_write',
                                         'list_extended_sandbox_paths',
                                         'send_user_message',
-                                        'extract_knowledge', 'deduplicate_identity',
+                                        'extract_knowledge', 'deduplicate_identity', 'get_proposal_result',
                                         'register_task_type', 'list_task_types', 'unregister_task_type',
                                         # Memento-Skills tools (v0.20.0+)
                                         'execute_skill',
