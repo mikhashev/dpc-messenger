@@ -6840,6 +6840,9 @@ class CoreService:
             )
             monitor.save_history()
 
+            # Reset chain depth — each CC message starts a fresh chain allowance
+            self._cc_ark_chain_depth = 0
+
             # Broadcast to UI so message appears in chat (skip when caller
             # already delivers content via execute_ai_query response)
             if not _skip_broadcast:
@@ -6853,6 +6856,27 @@ class CoreService:
                 })
 
             logger.info("CC response injected into %s (%d chars)", conversation_id, len(text))
+
+            # If the triggering @CC message came from Telegram, also send CC response there
+            try:
+                if monitor.message_history and self.telegram_manager:
+                    # Check last few messages for Telegram source
+                    for msg in reversed(monitor.message_history[-5:]):
+                        if msg.get("sender_node_id") == "cc":
+                            continue  # Skip CC's own messages
+                        sender_name = msg.get("sender_name", "")
+                        if "(Telegram)" in sender_name:
+                            # Find linked Telegram chat_id from agent bridge
+                            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                            if dpc_agent_provider and conversation_id in getattr(dpc_agent_provider, '_managers', {}):
+                                bridge = getattr(dpc_agent_provider._managers[conversation_id], '_telegram_bridge', None)
+                                if bridge and bridge.allowed_chat_ids:
+                                    chat_id = bridge.allowed_chat_ids[0]
+                                    await self.telegram_manager.send_message(chat_id, f"CC: {text}")
+                                    logger.info("CC response also sent to Telegram chat %s", chat_id)
+                            break
+            except Exception as e:
+                logger.warning("Failed to send CC response to Telegram: %s", e)
 
             # If CC's response mentions @Ark, trigger Ark to respond (subject to chain depth)
             import re
