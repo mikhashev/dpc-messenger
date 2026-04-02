@@ -749,6 +749,35 @@ Send a voice message and it will be transcribed and processed\\.
             # so Telegram messages share history with the DPC chat UI.
             conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
 
+            # Pattern D: Check if message is @CC-only (no @Ark) — skip Ark processing,
+            # save to history and broadcast cc_agent_mention for real CC to pick up
+            import re
+            _tg_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', message_text or '', re.IGNORECASE)}
+            if "cc" in _tg_mentions and "ark" not in _tg_mentions:
+                log.info(f"@CC-only Telegram message in {conversation_id} — skipping Ark, broadcasting for CC")
+                # Save to history so CC can see it
+                if self._agent_manager:
+                    monitor = self._agent_manager._get_or_create_agent_monitor(conversation_id)
+                    from dpc_client_core.dpc_agent.utils import utc_now_iso
+                    monitor.add_message(
+                        role="user",
+                        content=message_text,
+                        timestamp=utc_now_iso(),
+                        sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
+                        sender_name=sender_name,
+                    )
+                    monitor.save_history()
+                    # Broadcast cc_agent_mention for CC's MCP bridge
+                    service = getattr(self._agent_manager, 'service', None)
+                    if service:
+                        await service._check_agent_cc_mention(
+                            conversation_id, message_text, "", self._agent_manager
+                        )
+                        # Push updated history to DPC UI
+                        if self._unified_conversation:
+                            await self._broadcast_history_to_ui(conversation_id)
+                return  # Skip Ark's process_message
+
             # Call the message handler (agent_manager.process_message)
             response = await self._message_handler(
                 message=message_text,
