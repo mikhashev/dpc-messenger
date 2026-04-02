@@ -30,7 +30,19 @@ from mcp.types import TextContent, Tool
 logging.basicConfig(level=logging.WARNING)
 log = logging.getLogger("dpc-agent-mcp")
 
-DPC_WS = "ws://localhost:9999"
+def _get_dpc_ws_url() -> str:
+    """Read WebSocket URL from config.ini, fallback to default."""
+    import configparser
+    from pathlib import Path
+    config = configparser.ConfigParser()
+    config_path = Path.home() / ".dpc" / "config.ini"
+    if config_path.exists():
+        config.read(config_path, encoding="utf-8")
+    host = config.get("api", "host", fallback="127.0.0.1")
+    port = config.get("api", "port", fallback="9999")
+    return f"ws://{host}:{port}"
+
+DPC_WS = _get_dpc_ws_url()
 
 # Thread-safe ring buffer: holds up to 50 unread @CC mentions
 _pending: deque = deque(maxlen=50)
@@ -269,7 +281,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             sender = m.get("sender_name", role)
             content = m.get("content", "")
             ts = m.get("timestamp", "")[:19]
+            thinking = m.get("thinking", "")
+            streaming_raw = m.get("streaming_raw", "")
             parts.append(f"[{ts}] {sender} ({role}): {content}")
+            if thinking:
+                parts.append(f"  [Thinking]: {thinking[:500]}")
+            if streaming_raw:
+                parts.append(f"  [Raw output]: {streaming_raw[:500]}")
         return [TextContent(type="text", text="\n".join(parts))]
 
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
