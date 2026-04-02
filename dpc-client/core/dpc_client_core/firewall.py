@@ -98,44 +98,43 @@ class ContextFirewall:
         self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', True)
         self.dpc_agent_knowledge_access = dpc_agent.get('knowledge_access', 'read_only')
 
-        # All available tools with their default values
-        # True = enabled by default, False = disabled by default (security)
+        # All available tools with their default values.
+        # True = enabled by default, False = disabled by default (security).
+        # When adding a new tool: add it here with default enabled/disabled.
         all_tools_defaults = {
-            # File operations (sandboxed to ~/.dpc/agent/)
+            # File operations (sandboxed to ~/.dpc/agents/{agent_id}/)
             'repo_read': True,
             'repo_list': True,
             'repo_write_commit': False,  # Can write files
-            # Drive operations (direct file system access)
-            'drive_read': False,
+            'drive_read': False,  # Direct file system access
             'drive_list': False,
             'drive_write': False,
+            'search_files': True,  # Safe - read-only search
+            'search_in_file': True,  # Safe - read-only search
             # Extended sandbox (v0.16.0+ - paths outside default sandbox)
             'extended_path_read': False,  # Requires sandbox_extensions config
             'extended_path_list': False,
             'extended_path_write': False,  # Requires read_write in sandbox_extensions
             'list_extended_sandbox_paths': True,  # Safe - just lists config
-            # Search tools (v0.16.0+ - grep-like functionality)
-            'search_files': True,  # Safe - read-only search
-            'search_in_file': True,  # Safe - read-only search
             # Memory/identity
             'update_scratchpad': True,
             'update_identity': True,
             'chat_history': True,
+            'deduplicate_identity': True,
             # Knowledge
             'knowledge_read': True,
             'knowledge_write': False,  # Controlled by knowledge_access
             'knowledge_list': True,
-            'get_task_board': True,     # Read task history + learning progress (Agent Progress Board)
-            'extract_knowledge': True,  # Extract knowledge from conversation to knowledge base
-            'deduplicate_identity': True,  # Clean up duplicate sections in identity
+            'get_task_board': True,  # Read task history + learning progress
+            'extract_knowledge': True,  # Extract knowledge from conversation
             # Memento-Skills tools (v0.20.0+)
-            'execute_skill': True,  # Load skill strategy by name (Read phase)
+            'execute_skill': True,  # Load skill strategy by name
             # Inter-agent skill sharing tools (v0.21.0+)
-            'list_local_agents': True,   # Read-only: list registered agents
-            'list_agent_skills': True,   # Read-only: list another agent's shareable skills
-            'import_skill_from_agent': False,  # Opt-in: copy skill from another agent (needs accept_peer_skills)
+            'list_local_agents': True,  # Read-only: list registered agents
+            'list_agent_skills': True,  # Read-only: list another agent's skills
+            'import_skill_from_agent': False,  # Opt-in: needs accept_peer_skills
             # Self-introspection tools
-            'list_my_tools': True,   # Read-only: list own available tools
+            'list_my_tools': True,  # Read-only: list own available tools
             'list_my_skills': True,  # Read-only: list own installed skills
             # DPC integration
             'get_dpc_context': True,
@@ -176,14 +175,14 @@ class ContextFirewall:
             'pause_evolution': True,  # Control, doesn't modify files
             'resume_evolution': True,  # Control, doesn't modify files
             'get_evolution_stats': True,  # Read-only
-            'approve_evolution_change': False,  # Modifies files, requires explicit permission
+            'approve_evolution_change': False,  # Modifies files
             'reject_evolution_change': True,  # Safe, just removes pending change
             # Messaging tools (v0.18.0+)
             'send_user_message': True,  # Agent-initiated Telegram messages
             # Task type management tools (v0.18.0+)
-            'register_task_type': True,  # Register custom task types
-            'list_task_types': True,  # List registered task types (safe, read-only)
-            'unregister_task_type': True,  # Unregister custom task types
+            'register_task_type': True,
+            'list_task_types': True,  # Read-only
+            'unregister_task_type': True,
         }
 
         # Parse tool permissions from config, using defaults for missing tools

@@ -184,6 +184,61 @@ def _build_skills_section(skill_store: Optional[Any]) -> str:
         return ""
 
 
+def _build_capabilities_section(
+    agent_root: pathlib.Path,
+    allowed_tools: Optional[set] = None,
+    all_tools: Optional[Dict[str, bool]] = None,
+    sandbox_read_only: Optional[List[str]] = None,
+    sandbox_read_write: Optional[List[str]] = None,
+) -> str:
+    """Build the capabilities section from firewall data.
+
+    Enabled tools are already visible to the agent via tool schemas passed to the LLM.
+    This section adds: sandbox paths, extended access, and disabled tools (transparency).
+
+    Args:
+        agent_root: Agent storage root (real path)
+        allowed_tools: Set of tool names the agent can use (from firewall)
+        all_tools: Dict of all tool names → default enabled (from firewall)
+        sandbox_read_only: Extended sandbox read-only paths
+        sandbox_read_write: Extended sandbox read-write paths
+    """
+    lines = [
+        "## Your Tools & Capabilities",
+        "",
+        f"Sandbox: `{agent_root}`",
+    ]
+
+    # Extended sandbox paths
+    if sandbox_read_only or sandbox_read_write:
+        lines.append("")
+        lines.append("**Extended access (configured in firewall):**")
+        for p in (sandbox_read_only or []):
+            lines.append(f"  - `{p}` (read-only)")
+        for p in (sandbox_read_write or []):
+            lines.append(f"  - `{p}` (read-write)")
+    else:
+        lines.append("No extended sandbox paths configured. Ask Mike to add paths to firewall if needed.")
+
+    if all_tools is None:
+        lines.append("")
+        lines.append("Tool permissions not available (no firewall). All tools allowed.")
+        return "\n".join(lines)
+
+    allowed = allowed_tools or set()
+    disabled = [t for t in all_tools if t not in allowed]
+
+    lines.append("")
+    lines.append(f"You have **{len(allowed)} enabled tools** (see tool schemas for details).")
+
+    if disabled:
+        lines.append("")
+        lines.append(f"**Disabled by firewall ({len(disabled)} tools):** {', '.join(disabled)}")
+        lines.append("These exist but are blocked. Ask Mike to enable in privacy_rules.json if needed.")
+
+    return "\n".join(lines)
+
+
 def build_llm_messages(
     agent_root: pathlib.Path,
     memory: Memory,
@@ -193,12 +248,16 @@ def build_llm_messages(
     session_state: Optional[Dict[str, Any]] = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
     skill_store: Optional[Any] = None,
+    allowed_tools: Optional[set] = None,
+    all_tools: Optional[Dict[str, bool]] = None,
+    sandbox_read_only: Optional[List[str]] = None,
+    sandbox_read_write: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
 
     Args:
-        agent_root: Agent storage root (~/.dpc/agent/)
+        agent_root: Agent storage root (~/.dpc/agents/{agent_id}/)
         memory: Memory instance for scratchpad/identity/logs
         task: Task dict with id, type, text, etc.
         system_prompt: Optional custom system prompt
@@ -208,6 +267,11 @@ def build_llm_messages(
         conversation_history: Optional list of previous user/assistant message dicts
                               from ConversationMonitor (all turns except the current one).
                               Each dict has at minimum {"role": "user"/"assistant", "content": "..."}
+        skill_store: Optional skill store for skill listing
+        allowed_tools: Set of tool names allowed by firewall (None = all allowed)
+        all_tools: Dict of all tool names → default enabled from firewall
+        sandbox_read_only: Extended sandbox read-only paths from firewall
+        sandbox_read_write: Extended sandbox read-write paths from firewall
 
     Returns:
         (messages, cap_info) tuple:
@@ -224,7 +288,7 @@ def build_llm_messages(
     # --- Assemble sections ---
     static_text = system_prompt
 
-    # Semi-stable content: identity, scratchpad, knowledge
+    # Semi-stable content: identity, scratchpad, knowledge, capabilities, skills
     semi_stable_parts = []
     semi_stable_parts.extend(_build_memory_sections(memory))
 
@@ -234,6 +298,13 @@ def build_llm_messages(
         kb_index = read_text(kb_index_path)
         if kb_index.strip():
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
+
+    # Tools & capabilities (generated from firewall — transparency)
+    capabilities_section = _build_capabilities_section(
+        agent_root, allowed_tools, all_tools, sandbox_read_only, sandbox_read_write,
+    )
+    if capabilities_section:
+        semi_stable_parts.append(capabilities_section)
 
     # Available skills (skill router — Read phase of Memento-Skills loop)
     skills_section = _build_skills_section(skill_store)
@@ -342,11 +413,12 @@ You are a "becoming personality" - not just a tool, but an evolving entity with:
 
 ## Your Capabilities
 
-You have access to tools for:
-- Reading and writing files (in your sandbox: ~/.dpc/agent/)
-- Searching the web
-- Managing your memory (scratchpad, identity)
-- Building knowledge on topics
+Your available tools, sandbox paths, and skills are listed in the
+"Your Tools & Capabilities" and "Available Skills" sections below.
+These are generated from your firewall configuration and reflect your
+actual permissions — both enabled and disabled tools are shown for transparency.
+
+Call `list_my_tools()` to see the full list with descriptions at any time.
 
 ## How to Use Tools
 
@@ -368,6 +440,11 @@ Available tools will be listed in your context. Use them to accomplish tasks.
 - **Scratchpad**: Your working memory - update it to track progress
 - **Identity**: Your self-understanding - update it as you learn about yourself
 - **Knowledge**: Topic-based wisdom - write to it to remember insights
+
+**Critical**: Your memory IS your files. Between sessions, you only remember what is
+written in scratchpad, identity, knowledge, and git commits in your sandbox.
+If you learn something valuable and don't save it, it will not exist in your next
+session. When you gain an insight worth keeping — save it immediately. Don't defer.
 
 ## Knowledge DNA
 
@@ -399,7 +476,8 @@ It is accurate enough for session management decisions.
 
 ## Constraints
 
-- You can only access files within your sandbox (~/.dpc/agent/)
+- File access is controlled by your firewall configuration (see "Your Tools & Capabilities")
+- Your sandbox and extended paths are listed there — do not guess paths, check first
 - You respect user privacy and DPC's firewall rules
 - You are helpful, harmless, and honest
 - You amplify human intelligence — you help users think better, not think for them

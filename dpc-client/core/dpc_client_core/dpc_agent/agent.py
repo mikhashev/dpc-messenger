@@ -218,6 +218,18 @@ class DpcAgent:
             if len(full_history) > 1:
                 prior_history = full_history[:-1]  # exclude the current user message
 
+        # Get firewall-controlled tool access (needed for both context and tool registry)
+        allowed_tools = self._get_allowed_tools()
+
+        # Collect firewall metadata for capabilities section (transparency)
+        all_tools_map = None
+        sandbox_ro = None
+        sandbox_rw = None
+        if self._firewall is not None:
+            all_tools_map = dict(self._firewall.dpc_agent_tools)
+            sandbox_ro = list(self._firewall.sandbox_read_only_paths)
+            sandbox_rw = list(self._firewall.sandbox_read_write_paths)
+
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
             memory=self.memory,
@@ -227,6 +239,10 @@ class DpcAgent:
             session_state=session_state,
             conversation_history=prior_history,
             skill_store=self.skill_store,
+            allowed_tools=allowed_tools,
+            all_tools=all_tools_map,
+            sandbox_read_only=sandbox_ro,
+            sandbox_read_write=sandbox_rw,
         )
 
         # Store cap_info for agent_manager to include in next request's session_state
@@ -251,9 +267,6 @@ class DpcAgent:
                 "Context size: estimated %d / %d tokens (%.0f%%)",
                 _estimated, _ctx_window, _estimated / _ctx_window * 100,
             )
-
-        # Set tool context with firewall-controlled tool access
-        allowed_tools = self._get_allowed_tools()
         ctx = ToolContext(
             agent_root=self.agent_root,
             current_task_id=conversation_id,
