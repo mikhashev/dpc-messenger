@@ -247,7 +247,10 @@
         const newText = message.status === 'OK'
           ? message.payload.content
           : `Error: ${message.payload?.message || 'Unknown error'}`;
-        const newSender = message.status === 'OK' ? 'ai' : 'system';
+        // CC auto-responses use provider="cc" — render as 'cc' sender (not 'ai')
+        const newSender = message.status === 'OK'
+          ? (message.payload.provider === 'cc' ? 'cc' : 'ai')
+          : 'system';
         const modelName = message.status === 'OK' ? message.payload.model : undefined;
         // v1.4+: Extract thinking fields for reasoning models
         const thinkingContent = message.status === 'OK' ? message.payload.thinking : undefined;
@@ -289,8 +292,10 @@
             const found = hist.some((m: any) => m.commandId === responseCommandId);
             console.log(`[execute_ai_query] Found matching message: ${found}`);
 
-            // For agent chats, use the agent's display name as senderName
-            const agentSenderName = chatId?.startsWith('agent_') ? ($aiChats.get(chatId)?.name || undefined) : undefined;
+            // For CC auto-responses, use 'CC'; for agent chats, use the agent's display name
+            const agentSenderName = newSender === 'cc'
+              ? 'CC'
+              : (chatId?.startsWith('agent_') ? ($aiChats.get(chatId)?.name || undefined) : undefined);
 
             newMap.set(chatId, hist.map((m: any) =>
               m.commandId === responseCommandId ? {

@@ -6765,13 +6765,15 @@ class CoreService:
             response = await default_provider.generate_response(full_prompt)
 
             if response:
-                # Inject CC response into agent chat
+                # Inject CC response into agent chat (skip broadcast since
+                # execute_ai_query response below already delivers to UI)
                 await self.send_cc_agent_response(
                     conversation_id=conversation_id,
                     text=response,
+                    _skip_broadcast=True,
                 )
 
-                # Also send execute_ai_query response to complete the command
+                # Send execute_ai_query response to complete the command
                 session_state = agent_manager.get_session_state(conversation_id)
                 tokens_used = session_state.get("history_tokens", session_state.get("tokens_used", 0))
                 token_limit = session_state.get("tokens_limit", 128000)
@@ -6851,7 +6853,7 @@ class CoreService:
             "recent_history": recent_messages,
         })
 
-    async def send_cc_agent_response(self, conversation_id: str, text: str, **kwargs) -> dict:
+    async def send_cc_agent_response(self, conversation_id: str, text: str, _skip_broadcast: bool = False, **kwargs) -> dict:
         """Inject CC's response into an agent conversation.
 
         Called by CC (Claude Code) after reading agent chat history and
@@ -6861,6 +6863,8 @@ class CoreService:
         Args:
             conversation_id: Agent conversation ID (e.g. 'agent_001')
             text: CC's response text
+            _skip_broadcast: If True, skip agent_chat_message broadcast
+                (used when caller already delivers content via execute_ai_query response)
         """
         try:
             from dpc_client_core.dpc_agent.utils import utc_now_iso
@@ -6881,6 +6885,13 @@ class CoreService:
             timestamp = utc_now_iso()
             message_id = str(uuid.uuid4())
 
+            # Guard against duplicate CC messages (e.g. concurrent paths)
+            if monitor.message_history:
+                last = monitor.message_history[-1]
+                if last.get("sender_node_id") == "cc" and last.get("content") == text:
+                    logger.warning("Skipping duplicate CC message in %s", conversation_id)
+                    return {"status": "success", "message_id": message_id, "deduplicated": True}
+
             # Add CC's response to conversation history
             monitor.add_message(
                 role="user",
@@ -6891,15 +6902,17 @@ class CoreService:
             )
             monitor.save_history()
 
-            # Broadcast to UI so message appears in chat
-            await self.local_api.broadcast_event("agent_chat_message", {
-                "conversation_id": conversation_id,
-                "message_id": message_id,
-                "role": "user",
-                "content": text,
-                "sender_name": "CC",
-                "timestamp": timestamp,
-            })
+            # Broadcast to UI so message appears in chat (skip when caller
+            # already delivers content via execute_ai_query response)
+            if not _skip_broadcast:
+                await self.local_api.broadcast_event("agent_chat_message", {
+                    "conversation_id": conversation_id,
+                    "message_id": message_id,
+                    "role": "user",
+                    "content": text,
+                    "sender_name": "CC",
+                    "timestamp": timestamp,
+                })
 
             logger.info("CC response injected into %s (%d chars)", conversation_id, len(text))
 

@@ -140,12 +140,15 @@
 
                 const msgs = histResult.messages.map((msg: any, index: number) => {
                   const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (histResult.messages.length - index) * 1000;
-                  const stableId = `${conv_id}-${msg.timestamp ? ts : index}`;
+                  // Prefer backend UUID (msg.id) for uniqueness; fall back to timestamp-based ID
+                  const stableId = msg.id || `${conv_id}-${msg.timestamp ? ts : index}`;
                   const local = localById.get(stableId);
+                  // CC messages are stored as role="user" with sender_node_id="cc"
+                  const isCC = msg.sender_node_id === 'cc';
                   return {
                     id: stableId,
-                    sender: msg.role === 'user' ? 'user' : conv_id,
-                    senderName: msg.role === 'user' ? (msg.sender_name || 'You') : (agent.name || conv_id),
+                    sender: isCC ? 'cc' : (msg.role === 'user' ? 'user' : conv_id),
+                    senderName: isCC ? 'CC' : (msg.role === 'user' ? (msg.sender_name || 'You') : (agent.name || conv_id)),
                     text: msg.content,
                     timestamp: ts,
                     attachments: msg.attachments || [],
