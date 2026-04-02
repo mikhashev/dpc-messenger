@@ -6872,8 +6872,13 @@ class CoreService:
                                 bridge = getattr(dpc_agent_provider._managers[conversation_id], '_telegram_bridge', None)
                                 if bridge and bridge.allowed_chat_ids:
                                     chat_id = bridge.allowed_chat_ids[0]
-                                    await self.telegram_manager.send_message(chat_id, f"CC: {text}")
-                                    logger.info("CC response also sent to Telegram chat %s", chat_id)
+                                    # Use the agent's own bot (dpc_agent_bot), not telegram_manager's bot
+                                    bot = getattr(bridge, '_bot', None)
+                                    if bot:
+                                        await bot.send_message(chat_id=chat_id, text=f"CC: {text}")
+                                    else:
+                                        await self.telegram_manager.send_message(chat_id, f"CC: {text}")
+                                    logger.info("CC response also sent to Telegram chat %s via agent bot", chat_id)
                             break
             except Exception as e:
                 logger.warning("Failed to send CC response to Telegram: %s", e)
