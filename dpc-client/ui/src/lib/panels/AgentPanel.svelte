@@ -5,7 +5,7 @@
 <!-- Manages: $agentProgress, $agentProgressClear, $agentTextChunk, $agentHistoryUpdated effects -->
 
 <script lang="ts">
-  import type { Writable } from 'svelte/store';
+  import { type Writable, get } from 'svelte/store';
   import { untrack } from 'svelte';
   import {
     agentProgress,
@@ -216,8 +216,14 @@
         agentProgressMessage = null;
         agentProgressTool = null;
         agentProgressRound = 0;
-        // NOTE: Do NOT clear streamingBuffer here — it needs to survive until the
-        // final response handler captures it as capturedStreamingText via flushAndCapture().
+        // For chain-triggered responses (CC→@Ark), there's no execute_ai_query
+        // response to capture streaming text, so clear it here to prevent
+        // the streaming indicator from staying stuck.
+        const hist = get(chatHistories).get(conversation_id) || [];
+        const hasPendingCommand = hist.some((m: any) => m.commandId);
+        if (!hasPendingCommand) {
+          clearAgentStreaming();
+        }
       }
     }
   });
@@ -326,7 +332,7 @@
   // or Ark chain-triggered responses via _invoke_ark_in_agent_chat)
   $effect(() => {
     if ($agentChatMessage) {
-      const { conversation_id, content, sender_name, timestamp, role } = $agentChatMessage;
+      const { conversation_id, content, sender_name, timestamp, role, thinking, streaming_raw } = $agentChatMessage;
 
       untrack(() => {
         chatHistories.update(map => {
@@ -342,6 +348,8 @@
             text: content,
             timestamp: timestamp ? new Date(timestamp).getTime() : Date.now(),
             attachments: [],
+            thinking: thinking || undefined,
+            streamingRaw: streaming_raw || undefined,
           };
           newMap.set(conversation_id, [...existing, newMsg]);
           return newMap;

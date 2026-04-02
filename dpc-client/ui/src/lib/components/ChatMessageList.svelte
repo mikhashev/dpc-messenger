@@ -227,7 +227,7 @@
   {#if agentStreamingText}
     <div class="message ai-streaming">
       <div class="message-header">
-        <strong>AI Assistant</strong>
+        <strong>{conversationId?.startsWith('agent_') ? 'Agent' : 'AI Assistant'}</strong>
         <span class="streaming-indicator">✨ Generating...</span>
       </div>
       <!-- Always use plain text during streaming for performance - markdown renders on final message -->

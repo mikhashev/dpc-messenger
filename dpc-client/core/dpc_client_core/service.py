@@ -6897,6 +6897,19 @@ class CoreService:
                 logger.info("Ark responded to CC's @Ark mention in %s (%d chars)",
                             conversation_id, len(response))
 
+                # Extract thinking/streaming_raw from agent's last usage
+                thinking_text = None
+                streaming_raw = None
+                agent = agent_manager._get_or_create_agent_for_provider(conversation_id) if conversation_id else agent_manager.agent
+                if hasattr(agent, '_last_usage') and agent._last_usage:
+                    thinking_text = agent._last_usage.get("thinking")
+                # Get streaming_raw from the last message in monitor
+                monitor = agent_manager._agent_monitors.get(conversation_id)
+                if monitor and monitor.message_history:
+                    last_msg = monitor.message_history[-1]
+                    if last_msg.get("role") == "assistant":
+                        streaming_raw = last_msg.get("streaming_raw")
+
                 # Broadcast Ark's response to UI so it appears immediately
                 from dpc_client_core.dpc_agent.utils import utc_now_iso
                 import uuid
@@ -6908,6 +6921,13 @@ class CoreService:
                     "content": response,
                     "sender_name": agent_name,
                     "timestamp": utc_now_iso(),
+                    "thinking": thinking_text,
+                    "streaming_raw": streaming_raw,
+                })
+
+                # Clear the streaming/progress indicator in the UI
+                await self.local_api.broadcast_event("agent_progress_clear", {
+                    "conversation_id": conversation_id,
                 })
         except Exception as e:
             logger.error("Ark response to CC's @Ark mention failed: %s", e, exc_info=True)
