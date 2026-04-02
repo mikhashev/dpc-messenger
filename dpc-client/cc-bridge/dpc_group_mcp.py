@@ -6,32 +6,20 @@ Bridges DPC Messenger group chat <-> Claude Code session so CC can
 participate live in @mention-triggered group conversations.
 
 Architecture:
-  - Subscribes to ws://localhost:9999 (DPC local API)
-  - Queues incoming cc_group_mention events in a ring buffer
+  - Background thread connects to ws://localhost:9999 (DPC local API)
+  - Queues incoming cc_group_mention events in a thread-safe deque
   - Exposes two tools to Claude Code:
       dpc_read_group_messages()  — drain the queue and return pending @CC messages
       dpc_send_group_message()   — call send_group_agent_message on the DPC backend
-
-Usage:
-  python dpc_group_mcp.py
-
-Registration (add to ~/.claude/settings.json):
-  {
-    "mcpServers": {
-      "dpc-group-chat": {
-        "command": "python",
-        "args": ["C:/Users/mike/Documents/dpc-messenger/dpc-client/cc-bridge/dpc_group_mcp.py"]
-      }
-    }
-  }
 """
 
 import asyncio
 import json
 import logging
+import threading
+import time
 from collections import deque
 
-import websockets
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
@@ -41,40 +29,75 @@ log = logging.getLogger("dpc-group-mcp")
 
 DPC_WS = "ws://localhost:9999"
 
-# Ring buffer: holds up to 50 unread @CC mentions
+# Thread-safe ring buffer: holds up to 50 unread @CC mentions
 _pending: deque = deque(maxlen=50)
-
-# Live WebSocket connection (set by _ws_listener, used by dpc_send_group_message)
-_ws_conn = None
 
 app = Server("dpc-group-chat")
 
 
-async def _ws_listener() -> None:
-    """Background task: connect to DPC WebSocket and queue cc_group_mention events."""
-    global _ws_conn
-    while True:
-        try:
-            async with websockets.connect(DPC_WS) as ws:
-                _ws_conn = ws
-                log.warning("Connected to DPC WebSocket at %s", DPC_WS)
-                async for raw in ws:
-                    try:
-                        msg = json.loads(raw)
-                        # DPC local_api broadcasts events as {"event": "...", "payload": {...}}
-                        if msg.get("event") == "cc_group_mention":
-                            _pending.append(msg.get("payload", msg))
-                            log.warning(
-                                "Queued @CC mention from %s in group %s",
-                                msg.get("payload", {}).get("sender_name", "?"),
-                                msg.get("payload", {}).get("group_id", "?"),
-                            )
-                    except json.JSONDecodeError:
-                        pass
-        except Exception as e:
-            log.warning("WebSocket disconnected (%s), retrying in 3s...", e)
-            _ws_conn = None
-            await asyncio.sleep(3)
+def _ws_thread_fn() -> None:
+    """Background thread: run a separate event loop for WebSocket listener."""
+    import asyncio
+
+    async def _listen():
+        import websockets
+        while True:
+            try:
+                async with websockets.connect(DPC_WS) as ws:
+                    log.warning("Connected to DPC WebSocket at %s", DPC_WS)
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                            if msg.get("event") == "cc_group_mention":
+                                _pending.append(msg.get("payload", msg))
+                                log.warning(
+                                    "Queued @CC mention from %s in group %s",
+                                    msg.get("payload", {}).get("sender_name", "?"),
+                                    msg.get("payload", {}).get("group_id", "?"),
+                                )
+                        except json.JSONDecodeError:
+                            pass
+            except Exception as e:
+                log.warning("WebSocket disconnected (%s), retrying in 3s...", e)
+                await asyncio.sleep(3)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(_listen())
+
+
+def _send_ws_command(command: str, payload: dict, timeout: float = 10.0) -> dict:
+    """Send a command via a short-lived WebSocket connection (thread-safe)."""
+    import websockets
+
+    async def _do():
+        async with websockets.connect(DPC_WS) as ws:
+            cmd_id = f"cc-mcp-{int(time.time()*1000)}"
+            await ws.send(json.dumps({
+                "id": cmd_id,
+                "command": command,
+                "payload": payload,
+            }))
+            deadline = asyncio.get_event_loop().time() + timeout
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(
+                    ws.recv(),
+                    timeout=deadline - asyncio.get_event_loop().time(),
+                )
+                msg = json.loads(raw)
+                if msg.get("id") == cmd_id:
+                    return msg.get("payload", msg)
+                if msg.get("event") == "cc_group_mention":
+                    _pending.append(msg.get("payload", msg))
+            return {"status": "error", "message": "Timeout"}
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_do())
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+    finally:
+        loop.close()
 
 
 @app.list_tools()
@@ -132,31 +155,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not group_id or not text:
             return [TextContent(type="text", text="Error: group_id and text are required.")]
 
-        if _ws_conn is None:
-            return [TextContent(type="text", text="Error: Not connected to DPC WebSocket.")]
-
-        try:
-            await _ws_conn.send(json.dumps({
-                "id": "cc-response",
-                "command": "send_group_agent_message",
-                "payload": {
-                    "group_id": group_id,
-                    "agent_name": "CC",
-                    "text": text,
-                },
-            }))
-            return [TextContent(type="text", text="Sent.")]
-        except Exception as e:
-            return [TextContent(type="text", text=f"Error sending message: {e}")]
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _send_ws_command, "send_group_agent_message",
+            {"group_id": group_id, "agent_name": "CC", "text": text},
+        )
+        status = result.get("status", "?")
+        return [TextContent(type="text", text=f"Sent ({status}).")]
 
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 
 async def main() -> None:
-    # Start WebSocket listener as background task
-    asyncio.create_task(_ws_listener())
+    # Start WebSocket listener in a daemon thread (separate event loop)
+    t = threading.Thread(target=_ws_thread_fn, daemon=True)
+    t.start()
 
-    # Run MCP server over stdio (Claude Code connects via subprocess)
     async with stdio_server() as (read_stream, write_stream):
         await app.run(
             read_stream,
@@ -166,4 +179,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    import sys
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

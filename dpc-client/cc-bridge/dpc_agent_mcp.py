@@ -6,34 +6,23 @@ Bridges DPC Messenger agent chat <-> Claude Code session so the real CC
 can participate in @CC-triggered conversations with Ark and Mike.
 
 Architecture:
-  - Subscribes to ws://localhost:9999 (DPC local API)
-  - Queues incoming cc_agent_mention events in a ring buffer
+  - Background thread listens to ws://localhost:9999 for cc_agent_mention events
+  - Queues mentions in a thread-safe deque
+  - Tool calls use short-lived WebSocket connections (separate event loops)
   - Exposes tools to Claude Code:
       dpc_read_agent_mentions()    — drain pending @CC mentions from agent chat
       dpc_send_agent_response()    — inject CC's response into agent conversation
       dpc_read_agent_history()     — read recent conversation history for context
-
-Usage:
-  python dpc_agent_mcp.py
-
-Registration (add to ~/.claude/settings.json):
-  {
-    "mcpServers": {
-      "dpc-agent-chat": {
-        "command": "poetry",
-        "args": ["run", "python", "C:/Users/mike/Documents/dpc-messenger/dpc-client/cc-bridge/dpc_agent_mcp.py"],
-        "cwd": "C:/Users/mike/Documents/dpc-messenger/dpc-client/core"
-      }
-    }
-  }
 """
 
 import asyncio
 import json
 import logging
+import sys
+import threading
+import time
 from collections import deque
 
-import websockets
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import TextContent, Tool
@@ -43,70 +32,90 @@ log = logging.getLogger("dpc-agent-mcp")
 
 DPC_WS = "ws://localhost:9999"
 
-# Ring buffer: holds up to 50 unread @CC mentions from agent chat
+# Thread-safe ring buffer: holds up to 50 unread @CC mentions
 _pending: deque = deque(maxlen=50)
-
-# Live WebSocket connection (set by _ws_listener)
-_ws_conn = None
 
 app = Server("dpc-agent-chat")
 
 
-async def _ws_listener() -> None:
-    """Background task: connect to DPC WebSocket and queue cc_agent_mention events."""
-    global _ws_conn
-    while True:
-        try:
-            async with websockets.connect(DPC_WS) as ws:
-                _ws_conn = ws
-                log.warning("Connected to DPC WebSocket at %s", DPC_WS)
-                async for raw in ws:
-                    try:
-                        msg = json.loads(raw)
-                        if msg.get("event") == "cc_agent_mention":
-                            _pending.append(msg.get("payload", msg))
-                            log.warning(
-                                "Queued @CC mention from %s in %s",
-                                msg.get("payload", {}).get("trigger_sender", "?"),
-                                msg.get("payload", {}).get("conversation_id", "?"),
-                            )
-                    except json.JSONDecodeError:
-                        pass
-        except Exception as e:
-            log.warning("WebSocket disconnected (%s), retrying in 3s...", e)
-            _ws_conn = None
-            await asyncio.sleep(3)
+# ---------------------------------------------------------------------------
+# Background WebSocket listener (runs in a daemon thread with its own loop)
+# ---------------------------------------------------------------------------
 
+def _ws_thread_fn() -> None:
+    """Connect to DPC WebSocket and queue cc_agent_mention events forever."""
+    import websockets
 
-async def _ws_command(command: str, payload: dict, timeout: float = 10.0) -> dict:
-    """Send a command to DPC backend and wait for response."""
-    if _ws_conn is None:
-        return {"status": "error", "message": "Not connected to DPC WebSocket."}
+    async def _listen():
+        while True:
+            try:
+                async with websockets.connect(DPC_WS) as ws:
+                    log.warning("Connected to DPC WebSocket at %s", DPC_WS)
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                            if msg.get("event") == "cc_agent_mention":
+                                _pending.append(msg.get("payload", msg))
+                                log.warning(
+                                    "Queued @CC mention from %s in %s",
+                                    msg.get("payload", {}).get("trigger_sender", "?"),
+                                    msg.get("payload", {}).get("conversation_id", "?"),
+                                )
+                        except json.JSONDecodeError:
+                            pass
+            except Exception as e:
+                log.warning("WebSocket disconnected (%s), retrying in 3s...", e)
+                await asyncio.sleep(3)
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        cmd_id = f"cc-mcp-{id(payload)}"
-        await _ws_conn.send(json.dumps({
-            "id": cmd_id,
-            "command": command,
-            "payload": payload,
-        }))
-        # Read responses until we find ours (skip broadcast events)
-        deadline = asyncio.get_event_loop().time() + timeout
-        while asyncio.get_event_loop().time() < deadline:
-            raw = await asyncio.wait_for(
-                _ws_conn.recv(),
-                timeout=deadline - asyncio.get_event_loop().time(),
-            )
-            msg = json.loads(raw)
-            # Skip broadcast events, wait for our command response
-            if msg.get("id") == cmd_id:
-                return msg.get("payload", msg)
-            # Queue any cc_agent_mention events that arrive while waiting
-            if msg.get("event") == "cc_agent_mention":
-                _pending.append(msg.get("payload", msg))
-        return {"status": "error", "message": "Timeout waiting for response."}
+        loop.run_until_complete(_listen())
+    except Exception as e:
+        log.warning("WebSocket thread error: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Sync helpers for tool calls (each creates a short-lived connection)
+# ---------------------------------------------------------------------------
+
+def _ws_command_sync(command: str, payload: dict, timeout: float = 10.0) -> dict:
+    """Send a command via a short-lived WebSocket connection."""
+    import websockets
+
+    async def _do():
+        async with websockets.connect(DPC_WS) as ws:
+            cmd_id = f"cc-mcp-{int(time.time() * 1000)}"
+            await ws.send(json.dumps({
+                "id": cmd_id,
+                "command": command,
+                "payload": payload,
+            }))
+            deadline = asyncio.get_event_loop().time() + timeout
+            while asyncio.get_event_loop().time() < deadline:
+                raw = await asyncio.wait_for(
+                    ws.recv(),
+                    timeout=deadline - asyncio.get_event_loop().time(),
+                )
+                msg = json.loads(raw)
+                if msg.get("id") == cmd_id:
+                    return msg.get("payload", msg)
+                if msg.get("event") == "cc_agent_mention":
+                    _pending.append(msg.get("payload", msg))
+            return {"status": "error", "message": "Timeout"}
+
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(_do())
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    finally:
+        loop.close()
 
+
+# ---------------------------------------------------------------------------
+# MCP Tools
+# ---------------------------------------------------------------------------
 
 @app.list_tools()
 async def list_tools() -> list[Tool]:
@@ -116,7 +125,7 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Read pending @CC mentions from DPC agent chat. "
                 "Returns unread messages where someone mentioned @CC, then clears the queue. "
-                "Includes recent conversation history for context. "
+                "The background listener auto-queues mentions in real time. "
                 "Call this to check if Ark or Mike has mentioned @CC in agent chat."
             ),
             inputSchema={"type": "object", "properties": {}},
@@ -183,16 +192,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             sender = m.get("trigger_sender", "?")
             text = m.get("trigger_text", "")
             parts.append(f"[{sender} in {conv_id}]: {text}")
-
-            # Include recent history if provided
             history = m.get("recent_history", [])
             if history:
                 parts.append("  Recent history:")
                 for h in history[-10:]:
-                    name_ = h.get("sender_name", h.get("role", "?"))
-                    content = h.get("content", "")[:200]
-                    parts.append(f"    {name_}: {content}")
-
+                    n = h.get("sender_name", h.get("role", "?"))
+                    c = h.get("content", "")[:200]
+                    parts.append(f"    {n}: {c}")
         return [TextContent(type="text", text="\n".join(parts))]
 
     if name == "dpc_send_agent_response":
@@ -201,42 +207,21 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not conv_id or not text:
             return [TextContent(type="text", text="Error: conversation_id and text required.")]
 
-        if _ws_conn is None:
-            return [TextContent(type="text", text="Error: Not connected to DPC WebSocket.")]
-
-        try:
-            await _ws_conn.send(json.dumps({
-                "id": "cc-agent-response",
-                "command": "send_cc_agent_response",
-                "payload": {
-                    "conversation_id": conv_id,
-                    "text": text,
-                },
-            }))
-            # Wait for response
-            deadline = asyncio.get_event_loop().time() + 10.0
-            while asyncio.get_event_loop().time() < deadline:
-                raw = await asyncio.wait_for(
-                    _ws_conn.recv(),
-                    timeout=deadline - asyncio.get_event_loop().time(),
-                )
-                msg = json.loads(raw)
-                if msg.get("id") == "cc-agent-response":
-                    status = msg.get("status", msg.get("payload", {}).get("status", "?"))
-                    return [TextContent(type="text", text=f"Sent ({status}).")]
-                if msg.get("event") == "cc_agent_mention":
-                    _pending.append(msg.get("payload", msg))
-            return [TextContent(type="text", text="Sent (no ack received).")]
-        except Exception as e:
-            return [TextContent(type="text", text=f"Error: {e}")]
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _ws_command_sync, "send_cc_agent_response",
+            {"conversation_id": conv_id, "text": text},
+        )
+        status = result.get("status", "?")
+        return [TextContent(type="text", text=f"Sent ({status}).")]
 
     if name == "dpc_read_agent_history":
         conv_id = arguments.get("conversation_id", "agent_001")
         last_n = arguments.get("last_n", 20)
 
-        result = await _ws_command("get_conversation_history", {
-            "conversation_id": conv_id,
-        })
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _ws_command_sync, "get_conversation_history",
+            {"conversation_id": conv_id},
+        )
 
         if isinstance(result, dict) and result.get("status") == "error":
             return [TextContent(type="text", text=f"Error: {result.get('message', '?')}")]
@@ -245,7 +230,6 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not messages:
             return [TextContent(type="text", text=f"No messages in {conv_id}.")]
 
-        # Return last N messages formatted
         recent = messages[-last_n:]
         parts = [f"=== {conv_id} — last {len(recent)} of {len(messages)} messages ==="]
         for m in recent:
@@ -259,8 +243,15 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
 async def main() -> None:
-    asyncio.create_task(_ws_listener())
+    # Start WebSocket listener in daemon thread (won't block MCP shutdown)
+    t = threading.Thread(target=_ws_thread_fn, daemon=True)
+    t.start()
+
     async with stdio_server() as (read_stream, write_stream):
         await app.run(
             read_stream,
@@ -270,4 +261,6 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     asyncio.run(main())

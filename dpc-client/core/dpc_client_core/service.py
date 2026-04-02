@@ -6896,6 +6896,19 @@ class CoreService:
             if response:
                 logger.info("Ark responded to CC's @Ark mention in %s (%d chars)",
                             conversation_id, len(response))
+
+                # Broadcast Ark's response to UI so it appears immediately
+                from dpc_client_core.dpc_agent.utils import utc_now_iso
+                import uuid
+                agent_name = getattr(agent_manager, 'agent_id', conversation_id)
+                await self.local_api.broadcast_event("agent_chat_message", {
+                    "conversation_id": conversation_id,
+                    "message_id": str(uuid.uuid4()),
+                    "role": "assistant",
+                    "content": response,
+                    "sender_name": agent_name,
+                    "timestamp": utc_now_iso(),
+                })
         except Exception as e:
             logger.error("Ark response to CC's @Ark mention failed: %s", e, exc_info=True)
 

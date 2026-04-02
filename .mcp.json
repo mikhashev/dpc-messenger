@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "dpc-agent-chat": {
+      "command": "C:/Users/mike/Documents/dpc-messenger/dpc-client/core/.venv/Scripts/python.exe",
+      "args": [
+        "C:/Users/mike/Documents/dpc-messenger/dpc-client/cc-bridge/dpc_agent_mcp.py"
+      ]
+    },
+    "dpc-group-chat": {
+      "command": "C:/Users/mike/Documents/dpc-messenger/dpc-client/core/.venv/Scripts/python.exe",
+      "args": [
+        "C:/Users/mike/Documents/dpc-messenger/dpc-client/cc-bridge/dpc_group_mcp.py"
+      ]
+    }
+  }
+}

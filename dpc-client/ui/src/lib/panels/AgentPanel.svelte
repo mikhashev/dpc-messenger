@@ -322,20 +322,23 @@
     }
   });
 
-  // Handle CC agent chat message (injected via send_cc_agent_response)
+  // Handle agent chat message (CC responses via send_cc_agent_response,
+  // or Ark chain-triggered responses via _invoke_ark_in_agent_chat)
   $effect(() => {
     if ($agentChatMessage) {
-      const { conversation_id, content, sender_name, timestamp } = $agentChatMessage;
+      const { conversation_id, content, sender_name, timestamp, role } = $agentChatMessage;
 
       untrack(() => {
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = newMap.get(conversation_id) || [];
-          const stableId = `cc-${timestamp ? new Date(timestamp).getTime() : Date.now()}`;
+          // Determine sender: CC for user/cc role, agent for assistant role
+          const isAgent = role === 'assistant';
+          const stableId = `${isAgent ? 'ark' : 'cc'}-${timestamp ? new Date(timestamp).getTime() : Date.now()}`;
           const newMsg: Message = {
             id: stableId,
-            sender: 'cc',
-            senderName: sender_name || 'CC',
+            sender: isAgent ? conversation_id : 'cc',
+            senderName: sender_name || (isAgent ? 'Agent' : 'CC'),
             text: content,
             timestamp: timestamp ? new Date(timestamp).getTime() : Date.now(),
             attachments: [],
