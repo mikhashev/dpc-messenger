@@ -183,6 +183,11 @@ async def list_tools() -> list[Tool]:
                         "description": "Number of recent messages to return (default: 20)",
                         "default": 20,
                     },
+                    "thinking_limit": {
+                        "type": "integer",
+                        "description": "Max chars for thinking/raw output per message (default: 500, 0 = no limit)",
+                        "default": 500,
+                    },
                 },
                 "required": ["conversation_id"],
             },
@@ -261,6 +266,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if name == "dpc_read_agent_history":
         conv_id = arguments.get("conversation_id", "agent_001")
         last_n = arguments.get("last_n", 20)
+        thinking_limit = arguments.get("thinking_limit", 500)
 
         result = await asyncio.get_event_loop().run_in_executor(
             None, _ws_command_sync, "get_conversation_history",
@@ -285,9 +291,11 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             streaming_raw = m.get("streaming_raw", "")
             parts.append(f"[{ts}] {sender} ({role}): {content}")
             if thinking:
-                parts.append(f"  [Thinking]: {thinking[:500]}")
+                t = thinking if thinking_limit == 0 else thinking[:thinking_limit]
+                parts.append(f"  [Thinking]: {t}")
             if streaming_raw:
-                parts.append(f"  [Raw output]: {streaming_raw[:500]}")
+                r = streaming_raw if thinking_limit == 0 else streaming_raw[:thinking_limit]
+                parts.append(f"  [Raw output]: {r}")
         return [TextContent(type="text", text="\n".join(parts))]
 
     return [TextContent(type="text", text=f"Unknown tool: {name}")]
