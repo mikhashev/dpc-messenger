@@ -4110,126 +4110,35 @@ class CoreService:
         try:
             monitor = self.conversation_monitors.get(conversation_id)
 
-            # Special handling for agent conversations - their monitors are in AgentManager
+            # Agent conversations: always read from disk file (source of truth)
+            # The in-memory monitor can be stale after session resets, knowledge commits,
+            # or when messages arrive via different paths (Telegram, MCP, chain triggers).
+            # history.json is written on every save_history() call, so it's always current.
             if not monitor and conversation_id.startswith("agent_"):
-                # Get the dpc_agent provider to access the agent manager
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    # Check if we have a manager for this specific agent
-                    # conversation_id format is "agent_001", so we use it as the agent_id
-                    if conversation_id in dpc_agent_provider._managers:
-                        agent_manager = dpc_agent_provider._managers[conversation_id]
-                        if hasattr(agent_manager, '_agent_monitors'):
-                            monitor = agent_manager._agent_monitors.get(conversation_id)
-                            if monitor:
-                                # Monitor exists in memory — reload from disk if empty or stale
-                                # After session reset + new messages, the file may have been
-                                # recreated with different content than what the monitor has cached
-                                history_path = monitor._get_history_path()
-                                should_reload = False
-                                if not monitor.message_history:
-                                    should_reload = True
-                                elif history_path.exists():
-                                    # Check if file has more messages than monitor (stale cache)
-                                    try:
-                                        import json as _json
-                                        with open(history_path, encoding="utf-8") as f:
-                                            disk_data = _json.load(f)
-                                        disk_count = disk_data.get("message_count", len(disk_data.get("messages", [])))
-                                        if disk_count != len(monitor.message_history):
-                                            should_reload = True
-                                            logger.info("Monitor has %d messages but disk has %d for %s — reloading",
-                                                        len(monitor.message_history), disk_count, conversation_id)
-                                    except Exception:
-                                        pass
-                                if should_reload:
-                                    if history_path.exists():
-                                        logger.info("Reloading agent history from disk for %s", conversation_id)
-                                        monitor.load_history()
-                                    else:
-                                        # File doesn't exist — check if another monitor has the messages
-                                        # (Telegram bridge creates messages in a different monitor instance)
-                                        alt_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
-                                        if alt_path.exists():
-                                            logger.info("Loading agent history from alt path for %s", conversation_id)
-                                            import json as _json
-                                            with open(alt_path, encoding="utf-8") as f:
-                                                data = _json.load(f)
-                                            messages = data.get("messages", [])
-                                            if messages:
-                                                token_stats = data.get("token_stats", {})
-                                                history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                                                token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
-                                                return {
-                                                    "status": "success",
-                                                    "messages": messages,
-                                                    "message_count": len(messages),
-                                                    "tokens_used": token_stats.get("current_token_count", history_tokens),
-                                                    "token_limit": token_limit,
-                                                    "history_tokens": history_tokens,
-                                                    "context_estimated": token_stats.get("context_estimated", 0),
-                                                }
-                                        else:
-                                            logger.debug("No history file found for %s (likely reset), skipping load", conversation_id)
-                                logger.debug("Found agent conversation monitor for %s in AgentManager", conversation_id)
-                            else:
-                                # Agent manager exists but monitor not created yet (no messages
-                                # processed since service start) — load history from disk directly
-                                logger.debug("Agent monitor not created for %s, loading history from disk", conversation_id)
-                                history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
-                                if history_path.exists():
-                                    try:
-                                        import json as _json
-                                        with open(history_path, encoding="utf-8") as f:
-                                            data = _json.load(f)
-                                        messages = data.get("messages", [])
-                                        logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
-                                        token_stats = data.get("token_stats", {})
-                                        history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                                        token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
-                                        context_estimated = token_stats.get("context_estimated", 0)
-                                        return {
-                                            "status": "success",
-                                            "messages": messages,
-                                            "message_count": len(messages),
-                                            "tokens_used": token_stats.get("current_token_count", history_tokens),
-                                            "token_limit": token_limit,
-                                            "history_tokens": history_tokens,
-                                            "context_estimated": context_estimated,
-                                        }
-                                    except Exception as e:
-                                        logger.error("Failed to load agent history from disk: %s", e)
-                                else:
-                                    logger.debug("No history file found at %s", history_path)
-                    else:
-                        # Agent manager not created yet - try to load history directly from disk
-                        logger.debug("Agent manager not created for %s, attempting to load history from disk", conversation_id)
-                        history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
-                        if history_path.exists():
-                            try:
-                                import json
-                                with open(history_path, encoding="utf-8") as f:
-                                    data = json.load(f)
-                                messages = data.get("messages", [])
-                                logger.info("Loaded %d messages from disk for %s (agent manager not created yet)", len(messages), conversation_id)
-                                token_stats = data.get("token_stats", {})
-                                history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                                token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
-                                context_estimated = token_stats.get("context_estimated", 0)
-                                # Return early with the loaded messages
-                                return {
-                                    "status": "success",
-                                    "messages": messages,
-                                    "message_count": len(messages),
-                                    "tokens_used": token_stats.get("current_token_count", history_tokens),
-                                    "token_limit": token_limit,
-                                    "history_tokens": history_tokens,
-                                    "context_estimated": context_estimated,
-                                }
-                            except Exception as e:
-                                logger.error("Failed to load agent history from disk: %s", e)
-                        else:
-                            logger.debug("No history file found at %s", history_path)
+                history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                if history_path.exists():
+                    try:
+                        import json as _json
+                        with open(history_path, encoding="utf-8") as f:
+                            data = _json.load(f)
+                        messages = data.get("messages", [])
+                        logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
+                        token_stats = data.get("token_stats", {})
+                        history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                        context_estimated = token_stats.get("context_estimated", 0)
+                        return {
+                            "status": "success",
+                            "messages": messages,
+                            "message_count": len(messages),
+                            "tokens_used": token_stats.get("current_token_count", history_tokens),
+                            "token_limit": token_limit,
+                            "history_tokens": history_tokens,
+                            "context_estimated": context_estimated,
+                        }
+                    except Exception as e:
+                        logger.error("Failed to load agent history from disk: %s", e)
+                else:
+                    logger.debug("No history file found for %s", conversation_id)
 
             if not monitor:
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
@@ -4287,36 +4196,6 @@ class CoreService:
                 messages.append(message_dict)
 
             logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
-
-            # Fallback: if monitor returned 0 messages but file exists on disk, reload
-            # (handles session reset + new Telegram messages creating a new file)
-            if not messages and conversation_id.startswith("agent_"):
-                history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
-                if history_path.exists():
-                    try:
-                        import json as _json
-                        with open(history_path, encoding="utf-8") as f:
-                            data = _json.load(f)
-                        disk_messages = data.get("messages", [])
-                        if disk_messages:
-                            logger.info("Monitor empty but disk has %d messages for %s — using disk", len(disk_messages), conversation_id)
-                            # Also reload into the monitor so subsequent calls work
-                            monitor.load_history()
-                            messages = []
-                            for msg in disk_messages:
-                                messages.append({
-                                    "role": msg["role"],
-                                    "content": msg["content"],
-                                    "message_id": msg.get("id"),
-                                    "timestamp": msg.get("timestamp"),
-                                    "sender_node_id": msg.get("sender_node_id"),
-                                    "sender_name": msg.get("sender_name"),
-                                    "thinking": msg.get("thinking"),
-                                    "streaming_raw": msg.get("streaming_raw"),
-                                    "attachments": msg.get("attachments", []),
-                                })
-                    except Exception as e:
-                        logger.warning("Failed to load disk fallback for %s: %s", conversation_id, e)
 
             token_usage = monitor.get_token_usage()
             # history_tokens: dialog-only (chars ÷ 4), same basis as the token counter
