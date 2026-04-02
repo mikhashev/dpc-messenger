@@ -1071,6 +1071,7 @@ Send a voice message and it will be transcribed and processed\\.
                 "tokens_used": tokens_used,
                 "token_limit": token_limit,
                 "thinking": thinking,
+                "context_estimated": getattr(monitor, '_last_context_estimated', 0),
             })
             log.debug(f"[_broadcast_history_to_ui] Pushed {len(messages)} messages for {conversation_id}")
         except Exception as e:

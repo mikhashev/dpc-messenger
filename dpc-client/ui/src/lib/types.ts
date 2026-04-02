@@ -277,6 +277,7 @@ export interface AgentHistoryUpdatedEvent {
     token_limit?: number;
     thinking?: string;
     message_count?: number;
+    context_estimated?: number;
 }
 
 // --- File Transfer Event Payloads ---

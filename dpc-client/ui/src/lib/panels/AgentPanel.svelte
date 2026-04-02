@@ -44,7 +44,7 @@
     chatHistories: Writable<Map<string, Message[]>>;
     getPeerDisplayName: (id: string) => string;
     chatWindow: HTMLElement | null;
-    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number }) => void;
+    onUpdateTokenUsage: (conversationId: string, usage: { used: number; limit: number; historyTokens?: number; contextEstimated?: number }) => void;
     onAgentToast: (message: string, type: 'info' | 'warning' | 'error') => void;
     onRefreshAgents: () => void;
     agentProgressMessage?: string | null;
@@ -264,7 +264,7 @@
   // dependency, causing re-runs on every history change (infinite loop).
   $effect(() => {
     if ($agentHistoryUpdated) {
-      const { conversation_id, messages, tokens_used, token_limit, thinking } = $agentHistoryUpdated;
+      const { conversation_id, messages, tokens_used, token_limit, thinking, context_estimated } = $agentHistoryUpdated;
 
       untrack(() => {
         // Flush pending buffer and capture accumulated streaming text before overwriting history
@@ -279,9 +279,14 @@
           if (capturedAgentStreaming) clearAgentStreaming();
         }
 
-        // Notify parent to update token usage map
+        // Notify parent to update token usage map (include contextEstimated for Total counter)
         if (tokens_used !== undefined && token_limit !== undefined && token_limit > 0) {
-          onUpdateTokenUsage(conversation_id, { used: tokens_used, limit: token_limit });
+          onUpdateTokenUsage(conversation_id, {
+            used: tokens_used,
+            limit: token_limit,
+            historyTokens: tokens_used,
+            contextEstimated: context_estimated || 0,
+          });
         }
 
         chatHistories.update(map => {
