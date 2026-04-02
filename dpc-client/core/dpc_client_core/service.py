@@ -4122,13 +4122,29 @@ class CoreService:
                         if hasattr(agent_manager, '_agent_monitors'):
                             monitor = agent_manager._agent_monitors.get(conversation_id)
                             if monitor:
-                                # Monitor exists in memory — reload from disk if empty
-                                # After session reset + new Telegram messages, the file may
-                                # have been recreated but this monitor instance has stale empty history
+                                # Monitor exists in memory — reload from disk if empty or stale
+                                # After session reset + new messages, the file may have been
+                                # recreated with different content than what the monitor has cached
+                                history_path = monitor._get_history_path()
+                                should_reload = False
                                 if not monitor.message_history:
-                                    history_path = monitor._get_history_path()
+                                    should_reload = True
+                                elif history_path.exists():
+                                    # Check if file has more messages than monitor (stale cache)
+                                    try:
+                                        import json as _json
+                                        with open(history_path, encoding="utf-8") as f:
+                                            disk_data = _json.load(f)
+                                        disk_count = disk_data.get("message_count", len(disk_data.get("messages", [])))
+                                        if disk_count != len(monitor.message_history):
+                                            should_reload = True
+                                            logger.info("Monitor has %d messages but disk has %d for %s — reloading",
+                                                        len(monitor.message_history), disk_count, conversation_id)
+                                    except Exception:
+                                        pass
+                                if should_reload:
                                     if history_path.exists():
-                                        logger.info("Reloading agent history from disk for %s (monitor empty but file exists)", conversation_id)
+                                        logger.info("Reloading agent history from disk for %s", conversation_id)
                                         monitor.load_history()
                                     else:
                                         # File doesn't exist — check if another monitor has the messages
