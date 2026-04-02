@@ -456,6 +456,8 @@ class DpcAgentManager:
         # When set, injected into ToolContext so schedule_task auto-fills
         # _reply_telegram_chat_id in task data for later result delivery.
         telegram_chat_id: Optional[str] = None,
+        # When True, don't save user message to history (already saved by caller)
+        _skip_history: bool = False,
     ) -> str:
         """
         Process a user message through the agent.
@@ -490,16 +492,17 @@ class DpcAgentManager:
         # Get or create ConversationMonitor for this agent conversation (reuse existing)
         monitor = self._get_or_create_agent_monitor(conversation_id)
 
-        # Track user message in monitor (reuse existing method)
-        node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
-        monitor.add_message(
-            role="user",
-            content=message,
-            timestamp=utc_now_iso(),
-            sender_node_id=node_id,
-            sender_name=sender_name
-        )
-        monitor.save_history()  # Save to disk immediately
+        # Track user message in monitor (skip when caller already saved it, e.g. CC chain trigger)
+        if not _skip_history:
+            node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
+            monitor.add_message(
+                role="user",
+                content=message,
+                timestamp=utc_now_iso(),
+                sender_node_id=node_id,
+                sender_name=sender_name
+            )
+            monitor.save_history()  # Save to disk immediately
 
         # Use agent_id as sender name for better identification in chat UI
         agent_display_name = self.agent_id or "DPC Agent"

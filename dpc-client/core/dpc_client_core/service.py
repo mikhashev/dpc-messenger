@@ -6861,15 +6861,13 @@ class CoreService:
         duplicating CC's message in history (already saved by send_cc_agent_response).
         """
         try:
-            # Short prompt — CC's full message is already in conversation history
-            prompt = (
-                "[CC addressed you above. Read the conversation history and respond. "
-                "Do NOT end with questions — this is a one-shot exchange, not a conversation.]"
-            )
+            # CC's message is already saved in history by send_cc_agent_response.
+            # Pass _skip_history=True so this trigger prompt is NOT saved to history.json.
             response = await agent_manager.process_message(
-                message=prompt,
+                message=cc_text,
                 conversation_id=conversation_id,
-                sender_name="System",
+                sender_name="CC",
+                _skip_history=True,
             )
             if response:
                 logger.info("Ark responded to CC's @Ark mention in %s (%d chars)",
