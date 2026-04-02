@@ -4125,6 +4125,7 @@ class CoreService:
                         logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
                         token_stats = data.get("token_stats", {})
                         history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                        token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
                         context_estimated = token_stats.get("context_estimated", 0)
                         return {
                             "status": "success",
