@@ -6597,7 +6597,10 @@ class CoreService:
             await dpc_agent_provider._ensure_manager(agent_id=conversation_id)
             agent_manager = dpc_agent_provider.get_manager(conversation_id)
 
-            # Check if message is @CC-only (no @Ark) — route to default LLM instead of agent
+            # Reset chain depth on new user message (prevents stale depth from prior exchanges)
+            self._cc_ark_chain_depth = 0
+
+            # Check if message is @CC-only (no @Ark) — route to real Claude Code via MCP
             import re
             _mentions = {m.lower() for m in re.findall(r'@(\w+)\b', prompt or '', re.IGNORECASE)}
             if "cc" in _mentions and "ark" not in _mentions:
@@ -6614,16 +6617,28 @@ class CoreService:
                 )
                 monitor.save_history()
 
-                # Broadcast @CC mention event
+                # Broadcast @CC mention event (picked up by dpc-agent-chat MCP server)
                 await self._check_agent_cc_mention(
                     conversation_id, prompt, "", agent_manager
                 )
 
-                # Generate CC response using default LLM provider
-                asyncio.ensure_future(self._generate_cc_response(
-                    command_id, conversation_id, prompt, agent_manager
-                ))
-                logger.info("@CC-only mention in %s — routing to default LLM", conversation_id)
+                # Notify UI that the message was delivered (CC will respond via MCP bridge)
+                await self.local_api.send_response_to_all(
+                    command_id=command_id,
+                    command="execute_ai_query",
+                    status="OK",
+                    payload={
+                        "content": "*Waiting for CC (Claude Code) to respond via MCP bridge...*",
+                        "provider": "cc",
+                        "model": "claude-code",
+                        "compute_host": "local",
+                        "tokens_used": 0,
+                        "token_limit": 128000,
+                        "history_tokens": 0,
+                        "context_estimated": 0,
+                    }
+                )
+                logger.info("@CC-only mention in %s — broadcast to MCP bridge (real CC)", conversation_id)
                 return
 
             # Process message through agent (agent manager handles its own prompt assembly)
@@ -6712,7 +6727,8 @@ class CoreService:
 
             logger.info("Agent query completed for conversation %s", conversation_id)
 
-            # Detect @CC mentions in user prompt or agent response
+            # Detect @CC mentions in user prompt or agent response and broadcast
+            # event for the real Claude Code to pick up via MCP bridge
             await self._check_agent_cc_mention(
                 conversation_id, prompt, response, agent_manager
             )
@@ -6724,84 +6740,6 @@ class CoreService:
                 command="execute_ai_query",
                 status="ERROR",
                 payload={"message": str(e)}
-            )
-
-    async def _generate_cc_response(
-        self, command_id: str, conversation_id: str, user_prompt: str,
-        agent_manager
-    ) -> None:
-        """Generate CC's response using the default LLM and inject into agent chat."""
-        try:
-            from dpc_client_core.dpc_agent.utils import utc_now_iso
-
-            # Build conversation context from agent history
-            monitor = agent_manager._agent_monitors.get(conversation_id)
-            history_lines = []
-            if monitor:
-                for msg in monitor.message_history[-20:]:
-                    role = msg.get("role", "user")
-                    name = msg.get("sender_name", role.upper())
-                    content = msg.get("content", "")
-                    history_lines.append(f"{name}: {content}")
-
-            system_prompt = (
-                "You are CC (Claude Code), a development assistant participating in an agent chat. "
-                "You share this chat with Ark (an embedded AI agent) and the user (Mike). "
-                "Respond concisely and helpfully to the message addressed to you via @CC. "
-                "You can see the recent conversation history below. "
-                "If you need Ark's input, mention @Ark in your response. "
-                "Do NOT end with open-ended questions — keep responses actionable and conclusive."
-            )
-
-            history_block = "\n".join(history_lines) if history_lines else "(no prior messages)"
-            full_prompt = f"{system_prompt}\n\n--- CONVERSATION HISTORY ---\n{history_block}\n--- END ---\n\nRespond to the latest @CC message."
-
-            # Use default LLM provider
-            provider_alias = self.llm_manager.default_provider
-            if not provider_alias or provider_alias not in self.llm_manager.providers:
-                raise ValueError("No default LLM provider configured")
-            default_provider = self.llm_manager.providers[provider_alias]
-
-            response = await default_provider.generate_response(full_prompt)
-
-            if response:
-                # Inject CC response into agent chat (skip broadcast since
-                # execute_ai_query response below already delivers to UI)
-                await self.send_cc_agent_response(
-                    conversation_id=conversation_id,
-                    text=response,
-                    _skip_broadcast=True,
-                )
-
-                # Send execute_ai_query response to complete the command
-                session_state = agent_manager.get_session_state(conversation_id)
-                tokens_used = session_state.get("history_tokens", session_state.get("tokens_used", 0))
-                token_limit = session_state.get("tokens_limit", 128000)
-
-                await self.local_api.send_response_to_all(
-                    command_id=command_id,
-                    command="execute_ai_query",
-                    status="OK",
-                    payload={
-                        "content": response,
-                        "provider": "cc",
-                        "model": getattr(default_provider, 'model', 'default'),
-                        "compute_host": "local",
-                        "tokens_used": tokens_used,
-                        "token_limit": token_limit,
-                        "history_tokens": session_state.get("history_tokens", 0),
-                        "context_estimated": session_state.get("context_estimated", 0),
-                    }
-                )
-            logger.info("CC auto-response generated for %s (%d chars)", conversation_id, len(response or ""))
-
-        except Exception as e:
-            logger.error("CC auto-response failed: %s", e, exc_info=True)
-            await self.local_api.send_response_to_all(
-                command_id=command_id,
-                command="execute_ai_query",
-                status="ERROR",
-                payload={"message": f"CC response failed: {e}"}
             )
 
     async def _check_agent_cc_mention(
@@ -6916,12 +6854,19 @@ class CoreService:
 
             logger.info("CC response injected into %s (%d chars)", conversation_id, len(text))
 
-            # If CC's response mentions @Ark, trigger Ark to respond
+            # If CC's response mentions @Ark, trigger Ark to respond (subject to chain depth)
             import re
             cc_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text or '', re.IGNORECASE)}
             if "ark" in cc_mentions:
-                logger.info("CC mentioned @Ark in %s — triggering Ark response", conversation_id)
-                asyncio.ensure_future(self._invoke_ark_in_agent_chat(conversation_id, text, manager))
+                chain_depth = getattr(self, '_cc_ark_chain_depth', 0)
+                if chain_depth < 3:
+                    self._cc_ark_chain_depth = chain_depth + 1
+                    logger.info("CC mentioned @Ark in %s (chain depth %d) — triggering Ark response",
+                                conversation_id, chain_depth + 1)
+                    asyncio.ensure_future(self._invoke_ark_in_agent_chat(conversation_id, text, manager))
+                else:
+                    logger.info("CC mentioned @Ark in %s but chain depth limit reached (%d), skipping",
+                                conversation_id, chain_depth)
 
             return {"status": "success", "message_id": message_id}
 
