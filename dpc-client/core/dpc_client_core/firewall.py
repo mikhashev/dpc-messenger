@@ -206,19 +206,27 @@ class ContextFirewall:
         self.evolution_interval_minutes = evolution.get('interval_minutes', 60)
         self.evolution_auto_apply = evolution.get('auto_apply', False)
 
+        # Parse consciousness settings (v0.23.0+)
+        consciousness = dpc_agent.get('consciousness', {})
+        self.consciousness_enabled = consciousness.get('enabled', False)
+        self.consciousness_think_interval_min = consciousness.get('think_interval_min', 60)
+        self.consciousness_think_interval_max = consciousness.get('think_interval_max', 300)
+        self.consciousness_budget_fraction = consciousness.get('budget_fraction', 0.1)
+
         # Parse history settings (v0.22.0+)
         history = dpc_agent.get('history', {})
         self.history_preserve_on_reset = history.get('preserve_on_reset', True)
         self.history_max_archived_sessions = max(1, min(50, int(history.get('max_archived_sessions', 10))))
 
-        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s",
+        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s, consciousness=%s",
                      self.dpc_agent_enabled,
                      self.dpc_agent_personal_context_access,
                      self.dpc_agent_device_context_access,
                      self.dpc_agent_knowledge_access,
                      len([t for t in self.dpc_agent_tools.values() if t]),
                      len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths),
-                     self.evolution_enabled)
+                     self.evolution_enabled,
+                     self.consciousness_enabled)
 
     def _normalize_path(self, path_str: str) -> str:
         """Normalize a path string for comparison."""
@@ -1625,6 +1633,27 @@ class ContextFirewall:
                                     errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
                             if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
                                 errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
+
+                    # Validate consciousness settings (v0.23.0+)
+                    if 'consciousness' in dpc_agent:
+                        consciousness = dpc_agent['consciousness']
+                        if not isinstance(consciousness, dict):
+                            errors.append("'dpc_agent.consciousness' must be a dictionary")
+                        else:
+                            if 'enabled' in consciousness and not isinstance(consciousness['enabled'], bool):
+                                errors.append("'dpc_agent.consciousness.enabled' must be a boolean")
+                            if 'think_interval_min' in consciousness:
+                                if not isinstance(consciousness['think_interval_min'], int):
+                                    errors.append("'dpc_agent.consciousness.think_interval_min' must be an integer")
+                                elif consciousness['think_interval_min'] < 10:
+                                    errors.append("'dpc_agent.consciousness.think_interval_min' must be at least 10")
+                            if 'think_interval_max' in consciousness:
+                                if not isinstance(consciousness['think_interval_max'], int):
+                                    errors.append("'dpc_agent.consciousness.think_interval_max' must be an integer")
+                            if 'budget_fraction' in consciousness:
+                                val = consciousness['budget_fraction']
+                                if not isinstance(val, (int, float)) or val <= 0 or val > 1:
+                                    errors.append("'dpc_agent.consciousness.budget_fraction' must be a number between 0 and 1")
 
                     # Validate skills settings (v0.20.0+)
                     if 'skills' in dpc_agent:

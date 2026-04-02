@@ -184,6 +184,23 @@
     }
   }
 
+  function ensureConsciousnessSettings() {
+    if (!editSettings) return;
+    if (!editSettings.consciousness) {
+      editSettings.consciousness = {
+        enabled: false,
+        think_interval_min: 60,
+        think_interval_max: 300,
+        budget_fraction: 0.1
+      };
+    }
+  }
+
+  // Auto-initialize consciousness settings when entering edit mode
+  $: if (editMode && editSettings && !editSettings.consciousness) {
+    ensureConsciousnessSettings();
+  }
+
   // Auto-initialize skills when entering edit mode so bind:checked doesn't crash
   $: if (editMode && editSettings && !editSettings.skills) {
     ensureSkillsSettings();
@@ -424,6 +441,70 @@
               <strong>Evolution</strong> allows the agent to modify its own memory files
               (identity.md, scratchpad.md, knowledge/*.md) within the ~/.dpc/agents/AGENT_ID/ sandbox.
               When auto-apply is disabled, you must manually approve each change.
+            </div>
+          {/if}
+        </div>
+      {/if}
+
+      {#if !isGlobal}
+        <!-- Consciousness Settings Section (per-agent) -->
+        <div class="subsection">
+          <h4>Consciousness Settings</h4>
+          <p class="help-text-small">Background thinking between user messages</p>
+
+          <div class="setting-item">
+            <label>
+              {#if editMode && editSettings?.consciousness}
+                <input
+                  type="checkbox"
+                  id="agent-consciousness-enabled"
+                  bind:checked={editSettings.consciousness.enabled}
+                />
+              {:else}
+                <input
+                  type="checkbox"
+                  id="agent-consciousness-enabled-display"
+                  checked={displaySettings.consciousness?.enabled || false}
+                  disabled
+                />
+              {/if}
+              <span>Enable Consciousness</span>
+            </label>
+            <p class="help-text-small">Agent reflects and plans between conversations (uses up to 10% of budget)</p>
+          </div>
+
+          {#if (editMode ? editSettings?.consciousness?.enabled : displaySettings.consciousness?.enabled)}
+            <div class="setting-item" style="margin-top: 0.75rem;">
+              <span><strong>Think interval (sec):</strong></span>
+              {#if editMode && editSettings?.consciousness}
+                <input
+                  type="number"
+                  id="agent-consciousness-interval-min"
+                  min="10"
+                  max="600"
+                  bind:value={editSettings.consciousness.think_interval_min}
+                  style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
+                />
+                <span style="margin: 0 0.25rem;">to</span>
+                <input
+                  type="number"
+                  id="agent-consciousness-interval-max"
+                  min="10"
+                  max="600"
+                  bind:value={editSettings.consciousness.think_interval_max}
+                  style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
+                />
+              {:else}
+                <span class="value">{displaySettings.consciousness?.think_interval_min || 60} — {displaySettings.consciousness?.think_interval_max || 300}</span>
+              {/if}
+              <span class="help-text-small" style="margin-left: 0.5rem;">Random interval range between thoughts</span>
+            </div>
+          {/if}
+
+          {#if !editMode}
+            <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
+              <strong>Consciousness</strong> enables the agent to think autonomously between user messages —
+              self-reflection, planning, memory consolidation. Budget-capped at 10% of agent budget.
             </div>
           {/if}
         </div>

@@ -180,27 +180,35 @@ class DpcAgentManager:
             return
 
         # Build agent config (tool control is via firewall, not config)
-        # Evolution settings: per-agent profile overrides global dpc_agent settings
-        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
-        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
-        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
+        # Per-agent profile overrides global dpc_agent settings
         _per_agent_profile = (
             self.firewall.get_agent_profile_settings(self.agent_id)
             if (self.firewall and self.agent_id)
             else None
         )
+
+        # Evolution settings: firewall global → per-agent profile override
+        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
+        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
+        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
         _per_agent_evo = _per_agent_profile.get('evolution', {}) if _per_agent_profile else {}
         evolution_enabled = _per_agent_evo.get('enabled', _evo_global_enabled)
         evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
         evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
-        if _per_agent_evo:
-            log.debug("Agent %s: using per-agent evolution settings (enabled=%s, interval=%s, auto=%s)",
-                      self.agent_id, evolution_enabled, evolution_interval, evolution_auto)
+
+        # Consciousness settings: firewall global → per-agent profile override
+        _con_global_enabled = self.firewall.consciousness_enabled if self.firewall else False
+        _per_agent_con = _per_agent_profile.get('consciousness', {}) if _per_agent_profile else {}
+        consciousness_enabled = _per_agent_con.get('enabled', _con_global_enabled)
+
+        if _per_agent_evo or _per_agent_con:
+            log.debug("Agent %s: per-agent overrides (evolution=%s, consciousness=%s)",
+                      self.agent_id, evolution_enabled, consciousness_enabled)
 
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
-            background_consciousness=self.config.get("background_consciousness", False),
+            background_consciousness=consciousness_enabled,
             enable_task_queue=self.config.get("enable_task_queue", True),
             evolution_enabled=evolution_enabled,
             evolution_interval_minutes=evolution_interval,
