@@ -4122,16 +4122,39 @@ class CoreService:
                         if hasattr(agent_manager, '_agent_monitors'):
                             monitor = agent_manager._agent_monitors.get(conversation_id)
                             if monitor:
-                                # Monitor exists in memory — load history from disk if empty
-                                # (Check file exists to prevent reloading after reset, where
-                                # message_history is cleared but file is deleted)
+                                # Monitor exists in memory — reload from disk if empty
+                                # After session reset + new Telegram messages, the file may
+                                # have been recreated but this monitor instance has stale empty history
                                 if not monitor.message_history:
                                     history_path = monitor._get_history_path()
                                     if history_path.exists():
-                                        logger.debug("Loading agent conversation history from disk for %s", conversation_id)
+                                        logger.info("Reloading agent history from disk for %s (monitor empty but file exists)", conversation_id)
                                         monitor.load_history()
                                     else:
-                                        logger.debug("No history file found for %s (likely reset), skipping load", conversation_id)
+                                        # File doesn't exist — check if another monitor has the messages
+                                        # (Telegram bridge creates messages in a different monitor instance)
+                                        alt_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                                        if alt_path.exists():
+                                            logger.info("Loading agent history from alt path for %s", conversation_id)
+                                            import json as _json
+                                            with open(alt_path, encoding="utf-8") as f:
+                                                data = _json.load(f)
+                                            messages = data.get("messages", [])
+                                            if messages:
+                                                token_stats = data.get("token_stats", {})
+                                                history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                                                token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
+                                                return {
+                                                    "status": "success",
+                                                    "messages": messages,
+                                                    "message_count": len(messages),
+                                                    "tokens_used": token_stats.get("current_token_count", history_tokens),
+                                                    "token_limit": token_limit,
+                                                    "history_tokens": history_tokens,
+                                                    "context_estimated": token_stats.get("context_estimated", 0),
+                                                }
+                                        else:
+                                            logger.debug("No history file found for %s (likely reset), skipping load", conversation_id)
                                 logger.debug("Found agent conversation monitor for %s in AgentManager", conversation_id)
                             else:
                                 # Agent manager exists but monitor not created yet (no messages
@@ -4248,6 +4271,36 @@ class CoreService:
                 messages.append(message_dict)
 
             logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
+
+            # Fallback: if monitor returned 0 messages but file exists on disk, reload
+            # (handles session reset + new Telegram messages creating a new file)
+            if not messages and conversation_id.startswith("agent_"):
+                history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                if history_path.exists():
+                    try:
+                        import json as _json
+                        with open(history_path, encoding="utf-8") as f:
+                            data = _json.load(f)
+                        disk_messages = data.get("messages", [])
+                        if disk_messages:
+                            logger.info("Monitor empty but disk has %d messages for %s — using disk", len(disk_messages), conversation_id)
+                            # Also reload into the monitor so subsequent calls work
+                            monitor.load_history()
+                            messages = []
+                            for msg in disk_messages:
+                                messages.append({
+                                    "role": msg["role"],
+                                    "content": msg["content"],
+                                    "message_id": msg.get("id"),
+                                    "timestamp": msg.get("timestamp"),
+                                    "sender_node_id": msg.get("sender_node_id"),
+                                    "sender_name": msg.get("sender_name"),
+                                    "thinking": msg.get("thinking"),
+                                    "streaming_raw": msg.get("streaming_raw"),
+                                    "attachments": msg.get("attachments", []),
+                                })
+                    except Exception as e:
+                        logger.warning("Failed to load disk fallback for %s: %s", conversation_id, e)
 
             token_usage = monitor.get_token_usage()
             # history_tokens: dialog-only (chars ÷ 4), same basis as the token counter
