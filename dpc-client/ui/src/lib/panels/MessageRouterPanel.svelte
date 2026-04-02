@@ -244,6 +244,25 @@
         // Flush pending buffer and capture streaming text (AgentPanel owns buffer + state)
         const capturedStreamingText = getStreamingText();
 
+        // CC pending: @CC mention was broadcast to MCP bridge, response comes later
+        // via agent_chat_message — just remove the "Thinking..." placeholder
+        if (message.status === 'OK' && message.payload.provider === 'cc_pending') {
+          const responseCommandId = message.id;
+          const chatId = commandToChatMap.get(responseCommandId) || activeChatId;
+          if (chatId) {
+            onSetChatLoading(chatId, false);
+            // Remove the "Thinking..." placeholder entirely
+            chatHistories.update(h => {
+              const newMap = new Map(h);
+              const hist = newMap.get(chatId) || [];
+              newMap.set(chatId, hist.filter((m: any) => m.commandId !== responseCommandId));
+              return newMap;
+            });
+            commandToChatMap.delete(responseCommandId);
+          }
+          return;
+        }
+
         const newText = message.status === 'OK'
           ? message.payload.content
           : `Error: ${message.payload?.message || 'Unknown error'}`;

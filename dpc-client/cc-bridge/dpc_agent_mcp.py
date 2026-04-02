@@ -181,24 +181,56 @@ async def list_tools() -> list[Tool]:
 @app.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     if name == "dpc_read_agent_mentions":
+        # First check the real-time queue (background listener)
         messages = list(_pending)
         _pending.clear()
-        if not messages:
+
+        if messages:
+            parts = []
+            for m in messages:
+                conv_id = m.get("conversation_id", "?")
+                sender = m.get("trigger_sender", "?")
+                text = m.get("trigger_text", "")
+                parts.append(f"[{sender} in {conv_id}]: {text}")
+                history = m.get("recent_history", [])
+                if history:
+                    parts.append("  Recent history:")
+                    for h in history[-10:]:
+                        n = h.get("sender_name", h.get("role", "?"))
+                        c = h.get("content", "")[:200]
+                        parts.append(f"    {n}: {c}")
+            return [TextContent(type="text", text="\n".join(parts))]
+
+        # Fallback: scan conversation history for unanswered @CC mentions
+        # (catches events that fired before the listener connected)
+        result = await asyncio.get_event_loop().run_in_executor(
+            None, _ws_command_sync, "get_conversation_history",
+            {"conversation_id": "agent_001"},
+        )
+        hist_messages = result.get("messages", [])
+        if not hist_messages:
+            return [TextContent(type="text", text="No pending @CC mentions in agent chat.")]
+
+        # Find unanswered @CC mentions: any @CC message after the last CC response
+        last_cc_idx = -1
+        for i, m in enumerate(hist_messages):
+            if m.get("sender_node_id") == "cc":
+                last_cc_idx = i
+
+        unanswered = []
+        for m in hist_messages[last_cc_idx + 1:]:
+            content = m.get("content", "")
+            if "@CC" in content or "@cc" in content:
+                unanswered.append(m)
+
+        if not unanswered:
             return [TextContent(type="text", text="No pending @CC mentions in agent chat.")]
 
         parts = []
-        for m in messages:
-            conv_id = m.get("conversation_id", "?")
-            sender = m.get("trigger_sender", "?")
-            text = m.get("trigger_text", "")
-            parts.append(f"[{sender} in {conv_id}]: {text}")
-            history = m.get("recent_history", [])
-            if history:
-                parts.append("  Recent history:")
-                for h in history[-10:]:
-                    n = h.get("sender_name", h.get("role", "?"))
-                    c = h.get("content", "")[:200]
-                    parts.append(f"    {n}: {c}")
+        for m in unanswered:
+            sender = m.get("sender_name", "?")
+            text = m.get("content", "")
+            parts.append(f"[{sender} in agent_001]: {text}")
         return [TextContent(type="text", text="\n".join(parts))]
 
     if name == "dpc_send_agent_response":

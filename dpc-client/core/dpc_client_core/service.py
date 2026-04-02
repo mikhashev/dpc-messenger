@@ -6622,14 +6622,14 @@ class CoreService:
                     conversation_id, prompt, "", agent_manager
                 )
 
-                # Notify UI that the message was delivered (CC will respond via MCP bridge)
+                # Clear the UI loading state (CC will respond later via agent_chat_message)
                 await self.local_api.send_response_to_all(
                     command_id=command_id,
                     command="execute_ai_query",
                     status="OK",
                     payload={
-                        "content": "*Waiting for CC (Claude Code) to respond via MCP bridge...*",
-                        "provider": "cc",
+                        "content": "",
+                        "provider": "cc_pending",
                         "model": "claude-code",
                         "compute_host": "local",
                         "tokens_used": 0,
