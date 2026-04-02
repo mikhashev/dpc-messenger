@@ -4684,10 +4684,115 @@ class CoreService:
             )
             await monitor.on_message(conv_message)
 
+            # Detect @agent mentions and route to Ark / CC
+            await self._handle_group_agent_mentions(group_id, text, sender_name)
+
             return {"status": "success", "message_id": message_id}
         except Exception as e:
             logger.error("Error sending group message: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    async def _handle_group_agent_mentions(
+        self, group_id: str, text: str, sender_name: str
+    ) -> None:
+        """Detect @Ark / @CC mentions in outgoing group messages and route to agents."""
+        import re
+        mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text, re.IGNORECASE)}
+        logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
+
+        if "ark" in mentions:
+            logger.info("Group @ark mention detected — invoking Ark in group %s", group_id)
+            asyncio.ensure_future(self._invoke_ark_in_group(group_id, text, sender_name))
+
+        if "cc" in mentions:
+            logger.info("Group @cc mention detected — broadcasting cc_group_mention in group %s", group_id)
+            await self.local_api.broadcast_event("cc_group_mention", {
+                "group_id": group_id,
+                "text": text,
+                "sender_name": sender_name,
+                "sender_node_id": self.p2p_manager.node_id,
+            })
+
+    async def _invoke_ark_in_group(
+        self, group_id: str, text: str, sender_name: str
+    ) -> None:
+        """Invoke agent_001 (Ark) and post its response to the group."""
+        try:
+            dpc_provider = self.llm_manager.providers.get("dpc_agent")
+            if not dpc_provider:
+                logger.warning("_invoke_ark_in_group: dpc_agent provider not found")
+                return
+            manager = dpc_provider.get_manager("agent_001")
+            prompt = f"[Group chat — {sender_name} says]: {text}"
+            response = await manager.process_message(
+                message=prompt,
+                conversation_id=group_id,
+                sender_name=sender_name,
+            )
+            if response:
+                await self.send_group_agent_message(group_id, "Ark", response)
+        except Exception as e:
+            logger.error("Ark group response failed: %s", e, exc_info=True)
+
+    async def send_group_agent_message(
+        self, group_id: str, agent_name: str, text: str
+    ) -> None:
+        """Send a group message attributed to an agent (Ark, CC, etc.).
+
+        The message appears with agent_name as the sender and is marked
+        is_agent=True so the anti-loop guard in GroupTextHandler skips it.
+
+        Args:
+            group_id: Target group ID
+            agent_name: Display name ("Ark", "CC", ...)
+            text: Message text
+        """
+        group = self.group_manager.get_group(group_id)
+        if not group:
+            logger.warning("send_group_agent_message: group %s not found", group_id)
+            return
+
+        import uuid
+        message_id = uuid.uuid4().hex[:16]
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        payload = {
+            "group_id": group_id,
+            "text": text,
+            "sender_node_id": self.p2p_manager.node_id,
+            "sender_name": agent_name,
+            "message_id": message_id,
+            "timestamp": timestamp,
+            "mentions": [],
+            "is_agent": True,
+        }
+
+        # Broadcast to UI
+        await self.local_api.broadcast_event("group_text_received", payload)
+
+        # Pre-register message ID so GroupTextHandler ignores it if a peer relays it back
+        dedup_key = f"{group_id}:{message_id}"
+        self._processed_message_ids.add(dedup_key)
+        if len(self._processed_message_ids) > self._max_processed_ids:
+            # Trim oldest half to keep memory bounded
+            to_remove = list(self._processed_message_ids)[:len(self._processed_message_ids) // 2]
+            for k in to_remove:
+                self._processed_message_ids.discard(k)
+
+        # Relay to P2P peers so remote members see the agent response
+        await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
+
+        # Feed to ConversationMonitor so knowledge extraction captures agent responses
+        monitor = self._get_or_create_conversation_monitor(group_id)
+        from .conversation_monitor import Message as ConvMessage
+        monitor.message_buffer.append(ConvMessage(
+            message_id=message_id,
+            conversation_id=group_id,
+            sender_node_id=self.p2p_manager.node_id,
+            sender_name=agent_name,
+            text=text,
+            timestamp=timestamp,
+        ))
 
     async def add_group_member(self, group_id: str, node_id: str) -> Dict[str, Any]:
         """Add a member to a group and notify all members.

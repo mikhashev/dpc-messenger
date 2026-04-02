@@ -161,7 +161,60 @@ class GroupTextHandler(MessageHandler):
         except Exception as e:
             self.logger.error("Error in group conversation monitoring: %s", e, exc_info=True)
 
+        # Detect @Ark / @CC mentions and route to agents
+        await self._handle_agent_mentions(group_id, payload, text, sender_name, sender_node_id)
+
         return None
+
+    async def _handle_agent_mentions(
+        self,
+        group_id: str,
+        payload: Dict[str, Any],
+        text: str,
+        sender_name: str,
+        sender_node_id: str,
+    ) -> None:
+        """Detect @Ark and @CC mentions and route to respective agents."""
+        import re
+
+        # Anti-loop guard: is_agent is set by send_group_agent_message() server-side only.
+        # sender_name alone is insufficient — a user could rename themselves "Ark" or "CC".
+        if payload.get("is_agent", False):
+            return
+
+        mentions = re.findall(r'@(\w+)\b', text, re.IGNORECASE)
+        mention_names = {m.lower() for m in mentions}
+
+        if "ark" in mention_names:
+            await self._invoke_ark(group_id, text, sender_name)
+
+        if "cc" in mention_names:
+            # Broadcast event — the MCP server bridge subscribes and queues it
+            await self.service.local_api.broadcast_event("cc_group_mention", {
+                "group_id": group_id,
+                "text": text,
+                "sender_name": sender_name,
+                "sender_node_id": sender_node_id,
+            })
+
+    async def _invoke_ark(self, group_id: str, text: str, sender_name: str) -> None:
+        """Invoke agent_001 (Ark) and post response to the group."""
+        try:
+            dpc_provider = self.service.llm_manager.providers.get("dpc_agent")
+            if not dpc_provider:
+                self.logger.warning("_invoke_ark: dpc_agent provider not found")
+                return
+            manager = dpc_provider.get_manager("agent_001")
+            prompt = f"[Group chat — {sender_name} says]: {text}"
+            response = await manager.process_message(
+                message=prompt,
+                conversation_id=group_id,
+                sender_name=sender_name,
+            )
+            if response:
+                await self.service.send_group_agent_message(group_id, "Ark", response)
+        except Exception as e:
+            self.logger.error("Ark group response failed: %s", e, exc_info=True)
 
 
 class GroupLeaveHandler(MessageHandler):

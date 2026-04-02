@@ -24,7 +24,6 @@
 
   function handleCreate() {
     if (!groupName.trim()) return;
-    if (selectedPeers.size === 0) return;
 
     dispatch('create', {
       name: groupName.trim(),
@@ -106,7 +105,7 @@
         <button
           class="btn-create"
           on:click={handleCreate}
-          disabled={!groupName.trim() || selectedPeers.size === 0}
+          disabled={!groupName.trim()}
         >
           Create Group
         </button>

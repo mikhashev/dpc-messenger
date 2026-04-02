@@ -193,14 +193,7 @@
     activeChatId.startsWith('ai_') || activeChatId === 'local_ai'
       ? true
       : activeChatId.startsWith('group-')
-        ? (() => {
-            const group = $groupChats.get(activeChatId);
-            if (!group) return false;
-            const selfId = $nodeStatus?.node_id || '';
-            return group.members?.some((m: string) =>
-              m !== selfId && ($nodeStatus?.peer_info?.some((p: any) => p.node_id === m) ?? false)
-            ) ?? false;
-          })()
+        ? true  // Group chats always allow sending — agents respond locally, peers optional
         : ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
   );
 

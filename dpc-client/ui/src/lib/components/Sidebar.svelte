@@ -752,10 +752,7 @@
             type="button"
             class="add-group-btn"
             onclick={() => onCreateGroup?.()}
-            disabled={!nodeStatus?.p2p_peers || nodeStatus.p2p_peers.length === 0}
-            title={nodeStatus?.p2p_peers && nodeStatus.p2p_peers.length > 0
-              ? "Create new group chat"
-              : "Connect to peers first to create a group"}
+            title="Create new group chat"
           >
             + Group
           </button>

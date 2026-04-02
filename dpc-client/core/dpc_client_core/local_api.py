@@ -90,6 +90,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Group chat
     "create_group_chat",
     "send_group_message",
+    "send_group_agent_message",
     "send_group_image",
     "send_group_voice_message",
     "send_group_file",

@@ -428,15 +428,7 @@
     activeChatId.startsWith('ai_') || activeChatId === 'local_ai'
       ? true  // AI chats don't require peer connection
       : activeChatId.startsWith('group-')
-        ? (() => {
-            // Group chat: at least one other member online
-            const group = $groupChats.get(activeChatId);
-            if (!group) return false;
-            const selfId = $nodeStatus?.node_id || '';
-            return group.members?.some((m: string) =>
-              m !== selfId && ($nodeStatus?.peer_info?.some((p: any) => p.node_id === m) ?? false)
-            ) ?? false;
-          })()
+        ? true  // Group chats always allow sending — agents respond locally, peers are optional
         : ($nodeStatus?.peer_info?.some((p: any) => p.node_id === activeChatId) ?? false)
   );
 
