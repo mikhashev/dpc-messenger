@@ -37,10 +37,10 @@
     selfName?: string;
   } = $props();
 
-  // A sender counts as "AI" if it's the canonical 'ai' string (direct DPC queries) or
-  // starts with 'agent_' (Telegram-bridged, history-loaded, or proactively-fetched agent messages).
-  // These senders get markdown rendering, thinking block, and raw output collapsible.
-  const isAiSender = (sender: string) => sender === 'ai' || sender?.startsWith('agent_');
+  // A sender counts as "AI" if it's the canonical 'ai' string (direct DPC queries),
+  // starts with 'agent_' (Telegram-bridged, history-loaded, or proactively-fetched agent messages),
+  // or is 'cc' (Claude Code responses injected via @CC mentions).
+  const isAiSender = (sender: string) => sender === 'ai' || sender === 'cc' || sender?.startsWith('agent_');
 
   // Debug: Log when progress props change
   $effect(() => {

@@ -11,6 +11,7 @@
     agentProgress,
     agentProgressClear,
     agentTextChunk,
+    agentChatMessage,
     agentHistoryUpdated,
     agentTelegramLinked,
     agentTelegramUnlinked,
@@ -309,6 +310,38 @@
         });
 
         // Scroll to bottom if this is the active chat (two rAF calls for layout accuracy)
+        if (isActiveChatConv(conversation_id)) {
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
+          }));
+        }
+      });
+    }
+  });
+
+  // Handle CC agent chat message (injected via send_cc_agent_response)
+  $effect(() => {
+    if ($agentChatMessage) {
+      const { conversation_id, content, sender_name, timestamp } = $agentChatMessage;
+
+      untrack(() => {
+        chatHistories.update(map => {
+          const newMap = new Map(map);
+          const existing = newMap.get(conversation_id) || [];
+          const stableId = `cc-${timestamp ? new Date(timestamp).getTime() : Date.now()}`;
+          const newMsg: Message = {
+            id: stableId,
+            sender: 'cc',
+            senderName: sender_name || 'CC',
+            text: content,
+            timestamp: timestamp ? new Date(timestamp).getTime() : Date.now(),
+            attachments: [],
+          };
+          newMap.set(conversation_id, [...existing, newMsg]);
+          return newMap;
+        });
+
+        // Scroll to bottom if active
         if (isActiveChatConv(conversation_id)) {
           requestAnimationFrame(() => requestAnimationFrame(() => {
             if (chatWindow) chatWindow.scrollTop = chatWindow.scrollHeight;
