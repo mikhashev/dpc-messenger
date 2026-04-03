@@ -328,7 +328,9 @@ async def run_llm_loop(
     # break the loop to prevent infinite repetition.
     MAX_DUPLICATE_CALLS = 5
     MAX_TOOL_CALLS_PER_TURN = 25  # Hard cap: if LLM emits more than this in one shot, it's looping
+    MAX_CONSECUTIVE_TOOL_ONLY_ROUNDS = 15  # Force final answer after this many rounds without text
     _tool_call_counts: Dict[str, int] = {}
+    _consecutive_tool_only = 0  # Rounds with tool calls but no text content
 
     round_idx = 0
     try:
@@ -460,11 +462,46 @@ async def run_llm_loop(
             if thinking and thinking.strip():
                 emit_progress(thinking.strip(), None, round_idx)
                 llm_trace["assistant_notes"].append(thinking.strip()[:320])
+                _consecutive_tool_only = 0  # Has text — reset counter
             elif tool_calls:
                 # Native tool calling returns no text preamble — emit tool names so the
                 # UI shows activity rather than a silent "Thinking..." placeholder.
                 names = ", ".join(tc["function"]["name"] for tc in tool_calls)
                 emit_progress(f"→ {names}", None, round_idx)
+                _consecutive_tool_only += 1  # Tool-only round — increment
+
+            # Guard: too many consecutive tool-only rounds without producing text.
+            # The agent is doing deep research but never summarizing — force a final answer.
+            if _consecutive_tool_only >= MAX_CONSECUTIVE_TOOL_ONLY_ROUNDS:
+                log.warning(
+                    "Agent spent %d consecutive rounds on tool calls without text — forcing final answer",
+                    _consecutive_tool_only,
+                )
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        f"[RESEARCH_LIMIT] You have spent {_consecutive_tool_only} consecutive rounds "
+                        "calling tools without providing any text response to the user. "
+                        "Stop researching. Summarise your findings and give your answer now."
+                    ),
+                })
+                try:
+                    final_msg, _ = await llm.chat(
+                        messages,
+                        tools=None,
+                        on_stream_chunk=on_stream_chunk,
+                        conversation_id=conversation_id,
+                    )
+                    if final_msg and final_msg.get("content"):
+                        return final_msg["content"], accumulated_usage, llm_trace
+                except Exception:
+                    log.warning("Failed to get response after research limit", exc_info=True)
+                return (
+                    f"⚠️ Agent spent {_consecutive_tool_only} rounds researching without answering. "
+                    "Please rephrase your question or ask for a specific aspect.",
+                    accumulated_usage,
+                    llm_trace,
+                )
 
             # Check for duplicate tool calls before executing.
             # If the same (tool, args) fingerprint has appeared MAX_DUPLICATE_CALLS

@@ -623,18 +623,20 @@ class DpcAgentManager:
                 reply_telegram_chat_id=telegram_chat_id,
             )
 
-            # Track agent response in monitor — skip thinking-only fallback responses
-            # since they contain no real content for knowledge extraction or continuity
+            # Track agent response in monitor.
+            # Always save if there's content, thinking, or streaming_raw — the UI
+            # already shows thinking/raw blocks, so they must be persisted to history.
             _THINKING_FALLBACK = "(thinking completed - see reasoning for details)"
-            if response and response.strip() != _THINKING_FALLBACK:
-                # Capture thinking from last LLM usage (set by dpc_agent/loop.py during execution)
-                _thinking = agent._last_usage.get("thinking") if agent._last_usage else None
-                # Capture full streamed text (accumulated above); skip if identical to final content
-                _raw = "".join(_stream_chunks) if _stream_chunks else None
-                _streaming_raw = _raw if _raw and _raw.strip() != (response or "").strip() else None
+            _thinking = agent._last_usage.get("thinking") if agent._last_usage else None
+            _raw = "".join(_stream_chunks) if _stream_chunks else None
+            _streaming_raw = _raw if _raw and _raw.strip() != (response or "").strip() else None
+            _has_content = response and response.strip() != _THINKING_FALLBACK
+            _has_extras = _thinking or _streaming_raw
+
+            if _has_content or _has_extras:
                 monitor.add_message(
                     role="assistant",
-                    content=response,
+                    content=response or "",
                     timestamp=utc_now_iso(),
                     sender_node_id=conversation_id,
                     sender_name=agent_display_name,
