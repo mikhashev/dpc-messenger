@@ -3830,6 +3830,15 @@ class CoreService:
                 logger.info("Notifying connected peers of provider changes")
                 await self._notify_peers_of_provider_changes()
 
+                # Sync agent evolution/consciousness settings without restart
+                try:
+                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                        for mgr in dpc_agent_provider._managers.values():
+                            mgr.sync_firewall_settings()
+                except Exception as e:
+                    logger.warning("Failed to sync agent firewall settings: %s", e)
+
                 # Emit event to UI
                 await self.local_api.broadcast_event("firewall_rules_updated", {
                     "message": message

@@ -255,6 +255,61 @@ class DpcAgentManager:
 
         log.info("DpcAgent started successfully")
 
+    def sync_firewall_settings(self) -> None:
+        """Re-read evolution/consciousness settings from firewall and start/stop accordingly.
+
+        Called after firewall rules are saved via UI to apply changes without restart.
+        """
+        if self._agent is None:
+            return
+
+        # Read current settings from firewall (same logic as start())
+        _per_agent_profile = (
+            self.firewall.get_agent_profile_settings(self.agent_id)
+            if (self.firewall and self.agent_id)
+            else None
+        )
+
+        # Evolution
+        _evo_global = self.firewall.evolution_enabled if self.firewall else False
+        _per_evo = (_per_agent_profile or {}).get('evolution', {})
+        evo_enabled = _per_evo.get('enabled', _evo_global)
+
+        if evo_enabled and not self._agent.is_evolution_running():
+            self._agent._evolution_enabled = True
+            self._agent.config.evolution_enabled = True
+            self._agent.config.evolution_interval_minutes = _per_evo.get(
+                'interval_minutes',
+                self.firewall.evolution_interval_minutes if self.firewall else 60,
+            )
+            self._agent.config.evolution_auto_apply = _per_evo.get(
+                'auto_apply',
+                self.firewall.evolution_auto_apply if self.firewall else False,
+            )
+            self._agent.start_evolution()
+            log.info("Evolution started via firewall sync")
+        elif not evo_enabled and self._agent.is_evolution_running():
+            self._agent.stop_evolution()
+            self._agent._evolution_enabled = False
+            self._agent.config.evolution_enabled = False
+            log.info("Evolution stopped via firewall sync")
+
+        # Consciousness
+        _con_global = self.firewall.consciousness_enabled if self.firewall else False
+        _per_con = (_per_agent_profile or {}).get('consciousness', {})
+        con_enabled = _per_con.get('enabled', _con_global)
+
+        if con_enabled and not self._agent.is_consciousness_running():
+            self._agent._consciousness_enabled = True
+            self._agent.config.background_consciousness = True
+            self._agent.start_consciousness(emit_progress=self._emit_progress)
+            log.info("Consciousness started via firewall sync")
+        elif not con_enabled and self._agent.is_consciousness_running():
+            self._agent.stop_consciousness()
+            self._agent._consciousness_enabled = False
+            self._agent.config.background_consciousness = False
+            log.info("Consciousness stopped via firewall sync")
+
     async def ensure_started(self) -> "DpcAgentManager":
         """
         Ensure the agent is started, starting it if necessary.
