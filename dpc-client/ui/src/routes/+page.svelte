@@ -211,6 +211,10 @@
   let showClearConfirm = $state(false);
   let pendingClearFn = $state<(() => void) | null>(null);
 
+  // "Start new session?" confirmation state (#7 fix: confirm BEFORE reset)
+  let showNewSessionConfirm = $state(false);
+  let pendingNewSessionChatId = $state<string | null>(null);
+
   // Connection state (Phase 2: UX improvements)
   let isConnecting = $state(false);
   let connectionError = $state("");
@@ -725,9 +729,24 @@
   }
 
   function handleNewChat(chatId: string) {
-    // v0.11.3: Send proposal to peer for mutual approval
-    // Frontend state will be cleared only after approval
-    proposeNewSession(chatId);
+    // #7 fix: Show confirmation dialog BEFORE sending reset to backend.
+    // Previously, proposeNewSession() was called immediately, archiving history
+    // before the user could confirm. Now we confirm first.
+    pendingNewSessionChatId = chatId;
+    showNewSessionConfirm = true;
+  }
+
+  function confirmNewSession() {
+    if (pendingNewSessionChatId) {
+      proposeNewSession(pendingNewSessionChatId);
+    }
+    showNewSessionConfirm = false;
+    pendingNewSessionChatId = null;
+  }
+
+  function cancelNewSession() {
+    showNewSessionConfirm = false;
+    pendingNewSessionChatId = null;
   }
 
   // handleAddAIChat, confirmAddAIChat, cancelAddAIChat, handleAddAgentChat, handleDeleteAIChat
@@ -1198,6 +1217,24 @@
         </button>
         <button class="btn-confirm-no" onclick={() => { showClearConfirm = false; pendingClearFn = null; }}>
           No, keep
+        </button>
+      </div>
+    </div>
+  </div>
+{/if}
+
+<!-- Start new session? Confirm BEFORE reset (#7 fix) -->
+{#if showNewSessionConfirm}
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div class="confirm-overlay" role="dialog" aria-modal="true" aria-label="New session?">
+    <div class="confirm-dialog">
+      <p>Start new session? Current history will be archived.</p>
+      <div class="confirm-actions">
+        <button class="btn-confirm-yes" onclick={confirmNewSession}>
+          Yes, new session
+        </button>
+        <button class="btn-confirm-no" onclick={cancelNewSession}>
+          Cancel
         </button>
       </div>
     </div>
