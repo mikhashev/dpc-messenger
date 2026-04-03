@@ -32,11 +32,17 @@ class ContextFirewall:
         except Exception as e:
             raise ValueError(f"Failed to load firewall rules: {e}")
 
-        # Parse file groups (aliases for groups of files)
-        self.file_groups: Dict[str, List[str]] = self.rules.get('file_groups', {})
+        # Parse file groups (aliases for groups of files) — skip _comment keys
+        self.file_groups: Dict[str, List[str]] = {
+            k: v for k, v in self.rules.get('file_groups', {}).items()
+            if not k.startswith('_') and isinstance(v, list)
+        }
 
-        # Parse node groups (which nodes belong to which groups)
-        self.node_groups: Dict[str, List[str]] = self.rules.get('node_groups', {})
+        # Parse node groups (which nodes belong to which groups) — skip _comment keys
+        self.node_groups: Dict[str, List[str]] = {
+            k: v for k, v in self.rules.get('node_groups', {}).items()
+            if not k.startswith('_') and isinstance(v, list)
+        }
 
         # Parse compute sharing settings
         self._parse_compute_settings()
