@@ -394,7 +394,18 @@ class KnowledgeService:
                 if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
                     _mgr = dpc_agent_provider._managers.get(conv_id)
                     if _mgr:
-                        agent_provider_alias = _mgr.config.get("provider_alias")
+                        # Resolve underlying LLM provider — NOT "dpc_agent" itself,
+                        # which would route through agent.process_message() and pollute
+                        # history.json with the voting prompt (#20/#10/#16).
+                        _raw_alias = _mgr.config.get("provider_alias")
+                        if _raw_alias == "dpc_agent" or not _raw_alias:
+                            # Use the agent's actual LLM provider (agent_provider → default)
+                            agent_provider_alias = (
+                                getattr(self.llm_manager, "agent_provider", None)
+                                or self.llm_manager.default_provider
+                            )
+                        else:
+                            agent_provider_alias = _raw_alias
                         _monitor = _mgr._agent_monitors.get(conv_id)
                         if _monitor:
                             conversation_history = _monitor.full_conversation
