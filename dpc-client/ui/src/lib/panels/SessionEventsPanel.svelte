@@ -28,6 +28,9 @@
     onConversationReset?: (conversationId: string, clear: () => void) => void;
   } = $props();
 
+  // Track recent New Session approval to suppress duplicate conversationReset dialog
+  let recentNewSessionConvId: string | null = $state(null);
+
   // ---------------------------------------------------------------------------
   // Effects
   // ---------------------------------------------------------------------------
@@ -75,6 +78,7 @@
       });
 
       onClearStateForConversation(conversationId);
+      recentNewSessionConvId = conversationId;
       newSessionResult.set(null);
     }
   });
@@ -85,6 +89,13 @@
       const conversationId = $conversationReset.conversation_id;
       console.log('[ConversationReset] Received for:', conversationId);
       conversationReset.set(null);
+
+      // Skip if already handled by New Session approval (avoid double dialog)
+      if (recentNewSessionConvId === conversationId) {
+        console.log('[ConversationReset] Skipping — already cleared by New Session');
+        recentNewSessionConvId = null;
+        return;
+      }
 
       const doClear = () => {
         chatHistories.update(h => {
