@@ -296,10 +296,11 @@ def deduplicate_identity(ctx: ToolContext) -> str:
                 total_removed += 1
             sections_cleaned.append(occurrences[0][1])  # Keep original header name
 
-        # Update timestamp
+        # Update timestamp (replace old, don't accumulate)
         for i, line in enumerate(lines):
             if line.strip() == "## Last Updated":
-                lines[i] = f"## Last Updated"
+                while i + 1 < len(lines) and lines[i + 1].strip() and not lines[i + 1].startswith("##"):
+                    del lines[i + 1]
                 lines.insert(i + 1, datetime.now(timezone.utc).isoformat())
                 break
 
@@ -423,11 +424,13 @@ This file tracks the agent's self-understanding and evolving identity.
             else:
                 new_lines = lines + ["", section_header, content]
 
-        # Update timestamp
+        # Update timestamp (replace old timestamp, don't accumulate)
         timestamp_updated = False
         for i, line in enumerate(new_lines):
             if line.strip() == "## Last Updated":
-                new_lines[i] = f"## Last Updated"
+                # Remove old timestamp line(s) after the header
+                while i + 1 < len(new_lines) and new_lines[i + 1].strip() and not new_lines[i + 1].startswith("##"):
+                    del new_lines[i + 1]
                 new_lines.insert(i + 1, datetime.now(timezone.utc).isoformat())
                 timestamp_updated = True
                 break
