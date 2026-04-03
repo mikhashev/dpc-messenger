@@ -6798,6 +6798,13 @@ class CoreService:
             )
             monitor.save_history()
 
+            # Update token stats so UI counter reflects CC messages (#4)
+            cc_tokens = len(text) // 4  # rough estimate
+            old_estimate = getattr(monitor, '_last_context_estimated', 0)
+            if old_estimate:
+                monitor._last_context_estimated = old_estimate + cc_tokens
+            token_stats = manager.get_session_state(conversation_id)
+
             # Reset chain depth — each CC message starts a fresh chain allowance
             self._cc_ark_chain_depth = 0
 
@@ -6811,6 +6818,9 @@ class CoreService:
                     "content": text,
                     "sender_name": "CC",
                     "timestamp": timestamp,
+                    "context_estimated": token_stats.get("context_estimated", 0),
+                    "history_tokens": token_stats.get("history_tokens", 0),
+                    "tokens_limit": token_stats.get("tokens_limit", 128000),
                 })
 
             logger.info("CC response injected into %s (%d chars)", conversation_id, len(text))

@@ -337,7 +337,8 @@
   // or Ark chain-triggered responses via _invoke_ark_in_agent_chat)
   $effect(() => {
     if ($agentChatMessage) {
-      const { conversation_id, content, sender_name, timestamp, role, thinking, streaming_raw } = $agentChatMessage;
+      const { conversation_id, message_id, content, sender_name, timestamp, role, thinking, streaming_raw,
+              context_estimated, history_tokens, tokens_limit } = $agentChatMessage;
 
       untrack(() => {
         chatHistories.update(map => {
@@ -345,7 +346,7 @@
           const existing = newMap.get(conversation_id) || [];
           // Determine sender: CC for user/cc role, agent for assistant role
           const isAgent = role === 'assistant';
-          const stableId = `${isAgent ? 'ark' : 'cc'}-${timestamp ? new Date(timestamp).getTime() : Date.now()}`;
+          const stableId = message_id || `${isAgent ? 'ark' : 'cc'}-${timestamp ? new Date(timestamp).getTime() : Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const newMsg: Message = {
             id: stableId,
             sender: isAgent ? conversation_id : 'cc',
@@ -359,6 +360,16 @@
           newMap.set(conversation_id, [...existing, newMsg]);
           return newMap;
         });
+
+        // Update token usage from CC message (#4: context_estimated stale after CC messages)
+        if (context_estimated && tokens_limit) {
+          onUpdateTokenUsage(conversation_id, {
+            used: history_tokens || 0,
+            limit: tokens_limit,
+            historyTokens: history_tokens || 0,
+            contextEstimated: context_estimated,
+          });
+        }
 
         // Scroll to bottom if active
         if (isActiveChatConv(conversation_id)) {

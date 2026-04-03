@@ -567,6 +567,13 @@ class DpcAgentManager:
             )
             monitor.save_history()  # Save to disk immediately
 
+            # Update context_estimated immediately so UI counter reflects user message (#4)
+            # Token stats will be included in Ark's response via get_session_state()
+            user_tokens = len(message) // 4
+            old_estimate = getattr(monitor, '_last_context_estimated', 0)
+            if old_estimate:
+                monitor._last_context_estimated = old_estimate + user_tokens
+
         # Use agent_id as sender name for better identification in chat UI
         agent_display_name = self.agent_id or "DPC Agent"
 
