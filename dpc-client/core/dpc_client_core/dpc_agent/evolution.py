@@ -149,10 +149,13 @@ class EvolutionManager:
         self._evolution_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
 
-        # Pending changes awaiting approval
-        self._pending_changes: List[ProposedChange] = []
+        # Pending changes awaiting approval — load from disk to survive restarts
+        self._pending_changes: List[ProposedChange] = self._load_pending_changes()
 
-        log.info(f"EvolutionManager initialized (enabled={enabled}, auto_apply={auto_apply})")
+        log.info(
+            "EvolutionManager initialized (enabled=%s, auto_apply=%s, pending=%d)",
+            enabled, auto_apply, len(self._pending_changes),
+        )
 
     def is_path_allowed(self, path: str) -> bool:
         """
@@ -537,6 +540,30 @@ If no improvements are warranted: {{"proposals": []}}
 
         log.info(f"Queued change {change_id} for approval: {pending_change.description}")
         return change_id
+
+    def _load_pending_changes(self) -> List[ProposedChange]:
+        """Load pending changes from disk (survives restarts)."""
+        pending_file = self.agent_root / "state" / "pending_changes.json"
+        if not pending_file.exists():
+            return []
+        try:
+            data = json.loads(pending_file.read_text(encoding="utf-8"))
+            changes = []
+            for c in data.get("changes", []):
+                changes.append(ProposedChange(
+                    id=c["id"],
+                    path=c["path"],
+                    change_type=c["change_type"],
+                    content=c["content"],
+                    description=c["description"],
+                    created_at=c.get("created_at", ""),
+                ))
+            if changes:
+                log.info("Loaded %d pending evolution changes from disk", len(changes))
+            return changes
+        except Exception as e:
+            log.warning("Failed to load pending changes: %s", e)
+            return []
 
     def _save_pending_changes(self) -> None:
         """Save pending changes to disk."""
