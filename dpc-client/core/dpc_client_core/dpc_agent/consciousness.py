@@ -135,6 +135,11 @@ class BackgroundConsciousness:
                 if not self._running:
                     break
 
+                # Yield to user interaction — don't compete for LLM provider
+                if getattr(self.agent, '_user_active', False):
+                    log.debug("Skipping thought — user interaction active")
+                    continue
+
                 # Perform a thought
                 await self._think()
 

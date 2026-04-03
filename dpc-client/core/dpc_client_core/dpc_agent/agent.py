@@ -149,6 +149,9 @@ class DpcAgent:
         # Callback set by agent_manager to deliver scheduled task results to Telegram
         self._telegram_send_fn: Optional[Any] = None
 
+        # Flag: user interaction in progress — consciousness/evolution should yield
+        self._user_active = False
+
         # Background consciousness (optional)
         self._consciousness: Optional["BackgroundConsciousness"] = None
         self._consciousness_enabled = self.config.background_consciousness

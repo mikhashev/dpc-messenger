@@ -718,6 +718,12 @@ If no improvements are warranted: {{"proposals": []}}
 
             while not self._stop_event.is_set():
                 try:
+                    # Yield to user interaction — don't compete for LLM provider
+                    if getattr(self.agent, '_user_active', False):
+                        log.debug("Skipping evolution cycle — user interaction active")
+                        await asyncio.sleep(10)  # Check again shortly
+                        continue
+
                     await self.run_evolution_cycle()
 
                     # Wait for next cycle

@@ -607,21 +607,26 @@ class DpcAgentManager:
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
 
-            response = await agent.process(
-                message=message,
-                conversation_id=conversation_id,
-                dpc_context=dpc_context,
-                emit_progress=emit_progress_with_context,
-                on_stream_chunk=emit_stream_chunk,
-                session_state=session_state,
-                conversation_monitor=monitor,  # For knowledge extraction tool
-                task_id=task_id,  # Unique per-message ID for event logging
-                # Pass image parameters for vision queries
-                image_base64=image_base64,
-                image_mime=image_mime,
-                image_caption=image_caption,
-                reply_telegram_chat_id=telegram_chat_id,
-            )
+            # Signal consciousness/evolution to yield while user interaction runs
+            agent._user_active = True
+            try:
+                response = await agent.process(
+                    message=message,
+                    conversation_id=conversation_id,
+                    dpc_context=dpc_context,
+                    emit_progress=emit_progress_with_context,
+                    on_stream_chunk=emit_stream_chunk,
+                    session_state=session_state,
+                    conversation_monitor=monitor,  # For knowledge extraction tool
+                    task_id=task_id,  # Unique per-message ID for event logging
+                    # Pass image parameters for vision queries
+                    image_base64=image_base64,
+                    image_mime=image_mime,
+                    image_caption=image_caption,
+                    reply_telegram_chat_id=telegram_chat_id,
+                )
+            finally:
+                agent._user_active = False
 
             # Track agent response in monitor.
             # Always save if there's content, thinking, or streaming_raw — the UI
