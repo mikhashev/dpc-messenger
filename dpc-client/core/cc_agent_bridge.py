@@ -68,13 +68,11 @@ def read_history(last_n: int = 0) -> list:
     if not _get_history_path().exists():
         _last_messages = []
         return []
-    mtime = _get_history_path().stat().st_mtime
+    history_path = _get_history_path()
+    mtime = history_path.stat().st_mtime
     if mtime == _last_mtime and _last_messages:
-        # File unchanged — return cached
+        # File unchanged — return cached (only useful in poll mode, same process)
         return _last_messages[-last_n:] if last_n else _last_messages
-    # File changed — wait for backend to finish writing
-    if mtime != _last_mtime:
-        time.sleep(WRITE_SETTLE_MS / 1000)
     try:
         with open(_get_history_path(), encoding="utf-8") as f:
             data = json.load(f)
@@ -108,6 +106,29 @@ def get_new_messages(messages: list, last_count: int) -> list:
     if len(messages) > last_count:
         return messages[last_count:]
     return []
+
+
+def check_backend_status() -> dict:
+    """Check if DPC backend is running by verifying history.json freshness.
+    Does NOT connect to WebSocket (raw TCP connect causes handshake errors in backend logs).
+    """
+    config = _read_config()
+    port = int(config.get("api", "port", fallback="9999"))
+    status = {"backend": False, "port": port}
+    # Check if history.json exists
+    hp = _get_history_path()
+    status["history_exists"] = hp.exists()
+    if hp.exists():
+        age_seconds = time.time() - hp.stat().st_mtime
+        status["history_age_seconds"] = round(age_seconds)
+    # Check backend by log file freshness (more reliable than history.json
+    # which only updates on new messages)
+    log_path = DPC_HOME / "logs" / "dpc-client.log"
+    if log_path.exists():
+        log_age = time.time() - log_path.stat().st_mtime
+        status["log_age_seconds"] = round(log_age)
+        status["backend"] = log_age < 60  # log updated within last minute = running
+    return status
 
 
 # ─────────────────────────────────────────────────────────────
@@ -300,7 +321,18 @@ def main():
     parser.add_argument("--mentions", action="store_true", help="Show @CC mentions")
     parser.add_argument("--analyze", action="store_true", help="Ark behavioral analysis")
     parser.add_argument("--send", type=str, help="Send CC response text")
+    parser.add_argument("--status", action="store_true", help="Check backend/frontend status")
     args = parser.parse_args()
+
+    if args.status:
+        status = check_backend_status()
+        print(f"Backend (port {status['port']}): {'UP' if status['backend'] else 'DOWN'}")
+        print(f"History: {'exists' if status.get('history_exists') else 'missing'}", end="")
+        if 'history_age_seconds' in status:
+            print(f" (last update {status['history_age_seconds']}s ago)")
+        else:
+            print()
+        return
 
     if args.send:
         send_response_sync(args.send)
