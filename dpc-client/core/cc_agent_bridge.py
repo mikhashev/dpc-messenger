@@ -16,6 +16,7 @@ Usage:
 """
 
 import json
+import os
 import sys
 import time
 import re
@@ -26,24 +27,65 @@ from pathlib import Path
 # Fix Windows console encoding
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-HISTORY_PATH = Path.home() / ".dpc" / "conversations" / "agent_001" / "history.json"
-WS_URL = "ws://127.0.0.1:9999"
+DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+CONFIG_PATH = DPC_HOME / "config.ini"
 POLL_INTERVAL = 5
-CONVERSATION_ID = "agent_001"
+DEFAULT_CONVERSATION_ID = "agent_001"
+
+
+def _read_config():
+    """Read config.ini once, return configparser object."""
+    import configparser
+    config = configparser.ConfigParser()
+    if CONFIG_PATH.exists():
+        config.read(CONFIG_PATH, encoding="utf-8")
+    return config
+
+
+def _get_ws_url() -> str:
+    """Read WebSocket URL from config.ini, fallback to default."""
+    config = _read_config()
+    port = config.get("api", "port", fallback="9999")
+    return f"ws://127.0.0.1:{port}"
+
+
+def _get_history_path(conversation_id: str = DEFAULT_CONVERSATION_ID) -> Path:
+    """Get history.json path for a conversation."""
+    return DPC_HOME / "conversations" / conversation_id / "history.json"
+WRITE_SETTLE_MS = 200  # wait after mtime change before reading (let backend finish writing)
+
+_last_mtime = 0.0
+_last_messages = []
 
 
 # ─────────────────────────────────────────────────────────────
-# READ — history.json
+# READ — history.json (with mtime tracking to avoid race conditions)
 # ─────────────────────────────────────────────────────────────
 
 def read_history(last_n: int = 0) -> list:
-    """Read messages from history.json. Returns list of message dicts."""
-    if not HISTORY_PATH.exists():
+    """Read messages from history.json. Uses mtime to avoid reading mid-write."""
+    global _last_mtime, _last_messages
+    if not _get_history_path().exists():
+        _last_messages = []
         return []
-    with open(HISTORY_PATH, encoding="utf-8") as f:
-        data = json.load(f)
-    msgs = data.get("messages", [])
-    return msgs[-last_n:] if last_n else msgs
+    mtime = _get_history_path().stat().st_mtime
+    if mtime == _last_mtime and _last_messages:
+        # File unchanged — return cached
+        return _last_messages[-last_n:] if last_n else _last_messages
+    # File changed — wait for backend to finish writing
+    if mtime != _last_mtime:
+        time.sleep(WRITE_SETTLE_MS / 1000)
+    try:
+        with open(_get_history_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        _last_messages = data.get("messages", [])
+        _last_mtime = _get_history_path().stat().st_mtime  # re-read mtime after successful parse
+    except (json.JSONDecodeError, IOError):
+        # File still being written — return cached
+        if _last_messages:
+            return _last_messages[-last_n:] if last_n else _last_messages
+        return []
+    return _last_messages[-last_n:] if last_n else _last_messages
 
 
 def find_mentions(messages: list, since_index: int = 0) -> list:
@@ -56,7 +98,7 @@ def find_mentions(messages: list, since_index: int = 0) -> list:
         sender = msg.get("sender_name", "")
         if sender == "CC":
             continue
-        if "@CC" in content or "@cc" in content:
+        if "@CC" in content or "@cc" in content or "@СС" in content or "@сс" in content:
             mentions.append((i, msg))
     return mentions
 
@@ -72,7 +114,7 @@ def get_new_messages(messages: list, last_count: int) -> list:
 # WRITE — WebSocket send
 # ─────────────────────────────────────────────────────────────
 
-async def send_response(text: str, conversation_id: str = CONVERSATION_ID) -> dict:
+async def send_response(text: str, conversation_id: str = DEFAULT_CONVERSATION_ID) -> dict:
     """Send CC response via WebSocket to backend."""
     try:
         import websockets
@@ -91,7 +133,7 @@ async def send_response(text: str, conversation_id: str = CONVERSATION_ID) -> di
     }
 
     try:
-        async with websockets.connect(WS_URL) as ws:
+        async with websockets.connect(_get_ws_url()) as ws:
             await ws.send(json.dumps(command))
             # Wait for response (with timeout)
             try:
@@ -110,7 +152,7 @@ async def send_response(text: str, conversation_id: str = CONVERSATION_ID) -> di
         return {"status": "error", "message": str(e)}
 
 
-def send_response_sync(text: str, conversation_id: str = CONVERSATION_ID) -> dict:
+def send_response_sync(text: str, conversation_id: str = DEFAULT_CONVERSATION_ID) -> dict:
     """Synchronous wrapper for send_response."""
     return asyncio.run(send_response(text, conversation_id))
 
@@ -220,7 +262,7 @@ def poll(show_thinking: bool = False, show_tools: bool = False):
     messages = read_history()
     last_count = len(messages)
     print(f"[CC Bridge] Started. History: {last_count} msgs. Poll every {POLL_INTERVAL}s.")
-    print(f"[CC Bridge] Path: {HISTORY_PATH}")
+    print(f"[CC Bridge] Path: {_get_history_path()}")
     print(f"[CC Bridge] Ctrl+C to stop.\n")
 
     try:
