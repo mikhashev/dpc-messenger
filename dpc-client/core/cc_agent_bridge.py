@@ -352,6 +352,7 @@ def main():
     parser.add_argument("--analyze", action="store_true", help="Ark behavioral analysis")
     parser.add_argument("--send", type=str, help="Send CC response text")
     parser.add_argument("--status", action="store_true", help="Check backend/frontend status")
+    parser.add_argument("--check", type=int, metavar="SINCE", help="Scan full content for @CC mentions since message index")
     args = parser.parse_args()
 
     if args.status:
@@ -366,6 +367,26 @@ def main():
 
     if args.send:
         send_response_sync(args.send)
+        return
+
+    if args.check is not None:
+        messages = read_history()
+        count = len(messages)
+        print(f"TOTAL: {count}")
+        mentions = find_mentions(messages, since_index=args.check)
+        for i, msg in mentions:
+            sender = msg.get("sender_name", "?")
+            content = msg.get("content", "")
+            idx = content.find("@CC")
+            if idx < 0:
+                idx = content.lower().find("@cc")
+            if idx >= 0:
+                ctx = content[max(0, idx - 20):idx + 100]
+            else:
+                ctx = content[:100]
+            print(f"MENTION [{i}] {sender}: {ctx}")
+        if not mentions:
+            print("NO_MENTIONS")
         return
 
     messages = read_history()
