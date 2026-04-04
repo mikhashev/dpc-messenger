@@ -6872,7 +6872,7 @@ class CoreService:
             agent_name = self._get_agent_display_name(_chain_agent_id).lower()
             if agent_name in cc_mentions or _chain_agent_id in cc_mentions:
                 chain_depth = getattr(self, '_cc_ark_chain_depth', 0)
-                if chain_depth < 3:
+                if chain_depth < 5:
                     self._cc_ark_chain_depth = chain_depth + 1
                     logger.info("CC mentioned @%s in %s (chain depth %d) — triggering agent response",
                                 agent_name, conversation_id, chain_depth + 1)
