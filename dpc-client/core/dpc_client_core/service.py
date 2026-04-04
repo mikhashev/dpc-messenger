@@ -7412,8 +7412,14 @@ class CoreService:
         return agent_id
 
     def get_cc_display_name(self) -> str:
-        """Read CC display name from config.ini [agent_chat] section."""
+        """Read CC display name from config.ini [agent_chat] section.
+        Sync for internal use. For WebSocket API, use get_cc_config().
+        """
         return self.settings.get("agent_chat", "cc_display_name", fallback="CC")
+
+    async def get_cc_config(self) -> Dict[str, Any]:
+        """Get CC display name (async API endpoint for UI)."""
+        return {"status": "success", "cc_display_name": self.get_cc_display_name()}
 
     async def set_cc_display_name(self, name: str) -> Dict[str, Any]:
         """Update CC display name in config.ini."""

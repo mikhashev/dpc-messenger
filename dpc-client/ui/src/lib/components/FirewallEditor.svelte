@@ -214,10 +214,8 @@
 
   async function loadCcDisplayName() {
     try {
-      const result = await sendCommand('get_cc_display_name', {});
-      if (typeof result === 'string') {
-        ccDisplayName = result;
-      } else if (result?.cc_display_name) {
+      const result = await sendCommand('get_cc_config', {});
+      if (result?.cc_display_name) {
         ccDisplayName = result.cc_display_name;
       }
     } catch (error) {
