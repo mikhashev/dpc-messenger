@@ -336,7 +336,7 @@ class AgentService:
 
     # --- Agent Task Board Methods (v0.20.0) ---
 
-    async def get_agent_tasks(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+    async def get_agent_tasks(self, agent_id: str = None) -> Dict[str, Any]:
         """Get agent task history for the Task Board panel.
 
         Reads:
@@ -480,7 +480,7 @@ class AgentService:
             logger.error("Error in get_agent_tasks: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def get_agent_task_result(self, agent_id: str = "agent_001", task_id: str = "") -> Dict[str, Any]:
+    async def get_agent_task_result(self, agent_id: str = None, task_id: str = "") -> Dict[str, Any]:
         """Get full result for a specific task from task_results/{task_id}.json."""
         try:
             from .dpc_agent.utils import get_agent_root
@@ -494,7 +494,7 @@ class AgentService:
             logger.error("Error in get_agent_task_result: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def get_agent_learning(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+    async def get_agent_learning(self, agent_id: str = None) -> Dict[str, Any]:
         """Get agent learning progress from knowledge/llm_learning_schedule.md.
 
         Parses the '## Progress Tracking' section with standardized format:
@@ -636,7 +636,7 @@ class AgentService:
 
     async def schedule_agent_task(
         self,
-        agent_id: str = "agent_001",
+        agent_id: str = None,
         task_type: str = "chat",
         data: Dict[str, Any] = None,
         priority: str = "NORMAL",
@@ -682,7 +682,7 @@ class AgentService:
             logger.error("Error in schedule_agent_task: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def cancel_agent_task(self, agent_id: str = "agent_001", task_id: str = "") -> Dict[str, Any]:
+    async def cancel_agent_task(self, agent_id: str = None, task_id: str = "") -> Dict[str, Any]:
         """Cancel a pending or running agent task."""
         if not task_id:
             return {"status": "error", "message": "task_id required"}

@@ -105,6 +105,10 @@
   let selectedAgentId: string = 'default';
   let newProfileName: string = '';
 
+  // CC display name (configurable via [agent_chat] cc_display_name in config.ini)
+  let ccDisplayName: string = 'CC';
+  let ccDisplayNameSaved: boolean = false;
+
   // Archive info for selected agent (loaded reactively)
   let archiveInfo: { count: number; max_sessions: number; archive_path: string; sessions: any[] } | null = null;
 
@@ -189,9 +193,10 @@
     loadRules();
   }
 
-  // Load agents when modal opens and dpc-agent tab is selected
+  // Load agents and CC display name when modal opens and dpc-agent tab is selected
   $: if (open && selectedTab === 'dpc-agent') {
     loadAgents();
+    loadCcDisplayName();
   }
 
   async function loadAgents() {
@@ -204,6 +209,31 @@
       }
     } catch (error) {
       console.error('Error loading agents:', error);
+    }
+  }
+
+  async function loadCcDisplayName() {
+    try {
+      const result = await sendCommand('get_cc_display_name', {});
+      if (typeof result === 'string') {
+        ccDisplayName = result;
+      } else if (result?.cc_display_name) {
+        ccDisplayName = result.cc_display_name;
+      }
+    } catch (error) {
+      console.error('Error loading CC display name:', error);
+    }
+  }
+
+  async function saveCcDisplayName() {
+    try {
+      const result = await sendCommand('set_cc_display_name', { name: ccDisplayName });
+      if (result?.status === 'success') {
+        ccDisplayNameSaved = true;
+        setTimeout(() => { ccDisplayNameSaved = false; }, 2000);
+      }
+    } catch (error) {
+      console.error('Error saving CC display name:', error);
     }
   }
 
@@ -2039,6 +2069,24 @@
           <div class="section">
             <h3>DPC Agent Permissions</h3>
             <p class="help-text">Control what the embedded AI agent can access and which tools it can use.</p>
+
+            <!-- CC Display Name Setting -->
+            <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px; margin-bottom: 1.5rem; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
+              <label for="cc-display-name" style="font-weight: 600; white-space: nowrap;">CC Display Name:</label>
+              <input
+                id="cc-display-name"
+                type="text"
+                bind:value={ccDisplayName}
+                placeholder="CC"
+                style="flex: 1; min-width: 120px; max-width: 200px; padding: 0.5rem; border-radius: 4px; border: 1px solid var(--border-color); background: var(--bg-primary); color: var(--text-primary);"
+                on:change={saveCcDisplayName}
+                on:keydown={(e) => { if (e.key === 'Enter') saveCcDisplayName(); }}
+              />
+              <span style="color: var(--text-secondary); font-size: 0.85rem;">Name shown for Claude Code messages in agent chat</span>
+              {#if ccDisplayNameSaved}
+                <span style="color: var(--success-color, #4caf50); font-size: 0.85rem;">Saved</span>
+              {/if}
+            </div>
 
             <!-- Agent Selector -->
             <div class="profile-selector" style="display: flex; gap: 1rem; align-items: center; margin-bottom: 1.5rem; flex-wrap: wrap; background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">

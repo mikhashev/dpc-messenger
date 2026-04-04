@@ -4653,16 +4653,19 @@ class CoreService:
     async def _handle_group_agent_mentions(
         self, group_id: str, text: str, sender_name: str
     ) -> None:
-        """Detect @Ark / @CC mentions in outgoing group messages and route to agents."""
+        """Detect @agent / @CC mentions in outgoing group messages and route to agents."""
         import re
         mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text, re.IGNORECASE)}
         logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
 
-        if "ark" in mentions:
-            logger.info("Group @ark mention detected — invoking Ark in group %s", group_id)
-            asyncio.ensure_future(self._invoke_ark_in_group(group_id, text, sender_name))
+        # Check if any mention matches an agent name (from config.json)
+        agent_name = self._get_agent_display_name().lower()
+        if agent_name in mentions:
+            logger.info("Group @%s mention detected — invoking agent in group %s", agent_name, group_id)
+            asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name))
 
-        if "cc" in mentions:
+        cc_name = self.get_cc_display_name().lower()
+        if cc_name in mentions:
             logger.info("Group @cc mention detected — broadcasting cc_group_mention in group %s", group_id)
             await self.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
@@ -4671,16 +4674,17 @@ class CoreService:
                 "sender_node_id": self.p2p_manager.node_id,
             })
 
-    async def _invoke_ark_in_group(
+    async def _invoke_agent_in_group(
         self, group_id: str, text: str, sender_name: str
     ) -> None:
-        """Invoke agent_001 (Ark) and post its response to the group."""
+        """Invoke the default agent and post its response to the group."""
         try:
             dpc_provider = self.llm_manager.providers.get("dpc_agent")
             if not dpc_provider:
-                logger.warning("_invoke_ark_in_group: dpc_agent provider not found")
+                logger.warning("_invoke_agent_in_group: dpc_agent provider not found")
                 return
-            manager = dpc_provider.get_manager("agent_001")
+            agent_id = self._get_default_agent_id()
+            manager = dpc_provider.get_manager(agent_id)
             prompt = f"[Group chat — {sender_name} says]: {text}"
             response = await manager.process_message(
                 message=prompt,
@@ -4688,21 +4692,22 @@ class CoreService:
                 sender_name=sender_name,
             )
             if response:
-                await self.send_group_agent_message(group_id, "Ark", response)
+                agent_name = self._get_agent_display_name(agent_id)
+                await self.send_group_agent_message(group_id, agent_name, response)
         except Exception as e:
-            logger.error("Ark group response failed: %s", e, exc_info=True)
+            logger.error("Agent group response failed: %s", e, exc_info=True)
 
     async def send_group_agent_message(
         self, group_id: str, agent_name: str, text: str
     ) -> None:
-        """Send a group message attributed to an agent (Ark, CC, etc.).
+        """Send a group message attributed to an agent.
 
         The message appears with agent_name as the sender and is marked
         is_agent=True so the anti-loop guard in GroupTextHandler skips it.
 
         Args:
             group_id: Target group ID
-            agent_name: Display name ("Ark", "CC", ...)
+            agent_name: Display name (from config.json or CC display name)
             text: Message text
         """
         group = self.group_manager.get_group(group_id)
@@ -6558,10 +6563,12 @@ class CoreService:
             # Reset chain depth on new user message (prevents stale depth from prior exchanges)
             self._cc_ark_chain_depth = 0
 
-            # Check if message is @CC-only (no @Ark) — route to real Claude Code via MCP
+            # Check if message is @CC-only (no @agent) — route to real Claude Code
             import re
             _mentions = {m.lower() for m in re.findall(r'@(\w+)\b', prompt or '', re.IGNORECASE)}
-            if "cc" in _mentions and "ark" not in _mentions:
+            cc_name_lower = self.get_cc_display_name().lower()
+            agent_name_lower = self._get_agent_display_name().lower()
+            if cc_name_lower in _mentions and agent_name_lower not in _mentions:
                 # Save user message to agent history
                 monitor = agent_manager._get_or_create_agent_monitor(conversation_id)
                 from dpc_client_core.dpc_agent.utils import utc_now_iso
@@ -6706,19 +6713,20 @@ class CoreService:
     ) -> None:
         """Detect @CC mentions in agent chat and broadcast event for Claude Code."""
         import re
+        cc_name = self.get_cc_display_name().lower()
         user_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', user_prompt or '', re.IGNORECASE)}
         agent_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', agent_response or '', re.IGNORECASE)}
 
-        if "cc" not in user_mentions and "cc" not in agent_mentions:
+        if cc_name not in user_mentions and cc_name not in agent_mentions:
             return
 
         # Determine who triggered the mention
-        if "cc" in user_mentions:
+        if cc_name in user_mentions:
             trigger_text = user_prompt
             trigger_sender = "User"
         else:
             trigger_text = agent_response
-            trigger_sender = conversation_id  # e.g. "agent_001"
+            trigger_sender = conversation_id
 
         # Get full recent history including thinking + streaming_raw
         monitor = agent_manager._agent_monitors.get(conversation_id)
@@ -6754,7 +6762,7 @@ class CoreService:
 
         Called by CC (Claude Code) after reading agent chat history and
         formulating a response. The message appears as a user message
-        with sender_name='CC' so Ark can see it in conversation context.
+        with the configured CC display name so the agent can see it in conversation context.
 
         Args:
             conversation_id: Agent conversation ID (e.g. 'agent_001')
@@ -6781,6 +6789,8 @@ class CoreService:
             timestamp = utc_now_iso()
             message_id = str(uuid.uuid4())
 
+            cc_name = self.get_cc_display_name()
+
             # Guard against duplicate CC messages (e.g. concurrent paths)
             if monitor.message_history:
                 last = monitor.message_history[-1]
@@ -6794,7 +6804,7 @@ class CoreService:
                 content=text,
                 timestamp=timestamp,
                 sender_node_id="cc",
-                sender_name="CC",
+                sender_name=cc_name,
             )
             monitor.save_history()
 
@@ -6816,7 +6826,7 @@ class CoreService:
                     "message_id": message_id,
                     "role": "user",
                     "content": text,
-                    "sender_name": "CC",
+                    "sender_name": cc_name,
                     "timestamp": timestamp,
                     "context_estimated": token_stats.get("context_estimated", 0),
                     "history_tokens": token_stats.get("history_tokens", 0),
@@ -6851,19 +6861,20 @@ class CoreService:
             except Exception as e:
                 logger.warning("Failed to send CC response to Telegram: %s", e)
 
-            # If CC's response mentions @Ark, trigger Ark to respond (subject to chain depth)
+            # If CC's response mentions @agent, trigger agent to respond (subject to chain depth)
             import re
             cc_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text or '', re.IGNORECASE)}
-            if "ark" in cc_mentions:
+            agent_name = self._get_agent_display_name().lower()
+            if agent_name in cc_mentions:
                 chain_depth = getattr(self, '_cc_ark_chain_depth', 0)
                 if chain_depth < 3:
                     self._cc_ark_chain_depth = chain_depth + 1
-                    logger.info("CC mentioned @Ark in %s (chain depth %d) — triggering Ark response",
-                                conversation_id, chain_depth + 1)
-                    asyncio.ensure_future(self._invoke_ark_in_agent_chat(conversation_id, text, manager))
+                    logger.info("CC mentioned @%s in %s (chain depth %d) — triggering agent response",
+                                agent_name, conversation_id, chain_depth + 1)
+                    asyncio.ensure_future(self._invoke_agent_in_agent_chat(conversation_id, text, manager))
                 else:
-                    logger.info("CC mentioned @Ark in %s but chain depth limit reached (%d), skipping",
-                                conversation_id, chain_depth)
+                    logger.info("CC mentioned @%s in %s but chain depth limit reached (%d), skipping",
+                                agent_name, conversation_id, chain_depth)
 
             return {"status": "success", "message_id": message_id}
 
@@ -6871,21 +6882,22 @@ class CoreService:
             logger.error("Failed to inject CC response: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
 
-    async def _invoke_ark_in_agent_chat(
+    async def _invoke_agent_in_agent_chat(
         self, conversation_id: str, cc_text: str, agent_manager
     ) -> None:
-        """Invoke Ark in agent chat after CC mentions @Ark.
+        """Invoke agent in agent chat after CC mentions @agent.
 
         Uses a short directive instead of CC's full text to avoid
         duplicating CC's message in history (already saved by send_cc_agent_response).
         """
         try:
+            cc_name = self.get_cc_display_name()
             # CC's message is already saved in history by send_cc_agent_response.
             # Pass _skip_history=True so this trigger prompt is NOT saved to history.json.
             response = await agent_manager.process_message(
                 message=cc_text,
                 conversation_id=conversation_id,
-                sender_name="CC",
+                sender_name=cc_name,
                 _skip_history=True,
             )
             if response:
@@ -7362,6 +7374,54 @@ class CoreService:
         context_json = json.dumps(context_dict, sort_keys=True)
         return hashlib.sha256(context_json.encode('utf-8')).hexdigest()
 
+    # --- Dynamic Agent/CC Name Resolution (#18) ---
+
+    def _get_default_agent_id(self) -> str:
+        """Get the first available agent ID from DpcAgentProvider at runtime.
+
+        Returns the first key in DpcAgentProvider._managers dict,
+        falling back to 'agent_001' for backwards compatibility.
+        """
+        try:
+            dpc_provider = self.llm_manager.providers.get("dpc_agent")
+            if dpc_provider and hasattr(dpc_provider, '_managers') and dpc_provider._managers:
+                return next(iter(dpc_provider._managers))
+        except Exception:
+            pass
+        return "agent_001"
+
+    def _get_agent_display_name(self, agent_id: str = None) -> str:
+        """Get agent's display name from its config.json.
+
+        Args:
+            agent_id: Agent ID to look up. If None, uses default agent.
+
+        Returns:
+            Display name from config, or agent_id as fallback.
+        """
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        try:
+            config_path = Path.home() / ".dpc" / "agents" / agent_id / "config.json"
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                return config.get("name", agent_id)
+        except Exception:
+            pass
+        return agent_id
+
+    def get_cc_display_name(self) -> str:
+        """Read CC display name from config.ini [agent_chat] section."""
+        return self.settings.get("agent_chat", "cc_display_name", fallback="CC")
+
+    async def set_cc_display_name(self, name: str) -> Dict[str, Any]:
+        """Update CC display name in config.ini."""
+        if not name or not name.strip():
+            return {"status": "error", "message": "CC display name cannot be empty"}
+        self.settings.set("agent_chat", "cc_display_name", name.strip())
+        return {"status": "success", "cc_display_name": name.strip()}
+
     # --- DPC Agent Management Methods ---
 
     async def create_agent(
@@ -7423,27 +7483,33 @@ class CoreService:
 
     # --- Agent Task Board Methods (v0.20.0) ---
 
-    async def get_agent_tasks(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+    async def get_agent_tasks(self, agent_id: str = None) -> Dict[str, Any]:
         """Delegates to AgentService."""
         if not self.agent_service:
             return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
         return await self.agent_service.get_agent_tasks(agent_id)
 
-    async def get_agent_task_result(self, agent_id: str = "agent_001", task_id: str = "") -> Dict[str, Any]:
+    async def get_agent_task_result(self, agent_id: str = None, task_id: str = "") -> Dict[str, Any]:
         """Delegates to AgentService."""
         if not self.agent_service:
             return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
         return await self.agent_service.get_agent_task_result(agent_id, task_id)
 
-    async def get_agent_learning(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+    async def get_agent_learning(self, agent_id: str = None) -> Dict[str, Any]:
         """Delegates to AgentService."""
         if not self.agent_service:
             return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
         return await self.agent_service.get_agent_learning(agent_id)
 
     async def schedule_agent_task(
         self,
-        agent_id: str = "agent_001",
+        agent_id: str = None,
         task_type: str = "chat",
         data: Dict[str, Any] = None,
         priority: str = "NORMAL",
@@ -7452,6 +7518,8 @@ class CoreService:
         """Delegates to AgentService."""
         if not self.agent_service:
             return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
         return await self.agent_service.schedule_agent_task(
             agent_id=agent_id,
             task_type=task_type,
@@ -7460,10 +7528,12 @@ class CoreService:
             delay_seconds=delay_seconds,
         )
 
-    async def cancel_agent_task(self, agent_id: str = "agent_001", task_id: str = "") -> Dict[str, Any]:
+    async def cancel_agent_task(self, agent_id: str = None, task_id: str = "") -> Dict[str, Any]:
         """Delegates to AgentService."""
         if not self.agent_service:
             return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
         return await self.agent_service.cancel_agent_task(agent_id, task_id)
 
     # --- Hub Methods ---

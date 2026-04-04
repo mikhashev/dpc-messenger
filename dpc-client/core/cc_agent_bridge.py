@@ -30,7 +30,6 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 DPC_HOME = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
 CONFIG_PATH = DPC_HOME / "config.ini"
 POLL_INTERVAL = 5
-DEFAULT_CONVERSATION_ID = "agent_001"
 
 
 def _read_config():
@@ -42,6 +41,27 @@ def _read_config():
     return config
 
 
+def _get_default_conversation_id() -> str:
+    """Get the first agent ID from ~/.dpc/agents/, fallback to 'agent_001'.
+
+    Note: Uses filesystem scan (sorted) because this runs as a standalone
+    script without access to DpcAgentProvider._managers (runtime source).
+    Both approaches return the first agent; in practice they match.
+    """
+    agents_dir = DPC_HOME / "agents"
+    if agents_dir.exists():
+        for d in sorted(agents_dir.iterdir()):
+            if d.is_dir() and (d / "config.json").exists():
+                return d.name
+    return "agent_001"
+
+
+def _get_cc_display_name() -> str:
+    """Read CC display name from config.ini [agent_chat] section."""
+    config = _read_config()
+    return config.get("agent_chat", "cc_display_name", fallback="CC")
+
+
 def _get_ws_url() -> str:
     """Read WebSocket URL from config.ini, fallback to default."""
     config = _read_config()
@@ -49,8 +69,10 @@ def _get_ws_url() -> str:
     return f"ws://127.0.0.1:{port}"
 
 
-def _get_history_path(conversation_id: str = DEFAULT_CONVERSATION_ID) -> Path:
+def _get_history_path(conversation_id: str = None) -> Path:
     """Get history.json path for a conversation."""
+    if conversation_id is None:
+        conversation_id = _get_default_conversation_id()
     return DPC_HOME / "conversations" / conversation_id / "history.json"
 WRITE_SETTLE_MS = 200  # wait after mtime change before reading (let backend finish writing)
 
@@ -88,15 +110,18 @@ def read_history(last_n: int = 0) -> list:
 
 def find_mentions(messages: list, since_index: int = 0) -> list:
     """Find @CC mentions after since_index. Returns [(index, msg), ...]."""
+    cc_name = _get_cc_display_name()
+    cc_lower = cc_name.lower()
     mentions = []
     for i, msg in enumerate(messages):
         if i < since_index:
             continue
         content = msg.get("content", "")
         sender = msg.get("sender_name", "")
-        if sender == "CC":
+        if sender == cc_name:
             continue
-        if "@CC" in content or "@cc" in content or "@СС" in content or "@сс" in content:
+        content_lower = content.lower()
+        if f"@{cc_lower}" in content_lower or "@сс" in content_lower:
             mentions.append((i, msg))
     return mentions
 
@@ -135,8 +160,10 @@ def check_backend_status() -> dict:
 # WRITE — WebSocket send
 # ─────────────────────────────────────────────────────────────
 
-async def send_response(text: str, conversation_id: str = DEFAULT_CONVERSATION_ID) -> dict:
+async def send_response(text: str, conversation_id: str = None) -> dict:
     """Send CC response via WebSocket to backend."""
+    if conversation_id is None:
+        conversation_id = _get_default_conversation_id()
     try:
         import websockets
     except ImportError:
@@ -173,7 +200,7 @@ async def send_response(text: str, conversation_id: str = DEFAULT_CONVERSATION_I
         return {"status": "error", "message": str(e)}
 
 
-def send_response_sync(text: str, conversation_id: str = DEFAULT_CONVERSATION_ID) -> dict:
+def send_response_sync(text: str, conversation_id: str = None) -> dict:
     """Synchronous wrapper for send_response."""
     return asyncio.run(send_response(text, conversation_id))
 
@@ -297,8 +324,11 @@ def poll(show_thinking: bool = False, show_tools: bool = False):
                 for i, msg in enumerate(new_msgs, last_count):
                     sender = msg.get("sender_name", "?")
                     content = msg.get("content", "")
-                    is_mention = ("@CC" in content or "@cc" in content) and sender != "CC"
-                    prefix = ">>> @CC MENTION" if is_mention else "    NEW"
+                    cc_name = _get_cc_display_name()
+                    cc_lower = cc_name.lower()
+                    content_lower = content.lower()
+                    is_mention = (f"@{cc_lower}" in content_lower or "@сс" in content_lower) and sender != cc_name
+                    prefix = f">>> @{cc_name} MENTION" if is_mention else "    NEW"
                     print(f"{prefix} {format_message(i, msg, show_thinking, show_tools)}")
                 last_count = current_count
             elif current_count < last_count:

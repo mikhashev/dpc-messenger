@@ -174,21 +174,24 @@ class GroupTextHandler(MessageHandler):
         sender_name: str,
         sender_node_id: str,
     ) -> None:
-        """Detect @Ark and @CC mentions and route to respective agents."""
+        """Detect @agent and @CC mentions and route to respective agents."""
         import re
 
         # Anti-loop guard: is_agent is set by send_group_agent_message() server-side only.
-        # sender_name alone is insufficient — a user could rename themselves "Ark" or "CC".
+        # sender_name alone is insufficient — a user could rename themselves to match agent names.
         if payload.get("is_agent", False):
             return
 
         mentions = re.findall(r'@(\w+)\b', text, re.IGNORECASE)
         mention_names = {m.lower() for m in mentions}
 
-        if "ark" in mention_names:
-            await self._invoke_ark(group_id, text, sender_name)
+        # Check if any mention matches the default agent's display name
+        agent_name = self.service._get_agent_display_name().lower()
+        if agent_name in mention_names:
+            await self._invoke_agent(group_id, text, sender_name)
 
-        if "cc" in mention_names:
+        cc_name = self.service.get_cc_display_name().lower()
+        if cc_name in mention_names:
             # Broadcast event — the MCP server bridge subscribes and queues it
             await self.service.local_api.broadcast_event("cc_group_mention", {
                 "group_id": group_id,
@@ -197,14 +200,15 @@ class GroupTextHandler(MessageHandler):
                 "sender_node_id": sender_node_id,
             })
 
-    async def _invoke_ark(self, group_id: str, text: str, sender_name: str) -> None:
-        """Invoke agent_001 (Ark) and post response to the group."""
+    async def _invoke_agent(self, group_id: str, text: str, sender_name: str) -> None:
+        """Invoke the default agent and post response to the group."""
         try:
             dpc_provider = self.service.llm_manager.providers.get("dpc_agent")
             if not dpc_provider:
-                self.logger.warning("_invoke_ark: dpc_agent provider not found")
+                self.logger.warning("_invoke_agent: dpc_agent provider not found")
                 return
-            manager = dpc_provider.get_manager("agent_001")
+            agent_id = self.service._get_default_agent_id()
+            manager = dpc_provider.get_manager(agent_id)
             prompt = f"[Group chat — {sender_name} says]: {text}"
             response = await manager.process_message(
                 message=prompt,
@@ -212,9 +216,10 @@ class GroupTextHandler(MessageHandler):
                 sender_name=sender_name,
             )
             if response:
-                await self.service.send_group_agent_message(group_id, "Ark", response)
+                agent_display = self.service._get_agent_display_name(agent_id)
+                await self.service.send_group_agent_message(group_id, agent_display, response)
         except Exception as e:
-            self.logger.error("Ark group response failed: %s", e, exc_info=True)
+            self.logger.error("Agent group response failed: %s", e, exc_info=True)
 
 
 class GroupLeaveHandler(MessageHandler):
