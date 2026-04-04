@@ -1,0 +1,294 @@
+"""
+CC Agent Bridge — unified module for CC to read agent chat and send responses.
+
+Replaces MCP bridge with stateless file + WebSocket approach:
+- READ: history.json (always on disk, survives End Session / New Session)
+- WRITE: WebSocket to localhost:9999 (send_cc_agent_response command)
+- ANALYZE: Ark thinking/tools/behavioral patterns
+
+Usage:
+    python cc_agent_bridge.py                       # poll mode (5s interval)
+    python cc_agent_bridge.py --once --last 5       # show last 5 messages
+    python cc_agent_bridge.py --mentions             # show @CC mentions
+    python cc_agent_bridge.py --send "hello"         # send CC response
+    python cc_agent_bridge.py --thinking             # show Ark thinking
+    python cc_agent_bridge.py --analyze              # Ark behavioral analysis
+"""
+
+import json
+import sys
+import time
+import re
+import asyncio
+import argparse
+from pathlib import Path
+
+# Fix Windows console encoding
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+HISTORY_PATH = Path.home() / ".dpc" / "conversations" / "agent_001" / "history.json"
+WS_URL = "ws://127.0.0.1:9999"
+POLL_INTERVAL = 5
+CONVERSATION_ID = "agent_001"
+
+
+# ─────────────────────────────────────────────────────────────
+# READ — history.json
+# ─────────────────────────────────────────────────────────────
+
+def read_history(last_n: int = 0) -> list:
+    """Read messages from history.json. Returns list of message dicts."""
+    if not HISTORY_PATH.exists():
+        return []
+    with open(HISTORY_PATH, encoding="utf-8") as f:
+        data = json.load(f)
+    msgs = data.get("messages", [])
+    return msgs[-last_n:] if last_n else msgs
+
+
+def find_mentions(messages: list, since_index: int = 0) -> list:
+    """Find @CC mentions after since_index. Returns [(index, msg), ...]."""
+    mentions = []
+    for i, msg in enumerate(messages):
+        if i < since_index:
+            continue
+        content = msg.get("content", "")
+        sender = msg.get("sender_name", "")
+        if sender == "CC":
+            continue
+        if "@CC" in content or "@cc" in content:
+            mentions.append((i, msg))
+    return mentions
+
+
+def get_new_messages(messages: list, last_count: int) -> list:
+    """Get messages added since last_count."""
+    if len(messages) > last_count:
+        return messages[last_count:]
+    return []
+
+
+# ─────────────────────────────────────────────────────────────
+# WRITE — WebSocket send
+# ─────────────────────────────────────────────────────────────
+
+async def send_response(text: str, conversation_id: str = CONVERSATION_ID) -> dict:
+    """Send CC response via WebSocket to backend."""
+    try:
+        import websockets
+    except ImportError:
+        print("[ERROR] websockets not installed. Run: pip install websockets")
+        return {"status": "error", "message": "websockets not installed"}
+
+    import uuid
+    command = {
+        "id": str(uuid.uuid4())[:8],
+        "command": "send_cc_agent_response",
+        "payload": {
+            "conversation_id": conversation_id,
+            "text": text,
+        }
+    }
+
+    try:
+        async with websockets.connect(WS_URL) as ws:
+            await ws.send(json.dumps(command))
+            # Wait for response (with timeout)
+            try:
+                response = await asyncio.wait_for(ws.recv(), timeout=10)
+                result = json.loads(response)
+                print(f"[SENT] {len(text)} chars → {conversation_id}: {result.get('status', '?')}")
+                return result
+            except asyncio.TimeoutError:
+                print(f"[SENT] {len(text)} chars → {conversation_id} (no response, timeout)")
+                return {"status": "sent", "message": "timeout waiting for response"}
+    except ConnectionRefusedError:
+        print("[ERROR] Cannot connect to backend (ws://127.0.0.1:9999). Is it running?")
+        return {"status": "error", "message": "connection refused"}
+    except Exception as e:
+        print(f"[ERROR] WebSocket send failed: {e}")
+        return {"status": "error", "message": str(e)}
+
+
+def send_response_sync(text: str, conversation_id: str = CONVERSATION_ID) -> dict:
+    """Synchronous wrapper for send_response."""
+    return asyncio.run(send_response(text, conversation_id))
+
+
+# ─────────────────────────────────────────────────────────────
+# ANALYZE — Ark behavior
+# ─────────────────────────────────────────────────────────────
+
+def extract_thinking(msg: dict) -> str:
+    """Extract thinking content from a message."""
+    return msg.get("thinking", "")
+
+
+def extract_tool_calls(msg: dict) -> list:
+    """Extract tool calls from streaming_raw output."""
+    raw = msg.get("streaming_raw", "")
+    if not raw:
+        return []
+    tools = re.findall(r'(?:calling|using|tool[_\s]call)[:\s]+(\w+)', raw, re.IGNORECASE)
+    if not tools:
+        known_tools = [
+            'search_files', 'grep', 'extended_path_read', 'extended_path_list',
+            'repo_read', 'repo_write', 'git_log', 'git_diff', 'git_commit',
+            'execute_skill', 'extract_knowledge', 'save_to_memory',
+            'web_search', 'web_fetch', 'shell_exec'
+        ]
+        for tool in known_tools:
+            if tool in raw:
+                tools.append(tool)
+    return tools
+
+
+def analyze_ark(messages: list, last_n: int = 20) -> dict:
+    """Analyze Ark's behavioral patterns. Returns analysis dict."""
+    ark_msgs = [
+        (i, m) for i, m in enumerate(messages)
+        if m.get("sender_name", "").startswith("agent_")
+    ][-last_n:]
+
+    if not ark_msgs:
+        return {"count": 0}
+
+    total_thinking = 0
+    tool_counts = {}
+    long_thinking = []
+    content_lengths = []
+
+    for i, msg in ark_msgs:
+        thinking = extract_thinking(msg)
+        if thinking:
+            total_thinking += 1
+            if len(thinking) > 500:
+                long_thinking.append((i, len(thinking)))
+
+        tools = extract_tool_calls(msg)
+        for t in tools:
+            tool_counts[t] = tool_counts.get(t, 0) + 1
+
+        content_lengths.append(len(msg.get("content", "")))
+
+    avg_len = sum(content_lengths) / len(content_lengths) if content_lengths else 0
+
+    return {
+        "count": len(ark_msgs),
+        "thinking_count": total_thinking,
+        "total_tools": sum(tool_counts.values()),
+        "tool_frequency": dict(sorted(tool_counts.items(), key=lambda x: -x[1])),
+        "long_thinking": len(long_thinking),
+        "avg_response_length": round(avg_len),
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# FORMAT — display helpers
+# ─────────────────────────────────────────────────────────────
+
+def format_message(i: int, msg: dict, show_thinking: bool = False, show_tools: bool = False) -> str:
+    """Format a message for display."""
+    sender = msg.get("sender_name", "?")
+    ts = msg.get("timestamp", "")[:19]
+    content = msg.get("content", "")
+    preview = content[:200].replace("\n", " ")
+    if len(content) > 200:
+        preview += "..."
+
+    line = f"  [{i}] {ts} {sender}: {preview}"
+
+    if show_thinking:
+        thinking = extract_thinking(msg)
+        if thinking:
+            line += f"\n       [THINKING] {thinking[:300].replace(chr(10), ' ')}..."
+
+    if show_tools:
+        tools = extract_tool_calls(msg)
+        if tools:
+            line += f"\n       [TOOLS] {', '.join(tools)}"
+
+    return line
+
+
+# ─────────────────────────────────────────────────────────────
+# POLL — main loop
+# ─────────────────────────────────────────────────────────────
+
+def poll(show_thinking: bool = False, show_tools: bool = False):
+    """Poll loop: watch for new messages and @CC mentions."""
+    messages = read_history()
+    last_count = len(messages)
+    print(f"[CC Bridge] Started. History: {last_count} msgs. Poll every {POLL_INTERVAL}s.")
+    print(f"[CC Bridge] Path: {HISTORY_PATH}")
+    print(f"[CC Bridge] Ctrl+C to stop.\n")
+
+    try:
+        while True:
+            time.sleep(POLL_INTERVAL)
+            messages = read_history()
+            current_count = len(messages)
+
+            if current_count > last_count:
+                new_msgs = messages[last_count:]
+                for i, msg in enumerate(new_msgs, last_count):
+                    sender = msg.get("sender_name", "?")
+                    content = msg.get("content", "")
+                    is_mention = ("@CC" in content or "@cc" in content) and sender != "CC"
+                    prefix = ">>> @CC MENTION" if is_mention else "    NEW"
+                    print(f"{prefix} {format_message(i, msg, show_thinking, show_tools)}")
+                last_count = current_count
+            elif current_count < last_count:
+                print(f"[CC Bridge] History reset: {last_count} -> {current_count}")
+                last_count = current_count
+    except KeyboardInterrupt:
+        print("\n[CC Bridge] Stopped.")
+
+
+# ─────────────────────────────────────────────────────────────
+# CLI
+# ─────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="CC Agent Bridge")
+    parser.add_argument("--once", action="store_true", help="Single check, exit")
+    parser.add_argument("--thinking", action="store_true", help="Show Ark thinking")
+    parser.add_argument("--tools", action="store_true", help="Show tool calls")
+    parser.add_argument("--last", type=int, default=5, help="Last N messages")
+    parser.add_argument("--mentions", action="store_true", help="Show @CC mentions")
+    parser.add_argument("--analyze", action="store_true", help="Ark behavioral analysis")
+    parser.add_argument("--send", type=str, help="Send CC response text")
+    args = parser.parse_args()
+
+    if args.send:
+        send_response_sync(args.send)
+        return
+
+    messages = read_history()
+    print(f"[CC Bridge] {len(messages)} messages in history.json\n")
+
+    if args.analyze:
+        print("=== Ark Behavioral Analysis ===")
+        analysis = analyze_ark(messages)
+        for k, v in analysis.items():
+            print(f"  {k}: {v}")
+        return
+
+    if args.mentions:
+        mentions = find_mentions(messages)
+        print(f"=== @CC Mentions ({len(mentions)}) ===")
+        for i, msg in mentions:
+            print(format_message(i, msg, args.thinking, args.tools))
+        return
+
+    if args.once:
+        print(f"=== Last {args.last} messages ===")
+        for i, msg in enumerate(messages[-args.last:], max(0, len(messages) - args.last)):
+            print(format_message(i, msg, args.thinking, args.tools))
+        return
+
+    poll(show_thinking=args.thinking, show_tools=args.tools)
+
+
+if __name__ == "__main__":
+    main()
