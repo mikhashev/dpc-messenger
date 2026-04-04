@@ -185,9 +185,10 @@ class GroupTextHandler(MessageHandler):
         mentions = re.findall(r'@(\w+)\b', text, re.IGNORECASE)
         mention_names = {m.lower() for m in mentions}
 
-        # Check if any mention matches the default agent's display name
-        agent_name = self.service._get_agent_display_name().lower()
-        if agent_name in mention_names:
+        # Check if any mention matches agent name or agent_id
+        agent_id = self.service._get_default_agent_id()
+        agent_name = self.service._get_agent_display_name(agent_id).lower()
+        if agent_name in mention_names or agent_id in mention_names:
             await self._invoke_agent(group_id, text, sender_name)
 
         cc_name = self.service.get_cc_display_name().lower()
