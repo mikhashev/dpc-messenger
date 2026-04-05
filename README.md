@@ -547,6 +547,7 @@ D-PC Messenger builds on the shoulders of giants:
 - **[FastAPI](https://fastapi.tiangolo.com/)** - Hub server framework
 - **[Ollama](https://ollama.ai/)** - Local AI inference
 - **[Ouroboros](https://github.com/razzant/ouroboros)** - Self-modifying AI agent (adapted for DPC Agent)
+- **[sgr-agent-core](https://github.com/vamplabAI/sgr-agent-core)** - Schema-Guided Reasoning patterns (MIT License)
 
 Special thanks to all contributors and early testers!
 
