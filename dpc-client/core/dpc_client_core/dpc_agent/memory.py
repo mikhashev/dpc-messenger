@@ -63,6 +63,10 @@ class Memory:
         """Path to identity file."""
         return self._memory_path("identity.md")
 
+    def reflection_path(self) -> pathlib.Path:
+        """Path to structured reflection file."""
+        return self._memory_path("reflection.json")
+
     def dialogue_summary_path(self) -> pathlib.Path:
         """Path to dialogue summary file."""
         return self._memory_path("dialogue_summary.md")
@@ -111,6 +115,44 @@ class Memory:
         """Save identity content."""
         write_text(self.identity_path(), content)
         auto_commit_agent_change(self.agent_root, "identity: updated self-understanding")
+
+    def load_reflection(self) -> dict:
+        """Load structured reflection data."""
+        p = self.reflection_path()
+        if p.exists():
+            try:
+                return json.loads(read_text(p))
+            except (json.JSONDecodeError, ValueError):
+                log.warning("Invalid reflection.json, returning empty")
+                return self._default_reflection()
+        return self._default_reflection()
+
+    def save_reflection(self, data: dict) -> None:
+        """Save structured reflection data with validation."""
+        # Validate top-level keys
+        valid_keys = {"reflections", "pattern_tracking", "calibration", "meta"}
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        if not filtered:
+            filtered = self._default_reflection()
+        write_text(self.reflection_path(), json.dumps(filtered, indent=2, ensure_ascii=False))
+
+    @staticmethod
+    def _default_reflection() -> dict:
+        """Default empty reflection structure."""
+        return {
+            "reflections": [],
+            "pattern_tracking": [],
+            "calibration": {
+                "self_assessment": None,
+                "user_feedback": None,
+                "gap": None
+            },
+            "meta": {
+                "schema_version": "1.0",
+                "max_reflections": 50,
+                "max_patterns": 20
+            }
+        }
 
     def load_dialogue_summary(self) -> str:
         """Load dialogue summary if exists."""

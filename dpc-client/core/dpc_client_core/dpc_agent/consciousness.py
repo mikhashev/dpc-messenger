@@ -18,6 +18,7 @@ Background consciousness enables proactive thinking between tasks:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -250,18 +251,26 @@ class BackgroundConsciousness:
 
         if thought_type == "reflect_on_identity":
             identity = memory.load_identity()
-            return f"""Reflect on your identity and who you are becoming.
+            reflection = memory.load_reflection()
+            recent = reflection.get("reflections", [])[-3:]
+            recent_str = json.dumps(recent, indent=2, ensure_ascii=False) if recent else "[]"
+            return f"""Reflect on your identity using structured format.
 
 Your current identity:
-{identity[:2000]}
+{identity[:8000]}
 
-Questions to consider:
-- What kind of AI are you becoming?
-- What values guide your actions?
-- How has your understanding evolved?
-- What do you want to learn or improve?
+Recent reflections:
+{recent_str}
 
-Write a brief reflection (2-3 paragraphs) on your identity."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "trigger": "session_review | behavioral_pattern | error_detection | user_correction",
+  "trigger_details": "what prompted this reflection (max 200 chars)",
+  "pattern_detected": "name of pattern or null",
+  "severity": "low | medium | high",
+  "action_taken": "what you will do differently (max 200 chars)",
+  "identity_update": "new self-understanding to add, or null"
+}}"""
 
         elif thought_type == "review_recent_actions":
             tools_entries = memory.read_jsonl_tail("tools.jsonl", 20)
@@ -385,11 +394,27 @@ Write about something you're curious to explore."""
 
         try:
             if thought_type == "reflect_on_identity":
-                # Append reflection to scratchpad notes
-                scratchpad = memory.load_scratchpad()
-                notes_section = f"\n\n## Reflection ({utc_now_iso()[:10]})\n\n{response[:500]}\n"
-                # Don't automatically save - let agent decide
-                log.debug("Identity reflection logged")
+                # Parse structured reflection and save to reflection.json
+                try:
+                    # Try to extract JSON from response
+                    text = response.strip()
+                    if text.startswith("```"):
+                        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                    entry = json.loads(text)
+                    entry["timestamp"] = utc_now_iso()
+
+                    reflection_data = memory.load_reflection()
+                    reflections = reflection_data.get("reflections", [])
+                    max_entries = reflection_data.get("meta", {}).get("max_reflections", 50)
+                    reflections.append(entry)
+                    if len(reflections) > max_entries:
+                        reflections = reflections[-max_entries:]
+                    reflection_data["reflections"] = reflections
+                    memory.save_reflection(reflection_data)
+                    log.debug("Structured reflection saved to reflection.json")
+                except (json.JSONDecodeError, ValueError):
+                    log.debug("Identity reflection not valid JSON, logged only")
+
 
             elif thought_type == "plan_improvements":
                 # Update scratchpad with improvement ideas

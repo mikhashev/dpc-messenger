@@ -274,14 +274,17 @@ def analyze_ark(messages: list, last_n: int = 20) -> dict:
 # FORMAT — display helpers
 # ─────────────────────────────────────────────────────────────
 
-def format_message(i: int, msg: dict, show_thinking: bool = False, show_tools: bool = False) -> str:
+def format_message(i: int, msg: dict, show_thinking: bool = False, show_tools: bool = False, full: bool = False) -> str:
     """Format a message for display."""
     sender = msg.get("sender_name", "?")
     ts = msg.get("timestamp", "")[:19]
     content = msg.get("content", "")
-    preview = content[:200].replace("\n", " ")
-    if len(content) > 200:
-        preview += "..."
+    if full:
+        preview = content.replace("\n", "\n       ")
+    else:
+        preview = content[:500].replace("\n", " ")
+        if len(content) > 500:
+            preview += "..."
 
     line = f"  [{i}] {ts} {sender}: {preview}"
 
@@ -350,6 +353,7 @@ def main():
     parser.add_argument("--send", type=str, help="Send CC response text")
     parser.add_argument("--status", action="store_true", help="Check backend/frontend status")
     parser.add_argument("--check", type=int, metavar="SINCE", help="Scan full content for @CC mentions since message index")
+    parser.add_argument("--full", action="store_true", help="Show full message content without truncation")
     args = parser.parse_args()
 
     if args.status:
@@ -403,13 +407,13 @@ def main():
         mentions = find_mentions(messages)
         print(f"=== @CC Mentions ({len(mentions)}) ===")
         for i, msg in mentions:
-            print(format_message(i, msg, args.thinking, args.tools))
+            print(format_message(i, msg, args.thinking, args.tools, args.full))
         return
 
     if args.once:
         print(f"=== Last {args.last} messages ===")
         for i, msg in enumerate(messages[-args.last:], max(0, len(messages) - args.last)):
-            print(format_message(i, msg, args.thinking, args.tools))
+            print(format_message(i, msg, args.thinking, args.tools, args.full))
         return
 
     poll(show_thinking=args.thinking, show_tools=args.tools)

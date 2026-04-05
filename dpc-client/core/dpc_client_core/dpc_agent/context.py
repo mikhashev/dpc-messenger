@@ -122,6 +122,15 @@ def _build_memory_sections(memory: Memory) -> List[str]:
     identity_raw = memory.load_identity()
     sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
 
+    # Structured reflection data
+    reflection_data = memory.load_reflection()
+    reflections = reflection_data.get("reflections", [])
+    if reflections:
+        recent = reflections[-5:]  # Last 5 reflections
+        import json
+        sections.append("## Recent Reflections\n\n" + clip_text(
+            json.dumps(recent, indent=2, ensure_ascii=False), 10000))
+
     # Dialogue summary
     summary_text = memory.load_dialogue_summary()
     if summary_text.strip():
