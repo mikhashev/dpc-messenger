@@ -48,6 +48,9 @@ class ZaiProvider(AIProvider):
         self.thinking_enabled = config.get("thinking", {}).get("enabled", True)
         self.thinking_budget_tokens = config.get("thinking", {}).get("budget_tokens", 10000)
 
+        # Sampling parameters
+        self.top_p = config.get("top_p")  # None = use API default; 0.9 reduces unlikely token tails (language mixing)
+
         # Store last thinking content for retrieval by LLMManager
         self._last_thinking: Optional[str] = None
 
@@ -88,6 +91,8 @@ class ZaiProvider(AIProvider):
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": kwargs.get("temperature", self.temperature),
             }
+            if self.top_p is not None:
+                api_params["top_p"] = self.top_p
 
             # Add extended thinking if enabled (all GLM models support it)
             if self.thinking_enabled:
@@ -184,6 +189,8 @@ class ZaiProvider(AIProvider):
                 "messages": [{"role": "user", "content": prompt}],
                 "temperature": self.temperature,
             }
+            if self.top_p is not None:
+                api_params["top_p"] = self.top_p
 
             # Add extended thinking if enabled (all GLM models support it)
             if self.thinking_enabled:
