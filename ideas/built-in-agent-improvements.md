@@ -216,7 +216,11 @@ in A2A.md and can build on this foundation later.
 - [x] **sandbox_delete + sandbox_list tools** — repo_delete implemented (core.py, registry.py, firewall.py, AgentPermissionsPanel.svelte). Default=False, user enables via UI. Ark tested successfully. sandbox_list already existed as repo_list.
 - [x] **Structured self-reflection schema** — Layer 2 (reflection.json) implemented: memory.py schema v1.0, consciousness.py structured JSON prompts, context.py Block2 integration. Identity limit 2K→8K. Bridge preview 200→500 + --full flag.
 - [ ] **Consciousness tool access** (~6h) — BackgroundConsciousness writes 535+ thoughts → 0 actions. Give it ability to act (update scratchpad, trigger cleanup). Roadmap-level.
-- [ ] **Schema-Guided Reasoning (SGR)** (~6h) — Structured schema BEFORE tool selection. Fixes pattern of hasty decisions based on filenames without reading content.
+- [x] **Schema-Guided Reasoning (SGR)** — Variant C (hybrid observe+log) implemented: reasoning.jsonl compliance logging in loop.py. Prompt v2 has Reasoning Guidelines + mandatory skill check. Full enforcement deferred until 50+ data points.
+- [x] **System prompt v2** — Rewritten from philosophical to operational. DPC Paradigms, Team, Skills (Memento-Skills), Reasoning Guidelines, Anti-patterns. Designed by Ark, approved by Mike.
+- [ ] **Model-aware context_budget** — Replace hardcoded truncation limits with % of context_window from provider. 35+ truncation points mapped.
+- [ ] **Active context warning in loop.py** — Inject system note at 70-90% usage. Agent ignores passive metrics.
+- [ ] **Consciousness tool access** (~6h) — BackgroundConsciousness writes 535+ thoughts → 0 actions. Give it ability to act (update scratchpad, trigger cleanup). Roadmap-level.
 - [ ] **task_results TTL/rotation** — 1448 files accumulated, write-only, no cleanup. Affects all agents.
 - [ ] **logs rotation** — 7.7MB append-only logs, no limit. tools.jsonl alone is 5.1MB.
 
