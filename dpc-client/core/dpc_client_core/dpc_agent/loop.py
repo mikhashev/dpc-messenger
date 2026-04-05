@@ -331,6 +331,7 @@ async def run_llm_loop(
     MAX_CONSECUTIVE_TOOL_ONLY_ROUNDS = 15  # Force final answer after this many rounds without text
     _tool_call_counts: Dict[str, int] = {}
     _consecutive_tool_only = 0  # Rounds with tool calls but no text content
+    _pre_tool_content: list = []  # Accumulate content from tool-call rounds (lost otherwise)
 
     round_idx = 0
     try:
@@ -442,6 +443,11 @@ async def run_llm_loop(
             if not tool_calls:
                 if content and content.strip():
                     clean_content = _strip_role_boundaries(content)
+                    # Prepend any content from tool-call rounds that was otherwise lost
+                    if _pre_tool_content:
+                        full_content = "\n\n".join(_pre_tool_content) + "\n\n" + clean_content
+                        clean_content = full_content
+                        _pre_tool_content.clear()
                     llm_trace["assistant_notes"].append(clean_content.strip()[:320])
                     return clean_content, accumulated_usage, llm_trace
                 # LLM returned empty content (e.g. GLM thinking-only with no text).
@@ -462,6 +468,7 @@ async def run_llm_loop(
             if thinking and thinking.strip():
                 emit_progress(thinking.strip(), None, round_idx)
                 llm_trace["assistant_notes"].append(thinking.strip()[:320])
+                _pre_tool_content.append(thinking.strip())  # Save for final response
                 _consecutive_tool_only = 0  # Has text — reset counter
             elif tool_calls:
                 # Native tool calling returns no text preamble — emit tool names so the
