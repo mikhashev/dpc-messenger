@@ -376,25 +376,25 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 
 **Managers:**
 - `p2p_manager.py` - Low-level P2P connection manager (TLS + WebRTC)
-- `agent_manager.py` - Agent lifecycle, task execution, tool dispatch
-- `agent_telegram_bridge.py` - Bridge between agent system and Telegram
-- `group_manager.py` - Group chat membership, history, metadata
-- `instruction_manager.py` - Per-peer custom AI instruction management
-- `prompt_manager.py` - Prompt template assembly and caching
-- `token_count_manager.py` - Token counting and context window tracking
-- `hole_punch_manager.py` - UDP hole punching coordinator (v0.10.0)
+- `managers/agent_manager.py` - Agent lifecycle, task execution, tool dispatch
+- `managers/agent_telegram_bridge.py` - Bridge between agent system and Telegram
+- `managers/group_manager.py` - Group chat membership, history, metadata
+- `managers/instruction_manager.py` - Per-peer custom AI instruction management
+- `managers/prompt_manager.py` - Prompt template assembly and caching
+- `managers/token_count_manager.py` - Token counting and context window tracking
+- `managers/hole_punch_manager.py` - UDP hole punching coordinator (v0.10.0)
   - DHT-based endpoint discovery (reflexive address from 3 random DHT peers)
   - NAT type detection (cone vs symmetric)
   - Coordinated simultaneous UDP send
-- `relay_manager.py` - Volunteer relay management (v0.10.0)
+- `managers/relay_manager.py` - Volunteer relay management (v0.10.0)
   - Client mode: find_relay() via DHT, quality scoring, connect_via_relay()
   - Server mode: announce_relay_availability(), handle_relay_register(), handle_relay_message()
   - Privacy-preserving (forwards encrypted payloads only)
-- `gossip_manager.py` - Epidemic gossip protocol (v0.10.0)
+- `managers/gossip_manager.py` - Epidemic gossip protocol (v0.10.0)
   - send_gossip(), handle_gossip_message(), _forward_message() (fanout=3)
   - Anti-entropy sync loop (5-minute interval, vector clock reconciliation)
   - Message deduplication, TTL enforcement
-- `file_transfer_manager.py` - File transfer coordination (v0.11.0)
+- `managers/file_transfer_manager.py` - File transfer coordination (v0.11.0)
   - Chunked file transfer (64KB chunks, SHA256 verification)
   - Active transfer tracking (upload/download progress)
   - Background process for large files (>50MB)
@@ -455,7 +455,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - Backend communication: `src/lib/coreService.ts` (WebSocket client, thin bootstrapper)
 - SSG mode with adapter-static (SPA fallback)
 - **Domain panels** (`src/lib/panels/`, 15 files): ChatPanel, AgentPanel, VoicePanel, GroupPanel, TelegramPanel, KnowledgeEventsPanel, ModelDownloadPanel, HistorySyncPanel, ChatHistorySyncPanel, SessionEventsPanel, MessageRouterPanel, PersistencePanel, AgentManagementPanel, GroupManagementPanel, AddAIChatPanel
-- **Domain services** (`src/lib/services/`, 10 files): chatService, agentService, connectionService, voiceService, knowledgeService, telegramService, groupsService, fileTransferService, sessionService, providersService
+- **Domain services** (`src/lib/services/`, 10 files): messaging.ts, agents.ts, connection.ts, voice.ts, knowledge.ts, telegram.ts, groups.ts, fileTransfer.ts, session.ts, providers.ts
 
 **Notification System (v0.11.3+):**
 - `notificationService.ts` - Native desktop notifications
