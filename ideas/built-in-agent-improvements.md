@@ -214,7 +214,7 @@ in A2A.md and can build on this foundation later.
 
 ### Open — HIGH (from session 2026-04-05, Ark sandbox cleanup)
 - [x] **sandbox_delete + sandbox_list tools** — repo_delete implemented (core.py, registry.py, firewall.py, AgentPermissionsPanel.svelte). Default=False, user enables via UI. Ark tested successfully. sandbox_list already existed as repo_list.
-- [ ] **Structured self-reflection schema** (~3h) — JSON schema for self-analysis instead of free prose. PCM spec has ready template. Prevents identity.md bloat.
+- [x] **Structured self-reflection schema** — Layer 2 (reflection.json) implemented: memory.py schema v1.0, consciousness.py structured JSON prompts, context.py Block2 integration. Identity limit 2K→8K. Bridge preview 200→500 + --full flag.
 - [ ] **Consciousness tool access** (~6h) — BackgroundConsciousness writes 535+ thoughts → 0 actions. Give it ability to act (update scratchpad, trigger cleanup). Roadmap-level.
 - [ ] **Schema-Guided Reasoning (SGR)** (~6h) — Structured schema BEFORE tool selection. Fixes pattern of hasty decisions based on filenames without reading content.
 - [ ] **task_results TTL/rotation** — 1448 files accumulated, write-only, no cleanup. Affects all agents.
