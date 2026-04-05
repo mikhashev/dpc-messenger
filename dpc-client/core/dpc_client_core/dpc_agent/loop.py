@@ -111,6 +111,46 @@ def _sanitize_tool_result(result: str) -> str:
     return sanitized
 
 
+def _detect_reasoning_quality(thinking: str, tool_names: List[str]) -> Dict[str, Any]:
+    """Detect SGR compliance: whether reasoning preceded tool calls.
+
+    Returns dict with reasoning quality metrics for logging.
+    """
+    if not thinking or not thinking.strip():
+        return {"had_reasoning": False, "quality": "none", "tools": tool_names}
+
+    text = thinking.strip().lower()
+    word_count = len(text.split())
+
+    # Minimal: just a few words, likely not real reasoning
+    if word_count < 10:
+        return {"had_reasoning": False, "quality": "minimal", "tools": tool_names,
+                "reasoning_words": word_count}
+
+    # Check for reasoning indicators
+    indicators = 0
+    reasoning_signals = [
+        "because", "since", "therefore", "need to", "should",
+        "first", "then", "next", "plan", "step",
+        "check", "verify", "read", "look at", "analyze",
+        "потому", "нужно", "сначала", "затем", "проверю",
+        "прочитаю", "посмотрю", "план", "шаг",
+    ]
+    for signal in reasoning_signals:
+        if signal in text:
+            indicators += 1
+
+    quality = "structured" if indicators >= 2 else "partial" if indicators >= 1 else "unstructured"
+
+    return {
+        "had_reasoning": indicators >= 1,
+        "quality": quality,
+        "tools": tool_names,
+        "reasoning_words": word_count,
+        "indicators": indicators,
+    }
+
+
 def _extract_thinking_prefix(content: str) -> str:
     """Return only the text before the first tool_call block.
 
@@ -464,6 +504,14 @@ async def run_llm_loop(
             # Process tool calls — strip hallucinated post-tool-call content before storing
             thinking = _extract_thinking_prefix(content)
             messages.append({"role": "assistant", "content": thinking, "tool_calls": tool_calls})
+
+            # SGR compliance logging — detect reasoning quality before tool calls
+            tool_names = [tc["function"]["name"] for tc in tool_calls]
+            sgr_quality = _detect_reasoning_quality(thinking, tool_names)
+            sgr_quality["ts"] = utc_now_iso()
+            sgr_quality["round"] = round_idx
+            sgr_quality["task_id"] = task_id
+            append_jsonl(logs_dir / "reasoning.jsonl", sgr_quality)
 
             if thinking and thinking.strip():
                 emit_progress(thinking.strip(), None, round_idx)
