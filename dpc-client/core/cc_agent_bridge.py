@@ -85,23 +85,20 @@ _last_messages = []
 # ─────────────────────────────────────────────────────────────
 
 def read_history(last_n: int = 0) -> list:
-    """Read messages from history.json. Uses mtime to avoid reading mid-write."""
+    """Read messages from history.json. Always reads fresh from disk."""
     global _last_mtime, _last_messages
-    if not _get_history_path().exists():
+    history_path = _get_history_path()
+    if not history_path.exists():
         _last_messages = []
         return []
-    history_path = _get_history_path()
-    mtime = history_path.stat().st_mtime
-    if mtime == _last_mtime and _last_messages:
-        # File unchanged — return cached (only useful in poll mode, same process)
-        return _last_messages[-last_n:] if last_n else _last_messages
     try:
-        with open(_get_history_path(), encoding="utf-8") as f:
+        # Always read fresh — no mtime cache (caused stale reads in cron mode)
+        with open(history_path, encoding="utf-8") as f:
             data = json.load(f)
         _last_messages = data.get("messages", [])
-        _last_mtime = _get_history_path().stat().st_mtime  # re-read mtime after successful parse
+        _last_mtime = history_path.stat().st_mtime
     except (json.JSONDecodeError, IOError):
-        # File still being written — return cached
+        # File being written — return previous if available
         if _last_messages:
             return _last_messages[-last_n:] if last_n else _last_messages
         return []
