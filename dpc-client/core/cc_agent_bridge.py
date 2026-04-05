@@ -370,6 +370,9 @@ def main():
         return
 
     if args.check is not None:
+        # Force fresh read — bypass any mtime cache
+        global _last_mtime
+        _last_mtime = 0.0
         messages = read_history()
         count = len(messages)
         print(f"TOTAL: {count}")

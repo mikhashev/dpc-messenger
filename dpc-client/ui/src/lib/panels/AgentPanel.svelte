@@ -344,12 +344,14 @@
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = newMap.get(conversation_id) || [];
-          // Determine sender: CC for user/cc role, agent for assistant role
+          // Determine sender by role + sender_name (CC messages have role="user" same as Mike)
           const isAgent = role === 'assistant';
-          const stableId = message_id || `${isAgent ? 'ark' : 'cc'}-${timestamp ? new Date(timestamp).getTime() : Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const isCC = sender_name === 'CC' || sender_name === 'СС';
+          const senderKey = isAgent ? conversation_id : (isCC ? 'cc' : 'user');
+          const stableId = message_id || `${senderKey}-${timestamp ? new Date(timestamp).getTime() : Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const newMsg: Message = {
             id: stableId,
-            sender: isAgent ? conversation_id : 'cc',
+            sender: senderKey,
             senderName: sender_name || (isAgent ? 'Agent' : 'CC'),
             text: content,
             timestamp: timestamp ? new Date(timestamp).getTime() : Date.now(),
