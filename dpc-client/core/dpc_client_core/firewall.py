@@ -112,6 +112,7 @@ class ContextFirewall:
             'repo_read': True,
             'repo_list': True,
             'repo_write_commit': False,  # Can write files
+            'repo_delete': False,  # Can delete files/directories in sandbox
             'drive_read': False,  # Direct file system access
             'drive_list': False,
             'drive_write': False,
@@ -543,6 +544,7 @@ class ContextFirewall:
                     'repo_read': True,
                     'repo_list': True,
                     'repo_write_commit': False,
+                    'repo_delete': False,
                     'update_scratchpad': True,
                     'browse_page': True,
                     'search_web': True,
@@ -698,6 +700,7 @@ class ContextFirewall:
                         "repo_read": True,
                         "repo_list": True,
                         "repo_write_commit": False,
+                        "repo_delete": False,
                         "drive_read": False,
                         "drive_list": False,
                         "drive_write": False,
@@ -1573,7 +1576,7 @@ class ContextFirewall:
                             # All valid tool names
                             valid_tools = {
                                 # File operations
-                                'repo_read', 'repo_list', 'repo_write_commit',
+                                'repo_read', 'repo_list', 'repo_write_commit', 'repo_delete',
                                 # Drive operations
                                 'drive_read', 'drive_list', 'drive_write',
                                 # Memory/identity
@@ -1704,7 +1707,7 @@ class ContextFirewall:
                                 else:
                                     # Use the same valid tools as dpc_agent
                                     valid_tools = {
-                                        'repo_read', 'repo_list', 'repo_write_commit',
+                                        'repo_read', 'repo_list', 'repo_write_commit', 'repo_delete',
                                         'drive_read', 'drive_list', 'drive_write',
                                         'update_scratchpad', 'update_identity', 'chat_history',
                                         'knowledge_read', 'knowledge_write', 'knowledge_list',

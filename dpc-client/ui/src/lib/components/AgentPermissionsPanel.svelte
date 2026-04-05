@@ -25,6 +25,7 @@
         { key: 'repo_read', label: 'Read Files', desc: 'Read files in sandbox' },
         { key: 'repo_list', label: 'List Files', desc: 'List directory contents' },
         { key: 'repo_write_commit', label: 'Write Files', desc: 'Create/modify files in sandbox' },
+        { key: 'repo_delete', label: 'Delete Files', desc: 'Delete files/directories in sandbox' },
       ]
     },
     {

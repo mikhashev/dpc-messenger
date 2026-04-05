@@ -156,6 +156,42 @@ def drive_write(ctx: ToolContext, path: str, content: str) -> str:
     return repo_write(ctx, path, content)
 
 
+def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
+    """
+    Delete a file or directory from the agent sandbox.
+
+    Args:
+        ctx: Tool context
+        path: Path relative to agent root
+        recursive: If True, delete directory and all contents
+
+    Returns:
+        Result message
+    """
+    try:
+        target = ctx.repo_path(path)
+
+        if not target.exists():
+            return f"⚠️ Not found: {path}"
+
+        if target.is_dir():
+            if not recursive:
+                return f"⚠️ '{path}' is a directory. Use recursive=true to delete it and all contents."
+            import shutil
+            count = sum(1 for _ in target.rglob("*") if _.is_file())
+            shutil.rmtree(target)
+            return f"✓ Deleted directory '{path}' ({count} files)"
+        else:
+            size = target.stat().st_size
+            target.unlink()
+            return f"✓ Deleted '{path}' ({size} bytes)"
+
+    except PermissionError as e:
+        return f"⚠️ Sandbox violation: {e}"
+    except Exception as e:
+        return f"⚠️ Error deleting: {e}"
+
+
 # ---------------------------------------------------------------------------
 # Memory Tools
 # ---------------------------------------------------------------------------
@@ -1887,6 +1923,31 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=drive_list,
+            timeout_sec=30,
+        ),
+
+        ToolEntry(
+            name="repo_delete",
+            schema={
+                "name": "repo_delete",
+                "description": "Delete a file or directory from the agent sandbox. Use recursive=true for directories.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Path relative to agent root to delete"
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "description": "Delete directory and all contents (required for directories)",
+                            "default": False
+                        }
+                    },
+                    "required": ["path"]
+                }
+            },
+            handler=repo_delete,
             timeout_sec=30,
         ),
 
