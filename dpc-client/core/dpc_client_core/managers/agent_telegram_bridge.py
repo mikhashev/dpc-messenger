@@ -302,7 +302,7 @@ class AgentTelegramBridge:
         chat_id = str(update.effective_chat.id)
 
         if chat_id not in self.allowed_chat_ids:
-            await update.message.reply_text("⛔ Unauthorized. Your chat ID is not in the allowed list.")
+            log.warning(f"Unauthorized /start from chat_id {chat_id}, silent drop")
             return
 
         welcome = """🤖 *DPC Agent Bot*
@@ -723,10 +723,9 @@ Send a voice message and it will be transcribed and processed\\.
         chat_id = str(update.effective_chat.id)
         message_text = update.message.text
 
-        # Check authorization
+        # Check authorization — silent drop
         if chat_id not in self.allowed_chat_ids:
-            log.warning(f"Unauthorized message from chat_id={chat_id}")
-            await update.message.reply_text("⛔ Unauthorized. Your chat ID is not in the allowed list.")
+            log.warning(f"Unauthorized message from chat_id={chat_id}, silent drop")
             return
 
         # Check if we have a message handler
@@ -834,10 +833,9 @@ Send a voice message and it will be transcribed and processed\\.
         chat_id = str(update.effective_chat.id)
         voice = update.message.voice
 
-        # Check authorization
+        # Check authorization — silent drop
         if chat_id not in self.allowed_chat_ids:
-            log.warning(f"Unauthorized voice message from chat_id={chat_id}")
-            await update.message.reply_text("⛔ Unauthorized. Your chat ID is not in the allowed list.")
+            log.warning(f"Unauthorized voice message from chat_id={chat_id}, silent drop")
             return
 
         # Check if we have a message handler
@@ -985,10 +983,9 @@ Send a voice message and it will be transcribed and processed\\.
         """
         chat_id = str(update.effective_chat.id)
 
-        # Check authorization
+        # Check authorization — silent drop
         if chat_id not in self.allowed_chat_ids:
-            log.warning(f"Unauthorized photo from chat_id={chat_id}")
-            await update.message.reply_text("⛔ Unauthorized. Your chat ID is not in the allowed list.")
+            log.warning(f"Unauthorized photo from chat_id={chat_id}, silent drop")
             return
 
         if not self._message_handler:
