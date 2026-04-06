@@ -198,17 +198,27 @@ class DpcAgentManager:
 
         # Consciousness settings: firewall global → per-agent profile override
         _con_global_enabled = self.firewall.consciousness_enabled if self.firewall else False
+        _con_global_min = getattr(self.firewall, 'consciousness_think_interval_min', 60) if self.firewall else 60
+        _con_global_max = getattr(self.firewall, 'consciousness_think_interval_max', 300) if self.firewall else 300
+        _con_global_budget = getattr(self.firewall, 'consciousness_budget_fraction', 0.1) if self.firewall else 0.1
         _per_agent_con = _per_agent_profile.get('consciousness', {}) if _per_agent_profile else {}
         consciousness_enabled = _per_agent_con.get('enabled', _con_global_enabled)
+        consciousness_interval_min = _per_agent_con.get('think_interval_min', _con_global_min)
+        consciousness_interval_max = _per_agent_con.get('think_interval_max', _con_global_max)
+        consciousness_budget = _per_agent_con.get('budget_fraction', _con_global_budget)
 
         if _per_agent_evo or _per_agent_con:
-            log.debug("Agent %s: per-agent overrides (evolution=%s, consciousness=%s)",
-                      self.agent_id, evolution_enabled, consciousness_enabled)
+            log.debug("Agent %s: per-agent overrides (evolution=%s, consciousness=%s, con_interval=%d-%ds)",
+                      self.agent_id, evolution_enabled, consciousness_enabled,
+                      consciousness_interval_min, consciousness_interval_max)
 
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
             background_consciousness=consciousness_enabled,
+            consciousness_think_interval_min=consciousness_interval_min,
+            consciousness_think_interval_max=consciousness_interval_max,
+            consciousness_budget_fraction=consciousness_budget,
             enable_task_queue=self.config.get("enable_task_queue", True),
             evolution_enabled=evolution_enabled,
             evolution_interval_minutes=evolution_interval,

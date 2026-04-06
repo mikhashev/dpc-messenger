@@ -54,6 +54,9 @@ class AgentConfig:
     max_rounds: int = 200
     # Tool control is via firewall (privacy_rules.json), not config
     background_consciousness: bool = False
+    consciousness_think_interval_min: int = 60
+    consciousness_think_interval_max: int = 300
+    consciousness_budget_fraction: float = 0.1
 
     # Task queue settings
     enable_task_queue: bool = True
@@ -450,6 +453,9 @@ class DpcAgent:
 
         self._consciousness = BackgroundConsciousness(
             agent=self,
+            think_interval_min=self.config.consciousness_think_interval_min,
+            think_interval_max=self.config.consciousness_think_interval_max,
+            budget_fraction=self.config.consciousness_budget_fraction,
             emit_progress=emit_progress,
         )
         self._consciousness.start()

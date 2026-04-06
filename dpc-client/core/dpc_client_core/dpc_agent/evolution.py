@@ -237,16 +237,7 @@ class EvolutionManager:
                     log.warning(f"Skipping proposal with forbidden path: {proposal['path']}")
                     continue
 
-                # Skill appends are auto-approved even when auto_apply=False.
-                # They only add content (never rewrite) so the risk is low and
-                # they fix measured performance gaps. Memory/identity changes
-                # still require explicit approval via the standard queue.
-                is_skill_append = (
-                    proposal["path"].startswith(self.SKILL_AUTO_APPROVE_PATH_PREFIX)
-                    and proposal.get("change_type") == "append"
-                )
-
-                if self.auto_apply or is_skill_append:
+                if self.auto_apply:
                     success = await self._apply_change(proposal)
                     if success:
                         cycle.changes_applied += 1
