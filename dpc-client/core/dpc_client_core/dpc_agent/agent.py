@@ -466,6 +466,51 @@ class DpcAgent:
         """Check if consciousness is running."""
         return self._consciousness is not None and self._consciousness.is_running()
 
+    def archive_old_task_results(self, max_age_hours: int = 24) -> int:
+        """Archive task_results older than max_age_hours into daily JSONL files.
+
+        Moves individual JSON files from task_results/ into
+        task_results/archive/YYYY-MM-DD.jsonl (one JSON object per line).
+        Returns number of files archived.
+        """
+        import json as _json
+        from datetime import datetime, timezone, timedelta
+
+        results_dir = self.agent_root / "task_results"
+        if not results_dir.exists():
+            return 0
+
+        archive_dir = results_dir / "archive"
+        archive_dir.mkdir(exist_ok=True)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        archived = 0
+
+        for f in sorted(results_dir.glob("*.json")):
+            try:
+                data = _json.loads(f.read_text(encoding="utf-8"))
+                completed = data.get("completed_at") or data.get("started_at", "")
+                if not completed:
+                    continue
+                ts = datetime.fromisoformat(completed.replace("Z", "+00:00"))
+                if ts >= cutoff:
+                    continue
+
+                # Append to daily archive file
+                day_str = ts.strftime("%Y-%m-%d")
+                archive_file = archive_dir / f"{day_str}.jsonl"
+                with open(archive_file, "a", encoding="utf-8") as af:
+                    af.write(_json.dumps(data, ensure_ascii=False) + "\n")
+
+                f.unlink()
+                archived += 1
+            except Exception as e:
+                log.debug("Skipping task result %s: %s", f.name, e)
+
+        if archived:
+            log.info("Archived %d old task results (>%dh)", archived, max_age_hours)
+        return archived
+
     # -------------------------------------------------------------------------
     # Task Queue Methods
     # -------------------------------------------------------------------------
@@ -475,6 +520,12 @@ class DpcAgent:
         if not self._queue_enabled:
             log.debug("Task queue not enabled")
             return
+
+        # Archive old task results on startup
+        try:
+            self.archive_old_task_results(max_age_hours=24)
+        except Exception as e:
+            log.warning("Task result archival failed: %s", e)
 
         # Set callbacks
         async def on_task_start(task: Task) -> None:
