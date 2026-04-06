@@ -235,6 +235,11 @@ in A2A.md and can build on this foundation later.
 - [ ] **Session duration in history archive** (Low) — Save session duration metadata (start_time, end_time, message_count) when history.json is archived/cleared. Currently timestamps exist per-message but are lost after End Session. Useful for budget tracking, productivity analysis, agent self-reflection.
 - [ ] **Tool result truncation metadata** (Low) — When tool results exceed 15K char limit, include count metadata (e.g., "showing 300 of 1448 results") so agent can estimate true scope. Currently just "... (truncated from N chars)".
 
+### Open — from session 2026-04-06
+- [ ] **Backlog UI tab in Agent Progress Board** (~3-4h) — New "Backlog" tab next to Tasks and Learning. Backend: backlog.json storage + get_backlog/add_backlog_item/update_backlog_item commands. Frontend: tab with priority/status filters. Agent tool for bidirectional updates. Единый источник правды вместо 3 мест (Ark scratchpad, CC ideas file, chat). Need to design responsibilities: who creates/updates items (UI, agents, or both).
+- [ ] **DDA v2 formalization** — Discussion → Decision (with argument) → Comments → Action. Approved as pilot. Saved in Ark's knowledge/operational-protocols.md and CC memory. Review after 3-5 sessions.
+- [ ] **git_commit None error** — FIXED (68c995d). git.py:300 `result.get('error', '') or ''`.
+
 ## Next Steps
 
 1. **Mike**: Monitor Twitter for reactions to Karpathy reply

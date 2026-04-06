@@ -111,18 +111,24 @@ class ZaiProvider(AIProvider):
             else:
                 logger.debug(f"GLM extended thinking disabled for {self.model}")
 
-            message = await self.client.messages.create(**api_params)
-
-            # Parse content blocks - handle both thinking and text blocks
+            # Use streaming to avoid Anthropic SDK timeout for long operations
+            # (SDK requires streaming for operations >10 minutes)
             thinking_text = None
-            final_text = None
+            final_text = ""
 
-            for block in message.content:
-                if hasattr(block, 'type'):
-                    if block.type == "thinking":
-                        thinking_text = getattr(block, 'thinking', None)
-                    elif block.type == "text":
-                        final_text = getattr(block, 'text', None)
+            async with self.client.messages.stream(**api_params) as stream:
+                async for text in stream.text_stream:
+                    final_text += text
+
+                # Extract thinking blocks from final message
+                if self.thinking_enabled:
+                    try:
+                        final_message = await stream.get_final_message()
+                        for block in final_message.content:
+                            if hasattr(block, 'type') and block.type == "thinking":
+                                thinking_text = getattr(block, 'thinking', None)
+                    except Exception as e:
+                        logger.debug(f"Could not get final message for thinking: {e}")
 
             # Store thinking for retrieval by LLMManager
             self._last_thinking = thinking_text
@@ -130,18 +136,10 @@ class ZaiProvider(AIProvider):
             if thinking_text:
                 logger.info(f"GLM extended thinking: {len(thinking_text)} chars")
 
-            # Return text content (only from text blocks, never from thinking blocks)
             if final_text:
                 return final_text
-            elif message.content:
-                # Fallback: look for any text block in content
-                for block in message.content:
-                    if hasattr(block, 'type') and block.type == "text" and hasattr(block, 'text'):
-                        return block.text
-                # No text block found - return empty rather than repr of thinking block
-                logger.warning(f"No text block found in response, only thinking blocks")
-                return ""
             else:
+                logger.warning(f"No text produced in response")
                 return ""
 
         except Exception as e:
@@ -150,13 +148,11 @@ class ZaiProvider(AIProvider):
                 logger.warning(f"Z.AI batch overloaded (1305), retrying in 3s: {e}")
                 await asyncio.sleep(3)
                 try:
-                    message = await self.client.messages.create(**api_params)
-                    final_text = next(
-                        (getattr(b, 'text', None) for b in message.content
-                         if hasattr(b, 'type') and b.type == "text"),
-                        ""
-                    )
-                    return final_text or ""
+                    retry_text = ""
+                    async with self.client.messages.stream(**api_params) as stream:
+                        async for text in stream.text_stream:
+                            retry_text += text
+                    return retry_text or ""
                 except Exception as retry_e:
                     raise RuntimeError(f"Z.AI provider '{self.alias}' failed after retry: {retry_e}") from retry_e
             raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {e}") from e
@@ -338,9 +334,10 @@ class ZaiProvider(AIProvider):
                 full_text, tool_calls_raw = _extract_blocks(final_message.content)
                 usage_obj = final_message.usage
             else:
-                message = await self.client.messages.create(**api_params)
-                full_text, tool_calls_raw = _extract_blocks(message.content)
-                usage_obj = message.usage
+                async with self.client.messages.stream(**api_params) as stream:
+                    final_message = await stream.get_final_message()
+                full_text, tool_calls_raw = _extract_blocks(final_message.content)
+                usage_obj = final_message.usage
 
             return {
                 "content": full_text,
@@ -358,9 +355,10 @@ class ZaiProvider(AIProvider):
             if is_overloaded:
                 logger.warning(f"Z.AI tool calling overloaded (1305), retrying in 3s: {e}")
                 await asyncio.sleep(3)
-                message = await self.client.messages.create(**api_params)
-                full_text, tool_calls_raw = _extract_blocks(message.content)
-                usage_obj = message.usage
+                async with self.client.messages.stream(**api_params) as stream:
+                    final_message = await stream.get_final_message()
+                full_text, tool_calls_raw = _extract_blocks(final_message.content)
+                usage_obj = final_message.usage
                 return {
                     "content": full_text,
                     "tool_calls_raw": tool_calls_raw,
@@ -402,12 +400,13 @@ class ZaiProvider(AIProvider):
                     }
                 })
 
-            response = await self.client.messages.create(
+            async with self.client.messages.stream(
                 model=self.model,
                 max_tokens=kwargs.get("max_tokens", 8192),
                 messages=[{"role": "user", "content": content}]
-            )
-            return response.content[0].text
+            ) as stream:
+                final_message = await stream.get_final_message()
+            return final_message.content[0].text
         except Exception as e:
             raise RuntimeError(f"Z.AI vision API failed for '{self.alias}': {e}") from e
 
