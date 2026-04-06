@@ -297,7 +297,7 @@ def git_commit(ctx: ToolContext, message: str, path: str = ".") -> str:
     result = _run_git(ctx, ["commit", "-m", message], cwd=path)
 
     if not result["success"]:
-        error = result.get("error", "")
+        error = result.get("error", "") or ""
         if "nothing to commit" in error.lower():
             return "Nothing to commit (working directory clean)"
         return f"⚠️ Git commit failed: {error}"
