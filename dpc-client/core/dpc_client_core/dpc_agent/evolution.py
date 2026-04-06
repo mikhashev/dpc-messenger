@@ -350,6 +350,14 @@ class EvolutionManager:
         except Exception as e:
             log.debug(f"Failed to read skill stats: {e}")
 
+        # Summarize recent consciousness thoughts for Evolution prompt
+        recent_thoughts: List[str] = []
+        for entry in thoughts_log[-5:]:
+            preview = str(entry.get("response_preview", ""))[:200]
+            thought_type = entry.get("type", "unknown")
+            if preview.strip():
+                recent_thoughts.append(f"[{thought_type}] {preview}")
+
         return {
             "files_examined": 5,
             "tool_calls_count": len(tools_log),
@@ -360,6 +368,7 @@ class EvolutionManager:
             "underperforming_skills": underperforming_skills,
             "total_skill_stats": len(skill_stats),
             "improvement_areas": [],  # Will be populated by LLM
+            "recent_thoughts": recent_thoughts,
         }
 
     # Maximum size for skill files — beyond this, append proposals are skipped
@@ -407,12 +416,26 @@ class EvolutionManager:
                 "Consider memory/identity.md or memory/knowledge/ improvements only."
             )
 
-        prompt = f"""You are an evolution cycle for an AI agent. Propose targeted improvements based on performance data.
+        # Build consciousness insights section
+        recent_thoughts = analysis.get("recent_thoughts", [])
+        if recent_thoughts:
+            thoughts_section = (
+                "## Recent Agent Self-Reflections (from Consciousness)\n"
+                "Use these insights to inform your proposals — "
+                "the agent has already been thinking about these topics:\n\n"
+                + "\n".join(f"- {t}" for t in recent_thoughts)
+            )
+        else:
+            thoughts_section = ""
+
+        prompt = f"""You are an evolution cycle for an AI agent. Propose targeted improvements based on performance data and the agent's own self-reflections.
 
 ## Performance Data
 - Recent tool calls: {analysis['tool_calls_count']}
 - Knowledge topics: {analysis['knowledge_topics']}
 - Skills tracked: {analysis['total_skill_stats']}
+
+{thoughts_section}
 
 {skill_section}
 
