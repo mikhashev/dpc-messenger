@@ -645,7 +645,10 @@ class DpcAgentManager:
             _has_content = response and response.strip() != _THINKING_FALLBACK
             _has_extras = _thinking or _streaming_raw
 
-            if _has_content or _has_extras:
+            # Skip saving LLM errors to history — they pollute context for future requests
+            _is_llm_error = response and response.startswith("⚠️ LLM error:")
+
+            if (_has_content or _has_extras) and not _is_llm_error:
                 monitor.add_message(
                     role="assistant",
                     content=response or "",
@@ -656,6 +659,8 @@ class DpcAgentManager:
                     streaming_raw=_streaming_raw,
                 )
                 monitor.save_history()  # Save to disk immediately
+            elif _is_llm_error:
+                logger.warning(f"LLM error not saved to history: {response[:100]}")
 
             # Store full context estimate from this request so next request's session_state
             # can expose it. One request stale, but accurate — context grows incrementally.

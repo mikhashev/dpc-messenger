@@ -329,14 +329,9 @@ class TelegramBridge:
             message_id = message.message_id
             from_user = message.from_user
 
-            # Whitelist check with rate limiting (send info reply only once per user - v0.15.0)
+            # Whitelist check — silent drop for unauthorized users (no reply, no confirmation bot is alive)
             if not self.telegram.is_allowed(chat_id):
-                if chat_id not in self._notified_unknown_users:
-                    logger.warning(f"Message from unauthorized chat_id {chat_id}, sending info reply")
-                    await self._send_unknown_user_info(chat_id, from_user)
-                    self._notified_unknown_users.add(chat_id)
-                else:
-                    logger.warning(f"Message from unauthorized chat_id {chat_id}, already notified")
+                logger.warning(f"Message from unauthorized chat_id {chat_id}, silent drop")
                 return
 
             # Get sender info
@@ -490,14 +485,9 @@ class TelegramBridge:
             chat_id = str(message.chat_id)
             from_user = message.from_user
 
-            # Whitelist check with rate limiting (v0.15.0)
+            # Whitelist check — silent drop
             if not self.telegram.is_allowed(chat_id):
-                if chat_id not in self._notified_unknown_users:
-                    logger.warning(f"Voice message from unauthorized chat_id {chat_id}, sending info reply")
-                    await self._send_unknown_user_info(chat_id, from_user)
-                    self._notified_unknown_users.add(chat_id)
-                else:
-                    logger.warning(f"Voice message from unauthorized chat_id {chat_id}, already notified")
+                logger.warning(f"Voice message from unauthorized chat_id {chat_id}, silent drop")
                 return
 
             # Get voice metadata
@@ -677,14 +667,9 @@ class TelegramBridge:
             chat_id = str(message.chat_id)
             from_user = message.from_user
 
-            # Whitelist check with rate limiting (v0.15.0)
+            # Whitelist check — silent drop
             if not self.telegram.is_allowed(chat_id):
-                if chat_id not in self._notified_unknown_users:
-                    logger.warning(f"Photo from unauthorized chat_id {chat_id}, sending info reply")
-                    await self._send_unknown_user_info(chat_id, from_user)
-                    self._notified_unknown_users.add(chat_id)
-                else:
-                    logger.warning(f"Photo from unauthorized chat_id {chat_id}, already notified")
+                logger.warning(f"Photo from unauthorized chat_id {chat_id}, silent drop")
                 return
 
             # Get or create conversation
@@ -784,14 +769,9 @@ class TelegramBridge:
             chat_id = str(message.chat_id)
             from_user = message.from_user
 
-            # Whitelist check with rate limiting (v0.15.0)
+            # Whitelist check — silent drop
             if not self.telegram.is_allowed(chat_id):
-                if chat_id not in self._notified_unknown_users:
-                    logger.warning(f"Document from unauthorized chat_id {chat_id}, sending info reply")
-                    await self._send_unknown_user_info(chat_id, from_user)
-                    self._notified_unknown_users.add(chat_id)
-                else:
-                    logger.warning(f"Document from unauthorized chat_id {chat_id}, already notified")
+                logger.warning(f"Document from unauthorized chat_id {chat_id}, silent drop")
                 return
 
             # Get or create conversation
@@ -897,14 +877,9 @@ class TelegramBridge:
             chat_id = str(message.chat_id)
             from_user = message.from_user
 
-            # Whitelist check with rate limiting (v0.15.0)
+            # Whitelist check — silent drop
             if not self.telegram.is_allowed(chat_id):
-                if chat_id not in self._notified_unknown_users:
-                    logger.warning(f"Video from unauthorized chat_id {chat_id}, sending info reply")
-                    await self._send_unknown_user_info(chat_id, from_user)
-                    self._notified_unknown_users.add(chat_id)
-                else:
-                    logger.warning(f"Video from unauthorized chat_id {chat_id}, already notified")
+                logger.warning(f"Video from unauthorized chat_id {chat_id}, silent drop")
                 return
 
             # Get or create conversation
