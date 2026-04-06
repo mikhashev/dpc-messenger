@@ -77,6 +77,17 @@ class ZaiProvider(AIProvider):
         """Get the thinking content from the last response."""
         return self._last_thinking
 
+    @staticmethod
+    def _is_retryable(error: Exception) -> bool:
+        """Check if error is transient and worth retrying (502, 503, timeout)."""
+        err_str = str(error).lower()
+        return any(indicator in err_str for indicator in [
+            "502", "503", "bad gateway", "service unavailable",
+            "timed out", "timeout", "connection reset", "connection error",
+            "connect() failed", "interrupted",
+            "1305", "overloaded",
+        ])
+
     async def generate_response(self, prompt: str, **kwargs) -> str:
         """Generate text response using Z.AI GLM model with extended thinking"""
         try:
@@ -143,18 +154,21 @@ class ZaiProvider(AIProvider):
                 return ""
 
         except Exception as e:
-            is_overloaded = "1305" in str(e) or "overloaded" in str(e).lower()
-            if is_overloaded:
-                logger.warning(f"Z.AI batch overloaded (1305), retrying in 3s: {e}")
-                await asyncio.sleep(3)
-                try:
-                    retry_text = ""
-                    async with self.client.messages.stream(**api_params) as stream:
-                        async for text in stream.text_stream:
-                            retry_text += text
-                    return retry_text or ""
-                except Exception as retry_e:
-                    raise RuntimeError(f"Z.AI provider '{self.alias}' failed after retry: {retry_e}") from retry_e
+            if self._is_retryable(e):
+                # Exponential backoff: 3s, 6s, 12s
+                for attempt, delay in enumerate([3, 6, 12], 1):
+                    logger.warning(f"Z.AI transient error (attempt {attempt}/3), retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                    try:
+                        retry_text = ""
+                        async with self.client.messages.stream(**api_params) as stream:
+                            async for text in stream.text_stream:
+                                retry_text += text
+                        return retry_text or ""
+                    except Exception as retry_e:
+                        if attempt == 3 or not self._is_retryable(retry_e):
+                            raise RuntimeError(f"Z.AI provider '{self.alias}' failed after {attempt} retries: {retry_e}") from retry_e
+                        e = retry_e  # Update for next iteration's log message
             raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {e}") from e
 
     async def generate_response_stream(
@@ -252,14 +266,10 @@ class ZaiProvider(AIProvider):
                 return full_text  # Return what we have
             raise
         except Exception as e:
-            is_overloaded = "1305" in str(e) or "overloaded" in str(e).lower()
-            if is_overloaded:
-                logger.warning(f"Z.AI streaming overloaded (1305), falling back to batch mode: {e}")
-                # Brief backoff before retrying — Z.AI uses HTTP 429 for overload (1305) as well
-                # as rate limiting; a short wait improves batch success rate on an overloaded server
-                await asyncio.sleep(2)
+            if self._is_retryable(e):
+                logger.warning(f"Z.AI streaming transient error, falling back to generate_response: {e}")
+                await asyncio.sleep(3)
                 result = await self.generate_response(prompt)
-                # Emit full result as one chunk so UI streaming display and Raw output still work
                 if on_chunk and result:
                     await on_chunk(result, conversation_id)
                 return result
@@ -351,24 +361,29 @@ class ZaiProvider(AIProvider):
             }
 
         except Exception as e:
-            is_overloaded = "1305" in str(e) or "overloaded" in str(e).lower()
-            if is_overloaded:
-                logger.warning(f"Z.AI tool calling overloaded (1305), retrying in 3s: {e}")
-                await asyncio.sleep(3)
-                async with self.client.messages.stream(**api_params) as stream:
-                    final_message = await stream.get_final_message()
-                full_text, tool_calls_raw = _extract_blocks(final_message.content)
-                usage_obj = final_message.usage
-                return {
-                    "content": full_text,
-                    "tool_calls_raw": tool_calls_raw,
-                    "thinking": self._last_thinking,
-                    "usage": {
-                        "prompt_tokens": usage_obj.input_tokens,
-                        "completion_tokens": usage_obj.output_tokens,
-                        "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
-                    },
-                }
+            if self._is_retryable(e):
+                for attempt, delay in enumerate([3, 6, 12], 1):
+                    logger.warning(f"Z.AI tool calling transient error (attempt {attempt}/3), retrying in {delay}s: {e}")
+                    await asyncio.sleep(delay)
+                    try:
+                        async with self.client.messages.stream(**api_params) as stream:
+                            final_message = await stream.get_final_message()
+                        full_text, tool_calls_raw = _extract_blocks(final_message.content)
+                        usage_obj = final_message.usage
+                        return {
+                            "content": full_text,
+                            "tool_calls_raw": tool_calls_raw,
+                            "thinking": self._last_thinking,
+                            "usage": {
+                                "prompt_tokens": usage_obj.input_tokens,
+                                "completion_tokens": usage_obj.output_tokens,
+                                "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
+                            },
+                        }
+                    except Exception as retry_e:
+                        if attempt == 3 or not self._is_retryable(retry_e):
+                            raise RuntimeError(f"Z.AI tool calling failed after {attempt} retries: {retry_e}") from retry_e
+                        e = retry_e
             raise RuntimeError(f"Z.AI native tool calling failed for '{self.alias}': {e}") from e
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
