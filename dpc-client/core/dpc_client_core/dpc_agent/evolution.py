@@ -194,6 +194,30 @@ class EvolutionManager:
         log.warning(f"Path not in allowed list: {path}")
         return False
 
+    def _get_skill_existing_sections(self, skill_name: str) -> Dict[str, Any]:
+        """
+        Read existing SKILL.md for a skill and return section headers + size info.
+
+        Used by _generate_proposals to prevent duplicate content.
+        """
+        skill_path = self.agent_root / "skills" / skill_name / "SKILL.md"
+        result: Dict[str, Any] = {"sections": [], "size": 0, "over_limit": False}
+        try:
+            if not skill_path.exists():
+                return result
+            content = skill_path.read_text(encoding="utf-8")
+            result["size"] = len(content)
+            result["over_limit"] = len(content) > self.MAX_SKILL_FILE_SIZE
+            # Extract markdown ## headers as section names
+            result["sections"] = [
+                line.lstrip("#").strip()
+                for line in content.splitlines()
+                if line.startswith("## ")
+            ]
+        except Exception as e:
+            log.debug(f"Failed to read skill sections for {skill_name}: {e}")
+        return result
+
     async def run_evolution_cycle(self) -> EvolutionCycle:
         """
         Run one evolution cycle.
@@ -338,11 +362,15 @@ class EvolutionManager:
             "improvement_areas": [],  # Will be populated by LLM
         }
 
+    # Maximum size for skill files — beyond this, append proposals are skipped
+    MAX_SKILL_FILE_SIZE = 10_000  # characters
+
     async def _generate_proposals(self, analysis: Dict) -> List[Dict]:
         """Generate improvement proposals using LLM."""
         underperforming = analysis.get("underperforming_skills", [])
 
-        # Build the skill-focused section of the prompt
+        # Build the skill-focused section of the prompt, including existing content
+        # to prevent duplicate proposals
         if underperforming:
             skill_section = "## Underperforming Skills (primary improvement target)\n"
             for s in underperforming[:3]:
@@ -351,10 +379,27 @@ class EvolutionManager:
                     f"avg_rounds={s['avg_rounds']:.1f}, uses={s['total_uses']}, "
                     f"prior_improvements={s['improvement_count']}"
                 )
+
+                # Read existing SKILL.md to prevent duplicate proposals
+                existing_info = self._get_skill_existing_sections(s['name'])
+                if existing_info["over_limit"]:
+                    skill_section += (
+                        f"\n  ⚠ SKILL.md is {existing_info['size']} chars "
+                        f"(limit {self.MAX_SKILL_FILE_SIZE}). "
+                        f"DO NOT propose appends for this skill — file is too large."
+                    )
+                elif existing_info["sections"]:
+                    skill_section += (
+                        f"\n  Existing sections in SKILL.md: "
+                        f"{', '.join(existing_info['sections'])}"
+                        f"\n  DO NOT propose content that duplicates these sections."
+                    )
+
             skill_section += (
-                "\n\nFor each underperforming skill, propose an APPEND to "
-                "skills/{skill-name}/SKILL.md that adds a missing step or "
-                "common-failure entry. Path format: skills/{name}/SKILL.md"
+                "\n\nFor each underperforming skill (that is NOT over the size limit), "
+                "propose an APPEND to skills/{skill-name}/SKILL.md that adds a "
+                "GENUINELY NEW step or common-failure entry not already covered. "
+                "Path format: skills/{name}/SKILL.md"
             )
         else:
             skill_section = (
@@ -482,6 +527,12 @@ If no improvements are warranted: {{"proposals": []}}
             # Apply change based on type
             if change_type == "append":
                 current = full_path.read_text(encoding="utf-8") if full_path.exists() else ""
+                if len(current) > self.MAX_SKILL_FILE_SIZE and path.startswith("skills/"):
+                    log.warning(
+                        "Blocked append to %s — file size %d exceeds limit %d",
+                        path, len(current), self.MAX_SKILL_FILE_SIZE,
+                    )
+                    return False
                 new_content = current + "\n\n" + content
                 full_path.write_text(new_content, encoding="utf-8")
 
@@ -508,12 +559,23 @@ If no improvements are warranted: {{"proposals": []}}
         """
         Queue a change for human approval.
 
+        Skips if a pending change already targets the same path (dedup).
+
         Args:
             proposal: The change proposal
 
         Returns:
-            Change ID
+            Change ID, or empty string if skipped as duplicate
         """
+        # Dedup: skip if we already have a pending change for the same path
+        for existing in self._pending_changes:
+            if existing.path == proposal["path"]:
+                log.info(
+                    "Skipping duplicate proposal for %s — pending change %s already exists",
+                    proposal["path"], existing.id,
+                )
+                return ""
+
         change_id = f"change-{uuid.uuid4().hex[:8]}"
 
         pending_change = ProposedChange(

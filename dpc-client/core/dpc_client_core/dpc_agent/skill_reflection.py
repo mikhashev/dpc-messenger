@@ -137,10 +137,35 @@ class SkillReflector:
         # Summarise what actually happened
         recent_tools = [tc.get("tool") for tc in tool_calls[-10:] if not tc.get("is_error")]
 
+        # Build skill context: show strategy summary + ALL existing section headers
+        # to prevent duplicate "Lessons Learned" / "Optimization" sections
+        MAX_SKILL_FILE_SIZE = 10_000
+        existing_sections = [
+            line.lstrip("#").strip()
+            for line in skill_body.splitlines()
+            if line.startswith("## ")
+        ]
+        sections_list = ", ".join(existing_sections) if existing_sections else "(none)"
+        skill_over_limit = len(skill_body) > MAX_SKILL_FILE_SIZE
+
+        if skill_over_limit:
+            skill_context = (
+                f"SKILL.md is {len(skill_body)} chars (over {MAX_SKILL_FILE_SIZE} limit). "
+                f"DO NOT propose any appends — file needs cleanup, not more content.\n"
+                f"Existing sections: {sections_list}"
+            )
+        else:
+            skill_context = (
+                f"{skill_body[:2000]}\n\n"
+                f"[...truncated — full file is {len(skill_body)} chars]\n"
+                f"ALL existing sections in this file: {sections_list}\n"
+                f"DO NOT duplicate any of these sections."
+            )
+
         reflection_prompt = f"""You are reflecting on the execution of the '{skill_name}' skill strategy.
 
 ## Skill Strategy (currently)
-{skill_body[:2000]}
+{skill_context}
 
 ## What happened
 Task: {task_text[:400]}
@@ -163,8 +188,9 @@ Only set needs_improvement=true when:
 - A step was clearly missing and its absence caused extra rounds
 - The strategy had incorrect advice that had to be worked around
 - A Common Failure was hit that isn't already documented
+- The improvement is NOT already covered by any existing section listed above
 
-Do NOT suggest improvements for: normal variance, minor wording, or tasks that succeeded quickly."""
+Do NOT suggest improvements for: normal variance, minor wording, tasks that succeeded quickly, or topics already covered in existing sections."""
 
         try:
             msg, _ = await self.llm.chat(
@@ -226,6 +252,16 @@ Do NOT suggest improvements for: normal variance, minor wording, or tasks that s
         """Append improvement to the skill's SKILL.md."""
         current = self.skill_store.load_skill_content(skill_name)
         if not current:
+            return
+
+        # Size guard — don't append to files that are already too large
+        MAX_SKILL_FILE_SIZE = 10_000
+        if len(current) > MAX_SKILL_FILE_SIZE:
+            log.info(
+                "Skipping reflector append to %s — file size %d exceeds limit %d",
+                skill_name, len(current), MAX_SKILL_FILE_SIZE,
+            )
+            self._log_pending(skill_name, content, reason + " (blocked: file over size limit)")
             return
 
         today = utc_now_iso()[:10]
