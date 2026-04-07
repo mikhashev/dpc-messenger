@@ -225,6 +225,8 @@ CORE_TOOL_NAMES = {
     "execute_skill",
     # Self-introspection tools
     "list_my_tools", "list_my_skills",
+    # Session archive tools (read-only access to conversation history)
+    "read_session_archive", "read_session_detail",
 }
 
 # Restricted tools (require explicit enable in config)
