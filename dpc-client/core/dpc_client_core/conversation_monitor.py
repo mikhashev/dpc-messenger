@@ -1517,6 +1517,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
             logger.info(f"Archived session to {archive_path}")
 
+            # Generate incremental session digest (derived data — can be rebuilt from archives)
+            self._generate_session_digest(data, archive_path)
+
             # Prune oldest archives beyond max_sessions
             archives = sorted(archive_dir.glob("*_session.json"))
             if len(archives) > max_sessions:
@@ -1529,6 +1532,69 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         except Exception as e:
             logger.warning(f"Failed to archive session for {self.conversation_id}: {e}")
             return 0
+
+    def _generate_session_digest(self, session_data: Dict[str, Any], archive_path: Path) -> None:
+        """Generate an incremental session digest and append to digest.jsonl.
+
+        Extracts structured metadata from the archived session via parsing (no LLM).
+        The digest is derived data — if lost, it can be rebuilt from session archives.
+
+        Args:
+            session_data: The archived session JSON data.
+            archive_path: Path to the archive file (for logging).
+        """
+        try:
+            messages = session_data.get("messages", [])
+            if not messages:
+                return
+
+            # Parse timestamps for duration
+            timestamps = [m.get("timestamp", "") for m in messages if m.get("timestamp")]
+            duration_mins = 0.0
+            if len(timestamps) >= 2:
+                try:
+                    first = datetime.fromisoformat(timestamps[0].replace("Z", "+00:00"))
+                    last = datetime.fromisoformat(timestamps[-1].replace("Z", "+00:00"))
+                    duration_mins = round((last - first).total_seconds() / 60, 1)
+                except (ValueError, TypeError):
+                    pass
+
+            # Count tool calls from assistant messages
+            tool_stats: Dict[str, int] = {}
+            for msg in messages:
+                if msg.get("role") == "assistant":
+                    content = msg.get("content", "")
+                    # Count tool invocations mentioned in assistant responses
+                    # Agent messages contain tool call results in structured format
+                    if "tool_calls" in msg:
+                        for tc in msg.get("tool_calls", []):
+                            name = tc.get("function", {}).get("name", tc.get("name", "unknown"))
+                            tool_stats[name] = tool_stats.get(name, 0) + 1
+
+            # Extract basic topics from user messages (first 5 user messages as topic hints)
+            user_messages = [m.get("content", "")[:100] for m in messages
+                            if m.get("role") == "user" and m.get("content")]
+
+            digest_entry = {
+                "date": session_data.get("archived_at", datetime.now(timezone.utc).isoformat()),
+                "session_id": self.conversation_id,
+                "message_count": len(messages),
+                "duration_mins": duration_mins,
+                "tool_stats": tool_stats,
+                "user_message_previews": user_messages[:5],
+                "archive_file": archive_path.name,
+            }
+
+            # Write to digest.jsonl in the conversation directory (next to archive/)
+            digest_path = archive_path.parent.parent / "digest.jsonl"
+            with open(digest_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(digest_entry, ensure_ascii=False) + "\n")
+
+            logger.info(f"Session digest appended to {digest_path}")
+
+        except Exception as e:
+            # Digest failure must not block archival
+            logger.warning(f"Failed to generate session digest: {e}")
 
     def reset_conversation(self, preserve: bool = True, max_sessions: int = 10) -> int:
         """Reset conversation history and context tracking (for "New Chat" button).
