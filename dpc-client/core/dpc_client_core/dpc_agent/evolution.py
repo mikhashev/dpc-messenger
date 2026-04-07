@@ -351,12 +351,29 @@ class EvolutionManager:
             log.debug(f"Failed to read skill stats: {e}")
 
         # Summarize recent consciousness thoughts for Evolution prompt
+        # Supports both structured (v2) and freeform (v1) formats
         recent_thoughts: List[str] = []
         for entry in thoughts_log[-5:]:
-            preview = str(entry.get("response_preview", ""))[:200]
             thought_type = entry.get("type", "unknown")
-            if preview.strip():
-                recent_thoughts.append(f"[{thought_type}] {preview}")
+            # Structured format (v2): has "observation" field
+            if "observation" in entry:
+                obs = str(entry.get("observation", ""))[:200]
+                pattern = entry.get("pattern_detected")
+                severity = entry.get("severity", "low")
+                action = entry.get("action_suggestion")
+                parts = [f"[{thought_type}] {obs}"]
+                if pattern:
+                    parts.append(f"pattern={pattern}")
+                if severity in ("medium", "high"):
+                    parts.append(f"severity={severity}")
+                if action:
+                    parts.append(f"action={action[:100]}")
+                recent_thoughts.append(" | ".join(parts))
+            else:
+                # Freeform format (v1): has "response_preview" field
+                preview = str(entry.get("response_preview", ""))[:200]
+                if preview.strip():
+                    recent_thoughts.append(f"[{thought_type}] {preview}")
 
         return {
             "files_examined": 5,

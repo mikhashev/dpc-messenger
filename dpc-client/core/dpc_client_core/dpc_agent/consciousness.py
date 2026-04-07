@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import logging
 import random
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -282,31 +283,35 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
                 for e in tools_entries[-10:]
             ])
 
-            return f"""Review your recent actions and consider what you've learned.
+            return f"""Review your recent actions and identify patterns.
 
 Recent tool calls:
 {recent_tools}
 
-Questions:
-- What patterns do you notice in your actions?
-- What worked well? What could be improved?
-- Are there more efficient approaches you could take?
-
-Write a brief analysis of your recent actions."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "observation": "what you notice about your recent actions (max 300 chars)",
+  "pattern_detected": "name of pattern (e.g. 'repetitive_search', 'tool_avoidance') or null",
+  "severity": "low | medium | high",
+  "action_suggestion": "specific change to try next time, or null",
+  "confidence": 0.7
+}}"""
 
         elif thought_type == "plan_improvements":
             scratchpad = memory.load_scratchpad()
-            return f"""Plan improvements to your capabilities and knowledge.
+            return f"""Plan improvements to your capabilities based on current state.
 
 Current focus (from scratchpad):
 {scratchpad[:1500]}
 
-Consider:
-- What skills or knowledge would make you more effective?
-- What gaps in your understanding should you address?
-- What experiments could you try?
-
-Write 2-3 specific improvements you'd like to make."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "observation": "what capability gap or weakness you identified (max 300 chars)",
+  "pattern_detected": "recurring theme or null (e.g. 'stalled_task', 'missing_skill')",
+  "severity": "low | medium | high",
+  "action_suggestion": "one specific, actionable improvement to make (required, max 300 chars)",
+  "confidence": 0.7
+}}"""
 
         elif thought_type == "consolidate_memory":
             progress_entries = memory.read_jsonl_tail("progress.jsonl", 30)
@@ -315,17 +320,19 @@ Write 2-3 specific improvements you'd like to make."""
                 for e in progress_entries[-15:]
             ]) if progress_entries else "No recent progress to consolidate."
 
-            return f"""Consolidate your recent experiences into lasting knowledge.
+            return f"""Consolidate recent experiences into lasting knowledge.
 
 Recent progress:
 {progress_summary}
 
-Task:
-- Identify key insights from recent work
-- Consider what should be remembered long-term
-- Suggest updates to your scratchpad or knowledge base
-
-Write a summary of what you've learned and what should be remembered."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "observation": "key insight worth remembering long-term (max 300 chars)",
+  "pattern_detected": "cross-session pattern or null (e.g. 'repeated_mistake', 'improving_efficiency')",
+  "severity": "low | medium | high",
+  "action_suggestion": "what to update in scratchpad or knowledge, or null",
+  "confidence": 0.7
+}}"""
 
         elif thought_type == "explore_curiosity":
             topics = memory.list_knowledge_topics()
@@ -335,12 +342,14 @@ Write a summary of what you've learned and what should be remembered."""
 
 Your current knowledge topics: {topics_str}
 
-Task:
-- Choose a topic you'd like to learn more about
-- Consider what questions you have
-- Think about how you could explore this topic
-
-Write about something you're curious to explore."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "observation": "what topic interests you and why (max 300 chars)",
+  "pattern_detected": null,
+  "severity": "low",
+  "action_suggestion": "specific question or exploration to pursue, or null",
+  "confidence": 0.5
+}}"""
 
         else:
             return "Take a moment to reflect on your existence and purpose."
@@ -372,16 +381,81 @@ Write about something you're curious to explore."""
             return f"Reflection interrupted: {e}"
 
     def _log_thought(self, thought_type: str, prompt: str, response: str) -> None:
-        """Log the thought to the consciousness log."""
+        """Log the thought to the consciousness log.
+
+        Attempts to parse the response as structured JSON. Falls back to
+        freeform format for backward compatibility if parsing fails.
+        """
         agent_root = self.agent.agent_root
 
-        append_jsonl(agent_root / "logs" / "consciousness.jsonl", {
-            "ts": utc_now_iso(),
-            "thought_number": self.thought_count,
-            "type": thought_type,
-            "prompt_preview": prompt[:500],
-            "response_preview": response[:1000],
-        })
+        # Try to parse structured JSON response
+        structured = self._parse_structured_response(response)
+
+        if structured:
+            entry = {
+                "ts": utc_now_iso(),
+                "thought_number": self.thought_count,
+                "type": thought_type,
+                "observation": str(structured.get("observation", ""))[:300],
+                "pattern_detected": structured.get("pattern_detected"),
+                "severity": structured.get("severity", "low"),
+                "action_suggestion": structured.get("action_suggestion"),
+                "confidence": min(1.0, max(0.0, float(structured.get("confidence", 0.5)))),
+            }
+        else:
+            # Fallback: freeform response (backward compat)
+            entry = {
+                "ts": utc_now_iso(),
+                "thought_number": self.thought_count,
+                "type": thought_type,
+                "prompt_preview": prompt[:500],
+                "response_preview": response[:1000],
+            }
+
+        append_jsonl(agent_root / "logs" / "consciousness.jsonl", entry)
+
+    @staticmethod
+    def _parse_structured_response(response: str) -> Optional[dict]:
+        """Try to parse a structured JSON response from LLM.
+
+        Handles common cases: raw JSON, JSON in markdown code blocks,
+        JSON with surrounding text.
+        """
+        if not response:
+            return None
+
+        text = response.strip()
+
+        # Try direct parse
+        try:
+            result = json.loads(text)
+            if isinstance(result, dict) and "observation" in result:
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Try extracting JSON from markdown code block
+        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        if json_match:
+            try:
+                result = json.loads(json_match.group(1))
+                if isinstance(result, dict) and "observation" in result:
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Try finding first { ... } block
+        brace_start = text.find('{')
+        brace_end = text.rfind('}')
+        if brace_start >= 0 and brace_end > brace_start:
+            try:
+                result = json.loads(text[brace_start:brace_end + 1])
+                if isinstance(result, dict) and "observation" in result:
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        return None
 
     async def _apply_thought_result(self, thought_type: str, response: str) -> None:
         """
