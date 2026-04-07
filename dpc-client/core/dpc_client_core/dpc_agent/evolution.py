@@ -350,6 +350,20 @@ class EvolutionManager:
         except Exception as e:
             log.debug(f"Failed to read skill stats: {e}")
 
+        # Analyze tool usage quality from tools.jsonl (error rate + diversity)
+        tool_error_count = 0
+        tool_frequency: Dict[str, int] = {}
+        for entry in tools_log:
+            tool_name = entry.get("tool", "unknown")
+            tool_frequency[tool_name] = tool_frequency.get(tool_name, 0) + 1
+            result = str(entry.get("result_preview", ""))
+            if result.startswith("⚠️") or "error" in result.lower()[:50]:
+                tool_error_count += 1
+
+        tool_error_rate = round(tool_error_count / len(tools_log), 2) if tools_log else 0.0
+        # Top 5 most used tools
+        top_tools = sorted(tool_frequency.items(), key=lambda x: -x[1])[:5]
+
         # Summarize recent consciousness thoughts for Evolution prompt
         # Supports both structured (v2) and freeform (v1) formats
         recent_thoughts: List[str] = []
@@ -378,6 +392,9 @@ class EvolutionManager:
         return {
             "files_examined": 5,
             "tool_calls_count": len(tools_log),
+            "tool_error_rate": tool_error_rate,
+            "tool_error_count": tool_error_count,
+            "top_tools": top_tools,
             "thoughts_count": len(thoughts_log),
             "identity_length": len(identity),
             "scratchpad_length": len(scratchpad),
@@ -445,12 +462,27 @@ class EvolutionManager:
         else:
             thoughts_section = ""
 
+        # Build tool usage quality section
+        tool_error_rate = analysis.get("tool_error_rate", 0.0)
+        top_tools = analysis.get("top_tools", [])
+        if tool_error_rate > 0.1 or top_tools:
+            tool_quality_section = "## Tool Usage Quality\n"
+            tool_quality_section += f"- Error rate: {tool_error_rate:.0%} ({analysis.get('tool_error_count', 0)} errors in {analysis['tool_calls_count']} calls)\n"
+            if top_tools:
+                tool_quality_section += "- Most used: " + ", ".join(f"{name}({count})" for name, count in top_tools) + "\n"
+            if tool_error_rate > 0.15:
+                tool_quality_section += "- ⚠️ HIGH error rate — consider if search patterns or file paths need improvement\n"
+        else:
+            tool_quality_section = ""
+
         prompt = f"""You are an evolution cycle for an AI agent. Propose targeted improvements based on performance data and the agent's own self-reflections.
 
 ## Performance Data
 - Recent tool calls: {analysis['tool_calls_count']}
 - Knowledge topics: {analysis['knowledge_topics']}
 - Skills tracked: {analysis['total_skill_stats']}
+
+{tool_quality_section}
 
 {thoughts_section}
 
