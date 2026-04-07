@@ -502,10 +502,10 @@ class ContextFirewall:
                 "personal_context_access": self.dpc_agent_personal_context_access,
                 "device_context_access": self.dpc_agent_device_context_access,
                 "knowledge_access": self.dpc_agent_knowledge_access,
-                "evolution_enabled": self.dpc_agent_evolution_enabled,
-                "consciousness_enabled": self.dpc_agent_consciousness_enabled,
+                "evolution_enabled": self.evolution_enabled,
+                "consciousness_enabled": self.consciousness_enabled,
             },
-            "archive_access": "read_session_archive" in allowed_tools,
+            "archive_access": True,  # read_session_archive is a core tool, always available
         }
 
     def get_allowed_agent_tools_for_profile(self, profile_name: str) -> Set[str]:

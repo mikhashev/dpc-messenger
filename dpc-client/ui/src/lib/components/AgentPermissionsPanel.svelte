@@ -331,15 +331,12 @@
     {#if displaySettings.enabled}
       <!-- Permissions Summary (transparency) -->
       <div class="subsection">
-        <h4
-          style="cursor: pointer; user-select: none;"
+        <button
+          class="section-toggle"
           on:click={togglePermissions}
-          on:keydown={(e) => e.key === 'Enter' && togglePermissions()}
-          role="button"
-          tabindex="0"
         >
           {permissionsExpanded ? '▼' : '▶'} Access & Paths
-        </h4>
+        </button>
         {#if permissionsExpanded}
           {#if permissionsLoading}
             <p class="help-text-small">Loading...</p>
@@ -925,6 +922,16 @@
 {/if}
 
 <style>
+  .section-toggle {
+    background: none;
+    border: none;
+    color: inherit;
+    font-size: 1em;
+    font-weight: bold;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+  }
   .permissions-summary {
     display: flex;
     flex-direction: column;
