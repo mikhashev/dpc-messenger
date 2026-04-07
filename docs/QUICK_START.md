@@ -8,9 +8,7 @@ This guide will help you set up D-PC Messenger for the first time. Choose your s
 - **Option B:** Internet-wide, zero infrastructure (no Hub, no VPS — works for teams)
 - **Option C:** Internet-wide with Hub (full WebRTC signaling)
 
-> **NEW in v0.10.0:** Automatic 6-tier connection fallback! The system tries IPv6 → IPv4 → WebRTC → Hole Punch → Relay → Gossip until one succeeds. Connections "just work" regardless of network conditions.
-
-> **NEW in v0.10.0:** Hub is now **optional**! Direct DHT-based connections work without Hub for true decentralization and censorship resistance.
+> **Connection:** Automatic 6-tier fallback (IPv6 → IPv4 → WebRTC → Hole Punch → Relay → Gossip). Hub is **optional** — DHT-based connections work without Hub.
 
 ---
 
@@ -55,7 +53,7 @@ The `.deb` installer will automatically install required runtime dependencies (`
 
 **Use this if:** You want to test between computers on the same network.
 
-**NEW in v0.10.0:** Direct connections now support 6-tier fallback hierarchy (IPv6 → IPv4 → WebRTC → UDP hole punching → Volunteer relays → Gossip) for near-universal connectivity!
+Direct connections use 6-tier fallback hierarchy (IPv6 → IPv4 → WebRTC → UDP hole punching → Volunteer relays → Gossip) for near-universal connectivity.
 
 ### Step 1: Clone the Repository
 
@@ -208,7 +206,7 @@ seed_nodes = 203.0.113.42:8888
 
 **Use this if:** You want to connect to anyone, anywhere, with the easiest setup and full WebRTC NAT traversal.
 
-**NEW in v0.10.0:** Hub is now **optional**! The system can establish connections without Hub using DHT-based hole punching and volunteer relay nodes.
+Hub is **optional** — the system establishes connections without Hub using DHT-based hole punching and volunteer relay nodes.
 
 ### Step 1: Clone the Repository
 

@@ -77,7 +77,7 @@ We're racing against a closing window: the infrastructure being built TODAY will
 - **Voice Messages** - Cross-platform voice recording with local Whisper transcription (v0.13.0)
 - **Telegram Integration** - Bot integration for voice transcription and messaging bridge (v0.14.0)
 - **Linux Support** - Native audio recording via Rust, ALSA/PipeWire support (v0.15.0)
-- **DPC Agent** - Embedded autonomous AI agent with 45+ tools, background consciousness, evolution system, and persistent memory ([guide](./docs/DPC_AGENT_GUIDE.md)) (v0.18.0)
+- **DPC Agent** - Embedded autonomous AI agent with 60+ tools, background consciousness, evolution system, and persistent memory ([guide](./docs/DPC_AGENT_GUIDE.md)) (v0.18.0)
 - **Reasoning Models** - Native support for DeepSeek R1, Claude Extended Thinking, and OpenAI o1/o3 with visible thinking process (v0.18.0)
 - **Real-time AI Streaming** - Token-by-token response display with tool execution progress indicators (v0.18.0)
 - **Agent Telegram Bridge** - Two-way messaging with DPC Agent via Telegram, voice transcription, event notifications ([guide](./docs/DPC_AGENT_TELEGRAM.md)) (v0.18.0)
@@ -109,7 +109,7 @@ We're racing against a closing window: the infrastructure being built TODAY will
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                  Human-AI Collaborative Intelligence                     │
-│          P2P Encrypted Communication (Text • Voice • Video • Files)      │
+│       P2P Encrypted Communication (Text • Voice • Files • Agent)         │
 └──────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────┐         ┌─────────────────┐         ┌─────────────────┐
@@ -161,7 +161,7 @@ D-PC Messenger uses intelligent fallback for near-universal P2P connectivity:
 **Key Benefits:**
 - Hub completely optional for Priorities 1-2, 4-6
 - Automatic fallback ensures connectivity in nearly any network condition
-- DTLS encryption for all 6 strategies
+- End-to-end encryption for all 6 strategies (TLS/DTLS/AES-GCM depending on transport)
 
 ### Important: True Peer-to-Peer Architecture
 
@@ -177,7 +177,7 @@ D-PC Messenger uses intelligent fallback for near-universal P2P connectivity:
 - Provides WebRTC signaling for NAT traversal (like STUN/TURN servers)
 - Messages flow directly P2P between clients (Hub never sees content)
 - Direct TLS connections work independently of Hub for local networks
-- Hub-free operation mode planned for Phase 3 (DHT-based discovery)
+- Hub-free operation available via DHT-based discovery, hole punching, and volunteer relays (v0.10.0+)
 
 **Legal implication:** This software provides a communication tool, not a communication service. Users are solely responsible for their use of this software and any infrastructure they choose to deploy.
 
