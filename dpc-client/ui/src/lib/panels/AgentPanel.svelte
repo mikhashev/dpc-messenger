@@ -294,7 +294,6 @@
           const existing = map.get(conversation_id) || [];
 
           // Defence-in-depth: never overwrite UI history with a shorter backend payload (B1 guard).
-          // This prevents blank chat if backend sends empty/stale messages array.
           const nonPendingExisting = existing.filter((m: any) => !m.commandId);
           if ((messages || []).length < nonPendingExisting.length) {
             return map; // skip — backend has fewer messages than UI
@@ -303,9 +302,10 @@
           // Preserve any pending DPC execute_ai_query placeholders
           const pendingMsgs = existing.filter((m: any) => m.commandId);
 
+          // B2 Fix 1: Use backend msg.id for stable IDs (prevents dedup collisions on same-timestamp msgs)
           const mappedMessages = (messages || []).map((msg: any, index: number) => {
             const isUser = msg.role === 'user';
-            const stableId = `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
+            const stableId = msg.id || `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
             return {
               id: stableId,
               sender: isUser ? 'user' : conversation_id,
@@ -327,7 +327,14 @@
             };
           }
 
-          newMap.set(conversation_id, [...mappedMessages, ...pendingMsgs]);
+          // B2 Fix 2: Merge backend messages with pending placeholders, sort by timestamp
+          // Backend messages are authoritative for content; pending placeholders kept until resolved
+          const backendIds = new Set(mappedMessages.map((m: any) => m.id));
+          const keptPending = pendingMsgs.filter((m: any) => !backendIds.has(m.id));
+          const merged = [...mappedMessages, ...keptPending];
+          merged.sort((a: any, b: any) => (a.timestamp || 0) - (b.timestamp || 0));
+
+          newMap.set(conversation_id, merged);
           return newMap;
         });
 

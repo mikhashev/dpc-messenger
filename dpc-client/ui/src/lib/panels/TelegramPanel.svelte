@@ -78,21 +78,27 @@
 
       ensureTelegramChat(conversation_id, sender_name);
 
-      chatHistories.update(map => {
-        const newMap = new Map(map);
-        const currentMessages = newMap.get(conversation_id) || [];
-        newMap.set(conversation_id, [
-          ...currentMessages,
-          {
-            id: `telegram-${Date.now()}`,
-            sender: `telegram-${telegram_chat_id}`,
-            senderName: sender_name,
-            text: text,
-            timestamp: new Date(timestamp).getTime()
-          }
-        ]);
-        return newMap;
-      });
+      // B2 Fix 3: Skip append for agent conversations — agent_history_updated
+      // already includes the Telegram message, so appending here causes duplicates
+      // and race conditions with AgentPanel's history replacement.
+      const isAgentChat = conversation_id.startsWith('agent_') || conversation_id.startsWith('agent-');
+      if (!isAgentChat) {
+        chatHistories.update(map => {
+          const newMap = new Map(map);
+          const currentMessages = newMap.get(conversation_id) || [];
+          newMap.set(conversation_id, [
+            ...currentMessages,
+            {
+              id: `telegram-${Date.now()}`,
+              sender: `telegram-${telegram_chat_id}`,
+              senderName: sender_name,
+              text: text,
+              timestamp: new Date(timestamp).getTime()
+            }
+          ]);
+          return newMap;
+        });
+      }
 
       (async () => {
         const messagePreview = text.length > 50 ? text.slice(0, 50) + '...' : text;
