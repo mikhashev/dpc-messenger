@@ -119,6 +119,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "update_agent_config",
     "delete_agent",
     "list_agent_profiles",
+    "get_agent_permissions",  # Agent permissions transparency (v0.22.0)
     # Agent Task Board (v0.20.0)
     "get_agent_tasks",
     "get_agent_learning",
