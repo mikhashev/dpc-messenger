@@ -190,6 +190,9 @@ class ContextFirewall:
             'register_task_type': True,
             'list_task_types': True,  # Read-only
             'unregister_task_type': True,
+            # Session archive tools (v0.22.0+ - read-only access to own history)
+            'read_session_archive': True,  # Read session summaries
+            'read_session_detail': True,  # Read session messages
         }
 
         # Parse tool permissions from config, using defaults for missing tools
