@@ -292,6 +292,14 @@
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = map.get(conversation_id) || [];
+
+          // Defence-in-depth: never overwrite UI history with a shorter backend payload (B1 guard).
+          // This prevents blank chat if backend sends empty/stale messages array.
+          const nonPendingExisting = existing.filter((m: any) => !m.commandId);
+          if ((messages || []).length < nonPendingExisting.length) {
+            return map; // skip — backend has fewer messages than UI
+          }
+
           // Preserve any pending DPC execute_ai_query placeholders
           const pendingMsgs = existing.filter((m: any) => m.commandId);
 

@@ -1057,11 +1057,12 @@ Send a voice message and it will be transcribed and processed\\.
             service = getattr(self._agent_manager, 'service', None)
             if not service:
                 return
-            history_result = await service.get_conversation_history(conversation_id)
-            messages = history_result.get("messages", [])
 
-            # Include token usage from agent manager's own monitor registry so the UI token counter updates
+            # Read history from agent's ConversationMonitor (the actual source of truth),
+            # NOT from service.get_conversation_history() which looks up P2P conversations
+            # and returns empty for agent conversations — causing UI to go blank (B1 fix).
             monitor = self._agent_manager._agent_monitors.get(conversation_id)
+            messages = monitor.get_history() if monitor else []
             tokens_used = monitor.current_token_count if monitor else 0
             token_limit = monitor.token_limit if monitor else 0
 
