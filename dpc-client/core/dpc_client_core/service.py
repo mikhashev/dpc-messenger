@@ -7492,6 +7492,20 @@ class CoreService:
             return {"status": "error", "message": "Agent service not available"}
         return await self.agent_service.list_agent_profiles()
 
+    async def get_agent_permissions(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+        """Get agent permissions summary for UI transparency.
+
+        Returns all access paths, tools, and capabilities so the user can see
+        exactly what the agent has access to.
+        """
+        if not self.firewall:
+            return {"status": "error", "message": "Firewall not initialized"}
+        try:
+            summary = self.firewall.get_agent_permissions_summary(agent_id)
+            return {"status": "ok", **summary}
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+
     # --- Agent Task Board Methods (v0.20.0) ---
 
     async def get_agent_tasks(self, agent_id: str = None) -> Dict[str, Any]:

@@ -462,6 +462,52 @@ class ContextFirewall:
             return profiles[profile_name].copy()
         return None
 
+    def get_agent_permissions_summary(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+        """
+        Get a complete permissions summary for an agent — for UI transparency.
+
+        Returns all access paths, tools, and capabilities so the user can see
+        exactly what the agent has access to.
+
+        Args:
+            agent_id: Agent identifier (e.g., "agent_001")
+
+        Returns:
+            Dict with sandbox_paths, tools, capabilities, and archive_access
+        """
+        # Determine which tool set to use (per-profile or global)
+        allowed_tools = self.get_allowed_agent_tools_for_profile(agent_id)
+
+        # Categorize tools
+        from .dpc_agent.tools.registry import CORE_TOOL_NAMES, RESTRICTED_TOOL_NAMES
+        core_enabled = sorted(allowed_tools & CORE_TOOL_NAMES)
+        restricted_enabled = sorted(allowed_tools & RESTRICTED_TOOL_NAMES)
+        other_enabled = sorted(allowed_tools - CORE_TOOL_NAMES - RESTRICTED_TOOL_NAMES)
+
+        return {
+            "agent_id": agent_id,
+            "enabled": self.dpc_agent_enabled,
+            "sandbox_paths": {
+                "agent_root": str(Path.home() / ".dpc" / "agents" / agent_id),
+                "read_only": self.sandbox_read_only_paths,
+                "read_write": self.sandbox_read_write_paths,
+            },
+            "tools": {
+                "core_enabled": core_enabled,
+                "core_total": len(CORE_TOOL_NAMES),
+                "restricted_enabled": restricted_enabled,
+                "other_enabled": other_enabled,
+            },
+            "capabilities": {
+                "personal_context_access": self.dpc_agent_personal_context_access,
+                "device_context_access": self.dpc_agent_device_context_access,
+                "knowledge_access": self.dpc_agent_knowledge_access,
+                "evolution_enabled": self.dpc_agent_evolution_enabled,
+                "consciousness_enabled": self.dpc_agent_consciousness_enabled,
+            },
+            "archive_access": "read_session_archive" in allowed_tools,
+        }
+
     def get_allowed_agent_tools_for_profile(self, profile_name: str) -> Set[str]:
         """
         Get allowed tools for a specific agent profile.

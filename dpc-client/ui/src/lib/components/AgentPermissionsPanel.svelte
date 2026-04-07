@@ -270,6 +270,33 @@
     }
   }
 
+  // Permissions summary (loaded on demand for transparency)
+  let permissionsSummary: any = null;
+  let permissionsLoading = false;
+  let permissionsExpanded = false;
+
+  async function loadPermissionsSummary() {
+    if (permissionsSummary || permissionsLoading) return;
+    permissionsLoading = true;
+    try {
+      const agentId = conversationId || 'agent_001';
+      const result = await sendCommand('get_agent_permissions', { agent_id: agentId });
+      if (result.status === 'ok') {
+        permissionsSummary = result;
+      }
+    } catch (e) {
+      console.error('Failed to load permissions summary:', e);
+    }
+    permissionsLoading = false;
+  }
+
+  function togglePermissions() {
+    permissionsExpanded = !permissionsExpanded;
+    if (permissionsExpanded && !permissionsSummary) {
+      loadPermissionsSummary();
+    }
+  }
+
   // Derived: near-limit warning threshold
   $: archiveNearLimit = archiveInfo ? archiveInfo.count >= Math.floor(archiveInfo.max_sessions * 0.8) : false;
   $: archivePercent = archiveInfo && archiveInfo.max_sessions > 0
@@ -302,6 +329,66 @@
     </div>
 
     {#if displaySettings.enabled}
+      <!-- Permissions Summary (transparency) -->
+      <div class="subsection">
+        <h4
+          style="cursor: pointer; user-select: none;"
+          on:click={togglePermissions}
+          on:keydown={(e) => e.key === 'Enter' && togglePermissions()}
+          role="button"
+          tabindex="0"
+        >
+          {permissionsExpanded ? '▼' : '▶'} Access & Paths
+        </h4>
+        {#if permissionsExpanded}
+          {#if permissionsLoading}
+            <p class="help-text-small">Loading...</p>
+          {:else if permissionsSummary}
+            <div class="permissions-summary">
+              <div class="perm-group">
+                <strong>Agent Root:</strong>
+                <code class="perm-path">{permissionsSummary.sandbox_paths?.agent_root || '~/.dpc/agents/agent_001'}</code>
+              </div>
+
+              {#if permissionsSummary.sandbox_paths?.read_only?.length > 0}
+                <div class="perm-group">
+                  <strong>Extended Read-Only Paths:</strong>
+                  {#each permissionsSummary.sandbox_paths.read_only as path}
+                    <code class="perm-path">{path}</code>
+                  {/each}
+                </div>
+              {/if}
+
+              {#if permissionsSummary.sandbox_paths?.read_write?.length > 0}
+                <div class="perm-group">
+                  <strong>Extended Read-Write Paths:</strong>
+                  {#each permissionsSummary.sandbox_paths.read_write as path}
+                    <code class="perm-path">{path}</code>
+                  {/each}
+                </div>
+              {/if}
+
+              <div class="perm-group">
+                <strong>Tools:</strong>
+                <span>{permissionsSummary.tools?.core_enabled?.length || 0} core</span>
+                {#if permissionsSummary.tools?.restricted_enabled?.length > 0}
+                  <span class="perm-warn"> + {permissionsSummary.tools.restricted_enabled.length} restricted ({permissionsSummary.tools.restricted_enabled.join(', ')})</span>
+                {/if}
+              </div>
+
+              <div class="perm-group">
+                <strong>Archive Access:</strong>
+                <span class={permissionsSummary.archive_access ? 'perm-ok' : 'perm-deny'}>
+                  {permissionsSummary.archive_access ? 'Enabled' : 'Disabled'}
+                </span>
+              </div>
+            </div>
+          {:else}
+            <p class="help-text-small">Unable to load permissions</p>
+          {/if}
+        {/if}
+      </div>
+
       <!-- Context Access Section -->
       <div class="subsection">
         <h4>Context Access</h4>
@@ -838,6 +925,33 @@
 {/if}
 
 <style>
+  .permissions-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    background: var(--bg-secondary, #1e1e1e);
+    border-radius: 4px;
+    font-size: 0.85em;
+  }
+  .perm-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    align-items: center;
+  }
+  .perm-path {
+    display: block;
+    padding: 2px 6px;
+    background: var(--bg-tertiary, #2a2a2a);
+    border-radius: 3px;
+    font-size: 0.85em;
+    word-break: break-all;
+  }
+  .perm-ok { color: #4caf50; }
+  .perm-deny { color: #f44336; }
+  .perm-warn { color: #ff9800; }
+
   .compute-settings {
     display: flex;
     flex-direction: column;
