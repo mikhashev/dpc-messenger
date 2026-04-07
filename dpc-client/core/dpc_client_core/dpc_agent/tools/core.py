@@ -143,6 +143,10 @@ def repo_write(ctx: ToolContext, path: str, content: str) -> str:
 
         file_path.write_text(content, encoding="utf-8")
 
+        # Regenerate _index.md if writing to knowledge/ dir
+        if path.startswith("knowledge/") and not path.endswith("_index.md"):
+            _update_knowledge_index(ctx, Path(path).stem)
+
         return f"✓ Wrote {len(content)} chars to {path}"
 
     except PermissionError as e:

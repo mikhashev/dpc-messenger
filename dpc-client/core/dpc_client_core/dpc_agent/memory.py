@@ -200,12 +200,12 @@ class Memory:
         return sorted(topics)
 
     def _update_knowledge_index(self) -> None:
-        """Update the knowledge base index file."""
+        """Update the knowledge base index file with markdown links."""
         topics = self.list_knowledge_topics()
-        lines = ["# Knowledge Base Index\n"]
+        lines = ["# Knowledge Base Index", ""]
         for topic in topics:
-            lines.append(f"- [[{topic}]]")
-        write_text(self.knowledge_index_path(), "\n".join(lines))
+            lines.append(f"- [{topic}]({topic}.md)")
+        write_text(self.knowledge_index_path(), "\n".join(lines) + "\n")
 
     # --- JSONL Reading ---
 
