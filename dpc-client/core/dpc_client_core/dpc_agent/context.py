@@ -367,9 +367,15 @@ def build_llm_messages(
             if role in ("user", "assistant") and content:
                 if role == "user":
                     timestamp = hist_msg.get("timestamp", "")
+                    sender = hist_msg.get("sender_name", "")
+                    prefix_parts = []
                     if timestamp:
                         ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
-                        content = f"[{ts_display}] {content}"
+                        prefix_parts.append(ts_display)
+                    if sender:
+                        prefix_parts.append(sender)
+                    if prefix_parts:
+                        content = f"[{' | '.join(prefix_parts)}] {content}"
                 messages.append({"role": role, "content": content})
 
     messages.append({"role": "user", "content": _build_user_content(task)})

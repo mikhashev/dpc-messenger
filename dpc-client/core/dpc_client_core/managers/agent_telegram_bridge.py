@@ -777,6 +777,25 @@ Send a voice message and it will be transcribed and processed\\.
                             await self._broadcast_history_to_ui(conversation_id)
                 return  # Skip Ark's process_message
 
+            # B1a: Save user message to monitor and broadcast to UI BEFORE agent
+            # processing, so the message appears in DPC UI immediately (not after response).
+            # B1b: Prefix sender_name so Ark sees message source (Telegram vs DPC UI).
+            if self._agent_manager and self._unified_conversation:
+                monitor = self._agent_manager._get_or_create_agent_monitor(conversation_id)
+                from dpc_client_core.dpc_agent.utils import utc_now_iso
+                monitor.add_message(
+                    role="user",
+                    content=message_text,
+                    timestamp=utc_now_iso(),
+                    sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
+                    sender_name=sender_name,
+                )
+                monitor.save_history()
+                await self._broadcast_history_to_ui(conversation_id)
+                skip_history = True
+            else:
+                skip_history = False
+
             # Call the message handler (agent_manager.process_message)
             response = await self._message_handler(
                 message=message_text,
@@ -784,6 +803,7 @@ Send a voice message and it will be transcribed and processed\\.
                 include_context=True,
                 sender_name=sender_name,
                 telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
+                _skip_history=skip_history,
             )
 
             # Send response (escape for MarkdownV2, split if needed)
