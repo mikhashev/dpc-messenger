@@ -103,6 +103,9 @@
               {#if conversationId.startsWith('group-') && selfName}
                 <!-- Group chat: Show own name instead of "You" -->
                 {selfName} | {selfNodeId}
+              {:else if conversationId.startsWith('agent_') || conversationId.startsWith('agent-')}
+                <!-- Agent chat: always "You" for user messages, backend may set senderName -->
+                You
               {:else}
                 {msg.senderName || 'You'}
               {/if}
