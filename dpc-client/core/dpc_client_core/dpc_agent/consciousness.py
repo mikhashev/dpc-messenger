@@ -387,11 +387,17 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
 
         Attempts to parse the response as structured JSON. Falls back to
         freeform format for backward compatibility if parsing fails.
+        Skips duplicate thoughts (same type + similar observation within 1h).
         """
         agent_root = self.agent.agent_root
 
         # Try to parse structured JSON response
         structured = self._parse_structured_response(response)
+
+        # Dedup: skip if last thought has same type and similar observation within 1h
+        if structured and self._is_duplicate_thought(agent_root, thought_type, structured):
+            log.info(f"Consciousness: skipped duplicate {thought_type} thought (same observation <1h)")
+            return
 
         if structured:
             entry = {
@@ -432,6 +438,46 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
                     log.info(f"Consciousness wrote {severity} action to scratchpad: {action[:80]}")
             except Exception as e:
                 log.debug(f"Failed to write consciousness action to scratchpad: {e}")
+
+    @staticmethod
+    def _is_duplicate_thought(agent_root, thought_type: str, structured: dict) -> bool:
+        """Check if the last logged thought is a duplicate (same type + similar observation within 1h)."""
+        try:
+            log_path = agent_root / "logs" / "consciousness.jsonl"
+            if not log_path.exists():
+                return False
+            # Read last line
+            last_line = ""
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        last_line = line
+            if not last_line:
+                return False
+            import json
+            from datetime import datetime, timezone, timedelta
+            last = json.loads(last_line)
+            # Check same type
+            if last.get("type") != thought_type:
+                return False
+            # Check within 1 hour
+            last_ts = last.get("ts", "")
+            if last_ts:
+                last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                if (now - last_dt) > timedelta(hours=1):
+                    return False
+            # Check observation similarity (simple prefix match)
+            last_obs = str(last.get("observation", ""))[:100]
+            new_obs = str(structured.get("observation", ""))[:100]
+            if not last_obs or not new_obs:
+                return False
+            # Consider duplicate if first 100 chars match >80%
+            common = sum(1 for a, b in zip(last_obs, new_obs) if a == b)
+            max_len = max(len(last_obs), len(new_obs), 1)
+            return (common / max_len) > 0.8
+        except Exception:
+            return False
 
     @staticmethod
     def _parse_structured_response(response: str) -> Optional[dict]:
