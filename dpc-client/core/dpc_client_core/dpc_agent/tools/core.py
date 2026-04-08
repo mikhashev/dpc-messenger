@@ -1226,7 +1226,7 @@ def get_evolution_stats(ctx: ToolContext) -> str:
         return f"⚠️ Error getting evolution stats: {e}"
 
 
-def approve_evolution_change(ctx: ToolContext, change_id: str) -> str:
+async def approve_evolution_change(ctx: ToolContext, change_id: str) -> str:
     """
     Approve a pending evolution change.
 
@@ -1241,24 +1241,11 @@ def approve_evolution_change(ctx: ToolContext, change_id: str) -> str:
         if not hasattr(ctx, '_agent'):
             return "⚠️ Agent not available"
 
-        # Note: This is a sync wrapper around async method
-        # In practice, the agent should handle this via its async methods
         if ctx._agent._evolution:
-            # Queue approval for async execution
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Schedule for later
-                    asyncio.create_task(ctx._agent.approve_evolution_change(change_id))
-                    return f"✓ Change {change_id} approval queued"
-                else:
-                    success = loop.run_until_complete(ctx._agent.approve_evolution_change(change_id))
-                    if success:
-                        return f"✓ Change {change_id} approved and applied"
-                    return f"⚠️ Failed to approve change {change_id}"
-            except RuntimeError:
-                return "⚠️ Cannot approve from sync context - use async API"
+            success = await ctx._agent.approve_evolution_change(change_id)
+            if success:
+                return f"✓ Change {change_id} approved and applied"
+            return f"⚠️ Failed to approve change {change_id} — not found or already applied"
         return "⚠️ Evolution not enabled"
 
     except Exception as e:
