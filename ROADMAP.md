@@ -6,12 +6,12 @@
 
 ## Overview
 
-D-PC Messenger follows a three-phase development roadmap:
+D-PC Messenger development:
 
 1. **Phase 1: Federated MVP - COMPLETE (v0.8.0)** - Proven P2P messaging with AI collaboration
 2. **Phase 1.5: Extended Features - COMPLETE (v0.9.0 - v0.18.0)** - File transfer, voice, agent, resilient infrastructure
 3. **Phase 2: Team Collaboration + Agent Evolution - IN PROGRESS** - Small teams, embedded AI agent, group chat
-4. **Phase 3: Scaling & Mass Decentralization - FUTURE IDEAS** - Mobile clients, global scale, 100% decentralization
+4. **Where This Leads** - Autonomous agents, network effects, local-first sovereignty
 
 ---
 
@@ -21,42 +21,7 @@ D-PC Messenger follows a three-phase development roadmap:
 **Timeline:** Completed November 2025
 **Scope:** Individual users + 1:1 peer collaboration
 
-### Core P2P Infrastructure
-
-| Feature | Status | Evidence | Notes |
-|---------|--------|----------|-------|
-| **Direct TLS Connections** | Complete | `p2p_manager.py` | Local network, self-signed certs |
-| **IPv6 Dual-Stack Support** | Complete | CHANGELOG v0.8.0 | IPv4 + IPv6 automatic detection |
-| **WebRTC NAT Traversal** | Complete | `webrtc_peer.py` | STUN/TURN, aiortc library |
-| **Federation Hub** | Complete | `dpc-hub/` | OAuth, WebSocket signaling |
-| **Cryptographic Node Identity** | Complete | `dpc-protocol/crypto.py` | RSA keys, X.509 certificates |
-| **OAuth Authentication** | Complete | `dpc-hub/auth.py` | Google + GitHub providers |
-
-### Privacy & Security
-
-| Feature | Status | Evidence |
-|---------|--------|----------|
-| **Encrypted Local Backups** | Complete | AES-256-GCM, PBKDF2 600k iterations |
-| **Context Firewall** | Complete | Granular access control per file/field, 7-tab UI editor |
-| **AI Scope Filtering** | Complete | Work/personal mode context isolation |
-| **Offline Mode** | Complete | Works without Hub, cached tokens |
-
-### AI Collaboration
-
-| Feature | Status | Evidence |
-|---------|--------|----------|
-| **Local AI Integration** | Complete | Ollama, OpenAI, Anthropic, Z.AI |
-| **Remote Inference** | Complete | Borrow peer's compute |
-| **Knowledge Commit System** | Complete | Git-like versioned knowledge with bias mitigation |
-| **Personal Context Model v2.0** | Complete | Modular file system, 80% size reduction |
-| **Cryptographic Commit Integrity** | Complete | Hash-based IDs, multi-signature, 22 tests |
-| **Markdown Rendering** | Complete | 50-200x performance caching |
-
-### Test Coverage
-
-- **Backend:** 61 tests passing
-- **Frontend:** 0 errors (svelte-check)
-- **Protocol Library:** 22 commit integrity tests
+**Features:** Direct TLS connections (IPv4/IPv6), WebRTC NAT traversal, Federation Hub (OAuth, signaling), cryptographic node identity (RSA/X.509), encrypted backups (AES-256-GCM), context firewall, AI scope filtering, offline mode, local AI integration (Ollama, OpenAI, Anthropic, Z.AI), remote inference (P2P compute sharing), knowledge commit system (git-like versioning with bias mitigation), personal context model v2.0
 
 ---
 
@@ -72,7 +37,7 @@ These features were developed organically as the product matured, significantly 
 
 | Feature | Version | Status | Description |
 |---------|---------|--------|-------------|
-| **DHT-Based Peer Discovery** | v0.9.5 | Complete | Kademlia DHT, 73 tests, internet-wide validated |
+| **DHT-Based Peer Discovery** | v0.9.5 | Complete | Kademlia DHT, internet-wide validated |
 | **6-Tier Connection Fallback** | v0.10.0 | Complete | ConnectionOrchestrator: IPv6 → IPv4 → WebRTC → hole punch → relay → gossip |
 | **UDP Hole Punching** | v0.10.0 | Complete | DTLS 1.2 encryption, 60-70% NAT success |
 | **Volunteer Relay Nodes** | v0.10.0 | Complete | DHT quality scoring, privacy-preserving |
@@ -127,7 +92,27 @@ These features were developed organically as the product matured, significantly 
 | 7 | **Protocol 13** | v0.21.0 | Complete | Human-AI team coordination protocol (Mike=approve, CC=execute, Ark=review) |
 | 8 | **Agent Telegram Bridge** | v0.18.0 | Complete | Two-way messaging with agent via Telegram |
 
-### What's Next (Team Features)
+### What's Next
+
+Two parallel tracks. Agent Maturity is research-backed (9 independent sources converge). Team Collaboration builds on agent infrastructure.
+
+#### Track 1: Agent Maturity (~1,990 lines)
+
+North Star: Consciousness observes → Evolution proposes → Verification measures → Cycle repeats with real learning. Phase 0 (Hooks) unlocks the cycle.
+
+| Phase | Feature | Scope | Priority | Description |
+|-------|---------|-------|----------|-------------|
+| **0** | **Hooks/Middleware** | ~510 lines | ENABLER | HookRegistry + Event Bus in loop.py. Injection points for all subsequent phases. 4 research projects converge on this pattern |
+| **1** | **Consciousness Tools** | ~240 lines | HIGH | Give consciousness ability to act (update scratchpad, read knowledge). Currently 535 thoughts → 0 actions |
+| **2** | **Evolution Verification** | ~280 lines | CRITICAL | Closed-loop feedback: proposal → apply → measure → rollback if harmful. Metric-driven evolution |
+| **3** | **Sleep Consolidation** | ~460 lines | HIGH | Overnight deep analysis of session archives. 5-phase pipeline (internalize → reflect → score → consolidate → commit). L1-2 DONE |
+| **4** | **Memory Upgrade** | ~240 lines | MEDIUM | Knowledge decay + relevance tracking, scratchpad sections, structured memory schema |
+| **5** | **Skill Rewrite** | ~260 lines | MEDIUM | Break append-only limit. A/B testing for skill rewrites with auto-rollback |
+
+**Dependencies:** Phase 0 → unblocks all. Phases 1+2 parallel after Phase 0. Phase 3 needs 1+2. Phases 4+5 parallel after Phase 3.
+**Research basis:** See `ideas/cc-mike-research/README.md` (consolidated from 9 sources) and `ideas/cc-mike-research/enumerated-strolling-seahorse.md` (detailed implementation plan).
+
+#### Track 2: Team Collaboration
 
 | # | Feature | Complexity | Description |
 |---|---------|------------|-------------|
@@ -140,109 +125,52 @@ These features were developed organically as the product matured, significantly 
 | 7 | **Team Compute Pools** | Medium | Auto-discovery, load balancing, "Team Compute" panel |
 | 8 | **DPC Agent Team Integration** | Medium | Agent tasks across team context, multi-peer coordination |
 
+**Cross-track dependencies:** Agent Isolation → A2A → Teams. Phase 0-2 → Team AI Assistants. Memory Upgrade → Team Knowledge Repo.
+
+#### Smaller Improvements (not in tracks)
+
+- **Consciousness dedup** — skip duplicate observations within 1h (~15 lines)
+- **Chain depth increase** — 3 → 5-6 for complex multi-agent discussions (P13 external review)
+- **Schedule System** — daily autonomous Ark sessions with autonomy rules
+- **Agent Starter Pack** — skills bundle for open source first-run experience
+- **Tool registry ↔ Firewall sync** — 7 tools invisible in UI, 17 without classification (ARCH-1)
+
 ### Success Metrics
 
 **Operational Metrics:**
 - All 6 connection tiers tested and operational
 - Agent consciousness uptime (thoughts per session, no recursive loops)
+- Evolution proposal success rate (applied vs regressed)
 - Knowledge commits per session (extraction + voting pipeline)
 - P2P mesh stability over 24h (2+ nodes)
 - DHT lookup success rate >95% (peer discovery without Hub)
 
 ---
 
-## Future Ideas
+## Where This Leads
 
-Ideas for future development. Not committed — direction, not promises.
+Not a feature list — three directions that grow from what we've already built.
 
-### Scaling
-- **Mobile clients** (iOS, Android)
-- **Multi-hub federation** for large organizations
-- **Hub-free operation mode** — 100% decentralized (no Hub at all)
+### 1. Autonomous Agents
+From triggered to proactive. Sleep consolidation, scheduled sessions, self-improvement cycles. Agents that grow with their humans — not tools that wait for commands.
 
-### Advanced Security
-- **Social recovery** (Shamir Secret Sharing) — recover backup passphrases via trusted peers
-- **Hardware wallet integration** (Ledger, YubiKey, TPM) — hardware-backed identity
+### 2. Network Effects
+From 1:1 to team networks to ecosystem. Agent Isolation → A2A → Teams → Open Source starter packs. Skills sharing and inference sharing already work. Hub becomes optional bootstrap, not architecture center. Any two nodes can connect directly via `dpc://` URI exchange — no server required.
 
-### Experimental
-- **Meshtastic (LoRa) Integration** — offline text messaging via LoRa radios
-- **Compute Marketplace** — monetized compute sharing
-- **A2A (Agent-to-Agent)** — P2P agent communication, task delegation across peers
+### 3. Local-First Sovereignty
+All LLMs run locally (Ollama, llama.cpp, etc). P2P network = mutual aid (share compute with peers), not dependency. Works fully offline. Your data never leaves your machine. Knowledge and skills portable across agents.
 
 ---
 
-## Knowledge Architecture Sub-Roadmap
+## Knowledge Architecture
 
-D-PC has a detailed **Knowledge Architecture** roadmap spanning 14 phases:
-
-### Phases 1-8: COMPLETE (v0.7.0 - v0.8.0)
-
-1. Instructions.json separation
-2. Token monitoring system
-3. Optional cultural perspectives
-4. Robust JSON extraction (6 repair strategies)
-5. Inline editing with attribution
-6. Provider-specific context windows
-7. Configuration system overhaul (TOML -> JSON)
-8. Cryptographic commit integrity (Git-style hashes, multi-signature)
-
-### Phases 9-14: IN PROGRESS / PLANNED
-
-9. Context retrieval & semantic search - **Partial** (knowledge extraction voting pipeline)
-10. Self-improvement tracking - **Partial** (tools.jsonl + evolution data pipeline)
-11. Multi-hub federation support (knowledge sharing)
-12. Collaborative knowledge building (team consensus) - **Partial** (consensus voting works for 1:1 and agent)
-13. Mobile client knowledge sync
-14. Advanced bias mitigation refinements
-
-**See [docs/KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md) for full specification.**
+14-phase knowledge architecture. Phases 1-8 complete (v0.7.0-v0.8.0), Phases 9-12 partially implemented (extraction, tracking, consensus voting). See [docs/KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md) for full specification.
 
 ---
 
-## Changelog Integration
+## Version History
 
-### Major Version Milestones
-
-| Version | Date | Milestone |
-|---------|------|-----------|
-| **v0.21.0** | Apr 2026 | Doc audit, Protocol 13 v1.8, tool data pipeline |
-| **v0.20.0** | Mar 2026 | Agent Progress Board, security hardening, knowledge integrity |
-| **v0.19.0** | Feb 2026 | Group Chat — multi-participant messaging |
-| **v0.18.0** | Feb 2026 | DPC Agent, reasoning models, Telegram agent bridge |
-| **v0.15.0** | Jan 2026 | Cross-platform audio (Rust cpal), VRAM management |
-| **v0.12.0** | Dec 2025 | Vision & image support |
-| **v0.11.0** | Dec 2025 | File transfer, session management, chat history sync |
-| **v0.10.0** | Dec 2025 | 6-tier connection fallback, ConnectionOrchestrator |
-| **v0.9.5** | Dec 2025 | DHT peer discovery (Kademlia) |
-| **v0.8.0** | Nov 2025 | Phase 1 Complete — Federated MVP |
-| **v0.7.0** | Nov 2025 | Knowledge Architecture Phases 1-7 |
-
-**See [CHANGELOG.md](./CHANGELOG.md) for complete version history.**
-
----
-
-## External References
-
-### Research & Inspiration
-
-**Network Resilience:**
-- [Privacy-Enhanced Communication Systems](https://gfw.report/publications/usenixsecurity23/en/)
-- [Tor's Snowflake - WebRTC for Privacy Protection](https://snowflake.torproject.org/)
-
-**Decentralized Systems:**
-- [Kademlia DHT Paper](https://pdos.csail.mit.edu/~petar/papers/maymounkov-kademlia-lncs.pdf)
-- [libp2p Specifications](https://github.com/libp2p/specs)
-
-**Mesh Networks:**
-- [Meshtastic - LoRa Mesh Networking](https://meshtastic.org/)
-
----
-
-## Questions & Feedback
-
-- [GitHub Discussions](https://github.com/mikhashev/dpc-messenger/discussions)
-- [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues)
-- Email: legoogmiha@gmail.com
+See [CHANGELOG.md](./CHANGELOG.md) for complete version history (v0.7.0 — v0.21.0, Nov 2025 — Apr 2026).
 
 ---
 
