@@ -240,6 +240,23 @@ in A2A.md and can build on this foundation later.
 - [ ] **DDA v2 formalization** — Discussion → Decision (with argument) → Comments → Action. Approved as pilot. Saved in Ark's knowledge/operational-protocols.md and CC memory. Review after 3-5 sessions.
 - [ ] **git_commit None error** — FIXED (68c995d). git.py:300 `result.get('error', '') or ''`.
 
+### Session S13 (2026-04-08) — Sleep Consolidation + Tool Quality
+
+- [x] **error_category in tools.jsonl** — classify tool errors (firewall_blocked, unknown_tool, sandbox_violation, runtime_error, tool_arg_error, timeout, tool_result_error). Evolution prompt shows breakdown. (99fccf1)
+- [x] **is_error race fix** — was always false in tools.jsonl log, computed after write. (99fccf1)
+- [x] **logger→log typo** — NameError in agent_manager.py:673 on Z.AI overload. (99fccf1)
+- [x] **approve_evolution_change async** — sync wrapper failed in ThreadPoolExecutor. (8009b23)
+- [x] **Thinking/Raw in chain triggers** — use monitor.message_history[-1] + display_name. (a081629)
+- [x] **consciousness parser** — accept trigger/pattern_detected fields, greedy regex for nested JSON. (a3b84a6)
+- [x] **extract_knowledge error message** — 'buffer empty' → 'extraction already in progress' when _extracting lock. (a3b84a6)
+- [x] **chat_history include_internals** — optional param to show thinking/streaming_raw. (a3b84a6)
+- [ ] **Tool registry ↔ Firewall sync gap** — 7 tools in registry without firewall entry (invisible in UI), 17 tools in firewall without CORE/RESTRICTED classification. Need single source of truth.
+- [ ] **Evolution hardcoded 50/20** — tools.jsonl tail 50, consciousness tail 20. Consider temporal window instead.
+- [ ] **Evolution blind to past sessions** — Phase 3 Sleep Consolidation Pipeline (digest.jsonl + archives).
+- [ ] **UI: End Session + Extract Knowledge** — shows confirm dialog instead of results (after Figma)
+- [ ] **UI: New Session double confirm** — two dialogs instead of one (after Figma)
+- [ ] **UI: Access & Paths in global tab** — should be per-agent only (after Figma)
+
 ## Next Steps
 
 1. **Mike**: Monitor Twitter for reactions to Karpathy reply
