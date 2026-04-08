@@ -812,13 +812,28 @@ def write_text(path: pathlib.Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+_JSONL_MAX_BYTES = 5 * 1024 * 1024  # 5 MB rotation threshold
+
+
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
     """
     Append a JSON object as a line to a JSONL file (concurrent-safe).
 
     Uses file-based locking to prevent concurrent write collisions.
+    Rotates when file exceeds 5 MB (renames to .1, starts fresh).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Rotate if file exceeds size limit
+    try:
+        if path.exists() and path.stat().st_size > _JSONL_MAX_BYTES:
+            rotated = path.with_suffix(path.suffix + ".1")
+            if rotated.exists():
+                rotated.unlink()
+            path.rename(rotated)
+    except Exception:
+        log.debug("append_jsonl: rotation failed for %s", path, exc_info=True)
+
     line = json.dumps(obj, ensure_ascii=False)
     data = (line + "\n").encode("utf-8")
 

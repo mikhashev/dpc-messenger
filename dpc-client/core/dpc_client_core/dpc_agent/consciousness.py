@@ -274,12 +274,14 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
 }}"""
 
         elif thought_type == "review_recent_actions":
-            tools_entries = memory.read_jsonl_tail("tools.jsonl", 20)
+            tools_entries = memory.read_jsonl_since("tools.jsonl", hours=6.0, max_entries=50)
+            if not tools_entries:
+                tools_entries = memory.read_jsonl_tail("tools.jsonl", 20)
             if not tools_entries:
                 return "No recent actions to review. Consider what you'd like to accomplish."
 
             recent_tools = "\n".join([
-                f"- {e.get('tool', '?')}: {str(e.get('args', {}))[:100]}"
+                f"- {e.get('tool', '?')} ({e.get('duration_ms', '?')}ms, round {e.get('round', '?')}): {str(e.get('args', {}))[:80]}"
                 for e in tools_entries[-10:]
             ])
 
@@ -413,6 +415,23 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
             }
 
         append_jsonl(agent_root / "logs" / "consciousness.jsonl", entry)
+
+        # Act on high-severity suggestions: append to scratchpad
+        if (
+            structured
+            and structured.get("severity") in ("medium", "high")
+            and structured.get("action_suggestion")
+        ):
+            try:
+                action = str(structured["action_suggestion"])[:300]
+                severity = structured["severity"]
+                scratchpad = self.agent.memory.load_scratchpad()
+                note = f"\n\n## Consciousness Note ({severity})\n{action}\n"
+                if note.strip() not in scratchpad:
+                    self.agent.memory.save_scratchpad(scratchpad + note)
+                    log.info(f"Consciousness wrote {severity} action to scratchpad: {action[:80]}")
+            except Exception as e:
+                log.debug(f"Failed to write consciousness action to scratchpad: {e}")
 
     @staticmethod
     def _parse_structured_response(response: str) -> Optional[dict]:

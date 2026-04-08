@@ -18,6 +18,7 @@ import gc
 import json
 import logging
 import pathlib
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
@@ -52,11 +53,18 @@ def _get_shared_executor() -> ThreadPoolExecutor:
 
 
 def _truncate_tool_result(result: Any) -> str:
-    """Hard-cap tool result string to 15000 characters."""
+    """Hard-cap tool result string to 15000 characters with scope metadata."""
     result_str = str(result)
     if len(result_str) <= 15000:
         return result_str
-    return result_str[:15000] + f"\n... (truncated from {len(result_str)} chars)"
+    # Count lines for scope context
+    total_lines = result_str.count("\n") + 1
+    shown_lines = result_str[:15000].count("\n") + 1
+    return (
+        result_str[:15000]
+        + f"\n... (truncated: showing {shown_lines} of ~{total_lines} lines, "
+        f"{len(result_str)} total chars)"
+    )
 
 
 # Patterns that could confuse LLM role boundaries or inject instructions
@@ -216,6 +224,8 @@ def _execute_single_tool(
     tc: Dict[str, Any],
     logs_dir: pathlib.Path,
     task_id: str = "",
+    round_number: int = 0,
+    session_id: str = "",
 ) -> Dict[str, Any]:
     """
     Execute a single tool call and return result info.
@@ -240,8 +250,9 @@ def _execute_single_tool(
 
     args_for_log = sanitize_tool_args_for_log(fn_name, args if isinstance(args, dict) else {})
 
-    # Execute tool
+    # Execute tool with timing
     is_error = False
+    t0 = time.monotonic()
     try:
         result = tools.execute(fn_name, args)
     except Exception as e:
@@ -255,6 +266,7 @@ def _execute_single_tool(
             "args": args_for_log,
             "error": repr(e),
         })
+    duration_ms = round((time.monotonic() - t0) * 1000)
 
     # Detect error category from result
     is_error = is_error or str(result).startswith("⚠️")
@@ -268,7 +280,11 @@ def _execute_single_tool(
         "args": args_for_log,
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
         "is_error": is_error,
+        "duration_ms": duration_ms,
+        "round": round_number,
     }
+    if session_id:
+        tool_log_entry["session_id"] = session_id
     if error_category:
         tool_log_entry["error_category"] = error_category
     append_jsonl(logs_dir / "tools.jsonl", tool_log_entry)
@@ -288,6 +304,8 @@ async def _execute_with_timeout(
     logs_dir: pathlib.Path,
     timeout_sec: int,
     task_id: str = "",
+    round_number: int = 0,
+    session_id: str = "",
 ) -> Dict[str, Any]:
     """Execute a tool call with a hard timeout using shared executor.
 
@@ -301,25 +319,42 @@ async def _execute_with_timeout(
     executor = _get_shared_executor()
     loop = asyncio.get_running_loop()
 
+    t0 = time.monotonic()
     try:
         # Use run_in_executor to avoid blocking the event loop
         result = await asyncio.wait_for(
             loop.run_in_executor(
                 executor,
                 _execute_single_tool,
-                tools, tc, logs_dir, task_id
+                tools, tc, logs_dir, task_id, round_number, session_id
             ),
             timeout=timeout_sec
         )
         return result
     except asyncio.TimeoutError:
+        duration_ms = round((time.monotonic() - t0) * 1000)
         result = f"⚠️ TOOL_TIMEOUT ({fn_name}): exceeded {timeout_sec}s limit."
+        # Log to both events.jsonl and tools.jsonl (previously only events.jsonl)
         append_jsonl(logs_dir / "events.jsonl", {
             "ts": utc_now_iso(),
             "type": "tool_timeout",
             "tool": fn_name,
             "timeout_sec": timeout_sec,
         })
+        timeout_log = {
+            "ts": utc_now_iso(),
+            "tool": fn_name,
+            "task_id": task_id,
+            "args": sanitize_tool_args_for_log(fn_name, {}),
+            "result_preview": result,
+            "is_error": True,
+            "error_category": "timeout",
+            "duration_ms": duration_ms,
+            "round": round_number,
+        }
+        if session_id:
+            timeout_log["session_id"] = session_id
+        append_jsonl(logs_dir / "tools.jsonl", timeout_log)
         return {
             "tool_call_id": tool_call_id,
             "fn_name": fn_name,
@@ -637,7 +672,11 @@ async def run_llm_loop(
                 tool_name = tc["function"]["name"]
                 emit_progress(f"Executing {tool_name}...", tool_name, round_idx)
                 timeout = tools.get_timeout(tc["function"]["name"])
-                exec_result = await _execute_with_timeout(tools, tc, logs_dir, timeout, task_id)
+                exec_result = await _execute_with_timeout(
+                    tools, tc, logs_dir, timeout, task_id,
+                    round_number=round_idx,
+                    session_id=conversation_id or "",
+                )
 
                 truncated_result = _truncate_tool_result(exec_result["result"])
                 safe_result = _sanitize_tool_result(truncated_result)

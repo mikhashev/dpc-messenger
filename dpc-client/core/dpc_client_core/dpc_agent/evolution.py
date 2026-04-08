@@ -310,11 +310,16 @@ class EvolutionManager:
         """Analyze current agent state for improvement opportunities."""
         memory = self.agent.memory
 
-        # Read recent tool usage
-        tools_log = memory.read_jsonl_tail("tools.jsonl", 50)
+        # Read recent tool usage (temporal window: last 24h instead of fixed tail)
+        tools_log = memory.read_jsonl_since("tools.jsonl", hours=24.0, max_entries=500)
+        if not tools_log:
+            # Fallback to tail if no recent entries (e.g., first run after upgrade)
+            tools_log = memory.read_jsonl_tail("tools.jsonl", 50)
 
-        # Read recent consciousness thoughts
-        thoughts_log = memory.read_jsonl_tail("consciousness.jsonl", 20)
+        # Read recent consciousness thoughts (temporal window: last 24h)
+        thoughts_log = memory.read_jsonl_since("consciousness.jsonl", hours=24.0, max_entries=100)
+        if not thoughts_log:
+            thoughts_log = memory.read_jsonl_tail("consciousness.jsonl", 20)
 
         # Read current identity
         identity = memory.load_identity()
@@ -350,13 +355,17 @@ class EvolutionManager:
         except Exception as e:
             log.debug(f"Failed to read skill stats: {e}")
 
-        # Analyze tool usage quality from tools.jsonl (error rate + diversity + categories)
+        # Analyze tool usage quality from tools.jsonl (error rate + diversity + categories + duration)
         tool_error_count = 0
         tool_frequency: Dict[str, int] = {}
+        tool_durations: Dict[str, list] = {}
         error_categories: Dict[str, int] = {}
         for entry in tools_log:
             tool_name = entry.get("tool", "unknown")
             tool_frequency[tool_name] = tool_frequency.get(tool_name, 0) + 1
+            dur = entry.get("duration_ms")
+            if dur is not None:
+                tool_durations.setdefault(tool_name, []).append(dur)
             is_err = entry.get("is_error", False)
             if not is_err:
                 result = str(entry.get("result_preview", ""))
@@ -369,6 +378,31 @@ class EvolutionManager:
         tool_error_rate = round(tool_error_count / len(tools_log), 2) if tools_log else 0.0
         # Top 5 most used tools
         top_tools = sorted(tool_frequency.items(), key=lambda x: -x[1])[:5]
+        # Slow tools (avg duration > 1000ms, at least 3 calls)
+        slow_tools = []
+        for name, durations in tool_durations.items():
+            if len(durations) >= 3:
+                avg = round(sum(durations) / len(durations))
+                if avg > 1000:
+                    slow_tools.append({"tool": name, "avg_ms": avg, "calls": len(durations)})
+        slow_tools.sort(key=lambda x: -x["avg_ms"])
+
+        # Read cross-session trends from digest.jsonl
+        digest_trends: List[Dict[str, Any]] = []
+        try:
+            from pathlib import Path
+            digest_path = Path.home() / ".dpc" / "conversations" / self.agent.agent_id / "digest.jsonl"
+            if digest_path.exists():
+                with open(digest_path, encoding="utf-8") as df:
+                    for line in df:
+                        line = line.strip()
+                        if line:
+                            try:
+                                digest_trends.append(json.loads(line))
+                            except Exception:
+                                continue
+        except Exception:
+            log.debug("Failed to read digest.jsonl for evolution trends", exc_info=True)
 
         # Summarize recent consciousness thoughts for Evolution prompt
         # Supports both structured (v2) and freeform (v1) formats
@@ -402,6 +436,7 @@ class EvolutionManager:
             "tool_error_count": tool_error_count,
             "error_categories": error_categories,
             "top_tools": top_tools,
+            "slow_tools": slow_tools[:5],
             "thoughts_count": len(thoughts_log),
             "identity_length": len(identity),
             "scratchpad_length": len(scratchpad),
@@ -410,6 +445,8 @@ class EvolutionManager:
             "total_skill_stats": len(skill_stats),
             "improvement_areas": [],  # Will be populated by LLM
             "recent_thoughts": recent_thoughts,
+            "digest_sessions": len(digest_trends),
+            "digest_latest": digest_trends[-3:] if digest_trends else [],
         }
 
     # Maximum size for skill files — beyond this, append proposals are skipped

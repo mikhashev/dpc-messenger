@@ -1559,21 +1559,43 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 except (ValueError, TypeError):
                     pass
 
-            # Count tool calls from assistant messages
+            # Count tool calls from tools.jsonl (agent log) by timestamp range
             tool_stats: Dict[str, int] = {}
-            for msg in messages:
-                if msg.get("role") == "assistant":
-                    content = msg.get("content", "")
-                    # Count tool invocations mentioned in assistant responses
-                    # Agent messages contain tool call results in structured format
-                    if "tool_calls" in msg:
-                        for tc in msg.get("tool_calls", []):
-                            name = tc.get("function", {}).get("name", tc.get("name", "unknown"))
-                            tool_stats[name] = tool_stats.get(name, 0) + 1
+            tool_durations: Dict[str, list] = {}
+            if timestamps and self.conversation_id.startswith("agent_"):
+                try:
+                    tools_path = (
+                        Path.home() / ".dpc" / "agents"
+                        / self.conversation_id / "logs" / "tools.jsonl"
+                    )
+                    if tools_path.exists():
+                        first_ts = timestamps[0]
+                        last_ts = timestamps[-1]
+                        with open(tools_path, encoding="utf-8") as tf:
+                            for line in tf:
+                                try:
+                                    entry = json.loads(line.strip())
+                                    ts = entry.get("ts", "")
+                                    if first_ts <= ts <= last_ts or entry.get("session_id") == self.conversation_id:
+                                        name = entry.get("tool", "unknown")
+                                        tool_stats[name] = tool_stats.get(name, 0) + 1
+                                        dur = entry.get("duration_ms")
+                                        if dur is not None:
+                                            tool_durations.setdefault(name, []).append(dur)
+                                except (json.JSONDecodeError, TypeError):
+                                    continue
+                except Exception as e:
+                    logger.debug(f"Could not read tools.jsonl for digest: {e}")
 
             # Extract basic topics from user messages (first 5 user messages as topic hints)
             user_messages = [m.get("content", "")[:100] for m in messages
                             if m.get("role") == "user" and m.get("content")]
+
+            # Compute avg duration per tool
+            tool_avg_duration: Dict[str, int] = {}
+            for name, durations in tool_durations.items():
+                if durations:
+                    tool_avg_duration[name] = round(sum(durations) / len(durations))
 
             digest_entry = {
                 "date": session_data.get("archived_at", datetime.now(timezone.utc).isoformat()),
@@ -1581,6 +1603,7 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "message_count": len(messages),
                 "duration_mins": duration_mins,
                 "tool_stats": tool_stats,
+                "tool_avg_duration_ms": tool_avg_duration,
                 "user_message_previews": user_messages[:5],
                 "archive_file": archive_path.name,
             }

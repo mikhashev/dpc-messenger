@@ -174,6 +174,25 @@ class Memory:
         if not self.journal_path().exists():
             write_text(self.journal_path(), "")
 
+    def cleanup_old_task_results(self, max_age_days: int = 30) -> int:
+        """Remove task_results files older than max_age_days. Returns count deleted."""
+        import time as _time
+        results_dir = self.agent_root / "task_results"
+        if not results_dir.exists():
+            return 0
+        cutoff = _time.time() - (max_age_days * 86400)
+        deleted = 0
+        for f in results_dir.glob("*.json"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    deleted += 1
+            except Exception:
+                continue
+        if deleted:
+            log.info(f"Cleaned up {deleted} old task result files (>{max_age_days} days)")
+        return deleted
+
     # --- Knowledge Base ---
 
     def load_knowledge(self, topic: str) -> str:
@@ -230,6 +249,32 @@ class Memory:
             return entries
         except Exception:
             log.warning(f"Failed to read JSONL tail from {log_name}", exc_info=True)
+            return []
+
+    def read_jsonl_since(self, log_name: str, hours: float = 24.0, max_entries: int = 500) -> List[Dict[str, Any]]:
+        """Read JSONL entries from the last `hours` hours (temporal window)."""
+        from datetime import datetime, timezone, timedelta
+        path = self.logs_path(log_name)
+        if not path.exists():
+            return []
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        try:
+            entries = []
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        ts = entry.get("ts", "")
+                        if ts >= cutoff:
+                            entries.append(entry)
+                    except Exception:
+                        continue
+            return entries[-max_entries:] if len(entries) > max_entries else entries
+        except Exception:
+            log.warning(f"Failed to read JSONL since {hours}h from {log_name}", exc_info=True)
             return []
 
     # --- Log Summarization ---

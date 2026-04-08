@@ -114,6 +114,7 @@ class DpcAgent:
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
         self.memory._update_knowledge_index()  # Regenerate _index.md on startup
+        self.memory.cleanup_old_task_results(max_age_days=30)  # TTL cleanup
         self.skill_store = SkillStore(agent_root=self.agent_root)
         self.skill_store.ensure_starter_skills()  # bootstrap for existing agents on first run
         self.skill_reflector = SkillReflector(
