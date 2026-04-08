@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Last Updated:** March 2026 | **Current Version:** 0.20.0 | **Current Phase:** Phase 2 - Team Collaboration + Decentralized Infrastructure
+> **Last Updated:** April 2026 | **Current Version:** 0.21.0 | **Current Phase:** Phase 2 - Team Collaboration + Agent Evolution
 
 ---
 
@@ -10,8 +10,8 @@ D-PC Messenger follows a three-phase development roadmap:
 
 1. **Phase 1: Federated MVP - COMPLETE (v0.8.0)** - Proven P2P messaging with AI collaboration
 2. **Phase 1.5: Extended Features - COMPLETE (v0.9.0 - v0.18.0)** - File transfer, voice, agent, resilient infrastructure
-3. **Phase 2: Team Collaboration - IN PROGRESS** - Small teams (2-20 people) with group chat and shared knowledge
-4. **Phase 3: Scaling & Mass Decentralization - PLANNED (2027+)** - Mobile clients, global scale, 100% decentralization
+3. **Phase 2: Team Collaboration + Agent Evolution - IN PROGRESS** - Small teams, embedded AI agent, group chat
+4. **Phase 3: Scaling & Mass Decentralization - FUTURE IDEAS** - Mobile clients, global scale, 100% decentralization
 
 ---
 
@@ -64,7 +64,7 @@ D-PC Messenger follows a three-phase development roadmap:
 
 **Status:** Complete
 **Timeline:** December 2025 - February 2026
-**Scope:** Features built beyond original Phase 1 scope, including disaster-resilient infrastructure
+**Scope:** Features built beyond original Phase 1 scope, including disaster-resilient infrastructure and AI agent capabilities
 
 These features were developed organically as the product matured, significantly expanding the platform's capabilities.
 
@@ -108,160 +108,66 @@ These features were developed organically as the product matured, significantly 
 
 ---
 
-## Phase 2: Team Collaboration - IN PROGRESS
+## Phase 2: Team Collaboration + Agent Evolution - IN PROGRESS
 
-**Status:** Infrastructure complete, team features pending
+**Status:** Agent evolution active, team features planned
 **Timeline:** Q1-Q3 2026
-**Scope:** Small teams (2-20 members + AIs)
+**Scope:** Small teams (2-20 members + AIs), embedded agent system
 
-### Strategic Goals
+### What's Done
 
-Build the best platform for small teams to collaborate with AI-augmented intelligence, leveraging the decentralized infrastructure already completed.
-
-### What's Done (Infrastructure)
-
-The foundation for team collaboration is in place:
-- DHT peer discovery (Hub-optional architecture)
-- 6-tier connection fallback (near-universal connectivity)
-- Gossip protocol (eventual delivery for offline members)
-- Consensus voting mechanism (proven in knowledge commits)
-- Firewall system (granular per-peer, per-group controls)
-- DPC Agent (autonomous AI assistant for team workflows)
+| # | Feature | Version | Status | Description |
+|---|---------|---------|--------|-------------|
+| 1 | **Group Chat** | v0.19.0 | Complete | Multi-participant chat with text, files, voice, screenshots, transcription, knowledge commits, session management |
+| 2 | **DPC Agent** | v0.18.0 | Complete | Embedded autonomous AI with 40+ tools (now 59), persistent memory, task queue |
+| 3 | **Agent Consciousness** | v0.20.0 | Complete | Background self-reflection, structured thoughts, scratchpad writes |
+| 4 | **Agent Evolution** | v0.20.0 | Complete | Periodic self-improvement proposals (identity, skills, knowledge) |
+| 5 | **Agent Skills** | v0.20.0 | Complete | 10 skills (code-analysis, memory-hygiene, web-research, etc.), skill reflection |
+| 6 | **Agent Progress Board** | v0.20.0 | Complete | UI for evolution proposals, consciousness logs, task history |
+| 7 | **Protocol 13** | v0.21.0 | Complete | Human-AI team coordination protocol (Mike=approve, CC=execute, Ark=review) |
+| 8 | **Agent Telegram Bridge** | v0.18.0 | Complete | Two-way messaging with agent via Telegram |
 
 ### What's Next (Team Features)
-
-#### Phase 2.1: Team Foundations
 
 | # | Feature | Complexity | Description |
 |---|---------|------------|-------------|
 | 1 | **Persistent Team Management** | Medium | Team objects (`~/.dpc/teams.json`), UI sidebar, auto-firewall integration |
-| 2 | **Group Chat** | Medium | **DONE (v0.19.0)** - Multi-participant chat with text, files, voice, screenshots, transcription, knowledge commits, session management |
-| 3 | **Team Firewall Presets** | Low | Pre-configured policies (Work Team, Study Group, Full Trust) |
-| 4 | **Team Invite & Onboarding** | Medium | Short-lived invite codes, QR sharing, auto-connect workflow |
-
-#### Phase 2.2: Knowledge Collaboration
-
-| # | Feature | Complexity | Description |
-|---|---------|------------|-------------|
-| 5 | **Team Knowledge Repository** | High | Separate `~/.dpc/teams/{team_id}/knowledge/`, Git-like sync protocol |
-| 6 | **Knowledge Commit Templates** | Low | Pre-defined formats (Meeting Notes, Decisions, Postmortems) |
-| 7 | **Team AI Assistants** | Medium | AI queries with `team_id`, access to collective team knowledge |
-| 8 | **Collaborative Context Editing** | High | Propose edits with diff generation, PR-like approval workflow |
-| 9 | **Multilingual Knowledge Extraction** | Low | Language detection for knowledge proposals |
-
-#### Phase 2.3: Polish & Advanced Features
-
-| # | Feature | Complexity | Description |
-|---|---------|------------|-------------|
-| 10 | **Team Compute Pools** | Medium | Auto-discovery, load balancing, "Team Compute" panel |
-| 11 | **Team Activity Feed** | Medium | Real-time event stream (joins, commits, compute sharing) |
-| 12 | **DPC Agent Team Integration** | Medium | Agent tasks across team context, multi-peer coordination |
-
-### Technical Architecture
-
-**New Protocol Messages:**
-```python
-# Team Management
-CREATE_TEAM, INVITE_TO_TEAM, ACCEPT_TEAM_INVITE, LEAVE_TEAM, TEAM_ROSTER_UPDATE
-
-# Group Chat
-GROUP_MESSAGE, TYPING_INDICATOR, MEMBER_PRESENCE
-
-# Knowledge Sync
-SYNC_TEAM_KNOWLEDGE, KNOWLEDGE_COMMIT_PUSH, KNOWLEDGE_DIFF_REQUEST
-```
-
-**New Backend Services:**
-- `TeamManager` - Team lifecycle management
-- `GroupChatManager` - Multi-peer message routing
-- `TeamKnowledgeSync` - P2P knowledge syncing with conflict resolution
-- `ComputePoolManager` - Resource discovery and load balancing
-
-**Critical Files to Modify:**
-1. `dpc-client/core/dpc_client_core/service.py` - Integrate new managers
-2. `dpc-client/core/dpc_client_core/consensus_manager.py` - Extend for team knowledge
-3. `dpc-client/ui/src/routes/+page.svelte` - Add team UI components
-4. `dpc-protocol/dpc_protocol/protocol.py` - Add new protocol messages
-5. `dpc-client/core/dpc_client_core/firewall.py` - Team-level permissions
-
-### Key Architectural Decisions
-
-**1. Hybrid DHT + Gossip for Team Discovery:**
-- Kademlia DHT for efficient peer lookup (O(log n))
-- Gossip protocol for resilience under network partitions
-- Hub as optional bootstrap (not required)
-
-**2. WebRTC Remains Primary Transport:**
-- Widely supported, indistinguishable from mainstream traffic
-- Proven in Phase 1 with STUN/TURN infrastructure
-
-**3. DPC Agent as Team Assistant:**
-- Agent leverages team context for smarter assistance
-- Can coordinate tasks across team members
-- Evolution system creates team-specific knowledge
+| 2 | **Team Firewall Presets** | Low | Pre-configured policies (Work Team, Study Group, Full Trust) |
+| 3 | **Team Invite & Onboarding** | Medium | Short-lived invite codes, QR sharing, auto-connect workflow |
+| 4 | **Team Knowledge Repository** | High | Separate `~/.dpc/teams/{team_id}/knowledge/`, Git-like sync protocol |
+| 5 | **Knowledge Commit Templates** | Low | Pre-defined formats (Meeting Notes, Decisions, Postmortems) |
+| 6 | **Team AI Assistants** | Medium | AI queries with `team_id`, access to collective team knowledge |
+| 7 | **Team Compute Pools** | Medium | Auto-discovery, load balancing, "Team Compute" panel |
+| 8 | **DPC Agent Team Integration** | Medium | Agent tasks across team context, multi-peer coordination |
 
 ### Success Metrics
 
-**User Metrics:**
-- 50+ active teams (5+ members, 10+ commits/month)
-- 70% team retention after creating 5+ commits
-- Teams create 2+ knowledge commits per week
-
-**Technical Metrics:**
-- 95%+ uptime for 20-node P2P mesh over 24 hours
-- 99% of commits sync within 5 seconds to online members
+**Operational Metrics:**
+- All 6 connection tiers tested and operational
+- Agent consciousness uptime (thoughts per session, no recursive loops)
+- Knowledge commits per session (extraction + voting pipeline)
+- P2P mesh stability over 24h (2+ nodes)
 - DHT lookup success rate >95% (peer discovery without Hub)
-
-**Contingency Plan:**
-- If 1 developer: Cut Features 11-12 (activity feed/agent team integration)
-- Core deliverables: Team Management, Group Chat, Team Knowledge (Features 1-8)
 
 ---
 
-## Phase 3: Scaling & Mass Decentralization - PLANNED (2027+)
+## Future Ideas
 
-**Status:** Design Phase
-**Timeline:** 2027+
-**Scope:** Global scale, mobile clients, 100% decentralization
+Ideas for future development. Not committed — direction, not promises.
 
-### Strategic Goals
+### Scaling
+- **Mobile clients** (iOS, Android)
+- **Multi-hub federation** for large organizations
+- **Hub-free operation mode** — 100% decentralized (no Hub at all)
 
-Phase 3 is about scaling to millions:
-- Mass-market mobile adoption (iOS, Android)
-- Large organization support (100+ teams, multi-hub federation)
-- Complete Hub independence (100% decentralized operation)
-- Advanced security features (hardware wallets, social recovery)
+### Advanced Security
+- **Social recovery** (Shamir Secret Sharing) — recover backup passphrases via trusted peers
+- **Hardware wallet integration** (Ledger, YubiKey, TPM) — hardware-backed identity
 
-### Feature Categories
-
-#### Scaling Features
-- **Mobile clients** (iOS, Android) - React Native or Flutter
-- **Multi-hub federation** - Large organizations with 100+ teams
-- **Advanced DHT features** - libp2p integration, cross-DHT discovery
-- **Hub-free operation mode** - 100% decentralized (no Hub at all)
-
-#### Advanced Security
-- **Social recovery** (Shamir Secret Sharing) - Recover backup passphrases via trusted peers
-- **Hardware wallet integration** (Ledger, YubiKey, TPM) - Hardware-backed identity
-- **Blockchain identity** (optional) - Decentralized identity verification
-
-#### Stretch Goals
-- **Meshtastic (LoRa) Integration** - Offline text messaging via LoRa radios
-- **WiFi Mesh (802.11s) Support** - Direct TLS already works over mesh LANs
-- **Compute Marketplace** - Monetized compute sharing with transaction fees
-
-### Rationale for Phasing
-
-**Why Phase 2 First?**
-- Prove the team collaboration model works (2-20 people)
-- Infrastructure foundation already built (DHT, 6-tier fallback, gossip)
-- Gather user feedback before mass scaling
-
-**Why Phase 3 Later?**
-- Mobile development is expensive (2 platforms, ongoing maintenance)
-- Mass-scale DHT is complex (requires Phase 2 experience)
-- Complete Hub removal requires mature DHT
-- Hardware wallets/blockchain add complexity (nice-to-have, not critical)
+### Experimental
+- **Meshtastic (LoRa) Integration** — offline text messaging via LoRa radios
+- **Compute Marketplace** — monetized compute sharing
+- **A2A (Agent-to-Agent)** — P2P agent communication, task delegation across peers
 
 ---
 
@@ -280,13 +186,13 @@ D-PC has a detailed **Knowledge Architecture** roadmap spanning 14 phases:
 7. Configuration system overhaul (TOML -> JSON)
 8. Cryptographic commit integrity (Git-style hashes, multi-signature)
 
-### Phases 9-14: PLANNED
+### Phases 9-14: IN PROGRESS / PLANNED
 
-9. Context retrieval & semantic search
-10. Self-improvement tracking
+9. Context retrieval & semantic search - **Partial** (knowledge extraction voting pipeline)
+10. Self-improvement tracking - **Partial** (tools.jsonl + evolution data pipeline)
 11. Multi-hub federation support (knowledge sharing)
-12. Collaborative knowledge building (team consensus) - **Requires Phase 2**
-13. Mobile client knowledge sync - **Requires Phase 3**
+12. Collaborative knowledge building (team consensus) - **Partial** (consensus voting works for 1:1 and agent)
+13. Mobile client knowledge sync
 14. Advanced bias mitigation refinements
 
 **See [docs/KNOWLEDGE_ARCHITECTURE.md](./docs/KNOWLEDGE_ARCHITECTURE.md) for full specification.**
@@ -299,15 +205,17 @@ D-PC has a detailed **Knowledge Architecture** roadmap spanning 14 phases:
 
 | Version | Date | Milestone |
 |---------|------|-----------|
+| **v0.21.0** | Apr 2026 | Doc audit, Protocol 13 v1.8, tool data pipeline |
+| **v0.20.0** | Mar 2026 | Agent Progress Board, security hardening, knowledge integrity |
+| **v0.19.0** | Feb 2026 | Group Chat — multi-participant messaging |
 | **v0.18.0** | Feb 2026 | DPC Agent, reasoning models, Telegram agent bridge |
 | **v0.15.0** | Jan 2026 | Cross-platform audio (Rust cpal), VRAM management |
-| **v0.13.0** | Jan 2026 | Voice messages (experimental) |
 | **v0.12.0** | Dec 2025 | Vision & image support |
 | **v0.11.0** | Dec 2025 | File transfer, session management, chat history sync |
 | **v0.10.0** | Dec 2025 | 6-tier connection fallback, ConnectionOrchestrator |
 | **v0.9.5** | Dec 2025 | DHT peer discovery (Kademlia) |
-| **v0.8.0** | Nov 2025 | Phase 1 Complete - Federated MVP |
-| **v0.7.0** | Oct 2025 | Knowledge Architecture Phases 1-7 |
+| **v0.8.0** | Nov 2025 | Phase 1 Complete — Federated MVP |
+| **v0.7.0** | Nov 2025 | Knowledge Architecture Phases 1-7 |
 
 **See [CHANGELOG.md](./CHANGELOG.md) for complete version history.**
 
@@ -338,6 +246,6 @@ D-PC has a detailed **Knowledge Architecture** roadmap spanning 14 phases:
 
 ---
 
-**Last Updated:** February 2026
+**Last Updated:** April 2026
 **Maintained By:** D-PC Messenger Core Team
 **License:** See [LICENSE.md](./LICENSE.md)
