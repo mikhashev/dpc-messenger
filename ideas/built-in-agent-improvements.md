@@ -254,6 +254,7 @@ in A2A.md and can build on this foundation later.
 - [ ] **Evolution hardcoded 50/20** — tools.jsonl tail 50, consciousness tail 20. Consider temporal window instead.
 - [ ] **Evolution blind to past sessions** — Phase 3 Sleep Consolidation Pipeline (digest.jsonl + archives).
 - [ ] **UI: End Session + Extract Knowledge** — shows confirm dialog instead of results (after Figma)
+- [ ] **Agent chat: End Session voting hangs on AI provider failure** (High) — When user clicks End Session in agent chat (agent_*), knowledge extraction triggers consensus voting with 2 participants (user + agent). User votes approve, then AI agent tries to evaluate via LLM. If provider is down (Z.AI 1305 overload), AI abstains → voting stuck with 1/2 votes → hangs 10 min until timeout. Observed 2026-04-08: proposal-be4e9661 hung, required second extraction to complete.
 - [ ] **UI: New Session double confirm** — two dialogs instead of one (after Figma)
 - [ ] **UI: Access & Paths in global tab** — should be per-agent only (after Figma)
 
