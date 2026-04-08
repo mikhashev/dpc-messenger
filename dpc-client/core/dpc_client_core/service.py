@@ -6909,23 +6909,20 @@ class CoreService:
                 logger.info("Ark responded to CC's @Ark mention in %s (%d chars)",
                             conversation_id, len(response))
 
-                # Extract thinking/streaming_raw from agent's last usage
+                # Extract thinking/streaming_raw from monitor history (reliable source)
                 thinking_text = None
                 streaming_raw = None
-                agent = agent_manager._get_or_create_agent_for_provider(conversation_id) if conversation_id else agent_manager.agent
-                if hasattr(agent, '_last_usage') and agent._last_usage:
-                    thinking_text = agent._last_usage.get("thinking")
-                # Get streaming_raw from the last message in monitor
                 monitor = agent_manager._agent_monitors.get(conversation_id)
                 if monitor and monitor.message_history:
                     last_msg = monitor.message_history[-1]
                     if last_msg.get("role") == "assistant":
+                        thinking_text = last_msg.get("thinking")
                         streaming_raw = last_msg.get("streaming_raw")
 
                 # Broadcast Ark's response to UI so it appears immediately
                 from dpc_client_core.dpc_agent.utils import utc_now_iso
                 import uuid
-                agent_name = getattr(agent_manager, 'agent_id', conversation_id)
+                agent_name = self._get_agent_display_name(conversation_id)
                 await self.local_api.broadcast_event("agent_chat_message", {
                     "conversation_id": conversation_id,
                     "message_id": str(uuid.uuid4()),
