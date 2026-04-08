@@ -426,20 +426,26 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
 
         text = response.strip()
 
+        # Structured response must be a dict with at least one known field
+        _known_fields = {"observation", "trigger", "pattern_detected", "severity", "action_suggestion", "confidence"}
+
+        def _is_structured(d: dict) -> bool:
+            return isinstance(d, dict) and bool(_known_fields & d.keys())
+
         # Try direct parse
         try:
             result = json.loads(text)
-            if isinstance(result, dict) and "observation" in result:
+            if _is_structured(result):
                 return result
         except (json.JSONDecodeError, ValueError):
             pass
 
-        # Try extracting JSON from markdown code block
-        json_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL)
+        # Try extracting JSON from markdown code block (greedy to handle nested braces)
+        json_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', text, re.DOTALL)
         if json_match:
             try:
                 result = json.loads(json_match.group(1))
-                if isinstance(result, dict) and "observation" in result:
+                if _is_structured(result):
                     return result
             except (json.JSONDecodeError, ValueError):
                 pass
@@ -450,7 +456,7 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
         if brace_start >= 0 and brace_end > brace_start:
             try:
                 result = json.loads(text[brace_start:brace_end + 1])
-                if isinstance(result, dict) and "observation" in result:
+                if _is_structured(result):
                     return result
             except (json.JSONDecodeError, ValueError):
                 pass

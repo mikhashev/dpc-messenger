@@ -226,7 +226,7 @@ class ConversationMonitor:
                 "generate_commit_proposal called while extraction already in progress for %s — skipping",
                 self.conversation_id,
             )
-            return None
+            return "EXTRACTION_IN_PROGRESS"
 
         self._extracting = True
         try:

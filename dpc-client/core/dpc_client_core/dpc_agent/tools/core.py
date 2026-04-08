@@ -501,7 +501,7 @@ This file tracks the agent's self-understanding and evolving identity.
         return f"⚠️ Error updating identity: {e}"
 
 
-def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1) -> str:
+def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_internals: bool = False) -> str:
     """
     Read conversation messages (user and assistant turns).
 
@@ -549,6 +549,13 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1) -> str:
             content = msg.get("content", "")
             ts_str = f" [{ts[:19]}]" if ts else ""
             output_lines.append(f"{sender}{ts_str}: {content}")
+            if include_internals:
+                thinking = msg.get("thinking")
+                streaming_raw = msg.get("streaming_raw")
+                if thinking:
+                    output_lines.append(f"  [THINKING]: {thinking[:500]}")
+                if streaming_raw:
+                    output_lines.append(f"  [RAW]: {streaming_raw[:500]}")
 
         return "\n".join(output_lines)
 
@@ -1721,6 +1728,8 @@ def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool
                 force=force, proposed_by=agent_id, initiated_by=initiated_by
             ))
 
+        if proposal == "EXTRACTION_IN_PROGRESS":
+            return "⚠️ Knowledge extraction already in progress — wait for it to finish and retry."
         if not proposal:
             return "⚠️ No knowledge extracted — conversation buffer is empty or below threshold. Try force=True."
 
@@ -2093,6 +2102,11 @@ def get_tools() -> List[ToolEntry]:
                             "default": 10,
                             "minimum": 1,
                             "maximum": 100
+                        },
+                        "include_internals": {
+                            "type": "boolean",
+                            "description": "Include thinking and streaming_raw blocks in output",
+                            "default": False
                         }
                     },
                     "required": []
