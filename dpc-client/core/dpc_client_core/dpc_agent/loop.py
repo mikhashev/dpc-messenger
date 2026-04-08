@@ -193,6 +193,24 @@ def _strip_role_boundaries(content: str) -> str:
     return content
 
 
+def _classify_tool_error(result: str) -> str:
+    """Classify tool error category from result string prefix."""
+    r = str(result)
+    if "not in the allowed tools list" in r:
+        return "firewall_blocked"
+    if "Unknown tool:" in r:
+        return "unknown_tool"
+    if "SANDBOX_VIOLATION" in r:
+        return "sandbox_violation"
+    if "TOOL_ARG_ERROR" in r:
+        return "tool_arg_error"
+    if "TOOL_TIMEOUT" in r:
+        return "timeout"
+    if "TOOL_ERROR" in r:
+        return "runtime_error"
+    return "tool_result_error"
+
+
 def _execute_single_tool(
     tools: "ToolRegistry",
     tc: Dict[str, Any],
@@ -238,16 +256,22 @@ def _execute_single_tool(
             "error": repr(e),
         })
 
+    # Detect error category from result
+    is_error = is_error or str(result).startswith("⚠️")
+    error_category = _classify_tool_error(result) if is_error else None
+
     # Log tool execution
-    append_jsonl(logs_dir / "tools.jsonl", {
+    tool_log_entry = {
         "ts": utc_now_iso(),
         "tool": fn_name,
         "task_id": task_id,
         "args": args_for_log,
         "result_preview": sanitize_tool_result_for_log(truncate_for_log(result, 2000)),
-    })
-
-    is_error = is_error or str(result).startswith("⚠️")
+        "is_error": is_error,
+    }
+    if error_category:
+        tool_log_entry["error_category"] = error_category
+    append_jsonl(logs_dir / "tools.jsonl", tool_log_entry)
 
     return {
         "tool_call_id": tool_call_id,

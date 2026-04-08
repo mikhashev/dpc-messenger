@@ -670,7 +670,7 @@ class DpcAgentManager:
                 )
                 monitor.save_history()  # Save to disk immediately
             elif _is_llm_error:
-                logger.warning(f"LLM error not saved to history: {response[:100]}")
+                log.warning(f"LLM error not saved to history: {response[:100]}")
 
             # Store full context estimate from this request so next request's session_state
             # can expose it. One request stale, but accurate — context grows incrementally.
