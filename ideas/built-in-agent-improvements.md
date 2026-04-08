@@ -220,9 +220,9 @@ in A2A.md and can build on this foundation later.
 - [x] **System prompt v2** — Rewritten from philosophical to operational. DPC Paradigms, Team, Skills (Memento-Skills), Reasoning Guidelines, Anti-patterns. Designed by Ark, approved by Mike.
 - [ ] **Model-aware context_budget** — Replace hardcoded truncation limits with % of context_window from provider. 35+ truncation points mapped.
 - [ ] **Active context warning in loop.py** — Inject system note at 70-90% usage. Agent ignores passive metrics.
-- [ ] **Consciousness tool access** (~6h) — BackgroundConsciousness writes 535+ thoughts → 0 actions. Give it ability to act (update scratchpad, trigger cleanup). Roadmap-level.
-- [ ] **task_results TTL/rotation** — 1448 files accumulated, write-only, no cleanup. Affects all agents.
-- [ ] **logs rotation** — 7.7MB append-only logs, no limit. tools.jsonl alone is 5.1MB.
+- [x] **Consciousness tool access** — Consciousness now writes medium/high severity actions to scratchpad (cf98c5b). Full tool dispatch deferred.
+- [x] **task_results TTL/rotation** — cleanup_old_task_results(30d) on agent startup (cf98c5b).
+- [x] **logs rotation** — append_jsonl rotates at 5MB (cf98c5b).
 
 ### Open — from earlier sessions
 - [ ] **UI duplication**: Evolution settings shown in both FirewallEditor.svelte (global dpc_agent tab)
@@ -251,8 +251,8 @@ in A2A.md and can build on this foundation later.
 - [x] **extract_knowledge error message** — 'buffer empty' → 'extraction already in progress' when _extracting lock. (a3b84a6)
 - [x] **chat_history include_internals** — optional param to show thinking/streaming_raw. (a3b84a6)
 - [ ] **Tool registry ↔ Firewall sync gap** — 7 tools in registry without firewall entry (invisible in UI), 17 tools in firewall without CORE/RESTRICTED classification. Need single source of truth.
-- [ ] **Evolution hardcoded 50/20** — tools.jsonl tail 50, consciousness tail 20. Consider temporal window instead.
-- [ ] **Evolution blind to past sessions** — Phase 3 Sleep Consolidation Pipeline (digest.jsonl + archives).
+- [x] **Evolution hardcoded 50/20** — replaced with temporal windows: evolution 24h, consciousness 6h (cf98c5b).
+- [x] **Evolution blind to past sessions** — evolution now reads digest.jsonl for cross-session trends + digest tool_stats populated from tools.jsonl (cf98c5b).
 - [ ] **UI: End Session + Extract Knowledge** — shows confirm dialog instead of results (after Figma)
 - [ ] **Agent chat: End Session voting hangs on AI provider failure** (High) — When user clicks End Session in agent chat (agent_*), knowledge extraction triggers consensus voting with 2 participants (user + agent). User votes approve, then AI agent tries to evaluate via LLM. If provider is down (Z.AI 1305 overload), AI abstains → voting stuck with 1/2 votes → hangs 10 min until timeout. Observed 2026-04-08: proposal-be4e9661 hung, required second extraction to complete.
 - [ ] **UI: New Session double confirm** — two dialogs instead of one (after Figma)
