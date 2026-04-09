@@ -207,10 +207,6 @@
   let peerContextHashes = $state(new Map<string, string>());  // Per-peer: current hash from backend
   let lastSentPeerHashes = $state(new Map<string, Map<string, string>>());  // Per-conversation, per-peer: last hash sent
 
-  // "Clear messages after knowledge extraction?" confirmation state
-  let showClearConfirm = $state(false);
-  let pendingClearFn = $state<(() => void) | null>(null);
-
   // "Start new session?" confirmation state (#7 fix: confirm BEFORE reset)
   let showNewSessionConfirm = $state(false);
   let pendingNewSessionChatId = $state<string | null>(null);
@@ -1206,23 +1202,6 @@
 {/if}
 
 <!-- Clear messages after knowledge extraction? -->
-{#if showClearConfirm}
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="confirm-overlay" role="dialog" aria-modal="true" aria-label="Clear messages?">
-    <div class="confirm-dialog">
-      <p>Knowledge saved. Clear conversation messages?</p>
-      <div class="confirm-actions">
-        <button class="btn-confirm-yes" onclick={() => { pendingClearFn?.(); showClearConfirm = false; pendingClearFn = null; }}>
-          Yes, clear
-        </button>
-        <button class="btn-confirm-no" onclick={() => { showClearConfirm = false; pendingClearFn = null; }}>
-          No, keep
-        </button>
-      </div>
-    </div>
-  </div>
-{/if}
-
 <!-- Start new session? Confirm BEFORE reset (#7 fix) -->
 {#if showNewSessionConfirm}
   <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -1340,8 +1319,10 @@
   {getPeerDisplayName}
   onOpenNewSessionDialog={() => { showNewSessionDialog = true; }}
   onConversationReset={(_convId, clear) => {
-    pendingClearFn = clear;
-    showClearConfirm = true;
+    // Auto-clear without confirm dialog.
+    // User already confirmed via New Session dialog (Dialog 2).
+    // Extraction no longer sends conversation_reset (commit c98debc).
+    clear();
   }}
   onClearStateForConversation={(convId) => {
     tokenUsageMap = new Map(tokenUsageMap);
