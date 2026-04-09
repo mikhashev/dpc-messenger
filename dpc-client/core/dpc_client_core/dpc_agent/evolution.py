@@ -24,7 +24,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -889,6 +889,35 @@ If no improvements are warranted: {{"proposals": []}}
 
         async def _evolution_loop():
             log.info(f"Starting automatic evolution (interval={self.interval_minutes}min)")
+
+            # Skip first cycle if last one was recent (prevents evolution-on-every-restart)
+            try:
+                log_file = self.agent_root / "logs" / "evolution.jsonl"
+                if log_file.exists():
+                    # Read only the last line efficiently
+                    with open(log_file, "rb") as f:
+                        f.seek(0, 2)  # Seek to end
+                        size = f.tell()
+                        # Read last 4KB (more than enough for one JSONL entry)
+                        f.seek(max(0, size - 4096))
+                        last_line = f.read().decode("utf-8").strip().rsplit("\n", 1)[-1]
+                    last_cycle = json.loads(last_line)
+                    completed = datetime.fromisoformat(last_cycle["completed_at"])
+                    if completed.tzinfo is None:
+                        completed = completed.replace(tzinfo=timezone.utc)
+                    elapsed = (datetime.now(timezone.utc) - completed).total_seconds()
+                    remaining = self.interval_minutes * 60 - elapsed
+                    if remaining > 0:
+                        log.info(f"Last evolution cycle was {elapsed:.0f}s ago, waiting {remaining:.0f}s before first cycle")
+                        try:
+                            await asyncio.wait_for(self._stop_event.wait(), timeout=remaining)
+                            log.info("Automatic evolution stopped during initial wait")
+                            self._evolution_task = None
+                            return
+                        except asyncio.TimeoutError:
+                            pass  # Time to run
+            except Exception as e:
+                log.debug(f"Could not read last evolution timestamp, running immediately: {e}")
 
             while not self._stop_event.is_set():
                 try:
