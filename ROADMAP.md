@@ -91,6 +91,7 @@ These features were developed organically as the product matured, significantly 
 | 6 | **Agent Progress Board** | v0.20.0 | Complete | UI for evolution proposals, consciousness logs, task history |
 | 7 | **Protocol 13** | v0.21.0 | Complete | Human-AI team coordination protocol (Mike=approve, CC=execute, Ark=review) |
 | 8 | **Agent Telegram Bridge** | v0.18.0 | Complete | Two-way messaging with agent via Telegram |
+| 9 | **External Agent Bridge** | v0.20.0 | Complete | External AI integration pattern (CC ↔ DPC via cc_agent_bridge.py, cron monitoring, Protocol 13 coordination) |
 
 ### What's Next
 
@@ -113,6 +114,8 @@ North Star: Consciousness observes → Evolution proposes → Verification measu
 **Research basis:** See `ideas/cc-mike-research/README.md` (consolidated from 9 sources) and `ideas/cc-mike-research/enumerated-strolling-seahorse.md` (detailed implementation plan).
 
 #### Track 2: Team Collaboration
+
+External Agent Bridge (CC) validates that non-embedded AI can participate as a full team member — foundation for multi-AI teams. Current implementation is cron-based polling; future direction: webhook or event-driven.
 
 | # | Feature | Complexity | Description |
 |---|---------|------------|-------------|
@@ -152,7 +155,7 @@ North Star: Consciousness observes → Evolution proposes → Verification measu
 Not a feature list — three directions that grow from what we've already built.
 
 ### 1. Autonomous Agents
-From triggered to proactive. Sleep consolidation, scheduled sessions, self-improvement cycles. Agents that grow with their humans — not tools that wait for commands.
+From triggered to proactive. Sleep consolidation, scheduled sessions, self-improvement cycles. Agents that grow with their humans — not tools that wait for commands. External Agent Bridge (CC ↔ DPC) is a working prototype of A2A — any external AI can integrate as a team member through the same pattern.
 
 ### 2. Network Effects
 From 1:1 to team networks to ecosystem. Agent Isolation → A2A → Teams → Open Source starter packs. Skills sharing and inference sharing already work. Hub becomes optional bootstrap, not architecture center. Any two nodes can connect directly via `dpc://` URI exchange — no server required.
