@@ -51,6 +51,9 @@ class ZaiProvider(AIProvider):
         # Sampling parameters
         self.top_p = config.get("top_p")  # None = use API default; 0.9 reduces unlikely token tails (language mixing)
 
+        # Retry configuration: exponential backoff with time budget (default 10 min)
+        self.max_retry_seconds = config.get("max_retry_seconds", 600)
+
         # Store last thinking content for retrieval by LLMManager
         self._last_thinking: Optional[str] = None
 
@@ -87,6 +90,27 @@ class ZaiProvider(AIProvider):
             "connect() failed", "interrupted",
             "1305", "overloaded",
         ])
+
+    async def _retry_with_backoff(self, fn, last_error: Exception):
+        """Exponential backoff retry with time budget. First attempt already failed."""
+        delay = 3
+        elapsed = 0
+        attempt = 0
+        while elapsed < self.max_retry_seconds:
+            attempt += 1
+            logger.warning(f"Z.AI retry {attempt}, waiting {delay}s (elapsed {elapsed}s/{self.max_retry_seconds}s): {last_error}")
+            await asyncio.sleep(delay)
+            elapsed += delay
+            try:
+                return await fn()
+            except Exception as e:
+                if not self._is_retryable(e):
+                    raise
+                last_error = e
+                delay = min(delay * 2, 192)
+        raise RuntimeError(
+            f"Z.AI provider '{self.alias}' failed after {attempt} retries ({elapsed}s elapsed): {last_error}"
+        ) from last_error
 
     async def generate_response(self, prompt: str, **kwargs) -> str:
         """Generate text response using Z.AI GLM model with extended thinking"""
@@ -155,20 +179,13 @@ class ZaiProvider(AIProvider):
 
         except Exception as e:
             if self._is_retryable(e):
-                # Exponential backoff: 3s, 6s, 12s
-                for attempt, delay in enumerate([3, 6, 12], 1):
-                    logger.warning(f"Z.AI transient error (attempt {attempt}/3), retrying in {delay}s: {e}")
-                    await asyncio.sleep(delay)
-                    try:
-                        retry_text = ""
-                        async with self.client.messages.stream(**api_params) as stream:
-                            async for text in stream.text_stream:
-                                retry_text += text
-                        return retry_text or ""
-                    except Exception as retry_e:
-                        if attempt == 3 or not self._is_retryable(retry_e):
-                            raise RuntimeError(f"Z.AI provider '{self.alias}' failed after {attempt} retries: {retry_e}") from retry_e
-                        e = retry_e  # Update for next iteration's log message
+                async def _retry_generate():
+                    retry_text = ""
+                    async with self.client.messages.stream(**api_params) as stream:
+                        async for text in stream.text_stream:
+                            retry_text += text
+                    return retry_text or ""
+                return await self._retry_with_backoff(_retry_generate, e)
             raise RuntimeError(f"Z.AI provider '{self.alias}' failed: {e}") from e
 
     async def generate_response_stream(
@@ -267,9 +284,10 @@ class ZaiProvider(AIProvider):
             raise
         except Exception as e:
             if self._is_retryable(e):
-                logger.warning(f"Z.AI streaming transient error, falling back to generate_response: {e}")
-                await asyncio.sleep(3)
-                result = await self.generate_response(prompt)
+                logger.warning(f"Z.AI streaming transient error, falling back to generate_response with backoff: {e}")
+                async def _retry_stream_fallback():
+                    return await self.generate_response(prompt)
+                result = await self._retry_with_backoff(_retry_stream_fallback, e)
                 if on_chunk and result:
                     await on_chunk(result, conversation_id)
                 return result
@@ -362,28 +380,22 @@ class ZaiProvider(AIProvider):
 
         except Exception as e:
             if self._is_retryable(e):
-                for attempt, delay in enumerate([3, 6, 12], 1):
-                    logger.warning(f"Z.AI tool calling transient error (attempt {attempt}/3), retrying in {delay}s: {e}")
-                    await asyncio.sleep(delay)
-                    try:
-                        async with self.client.messages.stream(**api_params) as stream:
-                            final_message = await stream.get_final_message()
-                        full_text, tool_calls_raw = _extract_blocks(final_message.content)
-                        usage_obj = final_message.usage
-                        return {
-                            "content": full_text,
-                            "tool_calls_raw": tool_calls_raw,
-                            "thinking": self._last_thinking,
-                            "usage": {
-                                "prompt_tokens": usage_obj.input_tokens,
-                                "completion_tokens": usage_obj.output_tokens,
-                                "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
-                            },
-                        }
-                    except Exception as retry_e:
-                        if attempt == 3 or not self._is_retryable(retry_e):
-                            raise RuntimeError(f"Z.AI tool calling failed after {attempt} retries: {retry_e}") from retry_e
-                        e = retry_e
+                async def _retry_tools():
+                    async with self.client.messages.stream(**api_params) as stream:
+                        final_message = await stream.get_final_message()
+                    full_text, tool_calls_raw = _extract_blocks(final_message.content)
+                    usage_obj = final_message.usage
+                    return {
+                        "content": full_text,
+                        "tool_calls_raw": tool_calls_raw,
+                        "thinking": self._last_thinking,
+                        "usage": {
+                            "prompt_tokens": usage_obj.input_tokens,
+                            "completion_tokens": usage_obj.output_tokens,
+                            "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
+                        },
+                    }
+                return await self._retry_with_backoff(_retry_tools, e)
             raise RuntimeError(f"Z.AI native tool calling failed for '{self.alias}': {e}") from e
 
     async def generate_with_vision(self, prompt: str, images: List[Dict[str, Any]], **kwargs) -> str:
