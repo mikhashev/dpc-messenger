@@ -109,3 +109,8 @@ audit/
 
 # 16. Sprint logs (internal team workflow - not for public repo)
 sprint-logs/
+
+# 17. Dead code & obsolete docs (kept locally, excluded from repo)
+docs/BACKUP_RESTORE.md
+dpc-client/core/dpc_client_core/backup_manager.py
+dpc-client/core/dpc_client_core/cli_backup.py
