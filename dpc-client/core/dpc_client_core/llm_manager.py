@@ -125,6 +125,7 @@ class LLMManager:
         self.default_provider: str | None = None
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
         self.voice_provider: str | None = None  # v0.13.0+: Voice transcription provider for auto-selection
+        self.background_provider: str | None = None  # v0.21.0+: Background tasks provider (consciousness/evolution)
 
         # Callback for re-injecting CoreService after providers reload (v0.18.0+)
         self._on_providers_reload_callback: Optional[Callable[[], None]] = None
@@ -161,6 +162,7 @@ class LLMManager:
                 "vision_provider": "ollama_vision",
                 "voice_provider": "local_whisper_large",  # v0.13.0+: Local Whisper or OpenAI-compatible
                 "agent_provider": "dpc_agent",  # v0.18.0+: AI Agent provider (dpc_agent or any other provider)
+                "background_provider": None,  # v0.21.0+: Separate provider for agent background tasks (consciousness/evolution)
                 "providers": [
                     {
                         "alias": "ollama_text",
@@ -330,6 +332,7 @@ class LLMManager:
             self.vision_provider = config.get("vision_provider")  # Load vision provider for auto-selection
             self.voice_provider = config.get("voice_provider")  # v0.13.0+: Load voice provider for auto-selection
             self.agent_provider = config.get("agent_provider")  # v0.18.0+: Load agent provider for AI agent
+            self.background_provider = config.get("background_provider")  # v0.21.0+: Separate provider for agent background tasks (consciousness/evolution)
 
             for provider_config in config.get("providers", []):
                 alias = provider_config.get("alias")
@@ -356,6 +359,10 @@ class LLMManager:
             if self.agent_provider and self.agent_provider not in self.providers:
                 logger.warning("Agent provider '%s' not found in loaded providers", self.agent_provider)
                 self.agent_provider = None
+
+            if self.background_provider and self.background_provider not in self.providers:
+                logger.warning("Background provider '%s' not found in loaded providers", self.background_provider)
+                self.background_provider = None
 
         except Exception as e:
             logger.error("Error parsing provider config file: %s", e, exc_info=True)

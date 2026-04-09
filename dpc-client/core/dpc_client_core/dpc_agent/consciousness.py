@@ -373,8 +373,8 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
                 {"role": "user", "content": prompt},
             ]
 
-            # Call LLM without tools
-            response, usage = await self.agent.llm.chat(messages, tools=None)
+            # Call LLM without tools (use background provider to avoid rate limit competition with chat)
+            response, usage = await self.agent.llm.chat(messages, tools=None, background=True)
 
             return response.get("content", "")
 

@@ -571,7 +571,7 @@ If no improvements are warranted: {{"proposals": []}}
                 {"role": "user", "content": prompt},
             ]
 
-            response, usage = await self.agent.llm.chat(messages, tools=None)
+            response, usage = await self.agent.llm.chat(messages, tools=None, background=True)
             content = response.get("content", "")
 
             # Parse JSON from response

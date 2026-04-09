@@ -87,6 +87,19 @@ class DpcLlmAdapter:
 
         return None
 
+    def _get_background_provider_alias(self) -> Optional[str]:
+        """
+        Get the provider alias for background tasks (consciousness, evolution).
+
+        Falls back to agent provider if no background_provider configured.
+        """
+        bg_provider = getattr(self._llm_manager, 'background_provider', None)
+        if bg_provider and bg_provider in self._llm_manager.providers:
+            log.debug(f"Using background_provider: {bg_provider}")
+            return bg_provider
+        # Fall back to normal agent provider
+        return self._get_agent_provider_alias()
+
     def _get_agent_provider(self) -> Optional[Any]:
         """Get the agent's provider instance."""
         alias = self._get_agent_provider_alias()
@@ -126,6 +139,7 @@ class DpcLlmAdapter:
         max_tokens: int = 4096,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
+        background: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Send chat request through DPC's LLMManager.
@@ -138,6 +152,7 @@ class DpcLlmAdapter:
             max_tokens: Max completion tokens
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks
+            background: If True, use background_provider for consciousness/evolution tasks
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -200,8 +215,8 @@ class DpcLlmAdapter:
                     dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
                 )
 
-        # Get the agent's provider
-        alias = self._get_agent_provider_alias()
+        # Get the agent's provider (or background provider for consciousness/evolution)
+        alias = self._get_background_provider_alias() if background else self._get_agent_provider_alias()
         if not alias:
             raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
         provider = self._llm_manager.providers[alias]
