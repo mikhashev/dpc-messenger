@@ -840,21 +840,9 @@ Respond in JSON format:
                 "context_hash": new_context_hash,
             })
 
-            # For private conversations, reset after commit so context window counter clears
-            conv_id = commit.conversation_id
-            if conv_id and (
-                conv_id == "local_ai"
-                or conv_id.startswith("ai_")
-                or conv_id.startswith("agent_")
-                or conv_id.startswith("telegram-")
-            ):
-                logger.info(
-                    "Resetting private conversation %s after knowledge commit applied",
-                    conv_id,
-                )
-                await self.local_api.broadcast_event(
-                    "conversation_reset", {"conversation_id": conv_id}
-                )
+            # Knowledge extraction does NOT reset the conversation.
+            # Chat and history remain — user explicitly starts New Session to clear.
+            # Counter resets happen only via New Session (propose_new_session flow).
         except Exception as e:
             logger.error("Error in _on_commit_applied: %s", e, exc_info=True)
             import traceback
