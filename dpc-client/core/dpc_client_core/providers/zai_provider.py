@@ -82,13 +82,16 @@ class ZaiProvider(AIProvider):
 
     @staticmethod
     def _is_retryable(error: Exception) -> bool:
-        """Check if error is transient and worth retrying (502, 503, timeout)."""
+        """Check if error is transient and worth retrying.
+        Z.AI error codes: 1302 (high concurrency), 1303 (high frequency),
+        1305 (rate limit), 1312 (high traffic). HTTP: 429, 502, 503."""
         err_str = str(error).lower()
         return any(indicator in err_str for indicator in [
-            "502", "503", "bad gateway", "service unavailable",
+            "429", "502", "503", "bad gateway", "service unavailable",
             "timed out", "timeout", "connection reset", "connection error",
             "connect() failed", "interrupted",
-            "1305", "overloaded",
+            "1302", "1303", "1305", "1312", "overloaded", "rate limit",
+            "high traffic", "high concurrency", "high frequency",
         ])
 
     async def _retry_with_backoff(self, fn, last_error: Exception):
