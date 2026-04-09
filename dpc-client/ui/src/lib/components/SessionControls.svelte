@@ -81,8 +81,8 @@
 
   let endSessionTitle = $derived(
     endSessionDisabled
-      ? "Peer must be online to save knowledge (requires voting)"
-      : "Extract and save knowledge from this conversation"
+      ? "Peer must be online to extract knowledge (requires voting)"
+      : "Extract knowledge from this conversation"
   );
 </script>
 
@@ -144,7 +144,7 @@
     disabled={endSessionDisabled}
     title={endSessionTitle}
   >
-    End Session & Save Knowledge
+    Extract Knowledge
   </button>
   {#if isAIChat}
     <button

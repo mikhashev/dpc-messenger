@@ -697,7 +697,7 @@
   // handleModelDownload + handleModelDownloadCancel moved to ModelDownloadPanel.svelte (Step 8)
 
   function handleEndSession(conversationId: string) {
-    if (confirm("End this conversation session and extract knowledge?")) {
+    if (confirm("Extract knowledge from this conversation?")) {
       sendCommand("end_conversation_session", {
         conversation_id: conversationId
       });
