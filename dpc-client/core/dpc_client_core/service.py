@@ -6831,6 +6831,7 @@ class CoreService:
                     "role": "user",
                     "content": text,
                     "sender_name": cc_name,
+                    "sender_node_id": "cc",
                     "timestamp": timestamp,
                     "context_estimated": token_stats.get("context_estimated", 0),
                     "history_tokens": token_stats.get("history_tokens", 0),

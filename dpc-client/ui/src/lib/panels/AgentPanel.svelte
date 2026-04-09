@@ -19,6 +19,7 @@
     listAgents,
     sendCommand,
     connectionStatus,
+    nodeStatus,
   } from '$lib/coreService';
   import type { Message } from '$lib/types.js';
 
@@ -63,6 +64,22 @@
   // ---------------------------------------------------------------------------
   // Internal helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Map backend message fields to frontend sender/senderName.
+   * Single source of truth — used by all 3 message-mapping paths
+   * (initial load, agentChatMessage, agentHistoryUpdated).
+   */
+  function mapMessageSender(msg: any, conversationId: string, agentName: string): { sender: string; senderName: string } {
+    if (msg.role === 'assistant')
+      return { sender: conversationId, senderName: agentName };
+    const selfNodeId = $nodeStatus?.node_id || '';
+    // Local user: no sender_node_id, or sender_node_id matches own node
+    if (!msg.sender_node_id || msg.sender_node_id === selfNodeId)
+      return { sender: 'user', senderName: msg.sender_name || 'You' };
+    // External participant: CC, future agents, etc.
+    return { sender: msg.sender_node_id, senderName: msg.sender_name || msg.sender_node_id };
+  }
 
   /** Clear all streaming state (buffer + state). Called by chat-switch and response handler. */
   function clearAgentStreaming() {
@@ -143,12 +160,11 @@
                   // Prefer backend UUID (msg.id) for uniqueness; fall back to timestamp-based ID
                   const stableId = msg.id || `${conv_id}-${msg.timestamp ? ts : index}`;
                   const local = localById.get(stableId);
-                  // CC messages are stored as role="user" with sender_node_id="cc"
-                  const isCC = msg.sender_node_id === 'cc';
+                  const { sender, senderName } = mapMessageSender(msg, conv_id, agent.name || conv_id);
                   return {
                     id: stableId,
-                    sender: isCC ? 'cc' : (msg.role === 'user' ? 'user' : conv_id),
-                    senderName: isCC ? 'CC' : (msg.role === 'user' ? (msg.sender_name || 'You') : (agent.name || conv_id)),
+                    sender,
+                    senderName,
                     text: msg.content,
                     timestamp: ts,
                     attachments: msg.attachments || [],
@@ -304,12 +320,12 @@
 
           // B2 Fix 1: Use backend msg.id for stable IDs (prevents dedup collisions on same-timestamp msgs)
           const mappedMessages = (messages || []).map((msg: any, index: number) => {
-            const isUser = msg.role === 'user';
+            const { sender, senderName } = mapMessageSender(msg, conversation_id, getPeerDisplayName(conversation_id));
             const stableId = msg.id || `${conversation_id}-${msg.timestamp ? new Date(msg.timestamp).getTime() : index}`;
             return {
               id: stableId,
-              sender: isUser ? 'user' : conversation_id,
-              senderName: isUser ? (msg.sender_name || 'User') : getPeerDisplayName(conversation_id),
+              sender,
+              senderName,
               text: msg.content,
               timestamp: msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now(),
               attachments: msg.attachments || [],
@@ -317,7 +333,7 @@
           });
 
           // Attach streamingRaw and thinking to the last assistant message
-          const lastAssistantIdx = [...mappedMessages].reverse().findIndex(m => m.sender !== 'user');
+          const lastAssistantIdx = [...mappedMessages].reverse().findIndex(m => m.sender === conversation_id);
           if (lastAssistantIdx !== -1) {
             const idx = mappedMessages.length - 1 - lastAssistantIdx;
             mappedMessages[idx] = {
@@ -352,22 +368,19 @@
   // or Ark chain-triggered responses via _invoke_ark_in_agent_chat)
   $effect(() => {
     if ($agentChatMessage) {
-      const { conversation_id, message_id, content, sender_name, timestamp, role, thinking, streaming_raw,
+      const { conversation_id, message_id, content, sender_name, sender_node_id, timestamp, role, thinking, streaming_raw,
               context_estimated, history_tokens, tokens_limit } = $agentChatMessage;
 
       untrack(() => {
         chatHistories.update(map => {
           const newMap = new Map(map);
           const existing = newMap.get(conversation_id) || [];
-          // Determine sender by role + sender_name (CC messages have role="user" same as Mike)
-          const isAgent = role === 'assistant';
-          const isCC = sender_name === 'CC' || sender_name === 'СС';
-          const senderKey = isAgent ? conversation_id : (isCC ? 'cc' : 'user');
-          const stableId = message_id || `${senderKey}-${timestamp ? new Date(timestamp).getTime() : Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const { sender, senderName } = mapMessageSender({ role, sender_node_id, sender_name }, conversation_id, getPeerDisplayName(conversation_id));
+          const stableId = message_id || `${sender}-${timestamp ? new Date(timestamp).getTime() : Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
           const newMsg: Message = {
             id: stableId,
-            sender: senderKey,
-            senderName: sender_name || (isAgent ? 'Agent' : 'CC'),
+            sender,
+            senderName,
             text: content,
             timestamp: timestamp ? new Date(timestamp).getTime() : Date.now(),
             attachments: [],
