@@ -391,7 +391,7 @@ class EvolutionManager:
         digest_trends: List[Dict[str, Any]] = []
         try:
             from pathlib import Path
-            digest_path = Path.home() / ".dpc" / "conversations" / self.agent.agent_id / "digest.jsonl"
+            digest_path = Path.home() / ".dpc" / "conversations" / self.agent_root.name / "digest.jsonl"
             if digest_path.exists():
                 with open(digest_path, encoding="utf-8") as df:
                     for line in df:
