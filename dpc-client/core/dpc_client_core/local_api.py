@@ -3,7 +3,9 @@
 import asyncio
 import json
 import logging
+import os
 import secrets
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 import websockets
@@ -188,6 +190,14 @@ class LocalApiServer:
         try:
             WS_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
             WS_TOKEN_PATH.write_text(self._auth_token, encoding="utf-8")
+            # Restrict to user-only read/write. On Linux/macOS this prevents
+            # other local users from reading the token. On Windows the mode
+            # bits are largely advisory; NTFS ACLs inherited from the user's
+            # home directory already restrict access to the same user.
+            try:
+                os.chmod(WS_TOKEN_PATH, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+            except OSError as chmod_err:
+                logger.debug("chmod 0o600 on %s skipped: %s", WS_TOKEN_PATH, chmod_err)
             logger.info("Local API auth token written to %s", WS_TOKEN_PATH)
         except OSError as e:
             logger.error("Failed to write auth token to %s: %s", WS_TOKEN_PATH, e)
