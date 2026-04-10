@@ -24,6 +24,7 @@
     chatWindow,
     processedMessageIds,
     commandToChatMap,
+    persistCommandToChatMap,
     currentContextHash,
     aiChats,
     onSetChatLoading,
@@ -37,6 +38,7 @@
     chatWindow: HTMLElement | null;
     processedMessageIds: Set<string>;
     commandToChatMap: Map<string, string>;
+    persistCommandToChatMap?: () => void;
     currentContextHash: string;
     aiChats: Writable<Map<string, any>>;
     onSetChatLoading: (chatId: string, loading: boolean) => void;
@@ -259,6 +261,7 @@
               return newMap;
             });
             commandToChatMap.delete(responseCommandId);
+            persistCommandToChatMap?.();
           }
           return;
         }
@@ -350,6 +353,7 @@
 
           // Clean up the command mapping
           commandToChatMap.delete(responseCommandId);
+          persistCommandToChatMap?.();
         }
 
         // Cleanup old processed IDs to prevent memory leak

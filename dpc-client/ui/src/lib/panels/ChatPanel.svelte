@@ -70,6 +70,7 @@
     activeChatId,
     chatHistories,
     commandToChatMap,
+    persistCommandToChatMap,
     agentChatToAgentId,
     aiChats,
     chatProviders,
@@ -97,6 +98,7 @@
     activeChatId: string;
     chatHistories: Writable<Map<string, Message[]>>;
     commandToChatMap: Map<string, string>;
+    persistCommandToChatMap?: () => void;
     agentChatToAgentId: Map<string, string>;
     aiChats: Writable<Map<string, AIChatMeta>>;
     chatProviders: Writable<Map<string, string>>;
@@ -551,6 +553,7 @@
     setChatLoading(activeChatId, true);
     const commandId = crypto.randomUUID();
     commandToChatMap.set(commandId, activeChatId);
+    persistCommandToChatMap?.();
 
     chatHistories.update(h => {
       const m = new Map(h);
@@ -597,6 +600,7 @@
         return m;
       });
       commandToChatMap.delete(commandId);
+      persistCommandToChatMap?.();
     }
   }
 

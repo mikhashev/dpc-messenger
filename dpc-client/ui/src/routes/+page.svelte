@@ -117,8 +117,29 @@
     new Map([['local_ai', {name: 'Local AI Chat', provider: '', instruction_set_name: 'general'}]])
   );
 
-  // Track which chat each AI command belongs to (commandId -> chatId)
-  let commandToChatMap = new Map<string, string>();
+  // Track which chat each AI command belongs to (commandId -> chatId).
+  // Persisted to localStorage so the mapping survives page reloads / Vite HMR /
+  // Tauri restarts that happen while a long-running agent query is in flight.
+  // Without this, any reload between sendCommand and the response races the
+  // routing logic and forces a fallback to activeChatId — see UI-1.
+  const COMMAND_CHAT_MAP_KEY = 'dpc-cmd-chat-map';
+  let commandToChatMap = new Map<string, string>(
+    (() => {
+      try {
+        const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(COMMAND_CHAT_MAP_KEY) : null;
+        return raw ? JSON.parse(raw) as [string, string][] : [];
+      } catch {
+        return [];
+      }
+    })()
+  );
+  function persistCommandToChatMap() {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(COMMAND_CHAT_MAP_KEY, JSON.stringify([...commandToChatMap.entries()]));
+      }
+    } catch { /* quota / privacy mode — ignore */ }
+  }
 
   let processedMessageIds = new Set<string>();
 
@@ -947,6 +968,7 @@
         {activeChatId}
         {chatHistories}
         {commandToChatMap}
+        {persistCommandToChatMap}
         {agentChatToAgentId}
         {aiChats}
         {chatProviders}
@@ -1030,6 +1052,7 @@
   chatWindow={chatWindow ?? null}
   {processedMessageIds}
   {commandToChatMap}
+  {persistCommandToChatMap}
   {currentContextHash}
   {aiChats}
   onSetChatLoading={setChatLoading}
