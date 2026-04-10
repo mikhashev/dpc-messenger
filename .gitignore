@@ -114,3 +114,8 @@ sprint-logs/
 docs/BACKUP_RESTORE.md
 dpc-client/core/dpc_client_core/backup_manager.py
 dpc-client/core/dpc_client_core/cli_backup.py
+
+# 18. Internal backlog (security-sensitive, not for public repo)
+# Triaged task list for Mike + Ark + CC. Contains unpatched security findings
+# and WIP architecture decisions. See conversations/ for decision history.
+backlog.md
