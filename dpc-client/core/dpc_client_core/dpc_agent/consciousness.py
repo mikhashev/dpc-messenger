@@ -40,6 +40,18 @@ DEFAULT_THINK_INTERVAL_MAX = 300  # Maximum seconds between thoughts
 DEFAULT_BUDGET_FRACTION = 0.1  # Use at most 10% of budget for consciousness
 
 
+def _reflection_signature(entry: dict) -> str:
+    """Stable hash of a reflection entry, excluding fields that always change.
+
+    Used by the dedup gate in _apply_thought_result to skip writing reflections
+    that are semantically identical to the previous one. timestamp is excluded
+    because it is auto-set on every entry; without exclusion the gate would
+    never trigger. See S24 cleanup (2026-04-10).
+    """
+    sig_data = {k: v for k, v in entry.items() if k != "timestamp"}
+    return json.dumps(sig_data, sort_keys=True, ensure_ascii=False)
+
+
 class BackgroundConsciousness:
     """
     Background consciousness for autonomous thinking between tasks.
@@ -551,7 +563,16 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
                     reflection_data = memory.load_reflection()
                     reflections = reflection_data.get("reflections", [])
                     max_entries = reflection_data.get("meta", {}).get("max_reflections", 50)
-                    reflections.append(entry)
+
+                    # Dedup gate: skip if semantically identical to last entry.
+                    # Without this guard, "identity stable" reflections accumulate
+                    # because session_review fires on every process() call.
+                    # See S24 audit: 22 identical reflections found in Identity.
+                    if reflections and _reflection_signature(reflections[-1]) == _reflection_signature(entry):
+                        log.debug("Reflection identical to previous, skipping append")
+                    else:
+                        reflections.append(entry)
+
                     if len(reflections) > max_entries:
                         reflections = reflections[-max_entries:]
                     reflection_data["reflections"] = reflections
