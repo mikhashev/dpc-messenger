@@ -53,7 +53,14 @@ def _get_shared_executor() -> ThreadPoolExecutor:
 
 
 def _truncate_tool_result(result: Any) -> str:
-    """Hard-cap tool result string to 15000 characters with scope metadata."""
+    """Hard-cap tool result string to 15000 characters with scope metadata.
+
+    The truncation marker is intentionally prominent (S24 audit found that
+    the previous mild "... (truncated: ...)" was being missed by the agent,
+    leading to decisions on partial data). The new marker is set off by
+    blank lines and uses `[!]` to break attention. See S24 cleanup
+    (2026-04-10).
+    """
     result_str = str(result)
     if len(result_str) <= 15000:
         return result_str
@@ -62,8 +69,10 @@ def _truncate_tool_result(result: Any) -> str:
     shown_lines = result_str[:15000].count("\n") + 1
     return (
         result_str[:15000]
-        + f"\n... (truncated: showing {shown_lines} of ~{total_lines} lines, "
-        f"{len(result_str)} total chars)"
+        + f"\n\n[!] OUTPUT TRUNCATED — showing {shown_lines:,}/{total_lines:,} lines"
+        f" ({len(result_str):,} bytes total)."
+        f"\n[!] This is a PARTIAL view. To see the rest, use `search_files`"
+        f" to locate the section you need, then re-read a narrower range."
     )
 
 
