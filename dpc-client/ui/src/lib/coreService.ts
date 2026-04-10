@@ -216,7 +216,7 @@ function startPolling() {
     }, 200); // Poll every 200ms
 }
 
-export function connectToCoreService() {
+export async function connectToCoreService() {
     if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
         return;
     }
@@ -234,6 +234,22 @@ export function connectToCoreService() {
     connectionStatus.set('connecting');
     console.log(`Connecting to Core Service at ${API_URL}...`);
 
+    // Read the local API auth token BEFORE opening the socket. The backend
+    // writes a fresh random token to ~/.dpc/.ws_token on every startup; we
+    // present it as the first WebSocket message. We read it up-front (rather
+    // than inside the open handler) because any await between socket creation
+    // and the auth send opens a race window where polling or the close handler
+    // can null `socket` out from under us.
+    let authToken: string;
+    try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        authToken = await invoke<string>('get_ws_token');
+    } catch (e) {
+        console.error("❌ Failed to read WS auth token:", e);
+        connectionStatus.set('error');
+        return;
+    }
+
     try {
         socket = new WebSocket(API_URL);
 
@@ -241,23 +257,13 @@ export function connectToCoreService() {
         startPolling();
 
         // Set up event listeners (belt and suspenders)
-        socket.addEventListener('open', async () => {
+        socket.addEventListener('open', () => {
             console.log("✅ WebSocket opened via event");
 
-            // Local API auth handshake. The backend writes a fresh random token
-            // to ~/.dpc/.ws_token at startup; we read it via a Tauri command and
-            // present it as the FIRST WebSocket message. Without this the backend
-            // closes the connection with code 1008. See local_api.py:_authenticate.
-            try {
-                const { invoke } = await import('@tauri-apps/api/core');
-                const token = await invoke<string>('get_ws_token');
-                socket!.send(JSON.stringify({ command: 'auth', token, id: 'auth-init' }));
-            } catch (e) {
-                console.error("❌ Failed to read WS auth token:", e);
-                socket?.close(1000, "auth token unavailable");
-                connectionStatus.set('error');
-                return;
-            }
+            // Send auth as the FIRST message — synchronously, no awaits.
+            // Without this the backend closes us with code 1008 after a 5s timeout.
+            // See local_api.py:_authenticate.
+            socket!.send(JSON.stringify({ command: 'auth', token: authToken, id: 'auth-init' }));
 
             connectionStatus.set('connected');
             reconnectAttempts = 0;
