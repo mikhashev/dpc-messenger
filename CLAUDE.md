@@ -1239,7 +1239,6 @@ poetry run pytest tests/test_turn_connectivity.py
 - `specs/hub_api_v1.md` - Hub API specification
 - `dpc-protocol/README.md` - Protocol library documentation and usage examples
 - `VISION.md` - Business vision, market opportunity, and mission (investor/co-founder focused)
-- `PRODUCT_VISION.md` - Product vision and technical philosophy
 - `docs/decisions/` - Architecture Decision Records (ADRs) for major structural choices
   - `001-service-split.md` - Why and how service.py was split into domain services (refactor/grand)
   - `002-provider-abc.md` - LLM provider abstract base class design

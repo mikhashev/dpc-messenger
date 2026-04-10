@@ -82,6 +82,5 @@ This matters beyond DPC. If the infrastructure being built today determines whet
 ## Links
 
 - [README.md](./README.md) — what DPC is and how to start
-- [PRODUCT_VISION.md](./PRODUCT_VISION.md) — product specification
 - [ROADMAP.md](./ROADMAP.md) — where we are and where we're going
 - [Protocol 13](./docs/protocol-13-public.md) — how humans and agents collaborate

@@ -61,7 +61,7 @@ Your team connects directly — no servers, no cloud, peer-to-peer. Humans and A
                             └───────────────────┘
 
                    6-Tier P2P Connection Fallback:
-         IPv6 → IPv4 → WebRTC → UDP Hole Punch → Relay → Gossip
+   IPv6 → IPv4 → WebRTC → UDP Hole Punch (experimental) → Relay (experimental) → Gossip (experimental)
 ```
 
 **This is peer-to-peer software, not a messaging service.** Messages flow directly between users. The Hub is optional (discovery + signaling only, never sees content).

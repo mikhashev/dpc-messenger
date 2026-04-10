@@ -221,7 +221,7 @@ poetry run npm install
 ## What's Next?
 
 ### Learn More
-- Read the [PRODUCT_VISION.md](https://github.com/mikhashev/dpc-messenger/blob/main/PRODUCT_VISION.md) to understand the philosophy
+- Read the [VISION.md](https://github.com/mikhashev/dpc-messenger/blob/main/VISION.md) to understand the philosophy
 - Explore the [docs/](https://github.com/mikhashev/dpc-messenger/tree/main/docs) folder for advanced features
 
 ### Advanced Features
