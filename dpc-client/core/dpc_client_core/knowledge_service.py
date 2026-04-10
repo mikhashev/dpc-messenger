@@ -920,10 +920,17 @@ Respond in JSON format:
                 "Asking agent %s to revise proposal %s",
                 agent_mgr.agent_id, proposal.proposal_id,
             )
+            # _skip_history=True: revision_prompt is a synthetic system message,
+            # not real user input. Saving it to history.json would pollute Ark's
+            # archive readers (archive.py role:user filter) and corrupt
+            # introspection (ARCH-9 / S23). Same rationale as the voting bypass
+            # at line 397-399 (#20/#10/#16) — synthetic prompts must not appear
+            # as user turns in conversation history.
             response = await agent_mgr.process_message(
                 message=revision_prompt,
                 conversation_id=proposal.conversation_id,
                 include_context=False,
+                _skip_history=True,
             )
 
             if not response:
