@@ -462,8 +462,10 @@ class P2PManager:
     async def _handle_direct_connection(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         """Handles an incoming raw TLS connection (Server-side)."""
         peer_node_id = None
+        peer_addr = writer.get_extra_info('peername')
+        peer_addr_str = f"{peer_addr[0]}:{peer_addr[1]}" if peer_addr else "unknown"
         try:
-            logger.info("Received a direct TLS connection attempt")
+            logger.info("Received a direct TLS connection attempt from %s", peer_addr_str)
             await asyncio.sleep(0.01)
 
             # Issue a challenge nonce so the client can prove private-key ownership.
@@ -556,7 +558,7 @@ class P2PManager:
             self._peer_listener_tasks[peer_node_id] = task
 
         except Exception as e:
-            logger.error("Error handling direct connection: %s", e, exc_info=True)
+            logger.error("Error handling direct connection from %s: %s", peer_addr_str, e, exc_info=True)
             if peer_node_id and peer_node_id in self.peers:
                 await self.shutdown_peer_connection(peer_node_id)
             else:
