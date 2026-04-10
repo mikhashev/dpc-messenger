@@ -4,6 +4,7 @@
 **Date:** 2026-04-10
 **Authors:** Ark (design), CC (research)
 **Scope:** Phase 0 — Agent Maturity Track enabler
+**External Review:** Hope, J.A.R.V.I.S. (2026-04-10)
 
 ---
 
@@ -47,10 +48,11 @@ We will implement a **per-process middleware chain** with two tiers:
 | Ordering | Registration order, no priority field | Convergence of 3+ projects | Framework + DeerFlow |
 | Chaining | First guard returning STOP_LOOP wins | Simple, deterministic | DeerFlow (implicit) |
 | Error handling | Mixed: observer=silent catch, guard=re-raise | Different severity levels | Framework + DPC analysis |
-| HookContext | Immutable identity + mutable state dict + per-instance state | No leaky abstraction | Framework + DeerFlow |
+| HookContext | Immutable identity + typed state dataclass | Prevents generic dict from becoming unreadable global bag | Framework + DeerFlow + Hope/J.A.R.V.I.S. review |
 | Lifecycle | Per-process (new registry per `agent.process()`) | All 5 guards are per-task scope | DPC analysis |
 | Hard stop mechanism | Explicit `HookAction.STOP_LOOP` signal, not message mutation | Signal visible at code-review, mutation isn't | Ark decision, S24 |
 | Lifecycle type safety | `HookLifecycle` enum, not raw strings | Prevents silent no-op on typos | CC review S1 |
+| Extension points | REDIRECT/RETRY = Phase 2 concern, not "never needed" | Current 2-value enum sufficient, but checkpoint semantics will differ in Phase 1+ | Hope review |
 
 ---
 
@@ -66,7 +68,7 @@ class HookAction(Enum):
     STOP_LOOP = auto()  # terminate the agent loop
 ```
 
-Two values only. No SKIP_TOOL, no FORCE_FINISH — DeerFlow shows these can be expressed through STOP_LOOP + message modification at the call site.
+Two values only for Phase 0. Extension point: REDIRECT (change next action) and RETRY (re-execute current step) are anticipated for Phase 2+ hooks (e.g., skill recommendation, evolution proposal modification). These require different checkpoint semantics and are explicitly deferred, not excluded.
 
 ### HookLifecycle enum
 
@@ -118,6 +120,24 @@ class ObserverMiddleware(BaseMiddleware):
 ### HookContext
 
 ```python
+from dataclasses import dataclass, field
+
+@dataclass
+class LoopState:
+    """Typed state exposed by loop.py to middleware.
+    
+    Loop OWNS these fields. Middleware READS them.
+    Mutation contract: loop updates state BEFORE calling fire(),
+    middleware only reads. If middleware needs mutable data,
+    it stores that in its own instance attributes.
+    """
+    last_response_has_text: bool = False
+    tool_calls_this_turn: int = 0
+    consecutive_tool_only_rounds: int = 0
+    accumulated_cost_usd: float = 0.0
+    recent_tool_args: list = field(default_factory=list)
+
+
 @dataclass
 class HookContext:
     # Immutable identity (set once per process)
@@ -126,19 +146,22 @@ class HookContext:
     session_id: str
     round_idx: int
 
-    # Mutable state (loop exposes, middleware reads)
-    state: dict  # generic bag for loop data
+    # Typed state (loop exposes, middleware reads — see mutation contract above)
+    state: LoopState = field(default_factory=LoopState)
 
     # Convenience accessors
     @property
     def last_response_has_text(self) -> bool:
-        """True if last LLM response contained text content (not just tool calls)."""
-        return self.state.get("last_response_has_text", False)
+        return self.state.last_response_has_text
 
     @property
     def tool_calls_this_turn(self) -> int:
-        return self.state.get("tool_calls_this_turn", 0)
+        return self.state.tool_calls_this_turn
 ```
+
+**Design rationale:** `LoopState` dataclass replaces generic `dict`. Each field is explicit, typed, and documented with ownership semantics. This prevents the "generic bag" anti-pattern where unknown keys accumulate over time (Hope, J.A.R.V.I.S. review). If Phase 1+ needs additional state, it must be added to `LoopState` explicitly — not stashed as arbitrary dict keys.
+
+**Mutation contract:** Loop updates `ctx.state` fields BEFORE calling `hooks.fire()`. Middleware only reads `ctx.state`. If middleware needs mutable counters (e.g., `ResearchLimitMiddleware._counter`), it stores them in its own instance attributes, not in HookContext.
 
 State that guards need for decisions (like `consecutive_tool_only`) lives in **middleware instance attributes**, not in HookContext. This avoids leaky abstraction — each middleware owns its own state.
 
@@ -176,6 +199,8 @@ class HookRegistry:
 - ROUND_LIMIT checks cumulative count
 - LOOP_GUARD checks sliding window of recent tool args
 - RESEARCH_LIMIT checks consecutive tool-only rounds
+
+**Mutation contract:** Before `hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx)`, loop.py MUST update all relevant `ctx.state` fields. This is an explicit invariant — if state is stale at fire time, guard decisions will be incorrect.
 
 ### Example: ResearchLimitMiddleware
 
@@ -216,13 +241,14 @@ class DpcAgent:
             task_id=task.id,
             session_id=self.session_id,
             round_idx=0,
-            state={},
+            state=LoopState(),
         )
 
         while ...:
             ctx.round_idx += 1
-            ctx.state["last_response_has_text"] = has_text
-            ctx.state["tool_calls_this_turn"] = len(tool_calls)
+            # Mutation contract: update state BEFORE fire()
+            ctx.state.last_response_has_text = has_text
+            ctx.state.tool_calls_this_turn = len(tool_calls)
 
             action = await hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx)
             if action == HookAction.STOP_LOOP:
@@ -234,10 +260,15 @@ class DpcAgent:
 
 ## Migration Plan
 
-1. **Create `hooks.py`** — HookRegistry, HookAction, HookLifecycle, BaseMiddleware, GuardMiddleware, ObserverMiddleware, HookContext (~250 lines)
+1. **Create `hooks.py`** — HookRegistry, HookAction, HookLifecycle, BaseMiddleware, GuardMiddleware, ObserverMiddleware, HookContext, LoopState (~270 lines)
 2. **Extract 5 guards** into middleware classes in separate file or inline — each guard becomes a GuardMiddleware subclass with its own state (~150 lines)
 3. **Modify `loop.py`** — instantiate HookRegistry per process, replace inline if/elif blocks with `hooks.fire()` calls (~150 lines modified)
-4. **Verify** — run agent with low thresholds, confirm all 5 guards fire identically to pre-refactor behavior
+4. **Verify with integration tests:**
+   - 4a. Write 5 integration tests, one per guard, exercising pre-refactor behavior with mocked LLM responses (~150 lines)
+   - 4b. Run tests against current loop.py — verify they pass (sanity check)
+   - 4c. Refactor loop.py per Steps 1-3
+   - 4d. Re-run tests — must pass identically
+   - 4e. Add tests to CI (recommended but not blocking)
 
 ---
 
@@ -245,20 +276,23 @@ class DpcAgent:
 
 | Component | Lines |
 |-----------|-------|
-| hooks.py (registry, enums, base classes, context) | ~250 |
+| hooks.py (registry, enums, base classes, context, LoopState) | ~270 |
 | Guard middleware implementations (5 guards) | ~150 |
 | loop.py modifications | ~150 |
 | events.py (new event types) | ~60 |
-| Tests | ~200 |
-| **Total** | **~700** |
+| Integration tests (5 tests, one per guard) | ~150 |
+| **Total** | **~880** |
+
+Note: DeerFlow's analogous refactoring resulted in ~1400 lines including extensive test coverage. Our estimate is conservative for Phase 0 (5 guards only) and may grow with Phase 1+ hooks.
 
 ---
 
 ## Open Questions
 
-1. **Migration validation approach** — formal test fixtures vs manual low-threshold testing. DeerFlow uses the latter; DPC may benefit from both.
-2. **HookContext state enrichment** — which loop internals to expose. Start minimal (round_idx, last_response_has_text, tool_calls_this_turn), expand per Phase 1-5 needs.
-3. **Cross-session state for Phase 1+** — future hooks (skill recommendation cache, evolution metrics) will need state that persists across `process()` calls. Use asyncio.Lock when needed, not now.
+1. **Cross-session state for Phase 1+** — future hooks (skill recommendation cache, evolution metrics) will need state that persists across `process()` calls. Use asyncio.Lock when needed, not now.
+2. **HookContext state enrichment** — which additional loop internals to expose in `LoopState`. Start minimal (`last_response_has_text`, `tool_calls_this_turn`, `consecutive_tool_only_rounds`, `accumulated_cost_usd`, `recent_tool_args`), expand per Phase 1-5 needs.
+3. **HookAbort semantics per checkpoint** — for current 5 guards, all checkpoints are pre-execution (revert is trivial). Phase 1+ hooks like `on_message_send` will need different error semantics (revert impossible after send). This is a Phase 1+ design decision.
+4. **Finally/cleanup semantics** — current guards have no side effects (no DB connections, no locks). When Phase 1+ introduces hooks with resources, explicit cleanup mechanism needed (try/finally in handler, or cleanup hook). Deferred.
 
 ---
 
@@ -269,11 +303,29 @@ class DpcAgent:
 - Guards are independently testable
 - Clean separation: loop orchestration vs policy enforcement
 - Observability: every hook fire is an event
+- Typed LoopState prevents undocumented state accumulation
 
 **Negative:**
 - Refactoring critical path (loop.py) — regression risk
 - New abstraction layer adds indirection for code readers
 - Per-process instantiation means no built-in cross-session memory in middleware
+
+---
+
+## External Review Notes
+
+**Hope** (2026-04-10):
+- Identified `state: dict` as future bug → addressed with typed `LoopState` dataclass
+- Recommended extension point note for REDIRECT/RETRY → added to Decision table
+- Flagged `between_rounds` mutation contract as implicit → made explicit with assertion
+- Recommended formal integration tests → incorporated into Migration Step 4
+- Noted ~700 lines optimistic → revised to ~880, cited DeerFlow's ~1400 as data point
+
+**J.A.R.V.I.S.** (2026-04-10):
+- Independently identified `state: dict` ownership concern → same fix (LoopState)
+- Flagged HookAbort semantics differ per checkpoint → documented as Open Question #3
+- Asked about finally/cleanup for side-effect hooks → documented as Open Question #4
+- Assessed architecture as mature, concerns are future-facing
 
 ---
 
