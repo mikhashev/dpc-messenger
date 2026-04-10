@@ -1331,6 +1331,11 @@
     commitResultMessage = message;
     commitResultType = type;
     currentVoteResult = result;
+    // Open the full Voting Results dialog automatically. The toast still
+    // appears as a secondary notification, but the dialog is the primary
+    // surface — without auto-open, results were lost if the user didn't
+    // click the toast in time. See backlog: knowledge_extraction_ux.
+    showVoteResultDialog = true;
     showCommitResultToast = true;
   }}
   onCloseCommitDialog={() => {
