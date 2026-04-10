@@ -82,7 +82,7 @@
 </script>
 
 {#if open && group}
-  <div class="modal-overlay" role="presentation" on:click|self={handleClose}>
+  <div class="modal-overlay" role="presentation">
     <div class="modal" role="dialog" aria-labelledby="settings-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="settings-title">Group Settings</h2>

@@ -136,8 +136,8 @@
 
 <!-- File Offer Dialog -->
 {#if showFileOfferDialog && currentFileOffer}
-  <div class="modal-overlay" role="presentation" onclick={onRejectFile} onkeydown={(e) => e.key === 'Escape' && onRejectFile()}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+  <div class="modal-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && onRejectFile()}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1">
       <h3>Incoming File</h3>
       <p><strong>File:</strong> {currentFileOffer.filename}</p>
       <p><strong>Size:</strong> {(currentFileOffer.size_bytes / 1024 / 1024).toFixed(2)} MB</p>
@@ -152,8 +152,8 @@
 
 <!-- Send File Confirmation Dialog -->
 {#if showSendFileDialog && pendingFileSend}
-  <div class="modal-overlay" role="presentation" onclick={onCancelSendFile} onkeydown={(e) => e.key === 'Escape' && onCancelSendFile()}>
-    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.stopPropagation()}>
+  <div class="modal-overlay" role="presentation" onkeydown={(e) => e.key === 'Escape' && onCancelSendFile()}>
+    <div class="modal-dialog" role="dialog" aria-modal="true" tabindex="-1">
       <h3>{pendingFileSend.imageData ? 'Send Screenshot' : 'Send File'}</h3>
       <p><strong>{pendingFileSend.imageData ? 'Image' : 'File'}:</strong> {pendingFileSend.fileName}</p>
       <p><strong>To:</strong> {pendingFileSend.recipientName}</p>

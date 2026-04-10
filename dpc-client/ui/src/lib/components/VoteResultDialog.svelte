@@ -95,10 +95,9 @@
 </script>
 
 {#if open && result}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={close} on:keydown={handleKeydown} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="dialog-title" tabindex="-1">
+  <div class="modal-overlay" on:keydown={handleKeydown} role="presentation">
+    <div class="modal" role="dialog" aria-labelledby="dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="dialog-title">Voting Results</h2>
         <button class="close-btn" on:click={close}>&times;</button>

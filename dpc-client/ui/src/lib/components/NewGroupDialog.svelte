@@ -48,7 +48,7 @@
 </script>
 
 {#if open}
-  <div class="modal-overlay" role="presentation" on:click|self={handleCancel}>
+  <div class="modal-overlay" role="presentation">
     <div class="modal" role="dialog" aria-labelledby="dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="dialog-title">New Group Chat</h2>

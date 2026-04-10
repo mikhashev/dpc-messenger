@@ -173,10 +173,9 @@
 </script>
 
 {#if open && context}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={close} on:keydown={handleKeydown} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="context-dialog-title" tabindex="-1">
+  <div class="modal-overlay" on:keydown={handleKeydown} role="presentation">
+    <div class="modal" role="dialog" aria-labelledby="context-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="context-dialog-title">Personal Context - {context.profile.name}</h2>
         <div class="header-actions">

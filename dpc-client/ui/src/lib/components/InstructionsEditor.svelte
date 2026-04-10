@@ -606,10 +606,9 @@
 </script>
 
 {#if open}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-overlay" onclick={close} onkeydown={handleKeydown} role="presentation">
-    <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="instructions-dialog-title" tabindex="-1">
+  <div class="modal-overlay" onkeydown={handleKeydown} role="presentation">
+    <div class="modal" role="dialog" aria-labelledby="instructions-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="instructions-dialog-title">AI Instructions</h2>
         <div class="header-actions">
@@ -913,10 +912,9 @@
 
 <!-- Template Import Dialog -->
 {#if showTemplateDialog}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-overlay" onclick={closeTemplateDialog} role="presentation">
-    <div class="template-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="template-dialog-title" tabindex="-1">
+  <div class="modal-overlay" role="presentation">
+    <div class="template-dialog" role="dialog" aria-labelledby="template-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="template-dialog-title">Import Instruction Template</h2>
         <button class="close-btn" onclick={closeTemplateDialog} aria-label="Close">×</button>
@@ -976,10 +974,9 @@
 
 <!-- Creation Mode Choice Dialog -->
 {#if showCreationModeDialog}
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="modal-overlay" onclick={closeCreationModeDialog} role="presentation">
-    <div class="choice-dialog" onclick={(e) => e.stopPropagation()} role="dialog" aria-labelledby="choice-dialog-title" tabindex="-1">
+  <div class="modal-overlay" role="presentation">
+    <div class="choice-dialog" role="dialog" aria-labelledby="choice-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="choice-dialog-title">Create New Instruction Set</h2>
         <button class="close-btn" onclick={closeCreationModeDialog} aria-label="Close">×</button>

@@ -713,8 +713,16 @@
     // Model download dialog handlers (v0.13.5)
   // handleModelDownload + handleModelDownloadCancel moved to ModelDownloadPanel.svelte (Step 8)
 
-  function handleEndSession(conversationId: string) {
-    if (confirm("Extract knowledge from this conversation?")) {
+  async function handleEndSession(conversationId: string) {
+    // IMPORTANT: window.confirm() is non-blocking in Tauri WebView2 on Windows
+    // (returns immediately, shows dialog asynchronously). This caused the
+    // extraction to start BEFORE the user clicked OK. Use Tauri's `ask` plugin
+    // instead, which properly awaits the result. Falls back to confirm() in
+    // pure web builds where `ask` is not loaded.
+    const proceed = ask
+      ? await ask("Extract knowledge from this conversation?", { title: "dpc-messenger", kind: "info" })
+      : window.confirm("Extract knowledge from this conversation?");
+    if (proceed) {
       sendCommand("end_conversation_session", {
         conversation_id: conversationId
       });

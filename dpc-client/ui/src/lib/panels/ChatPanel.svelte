@@ -368,8 +368,17 @@
     }
   }
 
-  function handleEndSession(conversationId: string) {
-    if (confirm('End this conversation session and extract knowledge?')) {
+  async function handleEndSession(conversationId: string) {
+    // window.confirm() is non-blocking in Tauri WebView2 on Windows — see
+    // +page.svelte:handleEndSession comment. Use Tauri ask() with fallback.
+    let proceed: boolean;
+    try {
+      const { ask } = await import('@tauri-apps/plugin-dialog');
+      proceed = await ask('End this conversation session and extract knowledge?', { title: 'dpc-messenger', kind: 'info' });
+    } catch {
+      proceed = window.confirm('End this conversation session and extract knowledge?');
+    }
+    if (proceed) {
       sendCommand('end_conversation_session', { conversation_id: conversationId });
     }
   }

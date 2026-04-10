@@ -513,10 +513,9 @@
 <svelte:window on:keydown={handleKeydown} />
 
 {#if open && displayConfig}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={close} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="modal-title" tabindex="-1">
+  <div class="modal-overlay" role="presentation">
+    <div class="modal" role="dialog" aria-labelledby="modal-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="modal-title">AI Providers Configuration</h2>
         <div class="header-actions">
@@ -1237,10 +1236,9 @@
 
 <!-- Model Info Modal -->
 {#if showModelInfo}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={closeModelInfo} role="presentation">
-    <div class="modal model-info-modal" on:click|stopPropagation role="dialog" aria-labelledby="model-info-title" tabindex="-1">
+  <div class="modal-overlay" role="presentation">
+    <div class="modal model-info-modal" role="dialog" aria-labelledby="model-info-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="model-info-title">🔍 Model Information</h2>
         <button class="close-btn" on:click={closeModelInfo} aria-label="Close">×</button>
