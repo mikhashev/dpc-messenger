@@ -3,6 +3,8 @@
 import asyncio
 import json
 import logging
+import secrets
+from pathlib import Path
 from typing import TYPE_CHECKING
 import websockets
 from websockets.server import WebSocketServerProtocol
@@ -12,6 +14,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 ui_logger = logging.getLogger("dpc_ui")
+
+# Local API authentication: a fresh random token is generated on every backend
+# startup and written to ~/.dpc/.ws_token. The frontend reads this file via a
+# Tauri command and presents the token as the first message on each WebSocket
+# connection. Without this, any local process could connect to ws://127.0.0.1:9999
+# and invoke backend commands.
+WS_TOKEN_PATH = Path.home() / ".dpc" / ".ws_token"
+AUTH_TIMEOUT_SECONDS = 5.0
 
 _UI_LOG_LEVELS = {
     "debug": ui_logger.debug,
@@ -166,6 +176,69 @@ class LocalApiServer:
         self.port = port
         self.server = None
         self._clients = set()
+        self._auth_token: str = ""
+
+    def _generate_and_persist_auth_token(self) -> None:
+        """Generate a fresh 256-bit auth token and write it to ~/.dpc/.ws_token.
+
+        Called once at startup. The frontend reads this file via a Tauri
+        command and sends the token as the first WebSocket message.
+        """
+        self._auth_token = secrets.token_urlsafe(32)
+        try:
+            WS_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+            WS_TOKEN_PATH.write_text(self._auth_token, encoding="utf-8")
+            logger.info("Local API auth token written to %s", WS_TOKEN_PATH)
+        except OSError as e:
+            logger.error("Failed to write auth token to %s: %s", WS_TOKEN_PATH, e)
+            raise
+
+    async def _authenticate(self, websocket: WebSocketServerProtocol) -> bool:
+        """Validate the first message on a new WebSocket connection.
+
+        Expects {"command": "auth", "token": "<token>"} within AUTH_TIMEOUT_SECONDS.
+        On success: sends an OK response and returns True.
+        On failure: closes the connection with code 1008 (policy violation),
+        logs the rejection with peer address, and returns False.
+        """
+        peer_addr = websocket.remote_address
+        peer_addr_str = f"{peer_addr[0]}:{peer_addr[1]}" if peer_addr else "unknown"
+        try:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=AUTH_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning("Local API auth timeout from %s", peer_addr_str)
+            await websocket.close(code=1008, reason="auth timeout")
+            return False
+        except websockets.exceptions.ConnectionClosed:
+            logger.debug("Local API connection from %s closed before auth", peer_addr_str)
+            return False
+
+        try:
+            message = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Local API auth: malformed first message from %s", peer_addr_str)
+            await websocket.close(code=1008, reason="auth required")
+            return False
+
+        if message.get("command") != "auth" or not isinstance(message.get("token"), str):
+            logger.warning("Local API auth: missing auth command from %s", peer_addr_str)
+            await websocket.close(code=1008, reason="auth required")
+            return False
+
+        # Constant-time comparison to avoid timing attacks
+        if not secrets.compare_digest(message["token"], self._auth_token):
+            logger.warning("Local API auth: invalid token from %s", peer_addr_str)
+            await websocket.close(code=1008, reason="invalid token")
+            return False
+
+        await websocket.send(json.dumps({
+            "id": message.get("id"),
+            "command": "auth",
+            "status": "OK",
+            "payload": {},
+        }))
+        logger.info("Local API client authenticated from %s", peer_addr_str)
+        return True
 
     async def _register(self, websocket: WebSocketServerProtocol):
         self._clients.add(websocket)
@@ -176,6 +249,8 @@ class LocalApiServer:
         logger.info("UI client disconnected: %s", websocket.remote_address)
 
     async def _handler(self, websocket: WebSocketServerProtocol):
+        if not await self._authenticate(websocket):
+            return
         await self._register(websocket)
         try:
             async for message_str in websocket:
@@ -255,6 +330,7 @@ class LocalApiServer:
             await self._unregister(websocket)
 
     async def start(self):
+        self._generate_and_persist_auth_token()
         logger.info("Starting Local API Server on ws://%s:%d", self.host, self.port)
 
         # Configure WebSocket server with more lenient timeouts

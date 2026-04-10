@@ -28,6 +28,21 @@ fn get_home_directory() -> Result<String, String> {
         .unwrap_or_else(|_| ".".to_string()))
 }
 
+// Read the local API auth token written by the backend at startup.
+// The backend generates a fresh 256-bit token on every run and writes it
+// to ~/.dpc/.ws_token. The frontend must present this token as the first
+// message on the WebSocket connection — see local_api.py:_authenticate.
+#[tauri::command]
+fn get_ws_token() -> Result<String, String> {
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|e| format!("No HOME/USERPROFILE: {}", e))?;
+    let token_path = std::path::PathBuf::from(home).join(".dpc").join(".ws_token");
+    std::fs::read_to_string(&token_path)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| format!("Failed to read {}: {}", token_path.display(), e))
+}
+
 #[derive(serde::Serialize)]
 struct FileMetadata {
     size: u64,
@@ -43,6 +58,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_file_metadata,
             get_home_directory,
+            get_ws_token,
             audio_recorder::tauri_start_recording,
             audio_recorder::tauri_stop_recording,
             audio_recorder::tauri_get_recording_status

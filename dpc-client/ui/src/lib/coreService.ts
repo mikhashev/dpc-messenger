@@ -172,14 +172,11 @@ function startPolling() {
             return;
         }
 
-        // Check if connection opened
-        if (socket.readyState === WebSocket.OPEN && get(connectionStatus) !== 'connected') {
-            console.log("✅ WebSocket connection established");
-            connectionStatus.set('connected');
-            reconnectAttempts = 0;
-            sendCommand("get_status");
-            
-            // Stop polling once connected
+        // Connection opened: stop polling and let the 'open' event handler
+        // do the auth handshake + initial commands. We must NOT sendCommand
+        // from here — that would race the auth message and the backend would
+        // close us with 1008 (auth required) before we sent the token.
+        if (socket.readyState === WebSocket.OPEN) {
             if (pollingInterval) {
                 clearInterval(pollingInterval);
                 pollingInterval = null;
@@ -244,8 +241,24 @@ export function connectToCoreService() {
         startPolling();
 
         // Set up event listeners (belt and suspenders)
-        socket.addEventListener('open', () => {
+        socket.addEventListener('open', async () => {
             console.log("✅ WebSocket opened via event");
+
+            // Local API auth handshake. The backend writes a fresh random token
+            // to ~/.dpc/.ws_token at startup; we read it via a Tauri command and
+            // present it as the FIRST WebSocket message. Without this the backend
+            // closes the connection with code 1008. See local_api.py:_authenticate.
+            try {
+                const { invoke } = await import('@tauri-apps/api/core');
+                const token = await invoke<string>('get_ws_token');
+                socket!.send(JSON.stringify({ command: 'auth', token, id: 'auth-init' }));
+            } catch (e) {
+                console.error("❌ Failed to read WS auth token:", e);
+                socket?.close(1000, "auth token unavailable");
+                connectionStatus.set('error');
+                return;
+            }
+
             connectionStatus.set('connected');
             reconnectAttempts = 0;
 
@@ -982,6 +995,17 @@ export function connectToCoreService() {
             console.log("WebSocket closed:", event.code, event.reason);
             nodeStatus.set(null);
             socket = null;
+
+            // Code 1008 = policy violation. The backend uses this exclusively for
+            // local API auth failures (missing/invalid token, timeout). The token
+            // won't change until the backend restarts, so retrying with the same
+            // stale token would just spin forever.
+            if (event.code === 1008) {
+                console.error(`❌ Local API auth rejected: ${event.reason}`);
+                connectionStatus.set('error');
+                reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+                return;
+            }
 
             // Reconnect unless manually disconnected (disconnectFromCoreService sets reconnectAttempts = MAX)
             if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
