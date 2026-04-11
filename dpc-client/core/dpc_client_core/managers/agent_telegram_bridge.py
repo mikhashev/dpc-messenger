@@ -1338,6 +1338,49 @@ Send a voice message and it will be transcribed and processed\\.
                     log.error(f"[_send_message] Failed even without Markdown: {e2}", exc_info=True)
                     raise
 
+    def _format_evolution_cycle_completed(
+        self,
+        event: AgentEvent,
+        title: str,
+        timestamp: str,
+    ) -> str:
+        """
+        Format Evolution Cycle Completed notification.
+
+        Plain style (no emojis), and lists what was actually proposed
+        instead of just showing a count.
+        """
+        data = event.data
+        proposed = data.get("changes_proposed", 0)
+        applied = data.get("changes_applied", 0)
+        files = data.get("files_modified", 0)
+        cycle_id = str(data.get("cycle_id", "?"))
+
+        lines = [
+            f"*{title}*",
+            f"`{escape_markdown(timestamp)}`",
+            f"Cycle: `{escape_markdown(cycle_id)}`",
+            f"Files modified: {files}",
+            f"Proposed: {proposed}    Applied: {applied}",
+        ]
+
+        proposals_summary = data.get("proposals_summary") or []
+        if proposals_summary:
+            lines.append("")
+            lines.append("Proposed changes:")
+            for i, p in enumerate(proposals_summary, start=1):
+                path = escape_markdown(str(p.get("path", "?")))
+                change_type = str(p.get("change_type", "")).strip()
+                desc = escape_markdown(str(p.get("description", ""))[:300])
+                head = f"{i}\\. `{path}`"
+                if change_type:
+                    head += f" \\[{escape_markdown(change_type)}\\]"
+                lines.append(head)
+                if desc:
+                    lines.append(f"   {desc}")
+
+        return "\n".join(lines)
+
     def _format_event(self, event: AgentEvent) -> str:
         """
         Format event for Telegram message.
@@ -1353,6 +1396,10 @@ Send a voice message and it will be transcribed and processed\\.
 
         # Event type as title (escape for Markdown)
         title = escape_markdown(event.type.value.replace("_", " ").title())
+
+        # Special case: Evolution Cycle Completed — no emojis, list proposals
+        if event.type == EventType.EVOLUTION_CYCLE_COMPLETED:
+            return self._format_evolution_cycle_completed(event, title, timestamp)
 
         lines = [
             f"{emoji} *{title}*",

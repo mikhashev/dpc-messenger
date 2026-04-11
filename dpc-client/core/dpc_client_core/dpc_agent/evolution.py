@@ -245,6 +245,7 @@ class EvolutionManager:
             "agent_id": _agent_id,
         })
 
+        proposals: List[Dict[str, Any]] = []
         try:
             # Step 1: Analyze state
             log.info(f"Starting evolution cycle {self._cycle_count}")
@@ -293,10 +294,22 @@ class EvolutionManager:
             self._status = EvolutionStatus.IDLE
             self._current_cycle = None
 
+            # Brief summary of each proposal for downstream notifiers (Telegram bridge etc.)
+            proposals_summary = [
+                {
+                    "path": str(p.get("path", "?")),
+                    "change_type": str(p.get("change_type", "")),
+                    "description": str(p.get("description", ""))[:200],
+                }
+                for p in proposals
+            ]
+
             await emitter.emit(EventType.EVOLUTION_CYCLE_COMPLETED, {
                 "cycle_id": cycle.id,
                 "files_modified": cycle.files_modified,
+                "changes_proposed": cycle.changes_proposed,
                 "changes_applied": cycle.changes_applied,
+                "proposals_summary": proposals_summary,
                 "description": cycle.description,
                 "agent_id": _agent_id,
             })
