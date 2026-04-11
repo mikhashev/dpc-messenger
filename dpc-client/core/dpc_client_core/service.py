@@ -3914,7 +3914,7 @@ class CoreService:
             import json as _json
             from pathlib import Path
             archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
-            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 10) if self.firewall else 10
+            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 40) if self.firewall else 40
 
             if not archive_dir.exists():
                 return {

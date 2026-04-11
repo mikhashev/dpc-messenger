@@ -232,7 +232,7 @@
     if (!editSettings.history) {
       editSettings.history = {
         preserve_on_reset: true,
-        max_archived_sessions: 10,
+        max_archived_sessions: 40,
       };
     }
   }
@@ -673,14 +673,14 @@
                   type="number"
                   id="agent-history-max"
                   min="1"
-                  max="50"
+                  max="200"
                   bind:value={editSettings.history.max_archived_sessions}
                   style="width: 70px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
                 />
               {:else}
-                <span class="value">{displaySettings.history?.max_archived_sessions ?? 10}</span>
+                <span class="value">{displaySettings.history?.max_archived_sessions ?? 40}</span>
               {/if}
-              <span class="help-text-small" style="margin-left: 0.5rem;">Oldest archives are pruned automatically (1–50)</span>
+              <span class="help-text-small" style="margin-left: 0.5rem;">Oldest archives are pruned automatically (1–200)</span>
             </div>
 
             {#if archiveInfo && !editMode}

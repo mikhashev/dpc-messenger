@@ -226,7 +226,7 @@ class ContextFirewall:
         # Parse history settings (v0.22.0+)
         history = dpc_agent.get('history', {})
         self.history_preserve_on_reset = history.get('preserve_on_reset', True)
-        self.history_max_archived_sessions = max(1, min(50, int(history.get('max_archived_sessions', 10))))
+        self.history_max_archived_sessions = max(1, min(200, int(history.get('max_archived_sessions', 40))))
 
         logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s, consciousness=%s",
                      self.dpc_agent_enabled,

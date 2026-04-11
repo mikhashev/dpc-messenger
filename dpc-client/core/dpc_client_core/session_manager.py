@@ -272,7 +272,7 @@ class NewSessionProposalManager:
             monitor = self.core_service._get_or_create_conversation_monitor(local_conversation_id)
             _firewall = getattr(self.core_service, "firewall", None)
             _preserve = getattr(_firewall, "history_preserve_on_reset", True) if _firewall else True
-            _max = getattr(_firewall, "history_max_archived_sessions", 10) if _firewall else 10
+            _max = getattr(_firewall, "history_max_archived_sessions", 40) if _firewall else 40
             monitor.reset_conversation(preserve=_preserve, max_sessions=_max)
 
         # Broadcast result to all participants (use original conversation_id so initiator can look it up)

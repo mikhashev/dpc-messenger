@@ -1545,8 +1545,8 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
                 for line_num, line in enumerate(content.splitlines(), 1):
                     if regex.search(line):
                         # Truncate long lines
-                        display_line = line.strip()[:150]
-                        if len(line.strip()) > 150:
+                        display_line = line.strip()[:300]
+                        if len(line.strip()) > 300:
                             display_line += "..."
 
                         matches.append(f"{rel_path}:{line_num}: {display_line}")
@@ -1641,7 +1641,10 @@ def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines
                 match_block = [f"\n### Line {i + 1}"]
                 for j in range(start, end):
                     prefix = ">>>" if j == i else "   "
-                    matches.append(f"{prefix} {j + 1:4d}: {lines[j][:120]}")
+                    line_text = lines[j][:300]
+                    if len(lines[j]) > 300:
+                        line_text += "..."
+                    matches.append(f"{prefix} {j + 1:4d}: {line_text}")
 
         if not matches:
             return f"No matches found for pattern '{pattern}' in {file_path}"
