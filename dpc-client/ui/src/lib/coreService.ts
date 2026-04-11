@@ -1139,6 +1139,9 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'get_agent_learning',
             'get_agent_task_result',
             'schedule_agent_task',
+            // Session archive (S25 Batch 1.1 fix)
+            'get_session_archive_info',
+            'clear_session_archives',
         ].includes(command);
 
         if (expectsResponse) {
