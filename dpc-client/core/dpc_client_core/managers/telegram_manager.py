@@ -172,6 +172,12 @@ class TelegramBotManager:
         self._network_filter = _TelegramNetworkErrorFilter(threshold=3, report_every=50)
         self._filtered_loggers: list[logging.Logger] = []
 
+        # Polling timeout backoff state (LOW-1).
+        # PTB's network_retry_loop has cur_interval=0 on TimedOut → no backoff
+        # when network is down. We wrap bot.get_updates and inject our own
+        # exponential delay between consecutive timeouts.
+        self._consecutive_polling_timeouts = 0
+
         logger.info(
             f"TelegramBotManager initialized (webhook={self.use_webhook}, "
             f"whitelist={len(self.allowed_chat_ids)} chat_ids, "
@@ -217,7 +223,7 @@ class TelegramBotManager:
                 # Import telegram library (lazy import for optional dependency)
                 from telegram import Update
                 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-                from telegram.error import InvalidToken, NetworkError, Conflict
+                from telegram.error import InvalidToken, NetworkError, Conflict, TimedOut
 
                 # Build bot application
                 self.application = (
@@ -335,6 +341,34 @@ class TelegramBotManager:
                     ]
                     for _lg in self._filtered_loggers:
                         _lg.addFilter(self._network_filter)
+
+                    # Wrap bot.get_updates with exponential backoff on consecutive
+                    # TimedOut errors (LOW-1). PTB's network_retry_loop sets
+                    # cur_interval=0 on TimedOut and retries immediately, which
+                    # hammers the loop while the network is down. We sleep before
+                    # the next call when previous attempts timed out.
+                    self._consecutive_polling_timeouts = 0
+                    _orig_get_updates = self.application.bot.get_updates
+
+                    async def _get_updates_with_backoff(*args, **kwargs):
+                        if self._consecutive_polling_timeouts > 0:
+                            # 2, 4, 8, 16, 32, 60, 60, ... seconds
+                            delay = min(60, 2 ** min(self._consecutive_polling_timeouts, 6))
+                            await asyncio.sleep(delay)
+                        try:
+                            result = await _orig_get_updates(*args, **kwargs)
+                        except TimedOut:
+                            self._consecutive_polling_timeouts += 1
+                            raise
+                        if self._consecutive_polling_timeouts > 0:
+                            logger.info(
+                                "Telegram polling recovered after %d consecutive timeouts",
+                                self._consecutive_polling_timeouts,
+                            )
+                            self._consecutive_polling_timeouts = 0
+                        return result
+
+                    self.application.bot.get_updates = _get_updates_with_backoff
 
                     await self.application.updater.start_polling(drop_pending_updates=drop_updates)
                     logger.info(f"Telegram bot started (polling mode, drop_updates={drop_updates})")
