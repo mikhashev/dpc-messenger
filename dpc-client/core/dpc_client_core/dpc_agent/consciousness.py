@@ -41,14 +41,18 @@ DEFAULT_BUDGET_FRACTION = 0.1  # Use at most 10% of budget for consciousness
 
 
 def _reflection_signature(entry: dict) -> str:
-    """Stable hash of a reflection entry, excluding fields that always change.
+    """Stable hash of a reflection entry using only semantically stable fields.
 
-    Used by the dedup gate in _apply_thought_result to skip writing reflections
-    that are semantically identical to the previous one. timestamp is excluded
-    because it is auto-set on every entry; without exclusion the gate would
-    never trigger. See S24 cleanup (2026-04-10).
+    Compares only pattern_detected + severity — these are the fields that
+    identify *what* was observed, not the LLM's varying prose about it.
+    Previous implementation compared ALL fields (minus timestamp), but the
+    LLM increments counters in trigger_details ("22nd", "23rd"...) making
+    every entry byte-unique despite identical semantics. See S32 fix.
     """
-    sig_data = {k: v for k, v in entry.items() if k != "timestamp"}
+    sig_data = {
+        "pattern_detected": entry.get("pattern_detected"),
+        "severity": entry.get("severity"),
+    }
     return json.dumps(sig_data, sort_keys=True, ensure_ascii=False)
 
 
@@ -186,6 +190,14 @@ class BackgroundConsciousness:
         try:
             # Choose a thought type
             thought_type = self._choose_thought_type()
+
+            # Circuit breaker: if reflect_on_identity selected but last 3
+            # reflections share the same pattern_detected, skip to another
+            # thought type. Saves an LLM call on stuck loops. See S32 fix.
+            if thought_type == "reflect_on_identity" and self._reflection_loop_detected():
+                log.info("Circuit breaker: reflect_on_identity suppressed (3+ identical patterns)")
+                thought_type = "review_recent_actions"
+
             log.debug(f"Thought type: {thought_type}")
 
             # Emit thought started event
@@ -257,6 +269,21 @@ class BackgroundConsciousness:
                 return thought_type
 
         return "reflect_on_identity"  # Default
+
+    def _reflection_loop_detected(self) -> bool:
+        """Check if the last 3 reflections in reflection.json share the same
+        pattern_detected — signals a stuck loop. Cross-session (reads disk).
+        """
+        try:
+            reflection_data = self.agent.memory.load_reflection()
+            reflections = reflection_data.get("reflections", [])
+            if len(reflections) < 3:
+                return False
+            last_3 = reflections[-3:]
+            patterns = [r.get("pattern_detected") for r in last_3]
+            return patterns[0] is not None and patterns[0] == patterns[1] == patterns[2]
+        except Exception:
+            return False
 
     def _generate_thought_prompt(self, thought_type: str) -> str:
         """Generate a prompt for the given thought type."""
@@ -480,8 +507,10 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
                 if (now - last_dt) > timedelta(hours=1):
                     return False
             # Check observation similarity (simple prefix match)
-            last_obs = str(last.get("observation", ""))[:100]
-            new_obs = str(structured.get("observation", ""))[:100]
+            # Identity reflections use trigger_details/action_taken, not observation.
+            # Fallback chain ensures dedup works for all thought types. See S32 fix.
+            last_obs = str(last.get("observation") or last.get("trigger_details") or last.get("action_taken") or "")[:100]
+            new_obs = str(structured.get("observation") or structured.get("trigger_details") or structured.get("action_taken") or "")[:100]
             if not last_obs or not new_obs:
                 return False
             # Consider duplicate if first 100 chars match >80%

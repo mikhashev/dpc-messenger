@@ -494,7 +494,19 @@ This file tracks the agent's self-understanding and evolving identity.
             if mode == "replace":
                 new_section_content = content
             elif mode == "append":
-                new_section_content = existing_content + "\n\n" + content if existing_content else content
+                # Line-level dedup: only append lines not already in section.
+                # Prevents duplicates from repeated append calls across sessions.
+                # Substring check is fragile (whitespace/newline variance); line-by-line
+                # is robust — same approach as merge mode. See S32 fix.
+                if existing_content:
+                    existing_lines = set(line.strip() for line in existing_content.split("\n") if line.strip())
+                    new_lines = [line for line in content.split("\n") if line.strip() and line.strip() not in existing_lines]
+                    if new_lines:
+                        new_section_content = existing_content + "\n\n" + "\n".join(new_lines)
+                    else:
+                        new_section_content = existing_content
+                else:
+                    new_section_content = content
             elif mode == "merge":
                 # Merge without duplicating lines that already exist
                 existing_lines = set(line.strip() for line in existing_content.split("\n") if line.strip())
