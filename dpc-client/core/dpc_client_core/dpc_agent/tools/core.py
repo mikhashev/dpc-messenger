@@ -28,16 +28,38 @@ log = logging.getLogger(__name__)
 # File Operations (sandboxed)
 # ---------------------------------------------------------------------------
 
-def repo_read(ctx: ToolContext, path: str) -> str:
+def _paginate_content(content: str, path: str, offset: int | None, limit: int | None, fallback_truncate: int) -> str:
+    """Apply line-based pagination or fallback truncation to file content."""
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+
+    if offset is not None or limit is not None:
+        start = offset or 0
+        end = start + limit if limit is not None else total
+        selected = lines[start:end]
+        result = "".join(selected)
+        shown_start = start + 1  # 1-based for display
+        shown_end = min(end, total)
+        return f"[Lines {shown_start}-{shown_end} of {total} total | {path}]\n{result}"
+
+    # No pagination — apply legacy truncation
+    if len(content) > fallback_truncate:
+        content = content[:fallback_truncate] + f"\n\n... (truncated, {len(content)} total chars)"
+    return content
+
+
+def repo_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
     """
     Read a file from the agent sandbox.
 
     Args:
         ctx: Tool context
         path: File path relative to agent root
+        offset: Start line (0-based). If provided, enables pagination.
+        limit: Number of lines to return. Used with offset for pagination.
 
     Returns:
-        File contents
+        File contents (paginated or full with truncation)
     """
     try:
         file_path = ctx.repo_path(path)
@@ -49,12 +71,7 @@ def repo_read(ctx: ToolContext, path: str) -> str:
             return f"⚠️ Not a file: {path}"
 
         content = file_path.read_text(encoding="utf-8", errors="replace")
-
-        # Truncate large files
-        if len(content) > 50000:
-            content = content[:50000] + f"\n\n... (truncated, {len(content)} total chars)"
-
-        return content
+        return _paginate_content(content, path, offset, limit, fallback_truncate=50000)
 
     except PermissionError as e:
         return f"⚠️ Sandbox violation: {e}"
@@ -113,9 +130,9 @@ def repo_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str
         return f"⚠️ Error listing directory: {e}"
 
 
-def drive_read(ctx: ToolContext, path: str) -> str:
+def drive_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
     """Alias for repo_read (compatibility with Ouroboros tools)."""
-    return repo_read(ctx, path)
+    return repo_read(ctx, path, offset=offset, limit=limit)
 
 
 def drive_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
@@ -1289,7 +1306,7 @@ def reject_evolution_change(ctx: ToolContext, change_id: str) -> str:
 # Extended Sandbox Tools (v0.16.0+)
 # ---------------------------------------------------------------------------
 
-def extended_path_read(ctx: ToolContext, path: str) -> str:
+def extended_path_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
     """
     Read a file from an extended sandbox path (outside ~/.dpc/agent/).
 
@@ -1299,9 +1316,11 @@ def extended_path_read(ctx: ToolContext, path: str) -> str:
     Args:
         ctx: Tool context
         path: Absolute file path (must be in extended sandbox)
+        offset: Start line (0-based). If provided, enables pagination.
+        limit: Number of lines to return. Used with offset for pagination.
 
     Returns:
-        File contents
+        File contents (paginated or full with truncation)
     """
     try:
         file_path = ctx.validate_extended_path(path, require_write=False)
@@ -1313,12 +1332,7 @@ def extended_path_read(ctx: ToolContext, path: str) -> str:
             return f"⚠️ Not a file: {path}"
 
         content = file_path.read_text(encoding="utf-8", errors="replace")
-
-        # Truncate large files
-        if len(content) > 100000:
-            content = content[:100000] + f"\n\n... (truncated, {len(content)} total chars)"
-
-        return content
+        return _paginate_content(content, path, offset, limit, fallback_truncate=100000)
 
     except PermissionError as e:
         return f"⚠️ Access denied: {e}"
@@ -1841,13 +1855,21 @@ def get_tools() -> List[ToolEntry]:
             name="repo_read",
             schema={
                 "name": "repo_read",
-                "description": "Read a file from the agent sandbox directory",
+                "description": "Read a file from the agent sandbox directory. Supports line-based pagination via offset/limit for large files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "File path relative to agent root"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Start line (0-based). Enables pagination when provided."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of lines to return. Use with offset for pagination."
                         }
                     },
                     "required": ["path"]
@@ -1887,13 +1909,21 @@ def get_tools() -> List[ToolEntry]:
             name="drive_read",
             schema={
                 "name": "drive_read",
-                "description": "Read a file from the agent sandbox (alias for repo_read)",
+                "description": "Read a file from the agent sandbox (alias for repo_read). Supports line-based pagination via offset/limit.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "File path relative to agent root"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Start line (0-based). Enables pagination when provided."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of lines to return. Use with offset for pagination."
                         }
                     },
                     "required": ["path"]
@@ -2501,13 +2531,21 @@ def get_tools() -> List[ToolEntry]:
             name="extended_path_read",
             schema={
                 "name": "extended_path_read",
-                "description": "Read a file from an extended sandbox path (outside ~/.dpc/agent/). Requires sandbox_extensions configuration.",
+                "description": "Read a file from an extended sandbox path (outside ~/.dpc/agent/). Requires sandbox_extensions configuration. Supports line-based pagination via offset/limit for large files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
                             "description": "Absolute file path (must be in configured extended sandbox)"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Start line (0-based). Enables pagination when provided."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of lines to return. Use with offset for pagination."
                         }
                     },
                     "required": ["path"]
