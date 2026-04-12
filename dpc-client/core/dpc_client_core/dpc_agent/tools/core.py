@@ -48,13 +48,28 @@ def _paginate_content(content: str, path: str, offset: int | None, limit: int | 
     return content
 
 
-def repo_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
+def _resolve_file_path(ctx: ToolContext, path: str, require_write: bool = False) -> Path:
+    """Resolve path to a file: relative → sandbox, absolute → firewall-checked extended path."""
+    import os
+    if os.path.isabs(path):
+        # Check extended path access gates (S31)
+        if ctx.firewall:
+            if require_write and not getattr(ctx.firewall, 'extended_write_enabled', False):
+                raise PermissionError("Extended path write access is disabled. Enable it in Agent Permissions → Extended Paths.")
+            if not require_write and not getattr(ctx.firewall, 'extended_read_enabled', True):
+                raise PermissionError("Extended path read access is disabled. Enable it in Agent Permissions → Extended Paths.")
+        return ctx.validate_extended_path(path, require_write=require_write)
+    return ctx.repo_path(path)
+
+
+def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
     """
-    Read a file from the agent sandbox.
+    Read a file. Relative paths resolve to sandbox, absolute paths
+    are checked against firewall (sandbox_extensions).
 
     Args:
         ctx: Tool context
-        path: File path relative to agent root
+        path: Relative path (sandbox) or absolute path (firewall-checked)
         offset: Start line (0-based). If provided, enables pagination.
         limit: Number of lines to return. Used with offset for pagination.
 
@@ -62,7 +77,7 @@ def repo_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int
         File contents (paginated or full with truncation)
     """
     try:
-        file_path = ctx.repo_path(path)
+        file_path = _resolve_file_path(ctx, path)
 
         if not file_path.exists():
             return f"⚠️ File not found: {path}"
@@ -71,12 +86,19 @@ def repo_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int
             return f"⚠️ Not a file: {path}"
 
         content = file_path.read_text(encoding="utf-8", errors="replace")
-        return _paginate_content(content, path, offset, limit, fallback_truncate=50000)
+        import os
+        truncate_limit = 100000 if os.path.isabs(path) else 50000
+        return _paginate_content(content, path, offset, limit, fallback_truncate=truncate_limit)
 
     except PermissionError as e:
-        return f"⚠️ Sandbox violation: {e}"
+        return f"⚠️ Access denied: {e}"
     except Exception as e:
         return f"⚠️ Error reading file: {e}"
+
+
+# Legacy aliases for backward compatibility
+def repo_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
+    return read_file(ctx, path, offset=offset, limit=limit)
 
 
 def repo_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
@@ -131,8 +153,8 @@ def repo_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str
 
 
 def drive_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
-    """Alias for repo_read (compatibility with Ouroboros tools)."""
-    return repo_read(ctx, path, offset=offset, limit=limit)
+    """Legacy alias for read_file."""
+    return read_file(ctx, path, offset=offset, limit=limit)
 
 
 def drive_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
@@ -140,41 +162,52 @@ def drive_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> st
     return repo_list(ctx, path, recursive)
 
 
-def repo_write(ctx: ToolContext, path: str, content: str) -> str:
+def write_file(ctx: ToolContext, path: str, content: str) -> str:
     """
-    Write a file to the agent sandbox.
+    Write a file. Relative paths resolve to sandbox, absolute paths
+    are checked against firewall (sandbox_extensions with write access).
 
     Args:
         ctx: Tool context
-        path: File path relative to agent root
+        path: Relative path (sandbox) or absolute path (firewall-checked)
         content: Content to write
 
     Returns:
         Result message
     """
     try:
-        file_path = ctx.repo_path(path)
+        import os
+        file_path = _resolve_file_path(ctx, path, require_write=os.path.isabs(path))
+
+        # Size limit for extended paths
+        if os.path.isabs(path) and len(content) > 500000:
+            return f"⚠️ Content too large ({len(content):,} chars). Maximum is 500,000 chars."
 
         # Create parent directories if needed
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         file_path.write_text(content, encoding="utf-8")
 
-        # Regenerate _index.md if writing to knowledge/ dir
-        if path.startswith("knowledge/") and not path.endswith("_index.md"):
+        # Regenerate _index.md if writing to knowledge/ dir (sandbox only)
+        if not os.path.isabs(path) and path.startswith("knowledge/") and not path.endswith("_index.md"):
             _update_knowledge_index(ctx, Path(path).stem)
 
-        return f"✓ Wrote {len(content)} chars to {path}"
+        return f"✓ Wrote {len(content):,} chars to {path}"
 
     except PermissionError as e:
-        return f"⚠️ Sandbox violation: {e}"
+        return f"⚠️ Access denied: {e}"
     except Exception as e:
         return f"⚠️ Error writing file: {e}"
 
 
+# Legacy alias
+def repo_write(ctx: ToolContext, path: str, content: str) -> str:
+    return write_file(ctx, path, content)
+
+
 def drive_write(ctx: ToolContext, path: str, content: str) -> str:
-    """Alias for repo_write (compatibility with Ouroboros tools)."""
-    return repo_write(ctx, path, content)
+    """Legacy alias for write_file."""
+    return write_file(ctx, path, content)
 
 
 def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
@@ -1850,18 +1883,18 @@ def get_proposal_result(ctx: ToolContext, proposal_id: str) -> str:
 def get_tools() -> List[ToolEntry]:
     """Export core tools for registry."""
     return [
-        # File operations
+        # File operations (unified read_file / write_file — S31)
         ToolEntry(
-            name="repo_read",
+            name="read_file",
             schema={
-                "name": "repo_read",
-                "description": "Read a file from the agent sandbox directory. Supports line-based pagination via offset/limit for large files.",
+                "name": "read_file",
+                "description": "Read a file. Relative paths read from sandbox, absolute paths are checked against firewall (sandbox_extensions). Supports line-based pagination via offset/limit for large files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "File path relative to agent root"
+                            "description": "Relative path (sandbox) or absolute path (firewall-checked)"
                         },
                         "offset": {
                             "type": "integer",
@@ -1875,7 +1908,7 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["path"]
                 }
             },
-            handler=repo_read,
+            handler=read_file,
             timeout_sec=30,
         ),
 
@@ -1902,34 +1935,6 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=repo_list,
-            timeout_sec=30,
-        ),
-
-        ToolEntry(
-            name="drive_read",
-            schema={
-                "name": "drive_read",
-                "description": "Read a file from the agent sandbox (alias for repo_read). Supports line-based pagination via offset/limit.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "File path relative to agent root"
-                        },
-                        "offset": {
-                            "type": "integer",
-                            "description": "Start line (0-based). Enables pagination when provided."
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Number of lines to return. Use with offset for pagination."
-                        }
-                    },
-                    "required": ["path"]
-                }
-            },
-            handler=drive_read,
             timeout_sec=30,
         ),
 
@@ -1985,16 +1990,16 @@ def get_tools() -> List[ToolEntry]:
         ),
 
         ToolEntry(
-            name="repo_write_commit",
+            name="write_file",
             schema={
-                "name": "repo_write_commit",
-                "description": "Write a file to the agent sandbox directory",
+                "name": "write_file",
+                "description": "Write a file. Relative paths write to sandbox, absolute paths are checked against firewall (sandbox_extensions with write access).",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "File path relative to agent root"
+                            "description": "Relative path (sandbox) or absolute path (firewall-checked)"
                         },
                         "content": {
                             "type": "string",
@@ -2004,32 +2009,7 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["path", "content"]
                 }
             },
-            handler=repo_write,
-            timeout_sec=30,
-            is_code_tool=True,
-        ),
-
-        ToolEntry(
-            name="drive_write",
-            schema={
-                "name": "drive_write",
-                "description": "Write a file to the agent sandbox (alias for repo_write)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "File path relative to agent root"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content to write"
-                        }
-                    },
-                    "required": ["path", "content"]
-                }
-            },
-            handler=drive_write,
+            handler=write_file,
             timeout_sec=30,
             is_code_tool=True,
         ),
@@ -2526,35 +2506,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=10,
         ),
 
-        # Extended sandbox tools (v0.16.0+)
-        ToolEntry(
-            name="extended_path_read",
-            schema={
-                "name": "extended_path_read",
-                "description": "Read a file from an extended sandbox path (outside ~/.dpc/agent/). Requires sandbox_extensions configuration. Supports line-based pagination via offset/limit for large files.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute file path (must be in configured extended sandbox)"
-                        },
-                        "offset": {
-                            "type": "integer",
-                            "description": "Start line (0-based). Enables pagination when provided."
-                        },
-                        "limit": {
-                            "type": "integer",
-                            "description": "Number of lines to return. Use with offset for pagination."
-                        }
-                    },
-                    "required": ["path"]
-                }
-            },
-            handler=extended_path_read,
-            timeout_sec=30,
-        ),
-
+        # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file in S31)
         ToolEntry(
             name="extended_path_list",
             schema={
@@ -2578,31 +2530,6 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=extended_path_list,
             timeout_sec=30,
-        ),
-
-        ToolEntry(
-            name="extended_path_write",
-            schema={
-                "name": "extended_path_write",
-                "description": "Write a file to an extended sandbox path. Requires read_write access in sandbox_extensions.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute file path"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content to write"
-                        }
-                    },
-                    "required": ["path", "content"]
-                }
-            },
-            handler=extended_path_write,
-            timeout_sec=30,
-            is_code_tool=True,
         ),
 
         ToolEntry(

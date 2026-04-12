@@ -20,12 +20,14 @@
   // Tool definitions by category
   const toolCategories = [
     {
-      name: 'File Operations (sandboxed)',
+      name: 'File Operations',
       tools: [
-        { key: 'repo_read', label: 'Read Files', desc: 'Read files in sandbox' },
+        { key: 'read_file', label: 'Read Files', desc: 'Read files from agent sandbox' },
+        { key: 'write_file', label: 'Write Files', desc: 'Write files to agent sandbox' },
         { key: 'repo_list', label: 'List Files', desc: 'List directory contents' },
-        { key: 'repo_write_commit', label: 'Write Files', desc: 'Create/modify files in sandbox' },
         { key: 'repo_delete', label: 'Delete Files', desc: 'Delete files/directories in sandbox' },
+        { key: 'extended_path_list', label: 'Extended List', desc: 'List directories in custom paths' },
+        { key: 'list_extended_sandbox_paths', label: 'List Extended Paths', desc: 'View configured extended paths' },
       ]
     },
     {
@@ -33,15 +35,6 @@
       tools: [
         { key: 'search_files', label: 'Search Files', desc: 'Search for patterns across multiple files' },
         { key: 'search_in_file', label: 'Search in File', desc: 'Search in specific file with context' },
-      ]
-    },
-    {
-      name: 'Extended Sandbox (custom paths)',
-      tools: [
-        { key: 'extended_path_read', label: 'Extended Read', desc: 'Read from custom paths outside sandbox' },
-        { key: 'extended_path_list', label: 'Extended List', desc: 'List directories in custom paths' },
-        { key: 'extended_path_write', label: 'Extended Write', desc: 'Write to custom paths (requires read_write)' },
-        { key: 'list_extended_sandbox_paths', label: 'List Extended Paths', desc: 'View configured extended paths' },
       ]
     },
     {
@@ -92,14 +85,6 @@
         { key: 'git_reset', label: 'Git Reset', desc: 'Rollback files or commits (hard=true is destructive)', isDanger: true },
         { key: 'git_snapshot', label: 'Git Snapshot', desc: 'Quick save: stage all + commit with UTC timestamp' },
         { key: 'repo_commit_push', label: 'Git Push', desc: 'Push to remote (not used — local only)', isDanger: true },
-      ]
-    },
-    {
-      name: 'Drive Operations (direct filesystem)',
-      tools: [
-        { key: 'drive_read', label: 'Drive Read', desc: 'Read files from drive' },
-        { key: 'drive_list', label: 'Drive List', desc: 'List drive contents' },
-        { key: 'drive_write', label: 'Drive Write', desc: 'Write files to drive' },
       ]
     },
     {
@@ -154,17 +139,27 @@
   }
 
   // Helper to add a path
-  function addPath(type: 'read_only' | 'read_write') {
+  function ensureSandboxExtensions() {
     if (!editSettings) return;
     if (!editSettings.sandbox_extensions) {
-      editSettings.sandbox_extensions = { read_only: [], read_write: [] };
+      editSettings.sandbox_extensions = { read_only: [], read_write: [], extended_read_enabled: true, extended_write_enabled: false };
     }
+    if (editSettings.sandbox_extensions.extended_read_enabled === undefined) editSettings.sandbox_extensions.extended_read_enabled = true;
+    if (editSettings.sandbox_extensions.extended_write_enabled === undefined) editSettings.sandbox_extensions.extended_write_enabled = false;
+  }
+
+  function addPath(type: 'read_only' | 'read_write') {
+    if (!editSettings) return;
+    ensureSandboxExtensions();
     if (!editSettings.sandbox_extensions[type]) {
       editSettings.sandbox_extensions[type] = [];
     }
     editSettings.sandbox_extensions[type] = [...editSettings.sandbox_extensions[type], ''];
     editSettings = editSettings;  // Trigger reactivity
   }
+
+  // Ensure sandbox_extensions has extended access fields when entering edit mode
+  $: if (editMode && editSettings) { ensureSandboxExtensions(); }
 
   // Helper to remove a path
   function removePath(type: 'read_only' | 'read_write', index: number) {
@@ -777,6 +772,26 @@
           <!-- Sandbox Path Configuration (per-agent) -->
           <h5 style="margin-top: 1rem; margin-bottom: 0.5rem; color: var(--text-secondary);">Configure Extended Paths</h5>
           <p class="help-text-small" style="margin-bottom: 0.5rem;">Add directories outside the default sandbox that the agent can access</p>
+
+          <!-- Extended path access gates (S31) -->
+          <div class="extended-access-gates" style="display: flex; gap: 1.5rem; margin-bottom: 0.75rem;">
+            <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+              {#if editMode && editSettings}
+                <input type="checkbox" bind:checked={editSettings.sandbox_extensions.extended_read_enabled} />
+              {:else}
+                <input type="checkbox" checked={displaySettings?.sandbox_extensions?.extended_read_enabled ?? true} disabled />
+              {/if}
+              <span>Enable extended path reading</span>
+            </label>
+            <label style="display: flex; align-items: center; gap: 0.4rem; cursor: pointer;">
+              {#if editMode && editSettings}
+                <input type="checkbox" bind:checked={editSettings.sandbox_extensions.extended_write_enabled} />
+              {:else}
+                <input type="checkbox" checked={displaySettings?.sandbox_extensions?.extended_write_enabled ?? false} disabled />
+              {/if}
+              <span>Enable extended path writing</span>
+            </label>
+          </div>
 
           {#if editMode && editSettings}
             <div class="sandbox-paths-config">

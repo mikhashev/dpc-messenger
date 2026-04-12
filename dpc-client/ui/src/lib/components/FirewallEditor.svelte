@@ -287,7 +287,8 @@
           device_context_access: true,
           knowledge_access: 'read_only',
           tools: {
-            repo_read: true,
+            read_file: true,
+            write_file: false,
             repo_list: true,
             update_scratchpad: true,
             browse_page: true,
@@ -606,7 +607,8 @@
       device_context_access: true,
       knowledge_access: 'read_only',
       tools: {
-        repo_read: true,
+        read_file: true,
+        write_file: false,
         repo_list: true,
         update_scratchpad: true,
       },
@@ -703,7 +705,7 @@
         personal_context_access: true,
         device_context_access: true,
         knowledge_access: 'read_only',
-        tools: { repo_read: true, repo_list: true, update_scratchpad: true, browse_page: true, search_web: true },
+        tools: { read_file: true, write_file: false, repo_list: true, update_scratchpad: true, browse_page: true, search_web: true },
       })
     );
     editedRules = editedRules;  // Trigger reactivity

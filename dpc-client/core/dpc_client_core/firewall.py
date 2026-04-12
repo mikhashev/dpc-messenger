@@ -108,20 +108,16 @@ class ContextFirewall:
         # True = enabled by default, False = disabled by default (security).
         # When adding a new tool: add it here with default enabled/disabled.
         all_tools_defaults = {
-            # File operations (sandboxed to ~/.dpc/agents/{agent_id}/)
-            'repo_read': True,
+            # File operations (unified read_file/write_file — S31)
+            'read_file': True,   # Read from sandbox or firewall-checked extended paths
+            'write_file': False,  # Write to sandbox or firewall-checked extended paths
             'repo_list': True,
-            'repo_write_commit': False,  # Can write files
             'repo_delete': False,  # Can delete files/directories in sandbox
-            'drive_read': False,  # Direct file system access
             'drive_list': False,
-            'drive_write': False,
             'search_files': True,  # Safe - read-only search
             'search_in_file': True,  # Safe - read-only search
-            # Extended sandbox (v0.16.0+ - paths outside default sandbox)
-            'extended_path_read': False,  # Requires sandbox_extensions config
+            # Extended sandbox (v0.16.0+)
             'extended_path_list': False,
-            'extended_path_write': False,  # Requires read_write in sandbox_extensions
             'list_extended_sandbox_paths': True,  # Safe - just lists config
             # Memory/identity
             'update_scratchpad': True,
@@ -196,15 +192,34 @@ class ContextFirewall:
         }
 
         # Parse tool permissions from config, using defaults for missing tools
+        # Legacy tool name mapping (S31: 6 tools merged into read_file/write_file)
+        _legacy_tool_map = {
+            'read_file': ['repo_read', 'extended_path_read', 'drive_read'],
+            'write_file': ['repo_write_commit', 'extended_path_write', 'drive_write'],
+        }
         tools = dpc_agent.get('tools', {})
         self.dpc_agent_tools: Dict[str, bool] = {}
         for tool_name, default_enabled in all_tools_defaults.items():
-            self.dpc_agent_tools[tool_name] = tools.get(tool_name, default_enabled)
+            if tool_name in tools:
+                self.dpc_agent_tools[tool_name] = tools.get(tool_name, default_enabled)
+            elif tool_name in _legacy_tool_map:
+                # Check if any legacy name is present in config
+                legacy_val = None
+                for legacy_name in _legacy_tool_map[tool_name]:
+                    if legacy_name in tools:
+                        legacy_val = tools[legacy_name]
+                        break
+                self.dpc_agent_tools[tool_name] = legacy_val if legacy_val is not None else default_enabled
+            else:
+                self.dpc_agent_tools[tool_name] = default_enabled
 
         # Parse sandbox extensions (v0.16.0+ - custom paths outside default sandbox)
         sandbox_extensions = dpc_agent.get('sandbox_extensions', {})
         self.sandbox_read_only_paths: List[str] = sandbox_extensions.get('read_only', [])
         self.sandbox_read_write_paths: List[str] = sandbox_extensions.get('read_write', [])
+        # Extended path access gates (S31 — UI checkboxes)
+        self.extended_read_enabled: bool = sandbox_extensions.get('extended_read_enabled', True)
+        self.extended_write_enabled: bool = sandbox_extensions.get('extended_write_enabled', False)
 
         # Validate and normalize paths
         self.sandbox_read_only_paths = [self._normalize_path(p) for p in self.sandbox_read_only_paths if p]
@@ -590,9 +605,9 @@ class ContextFirewall:
                 'device_context_access': True,
                 'knowledge_access': 'read_only',
                 'tools': {
-                    'repo_read': True,
+                    'read_file': True,
+                    'write_file': False,
                     'repo_list': True,
-                    'repo_write_commit': False,
                     'repo_delete': False,
                     'update_scratchpad': True,
                     'browse_page': True,
@@ -746,13 +761,11 @@ class ContextFirewall:
                     },
                     "tools": {
                         "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
-                        "repo_read": True,
+                        "read_file": True,
+                        "write_file": False,
                         "repo_list": True,
-                        "repo_write_commit": False,
                         "repo_delete": False,
-                        "drive_read": False,
                         "drive_list": False,
-                        "drive_write": False,
                         "update_scratchpad": True,
                         "update_identity": True,
                         "chat_history": True,
@@ -1624,10 +1637,9 @@ class ContextFirewall:
                         else:
                             # All valid tool names
                             valid_tools = {
-                                # File operations
-                                'repo_read', 'repo_list', 'repo_write_commit', 'repo_delete',
-                                # Drive operations
-                                'drive_read', 'drive_list', 'drive_write',
+                                # File operations (unified S31)
+                                'read_file', 'write_file', 'repo_list', 'repo_delete',
+                                'drive_list',
                                 # Memory/identity
                                 'update_scratchpad', 'update_identity', 'chat_history',
                                 # Knowledge
@@ -1652,8 +1664,8 @@ class ContextFirewall:
                                 'approve_evolution_change', 'reject_evolution_change',
                                 # Search tools (v0.16.0+)
                                 'search_files', 'search_in_file',
-                                # Extended sandbox tools (v0.16.0+)
-                                'extended_path_read', 'extended_path_list', 'extended_path_write',
+                                # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file S31)
+                                'extended_path_list',
                                 'list_extended_sandbox_paths',
                                 # Messaging tools (v0.18.0+)
                                 'send_user_message',
@@ -1667,6 +1679,9 @@ class ContextFirewall:
                                 'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
                                 # Self-introspection tools
                                 'list_my_tools', 'list_my_skills',
+                                # Legacy aliases (S31 migration — accepted but mapped to read_file/write_file)
+                                'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
+                                'extended_path_read', 'extended_path_write',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):
@@ -1756,8 +1771,8 @@ class ContextFirewall:
                                 else:
                                     # Use the same valid tools as dpc_agent
                                     valid_tools = {
-                                        'repo_read', 'repo_list', 'repo_write_commit', 'repo_delete',
-                                        'drive_read', 'drive_list', 'drive_write',
+                                        'read_file', 'write_file', 'repo_list', 'repo_delete',
+                                        'drive_list',
                                         'update_scratchpad', 'update_identity', 'chat_history',
                                         'knowledge_read', 'knowledge_write', 'knowledge_list',
                                         'get_task_board',
@@ -1772,7 +1787,7 @@ class ContextFirewall:
                                         'pause_evolution', 'resume_evolution', 'get_evolution_stats',
                                         'approve_evolution_change', 'reject_evolution_change',
                                         'search_files', 'search_in_file',
-                                        'extended_path_read', 'extended_path_list', 'extended_path_write',
+                                        'extended_path_list',
                                         'list_extended_sandbox_paths',
                                         'send_user_message',
                                         'extract_knowledge', 'deduplicate_identity', 'get_proposal_result',
@@ -1783,6 +1798,9 @@ class ContextFirewall:
                                         'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
                                         # Self-introspection tools
                                         'list_my_tools', 'list_my_skills',
+                                        # Legacy aliases (S31 migration)
+                                        'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
+                                        'extended_path_read', 'extended_path_write',
                                     }
                                     for tool_name, tool_enabled in tools.items():
                                         if tool_name.startswith('_'):
