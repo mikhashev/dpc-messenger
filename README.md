@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Co-Evolution
 
-> **Status:** MVP Ready | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.21.0
+> **Status:** Alpha | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.21.0
 > **Platforms:** Windows | Linux | macOS
 
 ---
@@ -11,18 +11,26 @@ Most AI products think for you. D-PC helps you think better. Every conversation 
 
 Your team connects directly — no servers, no cloud, peer-to-peer. Humans and AI work in one space, each with their own memory, their own boundaries, their own contribution to shared knowledge. Knowledge commits are versioned and signed — like git, but for thoughts.
 
-<!-- TODO: Add screenshot or demo video -->
+<div align="center">
+<table>
+<tr>
+<td align="center"><b>AI Agent Chat</b><br><a href="docs/screenshots/agent_chat.png"><img src="docs/screenshots/agent_chat.png" width="300" alt="Agent Chat"></a></td>
+<td align="center"><b>Privacy Control</b><br><a href="docs/screenshots/firewall_access_control_panel.png"><img src="docs/screenshots/firewall_access_control_panel.png" width="300" alt="Firewall Access Control"></a></td>
+<td align="center"><b>Knowledge Commits</b><br><a href="docs/screenshots/knowledge_commit_proposal.png"><img src="docs/screenshots/knowledge_commit_proposal.png" width="300" alt="Knowledge Commit Proposal"></a></td>
+</tr>
+</table>
+</div>
 
 **What makes this different:**
 - **Amplifies, not replaces** — cognitive load for growth, not delegation
 - **Your data stays yours** — P2P, no servers, end-to-end encryption
 - **AI grows with you** — long-term memory, skills, evolution across sessions
 - **Knowledge you own** — git-like commits, signed, versioned, yours forever
-- **Works with any AI** — Ollama, ChatGPT, Claude, Z.AI, local or remote
+- **Works with any AI** — Ollama, Claude, Z.AI, and more — local or remote
 - **Privacy on your terms** — granular firewall, field-level control
 - **Works everywhere** — 6 connection strategies, LAN to internet
 
-**[Read the full vision →](./VISION.md)** | **[Roadmap →](./ROADMAP.md)** | **[Quick Start →](./docs/QUICK_START.md)** | **[Documentation →](./docs/)**
+**[Read the full vision →](./VISION.md)** | **[Roadmap →](./ROADMAP.md)** | **[Quick Start →](./QUICK_START.md)** | **[Documentation →](./docs/)**
 
 ---
 
