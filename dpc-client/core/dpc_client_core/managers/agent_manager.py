@@ -238,7 +238,7 @@ class DpcAgentManager:
             agent_root=self.agent_root,
             firewall=self.firewall,           # Firewall controls tool access
             firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
-            service=self.service,             # For tools that need service access (e.g. extract_knowledge)
+            service=self.service,             # For tools that need service access (e.g. knowledge_write firewall)
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
 
@@ -877,8 +877,7 @@ class DpcAgentManager:
             conversation_id: The conversation to get state for
 
         Returns:
-            Dict with tokens_used, tokens_limit, usage_percent, messages_count,
-            should_extract_knowledge
+            Dict with tokens_used, tokens_limit, usage_percent, messages_count
         """
         monitor = self._agent_monitors.get(conversation_id)
         if not monitor:
@@ -887,7 +886,6 @@ class DpcAgentManager:
                 "tokens_limit": 128000,
                 "usage_percent": 0,
                 "messages_count": 0,
-                "should_extract_knowledge": False,
             }
 
         usage = monitor.get_token_usage()
@@ -906,7 +904,6 @@ class DpcAgentManager:
             "context_usage_percent": round(context_estimated / token_limit, 4) if token_limit and context_estimated else 0,
             "tokens_limit": token_limit,
             "messages_count": len(monitor.message_history),
-            "should_extract_knowledge": monitor.should_suggest_extraction(),
         }
 
     def reset_conversation(self, conversation_id: str) -> bool:

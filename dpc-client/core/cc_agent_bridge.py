@@ -248,7 +248,7 @@ def extract_tool_calls(msg: dict) -> list:
         known_tools = [
             'search_files', 'grep', 'extended_path_read', 'extended_path_list',
             'repo_read', 'repo_write', 'git_log', 'git_diff', 'git_commit',
-            'execute_skill', 'extract_knowledge', 'save_to_memory',
+            'execute_skill', 'save_to_memory',
             'web_search', 'web_fetch', 'shell_exec'
         ]
         for tool in known_tools:

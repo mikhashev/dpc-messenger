@@ -86,9 +86,8 @@ class ConversationMonitor:
         self.full_conversation: List[Message] = []  # Never cleared (for manual "End Session" extraction)
         self.knowledge_score: float = 0.0
 
-        # Flag to prevent concurrent knowledge extraction (e.g., tool + end_session running simultaneously).
-        # Note: not a proper lock — just a best-effort guard since the background thread that runs
-        # extract_knowledge uses a separate event loop and can't share an asyncio.Lock.
+        # Flag to prevent concurrent knowledge extraction (e.g., auto-detect + end_session running simultaneously).
+        # Note: not a proper lock — just a best-effort guard.
         self._extracting: bool = False
 
         # Tracking
@@ -218,9 +217,8 @@ class ConversationMonitor:
         if not self.message_buffer:
             return None
 
-        # Best-effort guard against concurrent extractions (e.g., extract_knowledge tool
-        # background thread racing with end_session).  Not a hard lock because the tool
-        # runs asyncio.run() in a separate thread/event-loop.
+        # Best-effort guard against concurrent extractions (e.g., auto-detect racing
+        # with end_session).
         if self._extracting:
             logger.warning(
                 "generate_commit_proposal called while extraction already in progress for %s — skipping",

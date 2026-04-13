@@ -106,7 +106,6 @@ def _build_runtime_section(
             # One request stale. Matches "Context size: X%" in dpc-client.log.
             "context_estimated": context_estimated,
             "context_usage_percent": session_state.get("context_usage_percent", 0),
-            "should_extract_knowledge": session_state.get("should_extract_knowledge", False),
         }
 
     return "## Runtime context\n\n" + json.dumps(runtime_data, ensure_ascii=False, indent=2)

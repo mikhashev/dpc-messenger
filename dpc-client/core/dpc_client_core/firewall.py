@@ -129,7 +129,6 @@ class ContextFirewall:
             'knowledge_write': False,  # Controlled by knowledge_access
             'knowledge_list': True,
             'get_task_board': True,  # Read task history + learning progress
-            'extract_knowledge': True,  # Extract knowledge from conversation
             # Memento-Skills tools (v0.20.0+)
             'execute_skill': True,  # Load skill strategy by name
             # Inter-agent skill sharing tools (v0.21.0+)
@@ -1669,8 +1668,8 @@ class ContextFirewall:
                                 'list_extended_sandbox_paths',
                                 # Messaging tools (v0.18.0+)
                                 'send_user_message',
-                                # Knowledge extraction tools (v0.18.0+)
-                                'extract_knowledge', 'deduplicate_identity', 'get_proposal_result',
+                                # Knowledge tools (v0.18.0+)
+                                'deduplicate_identity',
                                 # Task type management tools (v0.18.0+)
                                 'register_task_type', 'list_task_types', 'unregister_task_type',
                                 # Memento-Skills tools (v0.20.0+)
@@ -1790,7 +1789,7 @@ class ContextFirewall:
                                         'extended_path_list',
                                         'list_extended_sandbox_paths',
                                         'send_user_message',
-                                        'extract_knowledge', 'deduplicate_identity', 'get_proposal_result',
+                                        'deduplicate_identity',
                                         'register_task_type', 'list_task_types', 'unregister_task_type',
                                         # Memento-Skills tools (v0.20.0+)
                                         'execute_skill',

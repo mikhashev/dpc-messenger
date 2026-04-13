@@ -106,7 +106,7 @@ class DpcAgent:
         self._firewall = firewall  # Firewall controls tool access
         self._provider_alias = provider_alias  # Store for LLM adapter
         self._firewall_profile = firewall_profile  # Store for tool permission lookups
-        self._service = service  # CoreService — used by tools that need it (e.g. extract_knowledge)
+        self._service = service  # CoreService — used by tools that need it (e.g. knowledge_write firewall)
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components
@@ -285,7 +285,7 @@ class DpcAgent:
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
             reply_telegram_chat_id=reply_telegram_chat_id,
             skill_store=self.skill_store,  # For execute_skill tool
-            dpc_service=self._service,  # For extract_knowledge commit proposal trigger
+            dpc_service=self._service,  # For knowledge_write firewall checks
         )
         # Store main event loop so sync tools running in executor threads can schedule
         # async calls back onto it via asyncio.run_coroutine_threadsafe.
