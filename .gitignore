@@ -1,5 +1,8 @@
 # --- D-PC Messenger .gitignore ---
 
+# 0. Internal AI/team docs (not for public repo)
+CLAUDE.md
+
 # 1. Environments & Dependencies
 # Never commit virtual environments or local dependency caches.
 .venv/

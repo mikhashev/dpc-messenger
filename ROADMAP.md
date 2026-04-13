@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Last Updated:** April 2026 | **Current Version:** 0.21.0 | **Current Phase:** Phase 2 - Team Collaboration + Agent Evolution
+> **Status:** Alpha | **Last Updated:** April 2026 | **Current Version:** 0.21.0 | **Current Phase:** Phase 2 - Team Collaboration + Agent Evolution
 
 ---
 
@@ -173,7 +173,7 @@ All LLMs run locally (Ollama, llama.cpp, etc). P2P network = mutual aid (share c
 
 ## Version History
 
-See [CHANGELOG.md](./CHANGELOG.md) for complete version history (v0.7.0 — v0.21.0, Nov 2025 — Apr 2026).
+See `git log` for complete version history.
 
 ---
 

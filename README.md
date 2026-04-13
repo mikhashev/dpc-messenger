@@ -101,8 +101,9 @@ Built with [aiortc](https://github.com/aiortc/aiortc), [Tauri](https://tauri.app
 
 ---
 
-## Support
+## Support & Contributing
 
+- **Contributing:** We're not accepting external contributions yet. Questions? [Open an issue](https://github.com/mikhashev/dpc-messenger/issues) or [start a discussion](https://github.com/mikhashev/dpc-messenger/discussions).
 - **Issues:** [GitHub Issues](https://github.com/mikhashev/dpc-messenger/issues) | **Discussions:** [GitHub Discussions](https://github.com/mikhashev/dpc-messenger/discussions) | **Email:** legoogmiha@gmail.com
 - **Business:** Interested in partnerships or investment? [legoogmiha@gmail.com](mailto:legoogmiha@gmail.com)
 - **Donate:** BTC `bc1qfev88vx2yem48hfj04udjgn3938afg5yvdr92x` | ETH `0xB019Ae32a98fd206881f691fFe021A2B2520Ce9d` | TON `UQDWa0-nCyNM1jghk1PBRcjBt4Lxvs86wflNGHHQtxfyx-8J`

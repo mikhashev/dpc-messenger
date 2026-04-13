@@ -229,12 +229,11 @@ The creators provide NO privacy law compliance guarantees.
 11. REPOSITORY ACCESS AND DISTRIBUTION
 ================================================================================
 
-NOTICE: This repository is PRIVATE and access is restricted.
+NOTICE: This repository is PUBLIC and open source.
 
-  ⚠️  Public access was revoked to limit legal exposure
+  ⚠️  Redistribution must comply with applicable licenses (see LICENSE.md)
   ⚠️  Do NOT redistribute without understanding legal obligations
-  ⚠️  Do NOT make this repository public without creator permission
-  ⚠️  Access may be further restricted or revoked at any time
+  ⚠️  Access and licensing terms may change at any time
 
 Unauthorized redistribution may:
   - Violate export control laws
@@ -320,9 +319,9 @@ IF YOU DO NOT AGREE, DO NOT USE THIS SOFTWARE.
 
 ================================================================================
 
-Document Version: 1.0
-Last Updated: 2025-11-14
-Applicable to: D-PC Messenger v0.6.1 and all versions
+Document Version: 1.1
+Last Updated: 2026-04-14
+Applicable to: D-PC Messenger v0.21.0 and all versions
 
 READ LICENSE.md AND README.md FOR ADDITIONAL IMPORTANT INFORMATION
 
