@@ -310,11 +310,16 @@ class KnowledgeService:
         proposal_id: str,
         vote: str,
         comment: str = None,
+        entries: list = None,
+        summary: str = None,
     ) -> Dict[str, Any]:
         """Cast vote on a knowledge commit proposal.
 
         UI Integration: Called when user clicks approve/reject/request_changes
         in KnowledgeCommitDialog component.
+
+        If entries/summary are provided (from UI edit mode), the proposal is
+        updated before the vote is cast so the commit reflects user edits.
         """
         try:
             is_ai_chat = False
@@ -339,6 +344,33 @@ class KnowledgeService:
                 async def _no_op_broadcast(message: Dict[str, Any]) -> None:
                     pass
                 broadcast_func = _no_op_broadcast
+
+            # Apply user edits from UI edit mode before casting the vote.
+            # This ensures the commit contains user-modified entries/summary.
+            if proposal_id in self.consensus_manager.sessions:
+                session = self.consensus_manager.sessions[proposal_id]
+                if entries is not None:
+                    from dpc_protocol.pcm_core import KnowledgeEntry as KE, KnowledgeSource as KS
+                    rebuilt = []
+                    for e in entries:
+                        if isinstance(e, dict):
+                            src = e.get("source", {})
+                            if isinstance(src, dict):
+                                src = KS(**{k: v for k, v in src.items() if k in KS.__dataclass_fields__})
+                            rebuilt.append(KE(
+                                content=e.get("content", ""),
+                                tags=e.get("tags", []),
+                                source=src,
+                                confidence=e.get("confidence", 1.0),
+                                alternative_viewpoints=e.get("alternative_viewpoints", []),
+                                edited_by=e.get("edited_by"),
+                                edited_at=e.get("edited_at"),
+                            ))
+                        else:
+                            rebuilt.append(e)
+                    session.proposal.entries = rebuilt
+                if summary is not None:
+                    session.proposal.summary = summary
 
             success = await self.consensus_manager.cast_vote(
                 proposal_id=proposal_id,

@@ -150,6 +150,7 @@
   let showProvidersEditor = $state(false);
   let showAgentBoard = $state(false);
   let showCommitDialog = $state(false);
+  let isExtractingKnowledge = $state(false);
   let showNewSessionDialog = $state(false);  // v0.11.3: mutual session approval
   let showNewGroupDialog = $state(false);  // v0.19.0: group chat creation
   // showGroupInviteDialog + pendingGroupInvite moved to GroupPanel.svelte (Step 7)
@@ -680,11 +681,13 @@
   }
 
   function handleCommitVote(event: CustomEvent) {
-    const { proposal_id, vote, comment } = event.detail;
+    const { proposal_id, vote, comment, entries, summary } = event.detail;
     sendCommand("vote_knowledge_commit", {
       proposal_id,
       vote,
-      comment
+      comment,
+      entries,
+      summary
     });
     showCommitDialog = false;
   }
@@ -714,19 +717,11 @@
   // handleModelDownload + handleModelDownloadCancel moved to ModelDownloadPanel.svelte (Step 8)
 
   async function handleEndSession(conversationId: string) {
-    // IMPORTANT: window.confirm() is non-blocking in Tauri WebView2 on Windows
-    // (returns immediately, shows dialog asynchronously). This caused the
-    // extraction to start BEFORE the user clicked OK. Use Tauri's `ask` plugin
-    // instead, which properly awaits the result. Falls back to confirm() in
-    // pure web builds where `ask` is not loaded.
-    const proceed = ask
-      ? await ask("Extract knowledge from this conversation?", { title: "dpc-messenger", kind: "info" })
-      : window.confirm("Extract knowledge from this conversation?");
-    if (proceed) {
-      sendCommand("end_conversation_session", {
-        conversation_id: conversationId
-      });
-    }
+    // No confirm dialog — user can Reject the proposal if extraction was accidental.
+    isExtractingKnowledge = true;
+    sendCommand("end_conversation_session", {
+      conversation_id: conversationId
+    });
   }
 
   async function toggleAutoKnowledgeDetection() {
@@ -950,6 +945,7 @@
             contextEstimated={effectiveTokenUsage.contextEstimated ?? 0}
             messageCount={$chatHistories.get(activeChatId)?.length ?? 0}
             bind:enableMarkdown
+            isExtracting={isExtractingKnowledge}
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
           />
@@ -1314,7 +1310,7 @@
 
 <!-- KnowledgeEventsPanel: commit/token/extraction/context hash events -->
 <KnowledgeEventsPanel
-  onOpenCommitDialog={() => { showCommitDialog = true; }}
+  onOpenCommitDialog={() => { showCommitDialog = true; isExtractingKnowledge = false; }}
   onUpdateTokenUsage={(convId, usage) => {
     tokenUsageMap = new Map(tokenUsageMap);
     tokenUsageMap.set(convId, usage);
@@ -1326,6 +1322,7 @@
   onShowExtractionFailure={(message) => {
     showExtractionFailure = true;
     extractionFailureMessage = message;
+    isExtractingKnowledge = false;
   }}
   onShowCommitResult={(message, type, result) => {
     commitResultMessage = message;

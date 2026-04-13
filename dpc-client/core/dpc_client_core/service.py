@@ -4052,10 +4052,14 @@ class CoreService:
         self,
         proposal_id: str,
         vote: str,
-        comment: str = None
+        comment: str = None,
+        entries: list = None,
+        summary: str = None,
     ) -> Dict[str, Any]:
         """Delegated to KnowledgeService."""
-        return await self.knowledge_service.vote_knowledge_commit(proposal_id, vote, comment)
+        return await self.knowledge_service.vote_knowledge_commit(
+            proposal_id, vote, comment, entries=entries, summary=summary
+        )
 
     async def _ai_agent_vote_on_proposal(self, proposal_id: str, ai_agent_node_id: str) -> None:
         """Delegated to KnowledgeService."""

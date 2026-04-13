@@ -16,6 +16,7 @@
     contextEstimated = 0,
     messageCount = 0,
     enableMarkdown = $bindable(true),
+    isExtracting = false,
     onNewSession,
     onEndSession
   }: {
@@ -31,6 +32,7 @@
     contextEstimated?: number;
     messageCount?: number;
     enableMarkdown?: boolean;
+    isExtracting?: boolean;
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
   } = $props();
@@ -140,11 +142,16 @@
   </button>
   <button
     class="btn-end-session"
+    class:extracting={isExtracting}
     onclick={() => onEndSession(showForChatId)}
-    disabled={endSessionDisabled}
-    title={endSessionTitle}
+    disabled={endSessionDisabled || isExtracting}
+    title={isExtracting ? "Extracting knowledge..." : endSessionTitle}
   >
-    Extract Knowledge
+    {#if isExtracting}
+      Extracting...
+    {:else}
+      Extract Knowledge
+    {/if}
   </button>
   {#if isAIChat}
     <button
@@ -294,6 +301,16 @@
     opacity: 0.6;
     transform: none;
     box-shadow: 0 2px 4px rgba(108, 117, 125, 0.2);
+  }
+
+  .btn-end-session.extracting {
+    background: #f0ad4e;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 1; }
   }
 
   .btn-markdown-toggle {
