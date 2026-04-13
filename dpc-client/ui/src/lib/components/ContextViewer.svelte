@@ -416,7 +416,7 @@
         {:else if selectedTab === 'knowledge'}
           <div class="section">
             <h3>Knowledge Topics</h3>
-            {#each Object.entries(context.knowledge) as [topicName, topic]}
+            {#each Object.entries(context.knowledge).reverse() as [topicName, topic]}
               <div class="topic-card">
                 <div class="topic-header">
                   <h4>{topicName.replace(/_/g, ' ')}</h4>
@@ -454,7 +454,7 @@
         {:else if selectedTab === 'history'}
           <div class="section">
             <h3>Commit History</h3>
-            {#each context.commit_history as commit}
+            {#each [...context.commit_history].reverse() as commit}
               <div class="commit-card">
                 <div class="commit-header">
                   <code class="commit-id">{commit.commit_id}</code>

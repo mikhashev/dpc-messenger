@@ -347,7 +347,9 @@ class KnowledgeService:
                 broadcast_func=broadcast_func,
             )
 
-            if success and is_ai_chat:
+            if success and is_ai_chat and not conversation_id.startswith("agent_"):
+                # ADR-009: agent chat = solo voting (Mike only).
+                # Agent is not a voter — same as "AI provider is not a voter" in local_ai.
                 logger.info(
                     "User voted on AI chat proposal %s, triggering AI evaluation",
                     proposal_id,
@@ -643,6 +645,14 @@ Respond in JSON format:
                         },
                     )
                     return
+
+                # ADR-009: agent chat = solo voting (Mike only, agent is not a voter).
+                # Remove agent from participants so consensus finalizes on Mike's vote alone.
+                if conversation_id.startswith("agent_"):
+                    user_node_id = self.p2p_manager.node_id
+                    proposal.participants = [
+                        p for p in proposal.participants if p == user_node_id
+                    ]
 
                 await self.local_api.broadcast_event(
                     "knowledge_commit_proposed",
