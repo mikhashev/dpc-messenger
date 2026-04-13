@@ -2,6 +2,7 @@
 
 # 0. Internal AI/team docs (not for public repo)
 CLAUDE.md
+archive/
 
 # 1. Environments & Dependencies
 # Never commit virtual environments or local dependency caches.
