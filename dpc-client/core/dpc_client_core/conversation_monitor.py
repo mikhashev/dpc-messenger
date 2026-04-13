@@ -417,10 +417,10 @@ Conversation:
       "tags": ["task_assignment", "deadline", "status"],
       "confidence": 0.9,
       "sources": ["participant_name"],
-      "reasoning": "Direct statement or agreed commitment"
+      "reasoning": "Direct statement or agreed commitment",
+      "alternatives": []
     }
   ],
-  "alternatives": [],
   "devil_advocate": "Any risks or unclear requirements",
   "flagged_assumptions": ["Implicit assumptions about scope or timeline"]
 }"""
@@ -474,10 +474,10 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
       "tags": ["architecture", "implementation", "technical_decision"],
       "confidence": 0.8,
       "sources": ["participant_name"],
-      "reasoning": "Technical rationale or evidence"
+      "reasoning": "Technical rationale or evidence",
+      "alternatives": ["Alternative technical approach specific to THIS entry"]
     }
   ],
-  "alternatives": ["Alternative technical approaches discussed"],
   "devil_advocate": "Technical risks or tradeoffs",
   "flagged_assumptions": ["Technical assumptions to validate"]
 }"""
@@ -521,10 +521,10 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
       "tags": ["decision", "option_evaluation", "consensus"],
       "confidence": 0.85,
       "sources": ["participant_name"],
-      "reasoning": "Evidence or criteria used for decision"
+      "reasoning": "Evidence or criteria used for decision",
+      "alternatives": ["Options that were NOT chosen and why, specific to THIS entry"]
     }
   ],
-  "alternatives": ["Options that were NOT chosen and why"],
   "devil_advocate": "Counter-arguments or dissenting views",
   "flagged_assumptions": ["Assumptions underlying the decision"]
 }"""
@@ -575,19 +575,19 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
       "confidence": 0.8,
       "cultural_context": "Universal",
       "sources": ["participant_name"],
-      "reasoning": "Why notable"
+      "reasoning": "Why notable",
+      "alternatives": ["Alternative perspective specific to THIS entry"]
     }
   ],
   "cultural_perspectives": ["Western individualistic", "Eastern collective"],
-  "alternatives": ["Alternative perspective 1"],
   "devil_advocate": "Critical analysis",
   "flagged_assumptions": ["Assumption if any"]
 }"""
             rules_section = """RULES:
 - Rate confidence 0.0-1.0 for each claim
 - Mark cultural_context as "Universal" or "Context: [specific culture]"
-- Include devil's advocate critique
-- List alternative viewpoints
+- Include devil's advocate critique (one per commit)
+- List alternative viewpoints PER ENTRY (each entry gets its own unique alternatives)
 - Flag cultural assumptions"""
         else:
             json_format = """{
@@ -599,17 +599,17 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
       "tags": ["tag1", "tag2"],
       "confidence": 0.8,
       "sources": ["participant_name"],
-      "reasoning": "Why notable"
+      "reasoning": "Why notable",
+      "alternatives": ["Alternative perspective specific to THIS entry"]
     }
   ],
-  "alternatives": ["Alternative perspective 1"],
-  "devil_advocate": "Critical analysis",
+  "devil_advocate": "Critical analysis of the overall extraction",
   "flagged_assumptions": ["Assumption if any"]
 }"""
             rules_section = """RULES:
 - Rate confidence 0.0-1.0 for each claim
-- Include devil's advocate critique
-- List alternative viewpoints
+- Include devil's advocate critique (one per commit, not per entry)
+- List alternative viewpoints PER ENTRY (each entry gets its own unique alternatives)
 - Flag problematic assumptions"""
 
         return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
@@ -1140,7 +1140,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     confidence=entry_data.get('confidence', 1.0),
                     cultural_specific=(cultural_context != 'Universal') if cultural_perspectives_enabled else False,
                     requires_context=[cultural_context] if (cultural_perspectives_enabled and cultural_context != 'Universal') else [],
-                    alternative_viewpoints=result.get('alternatives', [])
+                    # Per-entry alternatives (S34 fix). Fallback to commit-level for backward compat.
+                    alternative_viewpoints=entry_data.get('alternatives', []) or result.get('alternatives', [])
                 )
                 entries.append(entry)
 
