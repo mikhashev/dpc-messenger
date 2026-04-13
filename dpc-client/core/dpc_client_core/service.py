@@ -3932,7 +3932,8 @@ class CoreService:
                     "sessions": [],
                 }
 
-            archives = sorted(archive_dir.glob("*_session.json"))
+            # ADR-008: rglob to find sessions in YYYY/MM subdirs + flat (backward compat)
+            archives = sorted(archive_dir.rglob("*_session.json"))
             sessions = []
             for p in archives:
                 try:
@@ -3977,7 +3978,8 @@ class CoreService:
             if not archive_dir.exists():
                 return {"status": "success", "deleted_count": 0, "remaining": 0}
 
-            archives = sorted(archive_dir.glob("*_session.json"))
+            # ADR-008: rglob to find sessions in YYYY/MM subdirs + flat (backward compat)
+            archives = sorted(archive_dir.rglob("*_session.json"))
             keep_latest = max(0, int(keep_latest))
             to_delete = archives[: max(0, len(archives) - keep_latest)]
 
@@ -3986,6 +3988,11 @@ class CoreService:
                 try:
                     p.unlink()
                     deleted += 1
+                    # Clean up empty YYYY/MM dirs after deletion
+                    try:
+                        p.parent.rmdir()  # only removes if empty
+                    except OSError:
+                        pass
                 except Exception as e:
                     logger.warning("Failed to delete archive %s: %s", p.name, e)
 

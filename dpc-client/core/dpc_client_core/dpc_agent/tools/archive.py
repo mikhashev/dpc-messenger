@@ -52,7 +52,8 @@ def read_session_archive(ctx: ToolContext, last_n: int = 3) -> str:
     if not archive_dir.exists():
         return json.dumps({"error": "No archive directory found", "sessions": []})
 
-    archive_files = sorted(archive_dir.glob("*_session.json"))
+    # ADR-008: rglob to find sessions in YYYY/MM subdirs + flat (backward compat)
+    archive_files = sorted(archive_dir.rglob("*_session.json"))
     if not archive_files:
         return json.dumps({"error": "No archived sessions found", "sessions": []})
 
@@ -132,10 +133,16 @@ def read_session_detail(ctx: ToolContext, filename: str, max_messages: int = 50)
     """
     max_messages = min(max(1, max_messages), 200)
     archive_dir = _get_archive_dir(ctx)
-    archive_path = archive_dir / filename
 
+    # ADR-008: try direct path first (flat layout), then rglob (YYYY/MM layout)
+    archive_path = archive_dir / filename
     if not archive_path.exists():
-        return json.dumps({"error": f"Archive not found: {filename}"})
+        # Search in YYYY/MM subdirectories
+        matches = list(archive_dir.rglob(filename))
+        if matches:
+            archive_path = matches[0]
+        else:
+            return json.dumps({"error": f"Archive not found: {filename}"})
 
     # Security: ensure the file is within archive directory
     try:

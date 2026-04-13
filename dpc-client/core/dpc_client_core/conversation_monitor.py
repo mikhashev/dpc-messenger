@@ -1500,10 +1500,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             return 0
 
         try:
-            archive_dir = path.parent / "archive"
+            now = datetime.now(timezone.utc)
+            ts = now.strftime("%Y-%m-%dT%H-%M-%S")
+            # ADR-008: YYYY/MM subdirectory layout for scalable archive storage
+            archive_base = path.parent / "archive"
+            archive_dir = archive_base / now.strftime("%Y") / now.strftime("%m")
             archive_dir.mkdir(parents=True, exist_ok=True)
 
-            ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
             archive_path = archive_dir / f"{ts}_{reason}_session.json"
 
             # Read current file content and inject archive metadata
@@ -1520,14 +1523,19 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             # Generate incremental session digest (derived data — can be rebuilt from archives)
             self._generate_session_digest(data, archive_path)
 
-            # Prune oldest archives beyond max_sessions
-            archives = sorted(archive_dir.glob("*_session.json"))
+            # Prune oldest archives beyond max_sessions (rglob for YYYY/MM layout)
+            archives = sorted(archive_base.rglob("*_session.json"))
             if len(archives) > max_sessions:
                 for old in archives[: len(archives) - max_sessions]:
                     old.unlink()
                     logger.debug(f"Pruned old archive: {old.name}")
+                    # Clean up empty YYYY/MM dirs after pruning
+                    try:
+                        old.parent.rmdir()  # only removes if empty
+                    except OSError:
+                        pass
 
-            return len(sorted(archive_dir.glob("*_session.json")))
+            return len(list(archive_base.rglob("*_session.json")))
 
         except Exception as e:
             logger.warning(f"Failed to archive session for {self.conversation_id}: {e}")
@@ -1609,7 +1617,10 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             }
 
             # Write to digest.jsonl in the conversation directory (next to archive/)
-            digest_path = archive_path.parent.parent / "digest.jsonl"
+            # Use explicit conversation dir instead of parent chain (ADR-008: archive_path
+            # is now inside YYYY/MM subdirs, so parent.parent would be wrong)
+            conversation_dir = self._get_history_path().parent
+            digest_path = conversation_dir / "digest.jsonl"
             with open(digest_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(digest_entry, ensure_ascii=False) + "\n")
 
