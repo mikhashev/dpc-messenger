@@ -13,7 +13,12 @@ end-user setup lives in [`../QUICK_START.md`](../QUICK_START.md).
 - Python 3.12+ (see [`core/pyproject.toml`](core/pyproject.toml) for the exact constraint)
 - Node.js 18+ with npm
 - Rust — install via [rustup.rs](https://rustup.rs/)
-- *(optional)* [Ollama](https://ollama.ai/) for local AI
+
+AI provider is configured at runtime in `~/.dpc/providers.json`, not at
+install time — see [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md).
+Options include remote providers (Anthropic, OpenAI, Z.AI, Gemini,
+GigaChat, GitHub Models) and [Ollama](https://ollama.ai/) for local
+models.
 
 ---
 
@@ -42,7 +47,8 @@ npm install
 npm run tauri dev
 ```
 
-The frontend talks to the backend over WebSocket at `127.0.0.1:9999`.
+The frontend talks to the backend over WebSocket at `127.0.0.1:9999`
+by default (override in `~/.dpc/config.ini` under `[api] port`).
 
 ---
 
