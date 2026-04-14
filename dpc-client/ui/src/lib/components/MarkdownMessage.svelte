@@ -8,10 +8,17 @@
   }
 
   let { content }: Props = $props();
+
+  // Turn bare [N] message refs into clickable markdown links pointing to #msg-N.
+  // The negative lookahead (?!\() leaves existing [text](url) markdown links alone.
+  // Styling of the resulting <a> inherits .msg-ref from ChatMessageList (global).
+  const withMessageRefs = $derived(
+    content.replace(/\[(\d+)\](?!\()/g, '[[$1]](#msg-$1)')
+  );
 </script>
 
 <div class="markdown-content">
-  <SvelteMarkdown source={content} />
+  <SvelteMarkdown source={withMessageRefs} />
 </div>
 
 <style>

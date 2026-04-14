@@ -66,10 +66,16 @@
       .replace(/'/g, '&#039;');
   }
 
+  // Turn [42] message refs into clickable anchors pointing to #msg-42.
+  // Input MUST already be HTML-escaped — we don't re-escape the N digits.
+  function linkifyMessageRefs(escapedHtml: string): string {
+    return escapedHtml.replace(/\[(\d+)\]/g, '<a class="msg-ref" href="#msg-$1">[$1]</a>');
+  }
+
   // Highlight @-mentions in message text
   function highlightMentions(text: string, mentions: Mention[] | undefined): string {
     if (!mentions || mentions.length === 0) {
-      return escapeHtml(text);
+      return linkifyMessageRefs(escapeHtml(text));
     }
 
     // Sort mentions by start position
@@ -80,14 +86,14 @@
 
     for (const mention of sortedMentions) {
       // Add text before this mention
-      result += escapeHtml(text.slice(lastEnd, mention.start));
+      result += linkifyMessageRefs(escapeHtml(text.slice(lastEnd, mention.start)));
       // Add highlighted mention
       result += `<span class="mention" data-node-id="${escapeHtml(mention.node_id)}">@${escapeHtml(mention.name)}</span>`;
       lastEnd = mention.end;
     }
 
     // Add remaining text after last mention
-    result += escapeHtml(text.slice(lastEnd));
+    result += linkifyMessageRefs(escapeHtml(text.slice(lastEnd)));
 
     return result;
   }
@@ -96,7 +102,7 @@
 <div class="chat-window" bind:this={chatWindowElement}>
   {#if messages.length > 0}
     {#each messages as msg, i (msg.id)}
-      <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'} class:error={msg.isError}>
+      <div id="msg-{i}" class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'} class:error={msg.isError}>
         <div class="message-header">
           <strong>
             {#if msg.sender === 'user'}
@@ -135,7 +141,7 @@
             <!-- Group chat message with @-mentions -->
             <p>{@html highlightMentions(msg.text, msg.mentions)}</p>
           {:else}
-            <p>{msg.text}</p>
+            <p>{@html linkifyMessageRefs(escapeHtml(msg.text))}</p>
           {/if}
         {/if}
 
@@ -249,6 +255,7 @@
     overflow-x: hidden; /* Prevent horizontal overflow */
     background: #f9f9f9;
     max-width: 100%; /* Constrain to parent width */
+    scroll-behavior: smooth; /* Smooth scroll when [N] refs are clicked */
   }
 
   .empty-chat {
@@ -328,6 +335,22 @@
     color: #aaa;
     margin-right: 0.25rem;
     user-select: all;
+  }
+
+  :global(.msg-ref) {
+    color: #0366d6;
+    text-decoration: none;
+    font-variant-numeric: tabular-nums;
+  }
+
+  :global(.msg-ref:hover) {
+    text-decoration: underline;
+  }
+
+  /* Brief target highlight when user clicks a [N] ref */
+  .message:target {
+    background: rgba(3, 102, 214, 0.08);
+    transition: background 1.5s ease-out;
   }
 
   .message p {
