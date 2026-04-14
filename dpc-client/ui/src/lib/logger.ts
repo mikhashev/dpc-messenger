@@ -39,6 +39,11 @@ export function setLogSender(fn: SendFn) {
     }
 }
 
+/** Called by coreService when the WebSocket closes. Re-enables buffering until reconnect. */
+export function clearLogSender() {
+    _sendFn = null;
+}
+
 // ── Global console intercept ──────────────────────────────────────────────────
 // Wraps console.log/warn/error/debug so ALL existing calls are captured without
 // any code changes.  The originals are still called so devtools work normally.

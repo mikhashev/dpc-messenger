@@ -96,6 +96,29 @@ class GroupTextHandler(MessageHandler):
             for mid in to_remove:
                 self.service._processed_message_ids.discard(mid)
 
+        # Relay to group members the sender may not be directly connected to.
+        # In a star topology (B↔A↔C, but B↛C), A must relay B's message to C.
+        # Dedup key already set above prevents relay loops.
+        group = self.service.group_manager.get_group(group_id)
+        if group:
+            relay_msg = {"command": "GROUP_TEXT", "payload": payload}
+            for member_id in group.members:
+                if member_id == self.service.p2p_manager.node_id:
+                    continue  # Skip self
+                if member_id == sender_node_id:
+                    continue  # Skip original sender
+                if member_id in self.service.p2p_manager.peers:
+                    try:
+                        await self.service.p2p_manager.send_message_to_peer(member_id, relay_msg)
+                        self.logger.debug(
+                            "Relayed GROUP_TEXT %s from %s to %s",
+                            message_id[:8], sender_node_id[:20], member_id[:20]
+                        )
+                    except Exception as e:
+                        self.logger.error(
+                            "Failed to relay group message to %s: %s", member_id[:20], e
+                        )
+
         # Use sender-provided timestamp if available (v0.20.0)
         timestamp = payload.get("timestamp", datetime.now(timezone.utc).isoformat())
 
@@ -138,7 +161,66 @@ class GroupTextHandler(MessageHandler):
         except Exception as e:
             self.logger.error("Error in group conversation monitoring: %s", e, exc_info=True)
 
+        # Detect @Ark / @CC mentions and route to agents
+        await self._handle_agent_mentions(group_id, payload, text, sender_name, sender_node_id)
+
         return None
+
+    async def _handle_agent_mentions(
+        self,
+        group_id: str,
+        payload: Dict[str, Any],
+        text: str,
+        sender_name: str,
+        sender_node_id: str,
+    ) -> None:
+        """Detect @agent and @CC mentions and route to respective agents."""
+        import re
+
+        # Anti-loop guard: is_agent is set by send_group_agent_message() server-side only.
+        # sender_name alone is insufficient — a user could rename themselves to match agent names.
+        if payload.get("is_agent", False):
+            return
+
+        mentions = re.findall(r'@(\w+)\b', text, re.IGNORECASE)
+        mention_names = {m.lower() for m in mentions}
+
+        # Check if any mention matches agent name or agent_id
+        agent_id = self.service._get_default_agent_id()
+        agent_name = self.service._get_agent_display_name(agent_id).lower()
+        if agent_name in mention_names or agent_id in mention_names:
+            await self._invoke_agent(group_id, text, sender_name)
+
+        cc_name = self.service.get_cc_display_name().lower()
+        if cc_name in mention_names:
+            # Broadcast event — the MCP server bridge subscribes and queues it
+            await self.service.local_api.broadcast_event("cc_group_mention", {
+                "group_id": group_id,
+                "text": text,
+                "sender_name": sender_name,
+                "sender_node_id": sender_node_id,
+            })
+
+    async def _invoke_agent(self, group_id: str, text: str, sender_name: str) -> None:
+        """Invoke the default agent and post response to the group."""
+        try:
+            dpc_provider = self.service.llm_manager.providers.get("dpc_agent")
+            if not dpc_provider:
+                self.logger.warning("_invoke_agent: dpc_agent provider not found")
+                return
+            agent_id = self.service._get_default_agent_id()
+            manager = dpc_provider.get_manager(agent_id)
+            prompt = f"[Group chat — {sender_name} says]: {text}"
+            response = await manager.process_message(
+                message=prompt,
+                conversation_id=group_id,
+                sender_name=sender_name,
+            )
+            if response:
+                agent_display = self.service._get_agent_display_name(agent_id)
+                await self.service.send_group_agent_message(group_id, agent_display, response)
+        except Exception as e:
+            self.logger.error("Agent group response failed: %s", e, exc_info=True)
 
 
 class GroupLeaveHandler(MessageHandler):
@@ -385,6 +467,7 @@ class GroupHistoryStatusHandler(MessageHandler):
         group_id = payload.get("group_id")
         remote_hash = payload.get("history_hash", "")
         remote_count = payload.get("message_count", 0)
+        is_reply = payload.get("is_reply", False)
 
         self.logger.debug(
             "Received GROUP_HISTORY_STATUS from %s for group %s (hash=%s, count=%d)",
@@ -398,15 +481,18 @@ class GroupHistoryStatusHandler(MessageHandler):
         local_hash = monitor.compute_history_hash() if monitor and hasattr(monitor, "compute_history_hash") else "sha256:empty"
         local_count = len(monitor.message_history) if monitor else 0
 
-        # Send our status back
-        await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-            "command": "GROUP_HISTORY_STATUS",
-            "payload": {
-                "group_id": group_id,
-                "history_hash": local_hash,
-                "message_count": local_count,
-            }
-        })
+        # Reply only to the initiating STATUS (not to replies), to prevent infinite ping-pong.
+        # A sends STATUS → B replies once with is_reply=True → A does NOT reply again.
+        if not is_reply:
+            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
+                "command": "GROUP_HISTORY_STATUS",
+                "payload": {
+                    "group_id": group_id,
+                    "history_hash": local_hash,
+                    "message_count": local_count,
+                    "is_reply": True,
+                }
+            })
 
         # If hashes differ and peer has more messages, request history
         if remote_hash != local_hash and remote_count > local_count:
@@ -451,14 +537,6 @@ class GroupDeletedStatusHandler(MessageHandler):
             "Received GROUP_DELETED_STATUS from %s with %d deleted groups",
             sender_node_id[:20], len(deleted_groups)
         )
-
-        # Send our deleted groups back
-        our_deleted = self.service.group_manager.get_deleted_group_ids()
-        if our_deleted:
-            await self.service.p2p_manager.send_message_to_peer(sender_node_id, {
-                "command": "GROUP_DELETED_STATUS",
-                "payload": {"deleted_groups": our_deleted}
-            })
 
         # Check if we have any of the deleted groups
         removed_count = 0

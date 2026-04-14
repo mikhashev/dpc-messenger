@@ -63,7 +63,9 @@ class Settings:
         self._config['p2p'] = {
             'listen_port': '8888',
             'listen_host': 'dual',  # dual-stack (IPv4 + IPv6), can be "0.0.0.0" (IPv4 only) or "::" (IPv6 only)
-            'connection_timeout': '30'  # Connection establishment timeout in seconds
+            'connection_timeout': '30',  # Connection establishment timeout in seconds
+            'auto_connect_node_groups': 'true',  # Auto-connect to firewall node group members on startup
+            'auto_connect_delay': '5'  # Seconds to wait before attempting (let DHT bootstrap)
         }
 
         self._config['api'] = {
@@ -371,6 +373,15 @@ class Settings:
     def get_p2p_connection_timeout(self) -> float:
         """Get the P2P connection establishment timeout in seconds."""
         return float(self.get('p2p', 'connection_timeout', '60'))
+
+    def get_p2p_auto_connect_node_groups(self) -> bool:
+        """Auto-connect to all node IDs in firewall node groups on startup."""
+        value = self.get('p2p', 'auto_connect_node_groups', 'true')
+        return value.lower() in ('true', '1', 'yes')
+
+    def get_p2p_auto_connect_delay(self) -> float:
+        """Seconds to wait before auto-connecting to node group peers (allows DHT bootstrap)."""
+        return float(self.get('p2p', 'auto_connect_delay', '5'))
 
     def get_api_port(self) -> int:
         """Get the local API server port."""

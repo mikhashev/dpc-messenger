@@ -97,10 +97,9 @@ class IPv6DirectStrategy(ConnectionStrategy):
             else:
                 raise ValueError(f"Invalid IPv6 address format: {ipv6_info.address}")
 
-            # Use existing P2P manager's connect_to_peer method
-            # Note: This assumes P2P manager supports IPv6 (it does via dual-stack)
+            # Note: P2P manager supports IPv6 via dual-stack listener
             connection = await asyncio.wait_for(
-                orchestrator.p2p_manager.connect_to_peer(host, port, node_id),
+                orchestrator.p2p_manager.connect_directly(host, port, node_id),
                 timeout=self.timeout
             )
 

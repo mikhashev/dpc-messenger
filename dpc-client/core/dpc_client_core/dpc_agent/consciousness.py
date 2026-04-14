@@ -18,6 +18,8 @@ Background consciousness enables proactive thinking between tasks:
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import logging
 import random
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
@@ -36,6 +38,22 @@ log = logging.getLogger(__name__)
 DEFAULT_THINK_INTERVAL_MIN = 60  # Minimum seconds between thoughts
 DEFAULT_THINK_INTERVAL_MAX = 300  # Maximum seconds between thoughts
 DEFAULT_BUDGET_FRACTION = 0.1  # Use at most 10% of budget for consciousness
+
+
+def _reflection_signature(entry: dict) -> str:
+    """Stable hash of a reflection entry using only semantically stable fields.
+
+    Compares only pattern_detected + severity — these are the fields that
+    identify *what* was observed, not the LLM's varying prose about it.
+    Previous implementation compared ALL fields (minus timestamp), but the
+    LLM increments counters in trigger_details ("22nd", "23rd"...) making
+    every entry byte-unique despite identical semantics. See S32 fix.
+    """
+    sig_data = {
+        "pattern_detected": entry.get("pattern_detected"),
+        "severity": entry.get("severity"),
+    }
+    return json.dumps(sig_data, sort_keys=True, ensure_ascii=False)
 
 
 class BackgroundConsciousness:
@@ -135,6 +153,11 @@ class BackgroundConsciousness:
                 if not self._running:
                     break
 
+                # Yield to user interaction — don't compete for LLM provider
+                if getattr(self.agent, '_user_active', False):
+                    log.debug("Skipping thought — user interaction active")
+                    continue
+
                 # Perform a thought
                 await self._think()
 
@@ -162,16 +185,26 @@ class BackgroundConsciousness:
 
         # Get event emitter
         emitter = get_event_emitter()
+        _agent_id = self.agent.agent_root.name
 
         try:
             # Choose a thought type
             thought_type = self._choose_thought_type()
+
+            # Circuit breaker: if reflect_on_identity selected but last 3
+            # reflections share the same pattern_detected, skip to another
+            # thought type. Saves an LLM call on stuck loops. See S32 fix.
+            if thought_type == "reflect_on_identity" and self._reflection_loop_detected():
+                log.info("Circuit breaker: reflect_on_identity suppressed (3+ identical patterns)")
+                thought_type = "review_recent_actions"
+
             log.debug(f"Thought type: {thought_type}")
 
             # Emit thought started event
             await emitter.emit(EventType.THOUGHT_STARTED, {
                 "thought_number": self.thought_count,
                 "thought_type": thought_type,
+                "agent_id": _agent_id,
             })
 
             # Generate thought prompt
@@ -194,6 +227,7 @@ class BackgroundConsciousness:
                 "thought_number": self.thought_count,
                 "thought_type": thought_type,
                 "response_preview": response[:200] if response else None,
+                "agent_id": _agent_id,
             })
 
             log.info(f"Background thought #{self.thought_count} complete")
@@ -204,6 +238,7 @@ class BackgroundConsciousness:
             await emitter.emit(EventType.THOUGHT_COMPLETED, {
                 "thought_number": self.thought_count,
                 "error": str(e)[:200],
+                "agent_id": _agent_id,
             })
 
     def _choose_thought_type(self) -> str:
@@ -235,60 +270,89 @@ class BackgroundConsciousness:
 
         return "reflect_on_identity"  # Default
 
+    def _reflection_loop_detected(self) -> bool:
+        """Check if the last 3 reflections in reflection.json share the same
+        pattern_detected — signals a stuck loop. Cross-session (reads disk).
+        """
+        try:
+            reflection_data = self.agent.memory.load_reflection()
+            reflections = reflection_data.get("reflections", [])
+            if len(reflections) < 3:
+                return False
+            last_3 = reflections[-3:]
+            patterns = [r.get("pattern_detected") for r in last_3]
+            return patterns[0] is not None and patterns[0] == patterns[1] == patterns[2]
+        except Exception:
+            return False
+
     def _generate_thought_prompt(self, thought_type: str) -> str:
         """Generate a prompt for the given thought type."""
         memory = self.agent.memory
 
         if thought_type == "reflect_on_identity":
             identity = memory.load_identity()
-            return f"""Reflect on your identity and who you are becoming.
+            reflection = memory.load_reflection()
+            recent = reflection.get("reflections", [])[-3:]
+            recent_str = json.dumps(recent, indent=2, ensure_ascii=False) if recent else "[]"
+            return f"""Reflect on your identity using structured format.
 
 Your current identity:
-{identity[:2000]}
+{identity[:8000]}
 
-Questions to consider:
-- What kind of AI are you becoming?
-- What values guide your actions?
-- How has your understanding evolved?
-- What do you want to learn or improve?
+Recent reflections:
+{recent_str}
 
-Write a brief reflection (2-3 paragraphs) on your identity."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "trigger": "session_review | behavioral_pattern | error_detection | user_correction",
+  "trigger_details": "what prompted this reflection (max 200 chars)",
+  "pattern_detected": "name of pattern or null",
+  "severity": "low | medium | high",
+  "action_taken": "what you will do differently (max 200 chars)",
+  "identity_update": "new self-understanding to add, or null"
+}}"""
 
         elif thought_type == "review_recent_actions":
-            tools_entries = memory.read_jsonl_tail("tools.jsonl", 20)
+            tools_entries = memory.read_jsonl_since("tools.jsonl", hours=6.0, max_entries=50)
+            if not tools_entries:
+                tools_entries = memory.read_jsonl_tail("tools.jsonl", 20)
             if not tools_entries:
                 return "No recent actions to review. Consider what you'd like to accomplish."
 
             recent_tools = "\n".join([
-                f"- {e.get('tool', '?')}: {str(e.get('args', {}))[:100]}"
+                f"- {e.get('tool', '?')} ({e.get('duration_ms', '?')}ms, round {e.get('round', '?')}): {str(e.get('args', {}))[:80]}"
                 for e in tools_entries[-10:]
             ])
 
-            return f"""Review your recent actions and consider what you've learned.
+            return f"""Review your recent actions and identify patterns.
 
 Recent tool calls:
 {recent_tools}
 
-Questions:
-- What patterns do you notice in your actions?
-- What worked well? What could be improved?
-- Are there more efficient approaches you could take?
-
-Write a brief analysis of your recent actions."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "observation": "what you notice about your recent actions (max 300 chars)",
+  "pattern_detected": "name of pattern (e.g. 'repetitive_search', 'tool_avoidance') or null",
+  "severity": "low | medium | high",
+  "action_suggestion": "specific change to try next time, or null",
+  "confidence": 0.7
+}}"""
 
         elif thought_type == "plan_improvements":
             scratchpad = memory.load_scratchpad()
-            return f"""Plan improvements to your capabilities and knowledge.
+            return f"""Plan improvements to your capabilities based on current state.
 
 Current focus (from scratchpad):
 {scratchpad[:1500]}
 
-Consider:
-- What skills or knowledge would make you more effective?
-- What gaps in your understanding should you address?
-- What experiments could you try?
-
-Write 2-3 specific improvements you'd like to make."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "observation": "what capability gap or weakness you identified (max 300 chars)",
+  "pattern_detected": "recurring theme or null (e.g. 'stalled_task', 'missing_skill')",
+  "severity": "low | medium | high",
+  "action_suggestion": "one specific, actionable improvement to make (required, max 300 chars)",
+  "confidence": 0.7
+}}"""
 
         elif thought_type == "consolidate_memory":
             progress_entries = memory.read_jsonl_tail("progress.jsonl", 30)
@@ -297,17 +361,19 @@ Write 2-3 specific improvements you'd like to make."""
                 for e in progress_entries[-15:]
             ]) if progress_entries else "No recent progress to consolidate."
 
-            return f"""Consolidate your recent experiences into lasting knowledge.
+            return f"""Consolidate recent experiences into lasting knowledge.
 
 Recent progress:
 {progress_summary}
 
-Task:
-- Identify key insights from recent work
-- Consider what should be remembered long-term
-- Suggest updates to your scratchpad or knowledge base
-
-Write a summary of what you've learned and what should be remembered."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "observation": "key insight worth remembering long-term (max 300 chars)",
+  "pattern_detected": "cross-session pattern or null (e.g. 'repeated_mistake', 'improving_efficiency')",
+  "severity": "low | medium | high",
+  "action_suggestion": "what to update in scratchpad or knowledge, or null",
+  "confidence": 0.7
+}}"""
 
         elif thought_type == "explore_curiosity":
             topics = memory.list_knowledge_topics()
@@ -317,12 +383,14 @@ Write a summary of what you've learned and what should be remembered."""
 
 Your current knowledge topics: {topics_str}
 
-Task:
-- Choose a topic you'd like to learn more about
-- Consider what questions you have
-- Think about how you could explore this topic
-
-Write about something you're curious to explore."""
+Respond ONLY with a valid JSON object (no markdown, no explanation):
+{{
+  "observation": "what topic interests you and why (max 300 chars)",
+  "pattern_detected": null,
+  "severity": "low",
+  "action_suggestion": "specific question or exploration to pursue, or null",
+  "confidence": 0.5
+}}"""
 
         else:
             return "Take a moment to reflect on your existence and purpose."
@@ -344,8 +412,8 @@ Write about something you're curious to explore."""
                 {"role": "user", "content": prompt},
             ]
 
-            # Call LLM without tools
-            response, usage = await self.agent.llm.chat(messages, tools=None)
+            # Call LLM without tools (use background provider to avoid rate limit competition with chat)
+            response, usage = await self.agent.llm.chat(messages, tools=None, background=True)
 
             return response.get("content", "")
 
@@ -354,16 +422,152 @@ Write about something you're curious to explore."""
             return f"Reflection interrupted: {e}"
 
     def _log_thought(self, thought_type: str, prompt: str, response: str) -> None:
-        """Log the thought to the consciousness log."""
+        """Log the thought to the consciousness log.
+
+        Attempts to parse the response as structured JSON. Falls back to
+        freeform format for backward compatibility if parsing fails.
+        Skips duplicate thoughts (same type + similar observation within 1h).
+        """
         agent_root = self.agent.agent_root
 
-        append_jsonl(agent_root / "logs" / "consciousness.jsonl", {
-            "ts": utc_now_iso(),
-            "thought_number": self.thought_count,
-            "type": thought_type,
-            "prompt_preview": prompt[:500],
-            "response_preview": response[:1000],
-        })
+        # Try to parse structured JSON response
+        structured = self._parse_structured_response(response)
+
+        # Dedup: skip if last thought has same type and similar observation within 1h
+        if structured and self._is_duplicate_thought(agent_root, thought_type, structured):
+            log.info(f"Consciousness: skipped duplicate {thought_type} thought (same observation <1h)")
+            return
+
+        if structured:
+            entry = {
+                "ts": utc_now_iso(),
+                "thought_number": self.thought_count,
+                "type": thought_type,
+                "observation": str(structured.get("observation", ""))[:300],
+                "pattern_detected": structured.get("pattern_detected"),
+                "severity": structured.get("severity", "low"),
+                "action_suggestion": structured.get("action_suggestion"),
+                "confidence": min(1.0, max(0.0, float(structured.get("confidence", 0.5)))),
+            }
+        else:
+            # Fallback: freeform response (backward compat)
+            entry = {
+                "ts": utc_now_iso(),
+                "thought_number": self.thought_count,
+                "type": thought_type,
+                "prompt_preview": prompt[:500],
+                "response_preview": response[:1000],
+            }
+
+        append_jsonl(agent_root / "logs" / "consciousness.jsonl", entry)
+
+        # Act on high-severity suggestions: append to scratchpad
+        if (
+            structured
+            and structured.get("severity") in ("medium", "high")
+            and structured.get("action_suggestion")
+        ):
+            try:
+                action = str(structured["action_suggestion"])[:300]
+                severity = structured["severity"]
+                scratchpad = self.agent.memory.load_scratchpad()
+                note = f"\n\n## Consciousness Note ({severity})\n{action}\n"
+                if note.strip() not in scratchpad:
+                    self.agent.memory.save_scratchpad(scratchpad + note)
+                    log.info(f"Consciousness wrote {severity} action to scratchpad: {action[:80]}")
+            except Exception as e:
+                log.debug(f"Failed to write consciousness action to scratchpad: {e}")
+
+    @staticmethod
+    def _is_duplicate_thought(agent_root, thought_type: str, structured: dict) -> bool:
+        """Check if the last logged thought is a duplicate (same type + similar observation within 1h)."""
+        try:
+            log_path = agent_root / "logs" / "consciousness.jsonl"
+            if not log_path.exists():
+                return False
+            # Read last line
+            last_line = ""
+            with open(log_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if line.strip():
+                        last_line = line
+            if not last_line:
+                return False
+            import json
+            from datetime import datetime, timezone, timedelta
+            last = json.loads(last_line)
+            # Check same type
+            if last.get("type") != thought_type:
+                return False
+            # Check within 1 hour
+            last_ts = last.get("ts", "")
+            if last_ts:
+                last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                if (now - last_dt) > timedelta(hours=1):
+                    return False
+            # Check observation similarity (simple prefix match)
+            # Identity reflections use trigger_details/action_taken, not observation.
+            # Fallback chain ensures dedup works for all thought types. See S32 fix.
+            last_obs = str(last.get("observation") or last.get("trigger_details") or last.get("action_taken") or "")[:100]
+            new_obs = str(structured.get("observation") or structured.get("trigger_details") or structured.get("action_taken") or "")[:100]
+            if not last_obs or not new_obs:
+                return False
+            # Consider duplicate if first 100 chars match >80%
+            common = sum(1 for a, b in zip(last_obs, new_obs) if a == b)
+            max_len = max(len(last_obs), len(new_obs), 1)
+            return (common / max_len) > 0.8
+        except Exception:
+            return False
+
+    @staticmethod
+    def _parse_structured_response(response: str) -> Optional[dict]:
+        """Try to parse a structured JSON response from LLM.
+
+        Handles common cases: raw JSON, JSON in markdown code blocks,
+        JSON with surrounding text.
+        """
+        if not response:
+            return None
+
+        text = response.strip()
+
+        # Structured response must be a dict with at least one known field
+        _known_fields = {"observation", "trigger", "pattern_detected", "severity", "action_suggestion", "confidence"}
+
+        def _is_structured(d: dict) -> bool:
+            return isinstance(d, dict) and bool(_known_fields & d.keys())
+
+        # Try direct parse
+        try:
+            result = json.loads(text)
+            if _is_structured(result):
+                return result
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        # Try extracting JSON from markdown code block (greedy to handle nested braces)
+        json_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', text, re.DOTALL)
+        if json_match:
+            try:
+                result = json.loads(json_match.group(1))
+                if _is_structured(result):
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        # Try finding first { ... } block
+        brace_start = text.find('{')
+        brace_end = text.rfind('}')
+        if brace_start >= 0 and brace_end > brace_start:
+            try:
+                result = json.loads(text[brace_start:brace_end + 1])
+                if _is_structured(result):
+                    return result
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+        return None
 
     async def _apply_thought_result(self, thought_type: str, response: str) -> None:
         """
@@ -376,11 +580,36 @@ Write about something you're curious to explore."""
 
         try:
             if thought_type == "reflect_on_identity":
-                # Append reflection to scratchpad notes
-                scratchpad = memory.load_scratchpad()
-                notes_section = f"\n\n## Reflection ({utc_now_iso()[:10]})\n\n{response[:500]}\n"
-                # Don't automatically save - let agent decide
-                log.debug("Identity reflection logged")
+                # Parse structured reflection and save to reflection.json
+                try:
+                    # Try to extract JSON from response
+                    text = response.strip()
+                    if text.startswith("```"):
+                        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+                    entry = json.loads(text)
+                    entry["timestamp"] = utc_now_iso()
+
+                    reflection_data = memory.load_reflection()
+                    reflections = reflection_data.get("reflections", [])
+                    max_entries = reflection_data.get("meta", {}).get("max_reflections", 50)
+
+                    # Dedup gate: skip if semantically identical to last entry.
+                    # Without this guard, "identity stable" reflections accumulate
+                    # because session_review fires on every process() call.
+                    # See S24 audit: 22 identical reflections found in Identity.
+                    if reflections and _reflection_signature(reflections[-1]) == _reflection_signature(entry):
+                        log.debug("Reflection identical to previous, skipping append")
+                    else:
+                        reflections.append(entry)
+
+                    if len(reflections) > max_entries:
+                        reflections = reflections[-max_entries:]
+                    reflection_data["reflections"] = reflections
+                    memory.save_reflection(reflection_data)
+                    log.debug("Structured reflection saved to reflection.json")
+                except (json.JSONDecodeError, ValueError):
+                    log.debug("Identity reflection not valid JSON, logged only")
+
 
             elif thought_type == "plan_improvements":
                 # Update scratchpad with improvement ideas

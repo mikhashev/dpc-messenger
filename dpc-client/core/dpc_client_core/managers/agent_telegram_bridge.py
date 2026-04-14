@@ -154,6 +154,9 @@ class AgentTelegramBridge:
         # Semaphore to limit concurrent Telegram API calls (prevents pool exhaustion)
         self._send_semaphore = asyncio.Semaphore(3)  # Max 3 concurrent sends
 
+        # Consecutive network error counter for log suppression
+        self._network_error_count = 0
+
         log.info(f"AgentTelegramBridge initialized for {len(allowed_chat_ids)} chat(s), "
                 f"filter={len(self.event_filter)} event types, transcription={transcription_enabled}")
 
@@ -240,6 +243,9 @@ class AgentTelegramBridge:
             # Add handler for voice messages
             self._application.add_handler(MessageHandler(filters.VOICE, self._handle_voice_message))
 
+            # Add handler for photo messages (vision analysis)
+            self._application.add_handler(MessageHandler(filters.PHOTO, self._handle_photo_message))
+
             # Initialize application (creates bot instance internally)
             await self._application.initialize()
 
@@ -296,7 +302,7 @@ class AgentTelegramBridge:
         chat_id = str(update.effective_chat.id)
 
         if chat_id not in self.allowed_chat_ids:
-            await update.message.reply_text("⛔ Unauthorized. Your chat ID is not in the allowed list.")
+            log.warning(f"Unauthorized /start from chat_id {chat_id}, silent drop")
             return
 
         welcome = """🤖 *DPC Agent Bot*
@@ -450,6 +456,49 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
 
+    def _build_proposal_message(self, proposal_id: str, proposal) -> tuple:
+        """Build Telegram message text and keyboard for a knowledge proposal.
+
+        Returns (text, InlineKeyboardMarkup) so both /endsession and
+        notify_knowledge_proposal use identical formatting.
+        """
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        # Build entries preview
+        entries = getattr(proposal, 'entries', []) or []
+        entries_lines = []
+        for i, entry in enumerate(entries, 1):
+            content = getattr(entry, 'content', str(entry))
+            confidence = getattr(entry, 'confidence', 1.0)
+            tags = getattr(entry, 'tags', [])
+            tag_str = f" \\[{escape_markdown(', '.join(tags))}\\]" if tags else ""
+            entries_lines.append(
+                f"{i}\\. {escape_markdown(content[:120])} _{confidence:.0%} confidence_{tag_str}"
+            )
+
+        topic = escape_markdown(getattr(proposal, 'topic', 'Unknown') or 'Unknown')
+        summary = escape_markdown(getattr(proposal, 'summary', '') or '')
+        avg_conf = getattr(proposal, 'avg_confidence', 1.0)
+        entries_text = "\n".join(entries_lines) if entries_lines else "_No entries_"
+
+        text = (
+            f"📚 *Knowledge Proposal*\n\n"
+            f"*Topic:* {topic}\n"
+            f"*Summary:* {summary}\n"
+            f"*Confidence:* {avg_conf:.0%} \\| *Entries:* {len(entries)}\n\n"
+            f"*Entries:*\n{entries_text}\n\n"
+            f"Review and vote:"
+        )
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                InlineKeyboardButton("🔄 Request Changes", callback_data=f"vote:{proposal_id}:request_changes"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
+            ]
+        ])
+        return text, keyboard
+
     async def _handle_endsession_command(self, update, context):
         """Handle /endsession command — end session and trigger knowledge extraction."""
         chat_id = str(update.effective_chat.id)
@@ -470,27 +519,37 @@ Send a voice message and it will be transcribed and processed\\.
         )
 
         try:
-            result = await service.end_conversation_session(conversation_id)
+            result = await service.end_conversation_session(
+                conversation_id,
+                initiated_by="telegram",
+            )
             status = result.get("status", "unknown")
 
             if status == "success":
                 proposal_id = result.get("proposal_id")
                 if proposal_id:
-                    # Store pending proposal so vote callback can look it up
+                    # Fetch the proposal object so we can show its content
+                    proposal = None
+                    if (hasattr(service, 'consensus_manager')
+                            and proposal_id in service.consensus_manager.sessions):
+                        proposal = service.consensus_manager.sessions[proposal_id].proposal
+
                     self._pending_proposals[proposal_id] = chat_id
 
-                    # Send message with inline approve/reject keyboard
-                    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-                    keyboard = InlineKeyboardMarkup([
-                        [
+                    if proposal:
+                        text, keyboard = self._build_proposal_message(proposal_id, proposal)
+                    else:
+                        # Fallback: no proposal object available
+                        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                        text = "📚 *Knowledge proposal created\\!*\n\nReview and vote:"
+                        keyboard = InlineKeyboardMarkup([[
                             InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                            InlineKeyboardButton("🔄 Request Changes", callback_data=f"vote:{proposal_id}:request_changes"),
                             InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
-                        ]
-                    ])
+                        ]])
+
                     await update.message.reply_text(
-                        "✅ *Session Ended*\n\n"
-                        "📚 *Knowledge proposal created\\!*\n\n"
-                        "Review and vote on the knowledge commit:",
+                        f"✅ *Session Ended*\n\n{text}",
                         parse_mode="MarkdownV2",
                         reply_markup=keyboard,
                     )
@@ -536,27 +595,22 @@ Send a voice message and it will be transcribed and processed\\.
             status = result.get("status", "unknown")
 
             if status == "success":
-                if vote == "approve":
-                    label = "✅ *Approved*"
-                    detail = "\n\nKnowledge will be saved to your personal context\\."
-                else:
-                    label = "❌ *Rejected*"
-                    detail = "\n\nKnowledge commit rejected\\."
-
-                await query.edit_message_text(
-                    f"{label}\n\nVote recorded\\."
-                    f"{detail}",
-                    parse_mode="MarkdownV2",
-                )
+                vote_labels = {
+                    "approve": "✅ Vote recorded — waiting for agent review\\.",
+                    "reject": "❌ Vote recorded — waiting for agent review\\.",
+                    "request_changes": "🔄 Vote recorded — agent will be asked to revise\\.",
+                }
+                label = vote_labels.get(vote, "Vote recorded\\.")
+                # Edit the proposal message to show vote was cast; final result
+                # will arrive via notify_knowledge_result once all votes are in.
+                await query.edit_message_text(label, parse_mode="MarkdownV2")
             else:
                 msg = escape_markdown(result.get("message", "Unknown error"))
                 await query.edit_message_text(
                     f"❌ *Vote failed:* {msg}",
                     parse_mode="MarkdownV2",
                 )
-
-            # Clean up pending proposal
-            self._pending_proposals.pop(proposal_id, None)
+                self._pending_proposals.pop(proposal_id, None)
 
         except Exception as e:
             log.error(f"Error handling vote callback: {e}", exc_info=True)
@@ -565,18 +619,14 @@ Send a voice message and it will be transcribed and processed\\.
     async def notify_knowledge_proposal(
         self,
         proposal_id: str,
-        topic: str,
+        proposal=None,
         chat_ids: Optional[List[str]] = None,
     ) -> None:
-        """
-        Send a Telegram notification for an auto-detected knowledge commit proposal.
-
-        Called by service.py when a ConversationMonitor auto-detects knowledge and creates
-        a proposal. Sends a message with inline [✅ Approve] [❌ Reject] buttons.
+        """Send a Telegram notification for an auto-detected knowledge commit proposal.
 
         Args:
             proposal_id: The proposal ID from consensus_manager
-            topic: Short topic description for the user
+            proposal: KnowledgeCommitProposal object (for showing entries/summary)
             chat_ids: Optional list of chat IDs to notify (defaults to all allowed_chat_ids)
         """
         if not self._enabled or not self._bot:
@@ -585,19 +635,17 @@ Send a voice message and it will be transcribed and processed\\.
         targets = [str(c) for c in chat_ids] if chat_ids else self.allowed_chat_ids
 
         try:
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-            keyboard = InlineKeyboardMarkup([
-                [
+            if proposal:
+                text, keyboard = self._build_proposal_message(proposal_id, proposal)
+            else:
+                from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+                text = "📚 *Knowledge Proposal*\n\nReview and vote:"
+                keyboard = InlineKeyboardMarkup([[
                     InlineKeyboardButton("✅ Approve", callback_data=f"vote:{proposal_id}:approve"),
+                    InlineKeyboardButton("🔄 Request Changes", callback_data=f"vote:{proposal_id}:request_changes"),
                     InlineKeyboardButton("❌ Reject", callback_data=f"vote:{proposal_id}:reject"),
-                ]
-            ])
-            topic_escaped = escape_markdown(topic or "New knowledge detected")
-            text = (
-                "📚 *Knowledge Proposal*\n\n"
-                f"*Topic:* {topic_escaped}\n\n"
-                "Review and vote:"
-            )
+                ]])
+
             for chat_id in targets:
                 if chat_id in self.allowed_chat_ids:
                     self._pending_proposals[proposal_id] = chat_id
@@ -613,15 +661,71 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"notify_knowledge_proposal error: {e}", exc_info=True)
 
+    async def notify_knowledge_result(
+        self,
+        proposal_id: str,
+        status: str,
+        topic: str,
+        vote_comments: Optional[Dict[str, str]] = None,
+        change_requests: Optional[list] = None,
+    ) -> None:
+        """Send the final voting result back to Telegram after all votes are in.
+
+        Called by service.py callbacks (_on_commit_approved, _on_commit_rejected,
+        _on_commit_revision_needed) so the user learns the actual outcome rather
+        than just "vote recorded".
+
+        Args:
+            proposal_id: The proposal that was finalized
+            status: "approved", "rejected", or "revision_needed"
+            topic: Topic name for context
+            vote_comments: Dict of node_id → comment from all voters
+            change_requests: List of {node_id, comment} for revision_needed case
+        """
+        if not self._enabled or not self._bot:
+            return
+
+        chat_id = self._pending_proposals.pop(proposal_id, None)
+        if not chat_id:
+            return  # Not a Telegram-originated proposal
+
+        try:
+            topic_esc = escape_markdown(topic or "")
+            if status == "approved":
+                text = f"✅ *Knowledge Saved*\n\n*Topic:* {topic_esc}\n\nThe agent approved and the knowledge has been added to your personal context\\."
+            elif status == "rejected":
+                reasons = ""
+                if vote_comments:
+                    lines = [f"• {escape_markdown(c)}" for c in vote_comments.values() if c]
+                    if lines:
+                        reasons = "\n\n*Reasons:*\n" + "\n".join(lines)
+                text = f"❌ *Knowledge Rejected*\n\n*Topic:* {topic_esc}{reasons}"
+            elif status == "revision_needed":
+                changes = ""
+                if change_requests:
+                    lines = [f"• {escape_markdown(cr.get('comment', ''))}" for cr in change_requests if cr.get('comment')]
+                    if lines:
+                        changes = "\n\n*Requested changes:*\n" + "\n".join(lines)
+                text = f"🔄 *Revision Requested*\n\n*Topic:* {topic_esc}{changes}\n\nThe agent will revise and resubmit for voting\\."
+            else:
+                text = f"⏱ *Voting timed out*\n\n*Topic:* {topic_esc}"
+
+            await self._bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                parse_mode="MarkdownV2",
+            )
+        except Exception as e:
+            log.error(f"notify_knowledge_result error: {e}", exc_info=True)
+
     async def _handle_message(self, update, context):
         """Handle incoming text message."""
         chat_id = str(update.effective_chat.id)
         message_text = update.message.text
 
-        # Check authorization
+        # Check authorization — silent drop
         if chat_id not in self.allowed_chat_ids:
-            log.warning(f"Unauthorized message from chat_id={chat_id}")
-            await update.message.reply_text("⛔ Unauthorized. Your chat ID is not in the allowed list.")
+            log.warning(f"Unauthorized message from chat_id={chat_id}, silent drop")
             return
 
         # Check if we have a message handler
@@ -632,33 +736,95 @@ Send a voice message and it will be transcribed and processed\\.
         # Send "processing" indicator
         await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-        log.info(f"Processing Telegram message from chat {chat_id}: {message_text[:50]}...")
+        # Build sender attribution for history (shown in DPC chat UI)
+        tg_user = update.effective_user
+        tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
+        sender_name = f"{tg_display_name} (Telegram)"
+
+        log.info(f"Processing Telegram message from chat {chat_id} ({sender_name}): {message_text[:50]}...")
 
         try:
             # Use agent_id as conversation_id when unified_conversation is enabled,
             # so Telegram messages share history with the DPC chat UI.
             conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
 
+            # Pattern D: Check if message is @CC-only (no @Ark) — skip Ark processing,
+            # save to history and broadcast cc_agent_mention for real CC to pick up
+            import re
+            _tg_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', message_text or '', re.IGNORECASE)}
+            if "cc" in _tg_mentions and "ark" not in _tg_mentions:
+                log.info(f"@CC-only Telegram message in {conversation_id} — skipping Ark, broadcasting for CC")
+                # Save to history so CC can see it
+                if self._agent_manager:
+                    monitor = self._agent_manager._get_or_create_agent_monitor(conversation_id)
+                    from dpc_client_core.dpc_agent.utils import utc_now_iso
+                    monitor.add_message(
+                        role="user",
+                        content=message_text,
+                        timestamp=utc_now_iso(),
+                        sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
+                        sender_name=sender_name,
+                        source="telegram",
+                    )
+                    monitor.save_history()
+                    # Broadcast cc_agent_mention for CC's MCP bridge
+                    service = getattr(self._agent_manager, 'service', None)
+                    if service:
+                        await service._check_agent_cc_mention(
+                            conversation_id, message_text, "", self._agent_manager
+                        )
+                        # Push updated history to DPC UI
+                        if self._unified_conversation:
+                            await self._broadcast_history_to_ui(conversation_id)
+                return  # Skip Ark's process_message
+
+            # B1a: Save user message to monitor and broadcast to UI BEFORE agent
+            # processing, so the message appears in DPC UI immediately (not after response).
+            # B1b: Prefix sender_name so Ark sees message source (Telegram vs DPC UI).
+            if self._agent_manager and self._unified_conversation:
+                monitor = self._agent_manager._get_or_create_agent_monitor(conversation_id)
+                from dpc_client_core.dpc_agent.utils import utc_now_iso
+                monitor.add_message(
+                    role="user",
+                    content=message_text,
+                    timestamp=utc_now_iso(),
+                    sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
+                    sender_name=sender_name,
+                    source="telegram",
+                )
+                monitor.save_history()
+                await self._broadcast_history_to_ui(conversation_id)
+                skip_history = True
+            else:
+                skip_history = False
+
             # Call the message handler (agent_manager.process_message)
             response = await self._message_handler(
                 message=message_text,
                 conversation_id=conversation_id,
                 include_context=True,
+                sender_name=sender_name,
+                telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
+                _skip_history=skip_history,
             )
 
             # Send response (escape for MarkdownV2, split if needed)
-            if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
-                # Split long messages
-                chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
-                for i, chunk in enumerate(chunks):
-                    prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                    await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
-            else:
-                await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
-
-            # In unified_conversation mode, push updated history to DPC chat UI
-            if self._unified_conversation and self._agent_manager:
-                await self._broadcast_history_to_ui(conversation_id)
+            try:
+                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
+                    # Split long messages
+                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
+                    for i, chunk in enumerate(chunks):
+                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
+                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
+                else:
+                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+            except Exception as send_err:
+                log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
+                await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+            finally:
+                # Always push updated history to DPC chat UI in unified_conversation mode
+                if self._unified_conversation and self._agent_manager:
+                    await self._broadcast_history_to_ui(conversation_id)
 
         except Exception as e:
             error_str = str(e)
@@ -689,10 +855,9 @@ Send a voice message and it will be transcribed and processed\\.
         chat_id = str(update.effective_chat.id)
         voice = update.message.voice
 
-        # Check authorization
+        # Check authorization — silent drop
         if chat_id not in self.allowed_chat_ids:
-            log.warning(f"Unauthorized voice message from chat_id={chat_id}")
-            await update.message.reply_text("⛔ Unauthorized. Your chat ID is not in the allowed list.")
+            log.warning(f"Unauthorized voice message from chat_id={chat_id}, silent drop")
             return
 
         # Check if we have a message handler
@@ -782,7 +947,12 @@ Send a voice message and it will be transcribed and processed\\.
                 # Send "typing" action
                 await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
-                log.info(f"Processing transcribed voice message from chat {chat_id}: {transcription_text[:50]}...")
+                # Build sender attribution for history
+                tg_user = update.effective_user
+                tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
+                sender_name = f"{tg_display_name} (Telegram)"
+
+                log.info(f"Processing transcribed voice message from chat {chat_id} ({sender_name}): {transcription_text[:50]}...")
 
                 # Use agent_id as conversation_id when unified_conversation is enabled
                 conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
@@ -792,21 +962,27 @@ Send a voice message and it will be transcribed and processed\\.
                     message=transcription_text,
                     conversation_id=conversation_id,
                     include_context=True,
+                    sender_name=sender_name,
+                    telegram_chat_id=chat_id,  # Enables reply routing for scheduled tasks
                 )
 
                 # Send response (escape for MarkdownV2, split if needed)
-                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
-                    # Split long messages
-                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
-                    for i, chunk in enumerate(chunks):
-                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
-                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
-                else:
-                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
-
-                # In unified_conversation mode, push updated history to DPC chat UI
-                if self._unified_conversation and self._agent_manager:
-                    await self._broadcast_history_to_ui(conversation_id)
+                try:
+                    if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
+                        # Split long messages
+                        chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
+                        for i, chunk in enumerate(chunks):
+                            prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
+                            await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
+                    else:
+                        await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+                except Exception as send_err:
+                    log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
+                    await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+                finally:
+                    # Always push updated history to DPC chat UI in unified_conversation mode
+                    if self._unified_conversation and self._agent_manager:
+                        await self._broadcast_history_to_ui(conversation_id)
 
             # Clean up voice file
             try:
@@ -817,6 +993,80 @@ Send a voice message and it will be transcribed and processed\\.
         except Exception as e:
             log.error(f"Error processing voice message: {e}", exc_info=True)
             await update.message.reply_text(f"❌ Error processing voice message: {str(e)[:200]}")
+
+    async def _handle_photo_message(self, update, context):
+        """
+        Handle incoming photo message from Telegram.
+
+        Downloads the highest-resolution photo, encodes it as base64, and passes
+        it to the agent via process_message(). The agent's llm_adapter will use
+        native vision if the configured provider supports it, or pre-analyze the
+        image with an auto-selected vision model and inject the description as text.
+        """
+        chat_id = str(update.effective_chat.id)
+
+        # Check authorization — silent drop
+        if chat_id not in self.allowed_chat_ids:
+            log.warning(f"Unauthorized photo from chat_id={chat_id}, silent drop")
+            return
+
+        if not self._message_handler:
+            await update.message.reply_text("⚠️ Message handler not configured. Cannot process photo.")
+            return
+
+        # Telegram sends multiple sizes; pick the largest (last in the list)
+        photo = update.message.photo[-1]
+        caption = update.message.caption or ""
+
+        log.info(f"Processing photo from chat {chat_id} (file_id={photo.file_id}, caption={caption[:50]!r})")
+        await context.bot.send_chat_action(chat_id=chat_id, action="typing")
+
+        try:
+            # Download photo from Telegram
+            file = await self._bot.get_file(photo.file_id)
+            photo_bytes = await file.download_as_bytearray()
+            image_base64 = base64.b64encode(bytes(photo_bytes)).decode("utf-8")
+
+            # Build sender attribution
+            tg_user = update.effective_user
+            tg_display_name = (tg_user.first_name or tg_user.username or "Telegram User") if tg_user else "Telegram User"
+            sender_name = f"{tg_display_name} (Telegram)"
+
+            # Use caption as message text; fall back to a generic prompt
+            message_text = caption if caption else "Please analyze this image."
+
+            conversation_id = self._agent_id if self._unified_conversation and self._agent_id else f"telegram-{chat_id}"
+
+            response = await self._message_handler(
+                message=message_text,
+                conversation_id=conversation_id,
+                include_context=True,
+                sender_name=sender_name,
+                telegram_chat_id=chat_id,
+                image_base64=image_base64,
+                image_mime="image/jpeg",
+                image_caption=caption or None,
+            )
+
+            # Send response
+            try:
+                if len(response) > TELEGRAM_MESSAGE_MAX_LENGTH:
+                    chunks = self._split_message(response, TELEGRAM_MESSAGE_MAX_LENGTH - 100)
+                    for i, chunk in enumerate(chunks):
+                        prefix = f"📄 *Part {i+1}/{len(chunks)}*\n\n" if len(chunks) > 1 else ""
+                        await update.message.reply_text(prefix + escape_markdown(chunk), parse_mode="MarkdownV2")
+                else:
+                    await update.message.reply_text(escape_markdown(response), parse_mode="MarkdownV2")
+            except Exception as send_err:
+                log.warning(f"MarkdownV2 send failed, falling back to plain text: {send_err}")
+                await update.message.reply_text(response[:TELEGRAM_MESSAGE_MAX_LENGTH])
+            finally:
+                if self._unified_conversation and self._agent_manager:
+                    await self._broadcast_history_to_ui(conversation_id)
+
+        except Exception as e:
+            log.error(f"Error processing photo message: {e}", exc_info=True)
+            await update.message.reply_text(f"❌ Error processing photo: {str(e)[:200]}")
 
     async def _broadcast_history_to_ui(self, conversation_id: str) -> None:
         """
@@ -829,11 +1079,12 @@ Send a voice message and it will be transcribed and processed\\.
             service = getattr(self._agent_manager, 'service', None)
             if not service:
                 return
-            history_result = await service.get_conversation_history(conversation_id)
-            messages = history_result.get("messages", [])
 
-            # Include token usage from agent manager's own monitor registry so the UI token counter updates
+            # Read history from agent's ConversationMonitor (the actual source of truth),
+            # NOT from service.get_conversation_history() which looks up P2P conversations
+            # and returns empty for agent conversations — causing UI to go blank (B1 fix).
             monitor = self._agent_manager._agent_monitors.get(conversation_id)
+            messages = monitor.get_message_history() if monitor else []
             tokens_used = monitor.current_token_count if monitor else 0
             token_limit = monitor.token_limit if monitor else 0
 
@@ -844,10 +1095,23 @@ Send a voice message and it will be transcribed and processed\\.
                     "conversation_id": conversation_id,
                     "tokens_used": tokens_used,
                     "token_limit": token_limit,
-                    "usage_percent": usage_percent
+                    "usage_percent": usage_percent,
+                    "history_tokens": tokens_used,  # for agent, current_token_count = history_tokens
+                    "context_estimated": getattr(monitor, '_last_context_estimated', 0),
                 })
                 log.warning(f"[_broadcast_history_to_ui] Token Warning - {conversation_id}: "
                             f"{usage_percent * 100:.1f}% of context window used ({tokens_used}/{token_limit})")
+
+            # Include thinking content from the last LLM response so the UI can show
+            # the "Thoughts" collapsible (same as execute_ai_query direct path).
+            # thinking lives in agent._last_usage["thinking"] after process() returns.
+            thinking = None
+            try:
+                agent = self._agent_manager.agent  # property — may raise RuntimeError
+                last_usage = getattr(agent, '_last_usage', {}) or {}
+                thinking = last_usage.get('thinking')
+            except Exception:
+                pass  # thinking is optional; don't block the broadcast
 
             await service.local_api.broadcast_event("agent_history_updated", {
                 "conversation_id": conversation_id,
@@ -855,6 +1119,8 @@ Send a voice message and it will be transcribed and processed\\.
                 "message_count": len(messages),
                 "tokens_used": tokens_used,
                 "token_limit": token_limit,
+                "thinking": thinking,
+                "context_estimated": getattr(monitor, '_last_context_estimated', 0),
             })
             log.debug(f"[_broadcast_history_to_ui] Pushed {len(messages)} messages for {conversation_id}")
         except Exception as e:
@@ -927,12 +1193,21 @@ Send a voice message and it will be transcribed and processed\\.
             return False
 
         # Send to all allowed chats
+        try:
+            from telegram.error import NetworkError, TimedOut
+            _network_exc = (NetworkError, TimedOut)
+        except ImportError:
+            _network_exc = (Exception,)  # type: ignore[assignment]
+
         success = True
         for chat_id in self.allowed_chat_ids:
             try:
                 log.debug(f"[handle_event] Calling _send_message for chat_id={chat_id}")
                 await self._send_message(chat_id, message)
                 log.debug(f"[handle_event] _send_message completed for chat_id={chat_id}")
+            except _network_exc:
+                # Already logged as WARNING inside _send_single_message — no need to repeat
+                success = False
             except Exception as e:
                 log.error(f"[handle_event] Failed to send Telegram message to {chat_id}: {e}", exc_info=True)
                 success = False
@@ -976,6 +1251,22 @@ Send a voice message and it will be transcribed and processed\\.
 
         return True
 
+    async def send_chain_response(self, text: str) -> None:
+        """Forward a chain-triggered agent response to the linked Telegram chat.
+
+        Used by service.py `_invoke_agent_in_agent_chat()` when the last user
+        message in the conversation came from Telegram (origin tracking).
+        Without this, chain-triggered responses only reach the UI broadcast
+        and never the Telegram chat that originated the session.
+        """
+        if not self._enabled or not self._bot:
+            log.warning("Chain response not delivered to Telegram (bridge disabled)")
+            return
+        if not self.allowed_chat_ids:
+            return
+        chat_id = self.allowed_chat_ids[0]
+        await self._send_message(chat_id, escape_markdown(text))
+
     async def _send_message(self, chat_id: str, text: str) -> None:
         """
         Send a message to a Telegram chat.
@@ -1016,6 +1307,12 @@ Send a voice message and it will be transcribed and processed\\.
             log.debug(f"[_send_message] Sending to chat_id={chat_id}, text_len={len(text)}")
 
             try:
+                from telegram.error import NetworkError, TimedOut
+            except ImportError:
+                NetworkError = Exception  # type: ignore[misc,assignment]
+                TimedOut = Exception      # type: ignore[misc,assignment]
+
+            try:
                 result = await self._bot.send_message(
                     chat_id=chat_id,
                     text=text,
@@ -1023,23 +1320,84 @@ Send a voice message and it will be transcribed and processed\\.
                     disable_notification=False,
                 )
                 log.debug(f"[_send_message] Success! message_id={result.message_id}")
+                self._network_error_count = 0
                 return result
+            except (NetworkError, TimedOut) as e:
+                # Network unavailable — skip Markdown fallback (same outcome), log at WARNING
+                self._network_error_count += 1
+                if self._network_error_count <= 3 or self._network_error_count % 50 == 0:
+                    log.warning(
+                        "[_send_message] Telegram unreachable (error #%d): %s",
+                        self._network_error_count, e,
+                    )
+                raise
             except Exception as e:
-                log.error(f"[_send_message] FAILED to send to {chat_id}: {e}", exc_info=True)
-                # Try without Markdown as fallback
+                # Non-network failure (e.g. Markdown parse error) — try plain text fallback
+                log.debug(f"[_send_message] Send failed ({type(e).__name__}), retrying without Markdown: {e}")
                 try:
-                    log.debug(f"[_send_message] Retrying without Markdown parsing...")
                     result = await self._bot.send_message(
                         chat_id=chat_id,
                         text=text,
-                        parse_mode=None,  # No markdown
+                        parse_mode=None,
                         disable_notification=False,
                     )
                     log.debug(f"[_send_message] Success without Markdown! message_id={result.message_id}")
+                    self._network_error_count = 0
                     return result
+                except (NetworkError, TimedOut) as e2:
+                    self._network_error_count += 1
+                    if self._network_error_count <= 3 or self._network_error_count % 50 == 0:
+                        log.warning(
+                            "[_send_message] Telegram unreachable on fallback (error #%d): %s",
+                            self._network_error_count, e2,
+                        )
+                    raise
                 except Exception as e2:
                     log.error(f"[_send_message] Failed even without Markdown: {e2}", exc_info=True)
                     raise
+
+    def _format_evolution_cycle_completed(
+        self,
+        event: AgentEvent,
+        title: str,
+        timestamp: str,
+    ) -> str:
+        """
+        Format Evolution Cycle Completed notification.
+
+        Plain style (no emojis), and lists what was actually proposed
+        instead of just showing a count.
+        """
+        data = event.data
+        proposed = data.get("changes_proposed", 0)
+        applied = data.get("changes_applied", 0)
+        files = data.get("files_modified", 0)
+        cycle_id = str(data.get("cycle_id", "?"))
+
+        lines = [
+            f"*{title}*",
+            f"`{escape_markdown(timestamp)}`",
+            f"Cycle: `{escape_markdown(cycle_id)}`",
+            f"Files modified: {files}",
+            f"Proposed: {proposed}    Applied: {applied}",
+        ]
+
+        proposals_summary = data.get("proposals_summary") or []
+        if proposals_summary:
+            lines.append("")
+            lines.append("Proposed changes:")
+            for i, p in enumerate(proposals_summary, start=1):
+                path = escape_markdown(str(p.get("path", "?")))
+                change_type = str(p.get("change_type", "")).strip()
+                desc = escape_markdown(str(p.get("description", ""))[:300])
+                head = f"{i}\\. `{path}`"
+                if change_type:
+                    head += f" \\[{escape_markdown(change_type)}\\]"
+                lines.append(head)
+                if desc:
+                    lines.append(f"   {desc}")
+
+        return "\n".join(lines)
 
     def _format_event(self, event: AgentEvent) -> str:
         """
@@ -1056,6 +1414,10 @@ Send a voice message and it will be transcribed and processed\\.
 
         # Event type as title (escape for Markdown)
         title = escape_markdown(event.type.value.replace("_", " ").title())
+
+        # Special case: Evolution Cycle Completed — no emojis, list proposals
+        if event.type == EventType.EVOLUTION_CYCLE_COMPLETED:
+            return self._format_evolution_cycle_completed(event, title, timestamp)
 
         lines = [
             f"{emoji} *{title}*",
@@ -1178,22 +1540,41 @@ Configure event types in `~/.dpc/config.ini` [dpc_agent_telegram] section.
         }
 
 
-def create_telegram_bridge_callback(bridge: AgentTelegramBridge):
+def create_telegram_bridge_callback(bridge: AgentTelegramBridge, agent_id: Optional[str] = None):
     """
     Create a callback function for AgentEventEmitter.
 
     Usage:
         bridge = AgentTelegramBridge(bot_token, chat_ids)
         await bridge.start()
-        emitter.add_listener(create_telegram_bridge_callback(bridge))
+        emitter.add_listener(create_telegram_bridge_callback(bridge, agent_id="agent_001"))
 
     Args:
         bridge: The AgentTelegramBridge instance
+        agent_id: If set, only handle events whose conversation_id matches this agent.
+                  Events without a conversation_id (e.g. evolution, lifecycle) are always handled.
 
     Returns:
         Callback function suitable for add_listener()
     """
     async def callback(event: AgentEvent) -> None:
+        # Filter out events that belong to a different agent conversation
+        if agent_id is not None:
+            event_conv_id = event.data.get("conversation_id")
+            event_agent_id = event.data.get("agent_id")
+            if event_conv_id is not None and event_conv_id != agent_id:
+                log.debug(
+                    f"[TelegramBridge Callback] Skipping event {event.type.value} "
+                    f"for conversation '{event_conv_id}' (bridge owns '{agent_id}')"
+                )
+                return
+            if event_agent_id is not None and event_agent_id != agent_id:
+                log.debug(
+                    f"[TelegramBridge Callback] Skipping event {event.type.value} "
+                    f"from agent '{event_agent_id}' (bridge owns '{agent_id}')"
+                )
+                return
+
         log.debug(f"[TelegramBridge Callback] Received event: {event.type.value}, bridge_enabled={bridge._enabled}")
         try:
             result = await bridge.handle_event(event)

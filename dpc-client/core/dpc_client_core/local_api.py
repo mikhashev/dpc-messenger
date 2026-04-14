@@ -3,6 +3,10 @@
 import asyncio
 import json
 import logging
+import os
+import secrets
+import stat
+from pathlib import Path
 from typing import TYPE_CHECKING
 import websockets
 from websockets.server import WebSocketServerProtocol
@@ -12,6 +16,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 ui_logger = logging.getLogger("dpc_ui")
+
+# Local API authentication: a fresh random token is generated on every backend
+# startup and written to ~/.dpc/.ws_token. The frontend reads this file via a
+# Tauri command and presents the token as the first message on each WebSocket
+# connection. Without this, any local process could connect to ws://127.0.0.1:9999
+# and invoke backend commands.
+WS_TOKEN_PATH = Path.home() / ".dpc" / ".ws_token"
+AUTH_TIMEOUT_SECONDS = 5.0
 
 _UI_LOG_LEVELS = {
     "debug": ui_logger.debug,
@@ -57,6 +69,7 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Firewall
     "get_firewall_rules",
     "save_firewall_rules",
+    "get_cc_config",
     # AI queries
     "execute_ai_query",
     # Conversation history
@@ -90,6 +103,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     # Group chat
     "create_group_chat",
     "send_group_message",
+    "send_group_agent_message",
+    "send_cc_agent_response",
     "send_group_image",
     "send_group_voice_message",
     "send_group_file",
@@ -107,6 +122,9 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "delete_telegram_conversation_link",
     "link_agent_telegram",
     "unlink_agent_telegram",
+    # Session archive
+    "get_session_archive_info",
+    "clear_session_archives",
     # Agents
     "create_agent",
     "list_agents",
@@ -114,11 +132,13 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "update_agent_config",
     "delete_agent",
     "list_agent_profiles",
+    "get_agent_permissions",  # Agent permissions transparency (v0.22.0)
     # Agent Task Board (v0.20.0)
     "get_agent_tasks",
     "get_agent_learning",
     "get_agent_task_result",
     "schedule_agent_task",
+    "cancel_agent_task",
     # Frontend logging relay
     "ui_log",
 })
@@ -143,11 +163,11 @@ def _sanitize_payload_for_logging(payload: dict, max_length: int = 30) -> dict:
         if len(original) > max_length:
             sanitized['image_base64'] = f"{original[:max_length]}... ({len(original)} chars)"
 
-    # Truncate voice_audio_base64 field if present
-    if 'voice_audio_base64' in sanitized and isinstance(sanitized['voice_audio_base64'], str):
-        original = sanitized['voice_audio_base64']
-        if len(original) > max_length:
-            sanitized['voice_audio_base64'] = f"{original[:max_length]}... ({len(original)} chars)"
+    # Truncate any *audio_base64 or *voice*base64 field if present
+    for key in list(sanitized.keys()):
+        if 'base64' in key and isinstance(sanitized[key], str) and len(sanitized[key]) > max_length:
+            original = sanitized[key]
+            sanitized[key] = f"{original[:max_length]}... ({len(original)} chars)"
 
     return sanitized
 
@@ -159,6 +179,77 @@ class LocalApiServer:
         self.port = port
         self.server = None
         self._clients = set()
+        self._auth_token: str = ""
+
+    def _generate_and_persist_auth_token(self) -> None:
+        """Generate a fresh 256-bit auth token and write it to ~/.dpc/.ws_token.
+
+        Called once at startup. The frontend reads this file via a Tauri
+        command and sends the token as the first WebSocket message.
+        """
+        self._auth_token = secrets.token_urlsafe(32)
+        try:
+            WS_TOKEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+            WS_TOKEN_PATH.write_text(self._auth_token, encoding="utf-8")
+            # Restrict to user-only read/write. On Linux/macOS this prevents
+            # other local users from reading the token. On Windows the mode
+            # bits are largely advisory; NTFS ACLs inherited from the user's
+            # home directory already restrict access to the same user.
+            try:
+                os.chmod(WS_TOKEN_PATH, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+            except OSError as chmod_err:
+                logger.debug("chmod 0o600 on %s skipped: %s", WS_TOKEN_PATH, chmod_err)
+            logger.info("Local API auth token written to %s", WS_TOKEN_PATH)
+        except OSError as e:
+            logger.error("Failed to write auth token to %s: %s", WS_TOKEN_PATH, e)
+            raise
+
+    async def _authenticate(self, websocket: WebSocketServerProtocol) -> bool:
+        """Validate the first message on a new WebSocket connection.
+
+        Expects {"command": "auth", "token": "<token>"} within AUTH_TIMEOUT_SECONDS.
+        On success: sends an OK response and returns True.
+        On failure: closes the connection with code 1008 (policy violation),
+        logs the rejection with peer address, and returns False.
+        """
+        peer_addr = websocket.remote_address
+        peer_addr_str = f"{peer_addr[0]}:{peer_addr[1]}" if peer_addr else "unknown"
+        try:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=AUTH_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning("Local API auth timeout from %s", peer_addr_str)
+            await websocket.close(code=1008, reason="auth timeout")
+            return False
+        except websockets.exceptions.ConnectionClosed:
+            logger.debug("Local API connection from %s closed before auth", peer_addr_str)
+            return False
+
+        try:
+            message = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            logger.warning("Local API auth: malformed first message from %s", peer_addr_str)
+            await websocket.close(code=1008, reason="auth required")
+            return False
+
+        if message.get("command") != "auth" or not isinstance(message.get("token"), str):
+            logger.warning("Local API auth: missing auth command from %s", peer_addr_str)
+            await websocket.close(code=1008, reason="auth required")
+            return False
+
+        # Constant-time comparison to avoid timing attacks
+        if not secrets.compare_digest(message["token"], self._auth_token):
+            logger.warning("Local API auth: invalid token from %s", peer_addr_str)
+            await websocket.close(code=1008, reason="invalid token")
+            return False
+
+        await websocket.send(json.dumps({
+            "id": message.get("id"),
+            "command": "auth",
+            "status": "OK",
+            "payload": {},
+        }))
+        logger.info("Local API client authenticated from %s", peer_addr_str)
+        return True
 
     async def _register(self, websocket: WebSocketServerProtocol):
         self._clients.add(websocket)
@@ -169,6 +260,8 @@ class LocalApiServer:
         logger.info("UI client disconnected: %s", websocket.remote_address)
 
     async def _handler(self, websocket: WebSocketServerProtocol):
+        if not await self._authenticate(websocket):
+            return
         await self._register(websocket)
         try:
             async for message_str in websocket:
@@ -191,7 +284,9 @@ class LocalApiServer:
                         context = payload.get("context", "ui")
                         msg = payload.get("message", "")
                         log_fn = _UI_LOG_LEVELS.get(level, ui_logger.info)
-                        log_fn("[%s] %s", context, msg)
+                        # Sanitize surrogates — emojis from JS UTF-16 can produce lone surrogates
+                        safe_msg = msg.encode("utf-8", errors="replace").decode("utf-8")
+                        log_fn("[%s] %s", context, safe_msg)
                         await websocket.send(json.dumps({"id": command_id, "command": command, "status": "OK", "payload": {}}))
                         continue
 
@@ -201,7 +296,8 @@ class LocalApiServer:
                         # Sanitize payload for logging (truncate large base64 strings)
                         sanitized_payload = _sanitize_payload_for_logging(payload)
                         # Special logging for image/voice commands
-                        if command in ["send_image", "send_p2p_image", "send_voice_message", "transcribe_audio"]:
+                        if command in ["send_image", "send_p2p_image", "send_voice_message", "transcribe_audio",
+                                       "send_group_voice_message", "send_group_image"]:
                             logger.debug("Executing command '%s' (payload contains media data)", command)
                         else:
                             logger.debug("Executing command '%s' with payload: %s", command, sanitized_payload)
@@ -245,6 +341,7 @@ class LocalApiServer:
             await self._unregister(websocket)
 
     async def start(self):
+        self._generate_and_persist_auth_token()
         logger.info("Starting Local API Server on ws://%s:%d", self.host, self.port)
 
         # Configure WebSocket server with more lenient timeouts

@@ -114,14 +114,9 @@ class HubWebRTCStrategy(ConnectionStrategy):
         )
 
         try:
-            # Use existing WebRTC connection method
-            # Note: p2p_manager.connect_via_webrtc() handles:
-            #   - Offer/Answer SDP exchange via Hub
-            #   - ICE candidate gathering (STUN)
-            #   - TURN relay fallback if needed
-            #   - Data channel creation
+            # Use p2p_manager's WebRTC method (offer/answer via Hub, STUN/TURN NAT traversal)
             connection = await asyncio.wait_for(
-                orchestrator.p2p_manager.connect_via_webrtc(
+                orchestrator.p2p_manager.connect_via_hub(
                     node_id,
                     orchestrator.hub_client
                 ),
@@ -140,14 +135,6 @@ class HubWebRTCStrategy(ConnectionStrategy):
                 node_id[:20], self.timeout
             )
             raise ConnectionError(f"WebRTC timeout to {node_id[:20]}")
-        except AttributeError as e:
-            # connect_via_webrtc() might not exist in current p2p_manager
-            logger.debug(
-                "WebRTC method not available in P2P manager: %s", e
-            )
-            raise StrategyNotApplicableError(
-                "WebRTC connection method not implemented in P2P manager"
-            )
         except Exception as e:
             logger.warning(
                 "Hub WebRTC connection failed to %s: %s",

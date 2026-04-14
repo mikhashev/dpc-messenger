@@ -124,4 +124,16 @@ BUILTIN_TASK_TYPES = {
             },
         },
     ),
+    "reminder": TaskTypeDefinition(
+        task_type="reminder",
+        description="Deliver a reminder message directly to the user without LLM processing. Use this instead of 'chat' for notifications/alerts to avoid accidental re-scheduling loops.",
+        execution_prompt="",  # Not used — reminder tasks bypass the LLM
+        input_schema={
+            "type": "object",
+            "properties": {
+                "message": {"type": "string", "description": "The reminder text to deliver"},
+            },
+            "required": ["message"],
+        },
+    ),
 }

@@ -50,6 +50,10 @@ class ToolContext:
     # Reference to DPC service for DPC-specific tools
     dpc_service: Optional[Any] = None
 
+    # Main asyncio event loop — set by DpcAgent.process() so sync tools running in
+    # executor threads can schedule async calls back via asyncio.run_coroutine_threadsafe.
+    agent_event_loop: Optional[Any] = None
+
     # ConversationMonitor for knowledge extraction (set by agent_manager)
     conversation_monitor: Optional[Any] = None
 
@@ -58,6 +62,13 @@ class ToolContext:
 
     # Firewall reference for extended sandbox paths (v0.16.0+)
     firewall: Optional[Any] = None
+
+    # Reply routing for scheduled tasks: set by agent_manager when processing
+    # a Telegram message so that schedule_task can propagate it into task data.
+    reply_telegram_chat_id: Optional[str] = None
+
+    # Skill store for execute_skill tool (set by DpcAgent.process())
+    skill_store: Optional[Any] = None
 
     # -----------------------------------------------------------------------
     # Path helpers (all sandboxed to agent_root)
@@ -136,7 +147,8 @@ class ToolContext:
         """
         if not self.firewall:
             return False
-        return self.firewall.is_extended_path_allowed(path, require_write)
+        _profile = getattr(getattr(self, "_agent", None), "_firewall_profile", None)
+        return self.firewall.is_extended_path_allowed(path, require_write, profile_name=_profile)
 
     def validate_extended_path(self, path: str, require_write: bool = False) -> pathlib.Path:
         """
@@ -171,7 +183,8 @@ class ToolContext:
         """Get all configured extended sandbox paths."""
         if not self.firewall:
             return {'read_only': [], 'read_write': []}
-        return self.firewall.get_extended_paths()
+        _profile = getattr(getattr(self, "_agent", None), "_firewall_profile", None)
+        return self.firewall.get_extended_paths(profile_name=_profile)
 
 
 @dataclass
@@ -189,7 +202,7 @@ class ToolEntry:
 # Core tools that are always available
 CORE_TOOL_NAMES = {
     # File operations (sandboxed)
-    "repo_read", "repo_list", "repo_write_commit",
+    "repo_read", "repo_list", "repo_write_commit", "repo_delete",
     "drive_read", "drive_list", "drive_write",
     # Extended sandbox (v0.16.0+)
     "extended_path_read", "extended_path_list", "extended_path_write", "list_extended_sandbox_paths",
@@ -208,6 +221,12 @@ CORE_TOOL_NAMES = {
     "self_review", "request_critique", "compare_approaches", "quality_checklist", "consensus_check",
     # Messaging tools (agent-to-user communication)
     "send_user_message",
+    # Skill router (Read phase of Memento-Skills loop)
+    "execute_skill",
+    # Self-introspection tools
+    "list_my_tools", "list_my_skills",
+    # Session archive tools (read-only access to conversation history)
+    "read_session_archive", "read_session_detail",
 }
 
 # Restricted tools (require explicit enable in config)
@@ -217,8 +236,9 @@ RESTRICTED_TOOL_NAMES = {
     "repo_commit_push",    # Git push
     "request_restart",     # Control operations
     "promote_to_stable",
-    # Git tools (can modify files)
+    # Git tools (can modify files / history)
     "git_add", "git_commit", "git_init",
+    "git_checkout", "git_merge", "git_tag", "git_reset", "git_snapshot",
 }
 
 
@@ -244,7 +264,7 @@ class ToolRegistry:
             agent_root: Root directory for agent storage (defaults to ~/.dpc/agent/)
         """
         self._entries: Dict[str, ToolEntry] = {}
-        self._agent_root = agent_root or get_agent_root()
+        self._agent_root = agent_root or get_agent_root("default")
         self._ctx = ToolContext(agent_root=self._agent_root)
         self._load_modules()
 

@@ -3,7 +3,7 @@ DPC Agent — Shared utilities.
 
 Adapted from Ouroboros utils.py for DPC Messenger integration.
 Key changes:
-- Added get_agent_root() and ensure_agent_dirs() for ~/.dpc/agent/ storage
+- Added get_agent_root() and ensure_agent_dirs() for ~/.dpc/agents/{id}/ storage
 - Removed Google Drive / Colab references
 - No OpenRouter pricing functions (DPC handles pricing separately)
 
@@ -30,23 +30,14 @@ log = logging.getLogger(__name__)
 # Agent Storage
 # ---------------------------------------------------------------------------
 
-def get_agent_root(agent_id: Optional[str] = None) -> pathlib.Path:
+def get_agent_root(agent_id: str) -> pathlib.Path:
     """
-    Get the agent's storage root directory.
-
-    Args:
-        agent_id: Optional agent ID. If provided, returns path to ~/.dpc/agents/{agent_id}/
-                  If None, returns path to ~/.dpc/agent/ (legacy/default location)
+    Get the agent's storage root directory: ~/.dpc/agents/{agent_id}/
 
     All agent files (memory, logs, state, knowledge) are stored here.
     This is sandboxed to prevent the agent from accessing other DPC files.
     """
-    if agent_id:
-        # Per-agent isolation: ~/.dpc/agents/{agent_id}/
-        agent_root = pathlib.Path.home() / ".dpc" / "agents" / agent_id
-    else:
-        # Legacy/default location: ~/.dpc/agent/
-        agent_root = pathlib.Path.home() / ".dpc" / "agent"
+    agent_root = pathlib.Path.home() / ".dpc" / "agents" / agent_id
     agent_root.mkdir(parents=True, exist_ok=True)
     return agent_root
 
@@ -72,6 +63,104 @@ def ensure_agent_dirs(agent_id: Optional[str] = None) -> None:
     (root / "knowledge").mkdir(exist_ok=True)
     (root / "task_results").mkdir(exist_ok=True)
     (root / "logs" / "tasks").mkdir(parents=True, exist_ok=True)
+    (root / "skills").mkdir(exist_ok=True)
+
+
+# Default .gitignore for agent sandbox repos
+_AGENT_GITIGNORE = """\
+# Task results (ephemeral outputs, not persistent knowledge)
+task_results/
+# Logs (too large, too frequent)
+logs/
+# Runtime state (changes every operation)
+state/state.json
+# Voice recordings (large binary files)
+voice/
+# Temporary files
+*.tmp
+temp_read.py
+"""
+
+
+def init_agent_git_repo(agent_id: str) -> None:
+    """
+    Initialize a local git repo in the agent sandbox.
+
+    Sets up hooks-disabled config, writes .gitignore, and creates the
+    initial commit. Called once during agent creation. Safe to call on
+    an already-initialized repo (no-op).
+
+    Args:
+        agent_id: Agent identifier (used for git user config)
+    """
+    root = get_agent_root(agent_id)
+
+    # No-op if already initialized
+    if (root / ".git").exists():
+        return
+
+    # Shared empty hooks directory — disables all git hook execution
+    # on both Unix and Windows (Git for Windows understands forward slashes)
+    no_hooks_dir = get_agents_base_dir() / ".no_hooks"
+    no_hooks_dir.mkdir(exist_ok=True)
+
+    try:
+        subprocess.run(["git", "init"], cwd=str(root), capture_output=True, timeout=30, check=False)
+
+        # Disable hooks, set a stable local identity
+        for cmd in [
+            ["git", "config", "core.hooksPath", str(no_hooks_dir)],
+            ["git", "config", "user.name", agent_id],
+            ["git", "config", "user.email", f"{agent_id}@dpc-local"],
+        ]:
+            subprocess.run(cmd, cwd=str(root), capture_output=True, timeout=10, check=False)
+
+        # Write .gitignore
+        gitignore_path = root / ".gitignore"
+        if not gitignore_path.exists():
+            gitignore_path.write_text(_AGENT_GITIGNORE, encoding="utf-8")
+
+        # Initial commit capturing all bootstrapped files
+        subprocess.run(["git", "add", "-A"], cwd=str(root), capture_output=True, timeout=30, check=False)
+        subprocess.run(
+            ["git", "commit", "-m", "chore: initial agent state"],
+            cwd=str(root), capture_output=True, timeout=30, check=False,
+        )
+
+        log.info(f"Initialized git repo for agent {agent_id}")
+
+    except Exception as e:
+        log.warning(f"Failed to initialize git repo for agent {agent_id}: {e}")
+
+
+def auto_commit_agent_change(agent_root: pathlib.Path, message: str) -> None:
+    """
+    Best-effort auto-commit all changes in the agent sandbox.
+
+    Only runs if a .git repo exists. Logs a warning on failure but never
+    raises — callers must not depend on this succeeding.
+
+    Args:
+        agent_root: Agent sandbox root (e.g. ~/.dpc/agents/agent_001/)
+        message: Commit message (use prefix convention: knowledge:, identity:, etc.)
+    """
+    if not (agent_root / ".git").exists():
+        return
+
+    try:
+        subprocess.run(
+            ["git", "add", "-A"],
+            cwd=str(agent_root), capture_output=True, timeout=30, check=False,
+        )
+        result = subprocess.run(
+            ["git", "commit", "-m", message],
+            cwd=str(agent_root), capture_output=True, text=True, timeout=30, check=False,
+        )
+        combined = (result.stdout or "") + (result.stderr or "")
+        if result.returncode != 0 and "nothing to commit" not in combined.lower():
+            log.warning(f"Auto-commit failed for {agent_root.name}: {result.stderr.strip()}")
+    except Exception as e:
+        log.warning(f"Auto-commit failed for {agent_root.name}: {e}")
 
 
 # ---------------------------------------------------------------------------
@@ -413,47 +502,6 @@ def generate_agent_id(name: str = "") -> str:
         return f"agent_{uuid_short}"
 
 
-def migrate_legacy_agent() -> bool:
-    """
-    Migrate legacy ~/.dpc/agent/ folder to ~/.dpc/agents/default/.
-
-    Returns:
-        True if migration was performed, False if not needed
-    """
-    legacy_path = pathlib.Path.home() / ".dpc" / "agent"
-    new_path = get_agent_root("default")
-
-    # Check if migration is needed
-    if not legacy_path.exists():
-        return False
-
-    # Check if already migrated
-    if new_path.exists():
-        log.debug("Legacy agent already migrated")
-        return False
-
-    # Perform migration
-    try:
-        import shutil
-        shutil.move(str(legacy_path), str(new_path))
-        log.info(f"Migrated legacy agent from {legacy_path} to {new_path}")
-
-        # Register default agent in registry
-        registry = AgentRegistry()
-        if not registry.get_agent("default"):
-            registry.register_agent(
-                agent_id="default",
-                name="Default Agent",
-                provider_alias="dpc_agent",
-                profile_name="default",
-            )
-
-        return True
-    except Exception as e:
-        log.error(f"Failed to migrate legacy agent: {e}")
-        return False
-
-
 def migrate_global_telegram_to_agents() -> Dict[str, Any]:
     """
     Migrate global [dpc_agent_telegram] config to per-agent config.
@@ -651,7 +699,14 @@ def create_agent_storage(
     memory = Memory(agent_root=get_agent_root(agent_id))
     memory.ensure_files()
 
+    # Bootstrap starter skills (5 strategy files in skills/)
+    from .skill_store import SkillStore
+    skill_store = SkillStore(agent_root=get_agent_root(agent_id))
+    skill_store.ensure_starter_skills()
+
     # Create config
+    # Note: git repo initialized AFTER all files are bootstrapped so the
+    # initial commit captures the complete starting state.
     config = {
         "agent_id": agent_id,
         "name": name,
@@ -666,6 +721,9 @@ def create_agent_storage(
 
     # Save config
     save_agent_config(agent_id, config)
+
+    # Initialize git repo now that all files are in place
+    init_agent_git_repo(agent_id)
 
     # Register in global registry with Telegram support
     registry = AgentRegistry()
@@ -754,13 +812,28 @@ def write_text(path: pathlib.Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
+_JSONL_MAX_BYTES = 5 * 1024 * 1024  # 5 MB rotation threshold
+
+
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> None:
     """
     Append a JSON object as a line to a JSONL file (concurrent-safe).
 
     Uses file-based locking to prevent concurrent write collisions.
+    Rotates when file exceeds 5 MB (renames to .1, starts fresh).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Rotate if file exceeds size limit
+    try:
+        if path.exists() and path.stat().st_size > _JSONL_MAX_BYTES:
+            rotated = path.with_suffix(path.suffix + ".1")
+            if rotated.exists():
+                rotated.unlink()
+            path.rename(rotated)
+    except Exception:
+        log.debug("append_jsonl: rotation failed for %s", path, exc_info=True)
+
     line = json.dumps(obj, ensure_ascii=False)
     data = (line + "\n").encode("utf-8")
 

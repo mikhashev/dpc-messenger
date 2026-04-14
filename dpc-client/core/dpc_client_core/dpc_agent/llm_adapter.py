@@ -37,6 +37,7 @@ class DpcLlmAdapter:
         self,
         llm_manager: "LLMManager",
         provider_alias: Optional[str] = None,
+        compute_host: str = "",
     ):
         """
         Initialize the adapter.
@@ -44,9 +45,11 @@ class DpcLlmAdapter:
         Args:
             llm_manager: DPC's LLMManager instance (injected from CoreService)
             provider_alias: Specific provider to use (overrides agent_provider/default_provider)
+            compute_host: Optional remote peer node_id — routes all LLM calls to that peer
         """
         self._llm_manager = llm_manager
         self._provider_alias = provider_alias  # Per-agent provider override
+        self._compute_host = compute_host  # Per-agent remote peer override
         self._default_model: Optional[str] = None
         # Reuse existing TokenCountManager for accurate token counting
         self._token_counter = getattr(llm_manager, 'token_count_manager', None)
@@ -83,6 +86,19 @@ class DpcLlmAdapter:
             return default_provider
 
         return None
+
+    def _get_background_provider_alias(self) -> Optional[str]:
+        """
+        Get the provider alias for background tasks (consciousness, evolution).
+
+        Falls back to agent provider if no background_provider configured.
+        """
+        bg_provider = getattr(self._llm_manager, 'background_provider', None)
+        if bg_provider and bg_provider in self._llm_manager.providers:
+            log.debug(f"Using background_provider: {bg_provider}")
+            return bg_provider
+        # Fall back to normal agent provider
+        return self._get_agent_provider_alias()
 
     def _get_agent_provider(self) -> Optional[Any]:
         """Get the agent's provider instance."""
@@ -123,6 +139,7 @@ class DpcLlmAdapter:
         max_tokens: int = 4096,
         on_stream_chunk: Optional[Callable[[str, str], None]] = None,
         conversation_id: Optional[str] = None,
+        background: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
         Send chat request through DPC's LLMManager.
@@ -135,6 +152,7 @@ class DpcLlmAdapter:
             max_tokens: Max completion tokens
             on_stream_chunk: Optional async callback for streaming: await on_stream_chunk(chunk, conversation_id)
             conversation_id: Optional conversation ID for streaming callbacks
+            background: If True, use background_provider for consciousness/evolution tasks
 
         Returns:
             (response_message, usage_dict) tuple in Ouroboros format
@@ -170,19 +188,52 @@ class DpcLlmAdapter:
                 messages = self._inject_image_description_into_messages(messages, description)
                 # Continue with normal text-based agent flow
 
-        # Check if dpc_agent provider has peer_id (remote inference) - KISS approach
+        # Check for remote peer routing — per-agent compute_host takes priority over global peer_id
         dpc_agent_provider = self._llm_manager.providers.get("dpc_agent")
-        if dpc_agent_provider and hasattr(dpc_agent_provider, 'peer_id') and dpc_agent_provider.peer_id:
-            log.debug(f"Routing to remote peer: {dpc_agent_provider.peer_id}")
-            return await self._chat_via_remote_peer(
-                dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
-            )
+        effective_peer_id = self._compute_host or (
+            getattr(dpc_agent_provider, 'peer_id', None) if dpc_agent_provider else None
+        )
+        if effective_peer_id:
+            if self._compute_host:
+                # Per-agent remote routing: build a context object from per-agent values
+                from types import SimpleNamespace
+                remote_ctx = SimpleNamespace(
+                    peer_id=effective_peer_id,
+                    remote_provider=self._provider_alias,
+                    remote_model=getattr(dpc_agent_provider, 'remote_model', None) if dpc_agent_provider else None,
+                    _service=getattr(dpc_agent_provider, '_service', None) if dpc_agent_provider else None,
+                    timeout=getattr(dpc_agent_provider, 'timeout', 180) if dpc_agent_provider else 180,
+                )
+                log.debug(f"Routing to per-agent remote peer: {effective_peer_id} (provider={self._provider_alias})")
+                return await self._chat_via_remote_peer(
+                    remote_ctx, messages, tools, on_stream_chunk, conversation_id
+                )
+            else:
+                # Global peer_id routing (legacy KISS approach)
+                log.debug(f"Routing to remote peer: {effective_peer_id}")
+                return await self._chat_via_remote_peer(
+                    dpc_agent_provider, messages, tools, on_stream_chunk, conversation_id
+                )
 
-        # Get the agent's provider
-        alias = self._get_agent_provider_alias()
+        # Get the agent's provider (or background provider for consciousness/evolution)
+        alias = self._get_background_provider_alias() if background else self._get_agent_provider_alias()
         if not alias:
             raise RuntimeError("No AI provider configured in DPC Messenger (check agent_provider or default_provider)")
         provider = self._llm_manager.providers[alias]
+
+        # Native tool calling path — use when provider supports it and tools are requested.
+        # This eliminates the text-based tool injection pattern that causes GLM-4.7 to
+        # hallucinate [TOOL RESULT]/[USER] sections (tool bypass behavior, ArXiv 2412.04141).
+        if tools and hasattr(provider, "generate_with_tools"):
+            log.debug("Using native tool calling path for provider '%s'", alias)
+            try:
+                return await self._chat_native_tools(
+                    provider, messages, tools, on_stream_chunk, conversation_id
+                )
+            except Exception as e:
+                log.warning(
+                    "Native tool calling failed (%s), falling back to text injection path", e
+                )
 
         # Local inference - text-only path (or pre-analyzed image description)
         # Convert message list to prompt string for DPC providers
@@ -296,6 +347,49 @@ class DpcLlmAdapter:
                 images=images,
             )
 
+            # Detect silent vision failure: some Anthropic-compatible endpoints (e.g. Z.AI)
+            # accept base64 images, convert them to CDN URLs internally, but the underlying
+            # model receives the JSON URL reference as text and cannot process it visually.
+            # In that case the model explicitly says it cannot see the image.
+            _vision_failure_phrases = [
+                "cannot see image",
+                "can't see image",
+                "don't see an actual image",
+                "don't see any image",
+                "don't see the image",
+                "didn't see any image",
+                "no actual image",
+                "no image embedded",
+                "no image attached",
+                "no image in the message",
+                "json objects",
+                "json format",
+                "image as json",
+                "passed as json",
+                "image as a url",
+                "provided as a url",
+                "image was provided as",
+                "no tool for image",
+                "cannot analyze image",
+                "cannot directly analyze",
+                "no image analysis",
+            ]
+            response_lower = response.lower()
+            if any(phrase in response_lower for phrase in _vision_failure_phrases):
+                log.warning(
+                    f"Native vision for provider '{provider.alias}' appears to have failed "
+                    f"(model cannot process the image). Falling back to pre-analysis."
+                )
+                user_text = self._extract_user_text(messages)
+                description = await self._pre_analyze_image_for_agent(images, user_text)
+                messages = self._inject_image_description_into_messages(messages, description)
+                # Re-build prompt with injected description and continue as text-only
+                prompt = self._messages_to_prompt(messages)
+                if tools:
+                    tool_descriptions = self._format_tools_for_prompt(tools)
+                    prompt = f"{tool_descriptions}\n\n{prompt}"
+                response = await provider.generate_response(prompt)
+
             # Build response message in Ouroboros format
             response_msg: Dict[str, Any] = {
                 "role": "assistant",
@@ -331,6 +425,170 @@ class DpcLlmAdapter:
         except Exception as e:
             log.error(f"Native vision query error: {e}")
             raise
+
+    async def _chat_native_tools(
+        self,
+        provider: Any,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        on_stream_chunk: Optional[Callable[[str, str], None]] = None,
+        conversation_id: Optional[str] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """
+        Native Anthropic SDK tool calling path.
+
+        Converts Ouroboros-format messages/tools to Anthropic format, calls
+        provider.generate_with_tools(), and converts the response back to
+        Ouroboros format. Tool calls are returned as structured data — the model
+        cannot hallucinate [TOOL RESULT]/[USER] sections because the API cleanly
+        separates tool_use blocks from text content.
+        """
+        system, anthropic_messages = self._convert_messages_to_anthropic(messages)
+        anthropic_tools = self._convert_tools_to_anthropic(tools)
+
+        log.debug(
+            "Native tool calling: %d messages → %d anthropic messages, %d tools",
+            len(messages), len(anthropic_messages), len(anthropic_tools),
+        )
+
+        raw = await provider.generate_with_tools(
+            messages=anthropic_messages,
+            tools=anthropic_tools,
+            system=system,
+            on_chunk=on_stream_chunk,
+            conversation_id=conversation_id,
+        )
+
+        # Convert Anthropic tool_use blocks → Ouroboros tool_calls format
+        tool_calls = []
+        for block in raw.get("tool_calls_raw", []):
+            tool_calls.append({
+                "id": block.id,
+                "type": "function",
+                "function": {
+                    "name": block.name,
+                    "arguments": json.dumps(block.input),
+                },
+            })
+
+        response_msg: Dict[str, Any] = {
+            "role": "assistant",
+            "content": raw.get("content", ""),
+        }
+        if tool_calls:
+            response_msg["tool_calls"] = tool_calls
+            log.info("Native tool calling: %d tool call(s): %s", len(tool_calls), [tc["function"]["name"] for tc in tool_calls])
+        if raw.get("thinking"):
+            response_msg["thinking"] = raw["thinking"]
+
+        usage = raw.get("usage") or {}
+        if not usage.get("total_tokens"):
+            # Fallback if provider didn't return usage
+            model_name = self.default_model()
+            if self._token_counter:
+                prompt_tokens = self._token_counter.count_tokens(str(anthropic_messages), model_name)
+                completion_tokens = self._token_counter.count_tokens(raw.get("content", ""), model_name)
+            else:
+                prompt_tokens = sum(len(str(m.get("content", ""))) for m in messages) // 4
+                completion_tokens = len(raw.get("content", "")) // 4
+            usage = {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+                "cost": 0.0,
+            }
+        else:
+            usage.setdefault("cost", 0.0)
+
+        return response_msg, usage
+
+    @staticmethod
+    def _convert_messages_to_anthropic(
+        messages: List[Dict[str, Any]],
+    ) -> Tuple[str, List[Dict[str, Any]]]:
+        """Convert Ouroboros message list → (system_str, anthropic_messages).
+
+        Ouroboros uses role:"tool" for tool results; Anthropic expects them as
+        role:"user" with tool_result content blocks. Consecutive tool results are
+        batched into a single user message as required by the Anthropic API.
+        """
+        system = ""
+        anthropic_messages: List[Dict[str, Any]] = []
+
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+            role = msg.get("role", "")
+
+            if role == "system":
+                system = msg.get("content", "")
+                i += 1
+                continue
+
+            if role == "user":
+                content = msg.get("content", "")
+                # If content is already a list (e.g. vision), pass through
+                anthropic_messages.append({"role": "user", "content": content})
+                i += 1
+                continue
+
+            if role == "assistant":
+                blocks: List[Dict[str, Any]] = []
+                text = msg.get("content", "")
+                if text:
+                    blocks.append({"type": "text", "text": text})
+                for tc in msg.get("tool_calls", []):
+                    try:
+                        input_data = json.loads(tc["function"]["arguments"])
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        input_data = {}
+                    blocks.append({
+                        "type": "tool_use",
+                        "id": tc.get("id", f"tu_{i}"),
+                        "name": tc["function"]["name"],
+                        "input": input_data,
+                    })
+                # Anthropic requires at least one block
+                if not blocks:
+                    blocks = [{"type": "text", "text": ""}]
+                anthropic_messages.append({"role": "assistant", "content": blocks})
+                i += 1
+                continue
+
+            if role == "tool":
+                # Batch all consecutive tool results into one user message
+                tool_results: List[Dict[str, Any]] = []
+                while i < len(messages) and messages[i].get("role") == "tool":
+                    tm = messages[i]
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tm.get("tool_call_id", ""),
+                        "content": str(tm.get("content", "")),
+                    })
+                    i += 1
+                anthropic_messages.append({"role": "user", "content": tool_results})
+                continue
+
+            i += 1
+
+        return system, anthropic_messages
+
+    @staticmethod
+    def _convert_tools_to_anthropic(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Convert Ouroboros/OpenAI tool schemas → Anthropic tool format.
+
+        OpenAI format: {"type":"function","function":{"name":...,"parameters":...}}
+        Anthropic format: {"name":...,"description":...,"input_schema":...}
+        """
+        result = []
+        for t in tools:
+            func = t.get("function", t)  # unwrap if OpenAI-style wrapper present
+            result.append({
+                "name": func["name"],
+                "description": func.get("description", ""),
+                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+            })
+        return result
 
     async def _chat_via_remote_peer(
         self,
@@ -655,7 +913,11 @@ class DpcLlmAdapter:
         lines.append("You have access to the following tools. To use a tool, output a code block like:")
         lines.append("```tool_call")
         lines.append('{"name": "tool_name", "arguments": {"arg1": "value1"}}')
-        lines.append("```\n")
+        lines.append("```")
+        lines.append("")
+        lines.append("**IMPORTANT**: Use ONLY the ```tool_call code block format above.")
+        lines.append("Do NOT use <tool_call>, [tool_call], or any XML/HTML format.")
+        lines.append("Do NOT add explanatory text before the tool call block — output the block directly.\n")
 
         for tool in tools:
             func = tool.get("function", {})
@@ -722,6 +984,46 @@ class DpcLlmAdapter:
             if json_matches:
                 log.debug(f"Found {len(json_matches)} JSON tool call objects directly")
                 matches = json_matches
+
+        # 4th fallback: handle GLM-4.7 native XML format <tool_call>tool_name>{json}</tool_name>
+        # GLM-4.7 sometimes outputs this format when it generates text before the tool call
+        if not matches:
+            glm_pattern = r'<tool_call>\s*([A-Za-z0-9_-]+)\s*>\s*(\{.*?\})\s*</[^>]+>'
+            for tool_name, args_str in re.findall(glm_pattern, content, re.DOTALL):
+                try:
+                    args = json.loads(args_str)
+                    normalized = json.dumps({"name": tool_name, "arguments": args}, ensure_ascii=False)
+                    matches.append(normalized)
+                    log.debug(f"GLM fallback: normalized <tool_call>{tool_name}> to standard format")
+                except json.JSONDecodeError:
+                    log.debug(f"GLM fallback: failed to parse args for <tool_call>{tool_name}")
+
+        # 5th fallback: <tool_call>tool_name\n{json} (newline separator, no closing tag)
+        # Seen when Z.AI text injection path produces this compact format
+        if not matches:
+            glm_newline_pattern = r'<tool_call>\s*([A-Za-z0-9_-]+)\s*\n(\{.*?\})(?:\s*</tool_call>)?'
+            for tool_name, args_str in re.findall(glm_newline_pattern, content, re.DOTALL):
+                try:
+                    args = json.loads(args_str)
+                    normalized = json.dumps({"name": tool_name, "arguments": args}, ensure_ascii=False)
+                    matches.append(normalized)
+                    log.debug(f"GLM newline fallback: parsed <tool_call>{tool_name}\\n{{json}}")
+                except json.JSONDecodeError:
+                    log.debug(f"GLM newline fallback: failed to parse args for <tool_call>{tool_name}")
+
+        # 6th fallback: <tool_call>tool_name arguments={json} (equals sign separator)
+        # Seen in GLM output: <tool_call>list_extended_sandbox_paths arguments={}
+        # Multiple calls may be separated by --- on its own line
+        if not matches:
+            glm_equals_pattern = r'<tool_call>\s*([A-Za-z0-9_-]+)\s+arguments\s*=\s*(\{.*?\})'
+            for tool_name, args_str in re.findall(glm_equals_pattern, content, re.DOTALL):
+                try:
+                    args = json.loads(args_str)
+                    normalized = json.dumps({"name": tool_name, "arguments": args}, ensure_ascii=False)
+                    matches.append(normalized)
+                    log.debug(f"GLM equals fallback: parsed <tool_call>{tool_name} arguments={{...}}")
+                except json.JSONDecodeError:
+                    log.debug(f"GLM equals fallback: failed to parse args for <tool_call>{tool_name}")
 
         for i, match in enumerate(matches):
             try:

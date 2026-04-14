@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional
 
 from .utils import (
     utc_now_iso, read_text, write_text, append_jsonl, short,
-    get_agent_root, ensure_agent_dirs
+    get_agent_root, ensure_agent_dirs, auto_commit_agent_change
 )
 
 log = logging.getLogger(__name__)
@@ -46,7 +46,7 @@ class Memory:
         Args:
             agent_root: Root directory for agent storage (defaults to ~/.dpc/agent/)
         """
-        self.agent_root = agent_root or get_agent_root()
+        self.agent_root = agent_root or get_agent_root("default")
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
     # --- Paths ---
@@ -62,6 +62,10 @@ class Memory:
     def identity_path(self) -> pathlib.Path:
         """Path to identity file."""
         return self._memory_path("identity.md")
+
+    def reflection_path(self) -> pathlib.Path:
+        """Path to structured reflection file."""
+        return self._memory_path("reflection.json")
 
     def dialogue_summary_path(self) -> pathlib.Path:
         """Path to dialogue summary file."""
@@ -110,6 +114,45 @@ class Memory:
     def save_identity(self, content: str) -> None:
         """Save identity content."""
         write_text(self.identity_path(), content)
+        auto_commit_agent_change(self.agent_root, "identity: updated self-understanding")
+
+    def load_reflection(self) -> dict:
+        """Load structured reflection data."""
+        p = self.reflection_path()
+        if p.exists():
+            try:
+                return json.loads(read_text(p))
+            except (json.JSONDecodeError, ValueError):
+                log.warning("Invalid reflection.json, returning empty")
+                return self._default_reflection()
+        return self._default_reflection()
+
+    def save_reflection(self, data: dict) -> None:
+        """Save structured reflection data with validation."""
+        # Validate top-level keys
+        valid_keys = {"reflections", "pattern_tracking", "calibration", "meta"}
+        filtered = {k: v for k, v in data.items() if k in valid_keys}
+        if not filtered:
+            filtered = self._default_reflection()
+        write_text(self.reflection_path(), json.dumps(filtered, indent=2, ensure_ascii=False))
+
+    @staticmethod
+    def _default_reflection() -> dict:
+        """Default empty reflection structure."""
+        return {
+            "reflections": [],
+            "pattern_tracking": [],
+            "calibration": {
+                "self_assessment": None,
+                "user_feedback": None,
+                "gap": None
+            },
+            "meta": {
+                "schema_version": "1.0",
+                "max_reflections": 50,
+                "max_patterns": 20
+            }
+        }
 
     def load_dialogue_summary(self) -> str:
         """Load dialogue summary if exists."""
@@ -130,6 +173,25 @@ class Memory:
             write_text(self.identity_path(), self._default_identity())
         if not self.journal_path().exists():
             write_text(self.journal_path(), "")
+
+    def cleanup_old_task_results(self, max_age_days: int = 30) -> int:
+        """Remove task_results files older than max_age_days. Returns count deleted."""
+        import time as _time
+        results_dir = self.agent_root / "task_results"
+        if not results_dir.exists():
+            return 0
+        cutoff = _time.time() - (max_age_days * 86400)
+        deleted = 0
+        for f in results_dir.glob("*.json"):
+            try:
+                if f.stat().st_mtime < cutoff:
+                    f.unlink()
+                    deleted += 1
+            except Exception:
+                continue
+        if deleted:
+            log.info(f"Cleaned up {deleted} old task result files (>{max_age_days} days)")
+        return deleted
 
     # --- Knowledge Base ---
 
@@ -157,12 +219,12 @@ class Memory:
         return sorted(topics)
 
     def _update_knowledge_index(self) -> None:
-        """Update the knowledge base index file."""
+        """Update the knowledge base index file with markdown links."""
         topics = self.list_knowledge_topics()
-        lines = ["# Knowledge Base Index\n"]
+        lines = ["# Knowledge Base Index", ""]
         for topic in topics:
-            lines.append(f"- [[{topic}]]")
-        write_text(self.knowledge_index_path(), "\n".join(lines))
+            lines.append(f"- [{topic}]({topic}.md)")
+        write_text(self.knowledge_index_path(), "\n".join(lines) + "\n")
 
     # --- JSONL Reading ---
 
@@ -187,6 +249,32 @@ class Memory:
             return entries
         except Exception:
             log.warning(f"Failed to read JSONL tail from {log_name}", exc_info=True)
+            return []
+
+    def read_jsonl_since(self, log_name: str, hours: float = 24.0, max_entries: int = 500) -> List[Dict[str, Any]]:
+        """Read JSONL entries from the last `hours` hours (temporal window)."""
+        from datetime import datetime, timezone, timedelta
+        path = self.logs_path(log_name)
+        if not path.exists():
+            return []
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+        try:
+            entries = []
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        ts = entry.get("ts", "")
+                        if ts >= cutoff:
+                            entries.append(entry)
+                    except Exception:
+                        continue
+            return entries[-max_entries:] if len(entries) > max_entries else entries
+        except Exception:
+            log.warning(f"Failed to read JSONL since {hours}h from {log_name}", exc_info=True)
             return []
 
     # --- Log Summarization ---

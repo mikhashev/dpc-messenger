@@ -482,6 +482,10 @@ class HubClient:
             status = getattr(e.response, 'status_code', 'unknown') if hasattr(e, 'response') else 'unknown'
             raise ConnectionError(f"Server rejected WebSocket connection: HTTP {status}") from e
 
+    def is_connected(self) -> bool:
+        """Return True if the Hub signaling websocket is open."""
+        return bool(self.websocket and self.websocket.state == websockets.State.OPEN)
+
     async def send_signal(self, target_node_id: str, payload: Dict[str, Any]):
         """Sends a signaling message to a target peer via the Hub."""
         if not self.websocket or self.websocket.state != websockets.State.OPEN:

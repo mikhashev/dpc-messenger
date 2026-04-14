@@ -12,7 +12,11 @@
     tokenLimit = 0,
     estimatedTokens = 0,
     showEstimation = false,
+    historyTokens = 0,
+    contextEstimated = 0,
+    messageCount = 0,
     enableMarkdown = $bindable(true),
+    isExtracting = false,
     onNewSession,
     onEndSession
   }: {
@@ -24,7 +28,11 @@
     tokenLimit?: number;
     estimatedTokens?: number;
     showEstimation?: boolean;
+    historyTokens?: number;
+    contextEstimated?: number;
+    messageCount?: number;
     enableMarkdown?: boolean;
+    isExtracting?: boolean;
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
   } = $props();
@@ -42,8 +50,29 @@
     effectiveLimit > 0 ? (totalTokens / effectiveLimit) : 0
   );
 
+  // Three-metric display (shown when context_estimated is available from backend)
+  let showThreeMetrics = $derived(contextEstimated > 0);
+  // historyTokens is a rough chars÷4 estimate; contextEstimated is the actual total from the LLM
+  // API. Clamp so the estimate never exceeds the measured total (prevents negative staticMemory).
+  let effectiveHistoryTokens = $derived(
+    showThreeMetrics ? Math.min(historyTokens, contextEstimated) : historyTokens
+  );
+  let staticMemory = $derived(showThreeMetrics ? contextEstimated - effectiveHistoryTokens : 0);
+  let dialogAvailable = $derived(showThreeMetrics ? effectiveLimit - staticMemory : effectiveLimit);
+  let dialogPercent = $derived(dialogAvailable > 0 ? effectiveHistoryTokens / dialogAvailable : 0);
+  let totalContextPercent = $derived(effectiveLimit > 0 ? contextEstimated / effectiveLimit : 0);
+
+  let dialogWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
+    ? effectiveHistoryTokens + estimatedTokens
+    : effectiveHistoryTokens);
+  let totalWithInput = $derived(showThreeMetrics && showEstimation && estimatedTokens > 0
+    ? contextEstimated + estimatedTokens
+    : contextEstimated);
+  let dialogPercentWithInput = $derived(dialogAvailable > 0 ? dialogWithInput / dialogAvailable : 0);
+  let totalContextPercentWithInput = $derived(effectiveLimit > 0 ? totalWithInput / effectiveLimit : 0);
+
   let showWarning = $derived(
-    tokenUsagePercent >= 0.8
+    showThreeMetrics ? totalContextPercentWithInput >= 0.8 : tokenUsagePercent >= 0.8
   );
 
   // End session is disabled only for P2P chats when peer is offline
@@ -54,28 +83,51 @@
 
   let endSessionTitle = $derived(
     endSessionDisabled
-      ? "Peer must be online to save knowledge (requires voting)"
-      : "Extract and save knowledge from this conversation"
+      ? "Peer must be online to extract knowledge (requires voting)"
+      : "Extract knowledge from this conversation"
   );
 </script>
 
 {#if isAIChat}
-  <div class="token-counter">
-    <span
-      class="token-value"
-      title={showEstimation && estimatedTokens > 0
-        ? "Estimate includes current input (4 chars ≈ 1 token, excludes contexts)"
-        : ""}
-    >
-      {#if showEstimation && estimatedTokens > 0}
-        {tokenUsed.toLocaleString()} + ~{estimatedTokens.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
-      {:else}
-        {tokenUsed.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
-      {/if}
-    </span>
-    <span class="token-percentage" class:warning={showWarning}>
-      ({Math.round(tokenUsagePercent * 100)}%)
-    </span>
+  <div class="token-counter" class:token-counter--detailed={showThreeMetrics}>
+    {#if showThreeMetrics}
+      <div class="token-row">
+        <span class="token-label">Dialog</span>
+        <span class="token-value">{historyTokens.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {dialogAvailable.toLocaleString()}</span>
+        <span class="token-percentage" class:warning={dialogPercentWithInput >= 0.8}>({Math.round(dialogPercentWithInput * 100)}%)</span>
+      </div>
+      <div class="token-row">
+        <span class="token-label">Total</span>
+        <span class="token-value">{contextEstimated.toLocaleString()}{#if showEstimation && estimatedTokens > 0} + ~{estimatedTokens.toLocaleString()}{/if} / {effectiveLimit.toLocaleString()}</span>
+        <span class="token-percentage" class:warning={totalContextPercentWithInput >= 0.8}>({Math.round(totalContextPercentWithInput * 100)}%)</span>
+      </div>
+      <div class="token-row token-row--muted" title="System prompt + contexts + tool schemas">
+        <span class="token-label">Static</span>
+        <span class="token-value">≈{staticMemory.toLocaleString()}</span>
+        <span class="token-percentage"></span>
+      </div>
+      <div class="token-row token-row--muted" title="Number of messages in current conversation">
+        <span class="token-label">Messages</span>
+        <span class="token-value">{messageCount}</span>
+        <span class="token-percentage"></span>
+      </div>
+    {:else}
+      <span
+        class="token-value"
+        title={showEstimation && estimatedTokens > 0
+          ? "Estimate includes current input (4 chars ≈ 1 token, excludes contexts)"
+          : ""}
+      >
+        {#if showEstimation && estimatedTokens > 0}
+          {tokenUsed.toLocaleString()} + ~{estimatedTokens.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
+        {:else}
+          {tokenUsed.toLocaleString()} / {effectiveLimit.toLocaleString()} tokens
+        {/if}
+      </span>
+      <span class="token-percentage" class:warning={showWarning}>
+        ({Math.round(tokenUsagePercent * 100)}%)
+      </span>
+    {/if}
     {#if showWarning}
       <span class="warning-label">
         ⚠️ Approaching limit
@@ -90,11 +142,16 @@
   </button>
   <button
     class="btn-end-session"
+    class:extracting={isExtracting}
     onclick={() => onEndSession(showForChatId)}
-    disabled={endSessionDisabled}
-    title={endSessionTitle}
+    disabled={endSessionDisabled || isExtracting}
+    title={isExtracting ? "Extracting knowledge..." : endSessionTitle}
   >
-    End Session & Save Knowledge
+    {#if isExtracting}
+      Extracting...
+    {:else}
+      Extract Knowledge
+    {/if}
   </button>
   {#if isAIChat}
     <button
@@ -118,6 +175,36 @@
     background: #f8f9fa;
     border-radius: 6px;
     border: 1px solid #e0e0e0;
+  }
+
+  .token-counter--detailed {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.2rem;
+  }
+
+  .token-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+
+  .token-label {
+    font-family: 'Courier New', monospace;
+    color: #888;
+    font-size: 0.75rem;
+    font-weight: 500;
+    min-width: 3.2rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+  }
+
+  .token-row--muted .token-value {
+    color: #aaa;
+  }
+
+  .token-row--muted .token-label {
+    color: #bbb;
   }
 
   .token-value {
@@ -214,6 +301,16 @@
     opacity: 0.6;
     transform: none;
     box-shadow: 0 2px 4px rgba(108, 117, 125, 0.2);
+  }
+
+  .btn-end-session.extracting {
+    background: #f0ad4e;
+    animation: pulse 1.5s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.7; }
+    50% { opacity: 1; }
   }
 
   .btn-markdown-toggle {

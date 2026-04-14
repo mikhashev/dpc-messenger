@@ -28,6 +28,8 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 from .llm_adapter import DpcLlmAdapter
 from .tools.registry import ToolRegistry, ToolContext
 from .memory import Memory
+from .skill_store import SkillStore
+from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
 from .loop import run_llm_loop
 from .utils import (
@@ -52,6 +54,9 @@ class AgentConfig:
     max_rounds: int = 200
     # Tool control is via firewall (privacy_rules.json), not config
     background_consciousness: bool = False
+    consciousness_think_interval_min: int = 60
+    consciousness_think_interval_max: int = 300
+    consciousness_budget_fraction: float = 0.1
 
     # Task queue settings
     enable_task_queue: bool = True
@@ -82,6 +87,8 @@ class DpcAgent:
         firewall: Optional[Any] = None,  # ContextFirewall for tool control
         provider_alias: Optional[str] = None,  # Per-agent provider override (Phase 3)
         firewall_profile: Optional[str] = None,  # Per-agent permission profile (Phase 2)
+        service: Optional[Any] = None,  # CoreService reference for commit proposals
+        compute_host: str = "",  # Optional remote peer node_id for LLM inference
     ):
         """
         Initialize the agent.
@@ -95,16 +102,27 @@ class DpcAgent:
             firewall_profile: Permission profile name from privacy_rules.json
         """
         self.config = config or AgentConfig()
-        self.agent_root = agent_root or get_agent_root()
+        self.agent_root = agent_root or get_agent_root("default")
         self._firewall = firewall  # Firewall controls tool access
         self._provider_alias = provider_alias  # Store for LLM adapter
         self._firewall_profile = firewall_profile  # Store for tool permission lookups
+        self._service = service  # CoreService — used by tools that need it (e.g. knowledge_write firewall)
         # Note: ensure_agent_dirs() is already called by DpcAgentManager, so we don't call it here
 
         # Initialize components
-        self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias)
+        self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias, compute_host=compute_host)
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
+        self.memory._update_knowledge_index()  # Regenerate _index.md on startup
+        self.memory.cleanup_old_task_results(max_age_days=30)  # TTL cleanup
+        self.skill_store = SkillStore(agent_root=self.agent_root)
+        self.skill_store.ensure_starter_skills()  # bootstrap for existing agents on first run
+        self.skill_reflector = SkillReflector(
+            skill_store=self.skill_store,
+            llm=self.llm,
+            firewall=firewall,
+            firewall_profile=firewall_profile,
+        )
 
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)
@@ -133,12 +151,20 @@ class DpcAgent:
         self._evolution: Optional[Any] = None  # EvolutionManager
         self._evolution_enabled = self.config.evolution_enabled
 
+        # Callback set by agent_manager to deliver scheduled task results to Telegram
+        self._telegram_send_fn: Optional[Any] = None
+
+        # Flag: user interaction in progress — consciousness/evolution should yield
+        self._user_active = False
+
         # Background consciousness (optional)
         self._consciousness: Optional["BackgroundConsciousness"] = None
         self._consciousness_enabled = self.config.background_consciousness
 
         # Track last usage for session state access by agent_manager
         self._last_usage: Optional[Dict[str, Any]] = None
+        # Track last full context estimate (from build_llm_messages cap_info)
+        self._last_cap_info: Optional[Dict[str, Any]] = None
 
         log.info(f"DpcAgent initialized with storage at {self.agent_root}")
 
@@ -158,6 +184,9 @@ class DpcAgent:
         image_caption: Optional[str] = None,
         # Unique per-message task ID (distinct from conversation_id)
         task_id: Optional[str] = None,
+        # Reply routing: when set, injected into ToolContext so schedule_task
+        # can propagate it into task data for automatic result delivery.
+        reply_telegram_chat_id: Optional[str] = None,
     ) -> str:
         """
         Process a user message and return response.
@@ -197,6 +226,18 @@ class DpcAgent:
             if len(full_history) > 1:
                 prior_history = full_history[:-1]  # exclude the current user message
 
+        # Get firewall-controlled tool access (needed for both context and tool registry)
+        allowed_tools = self._get_allowed_tools()
+
+        # Collect firewall metadata for capabilities section (transparency)
+        all_tools_map = None
+        sandbox_ro = None
+        sandbox_rw = None
+        if self._firewall is not None:
+            all_tools_map = dict(self._firewall.dpc_agent_tools)
+            sandbox_ro = list(self._firewall.sandbox_read_only_paths)
+            sandbox_rw = list(self._firewall.sandbox_read_write_paths)
+
         messages, cap_info = build_llm_messages(
             agent_root=self.agent_root,
             memory=self.memory,
@@ -205,10 +246,35 @@ class DpcAgent:
             dpc_context=dpc_context,
             session_state=session_state,
             conversation_history=prior_history,
+            skill_store=self.skill_store,
+            allowed_tools=allowed_tools,
+            all_tools=all_tools_map,
+            sandbox_read_only=sandbox_ro,
+            sandbox_read_write=sandbox_rw,
         )
 
-        # Set tool context with firewall-controlled tool access
-        allowed_tools = self._get_allowed_tools()
+        # Store cap_info for agent_manager to include in next request's session_state
+        self._last_cap_info = cap_info
+
+        # Log context window usage — warn if approaching limit or sections were trimmed
+        _estimated = cap_info.get("estimated_tokens_before", 0)
+        _ctx_window = (session_state or {}).get("tokens_limit", 200000) or 200000
+        _trimmed = cap_info.get("trimmed_sections", [])
+        if _trimmed:
+            log.warning(
+                "Context trimmed (approaching limit): %s | estimated: %d / %d tokens (%.0f%%)",
+                _trimmed, _estimated, _ctx_window, _estimated / _ctx_window * 100,
+            )
+        elif _estimated > _ctx_window * 0.8:
+            log.warning(
+                "Context window >80%% full: estimated %d / %d tokens (%.0f%%)",
+                _estimated, _ctx_window, _estimated / _ctx_window * 100,
+            )
+        else:
+            log.debug(
+                "Context size: estimated %d / %d tokens (%.0f%%)",
+                _estimated, _ctx_window, _estimated / _ctx_window * 100,
+            )
         ctx = ToolContext(
             agent_root=self.agent_root,
             current_task_id=conversation_id,
@@ -217,7 +283,13 @@ class DpcAgent:
             emit_progress_fn=emit_progress or (lambda msg, tool=None, rnd=None: None),
             firewall=self._firewall,  # For extended sandbox paths
             conversation_monitor=conversation_monitor,  # For knowledge extraction tool
+            reply_telegram_chat_id=reply_telegram_chat_id,
+            skill_store=self.skill_store,  # For execute_skill tool
+            dpc_service=self._service,  # For knowledge_write firewall checks
         )
+        # Store main event loop so sync tools running in executor threads can schedule
+        # async calls back onto it via asyncio.run_coroutine_threadsafe.
+        ctx.agent_event_loop = asyncio.get_event_loop()
         ctx._agent = self  # Enable schedule_task and other agent-dependent tools
         self.tools.set_context(ctx)
 
@@ -253,6 +325,18 @@ class DpcAgent:
         # Store last usage for session state access by agent_manager
         self._last_usage = usage
 
+        # Phase 3: Skill Write phase — record outcomes, optionally reflect
+        used_skills = self.skill_reflector.record_outcome(trace, usage)
+        if used_skills and usage.get("rounds", 0) >= REFLECTION_ROUNDS_THRESHOLD:
+            asyncio.ensure_future(
+                self.skill_reflector.reflect_async(
+                    skill_name=used_skills[0],
+                    task_text=message,
+                    llm_trace=trace,
+                    usage=usage,
+                )
+            )
+
         completed_at = utc_now_iso()
 
         # Log task completion
@@ -264,6 +348,9 @@ class DpcAgent:
             "response_preview": response[:200] if response else "",
             "rounds": usage.get("rounds", 0),
             "cost_usd": usage.get("cost", 0),
+            "tokens_estimated_total": cap_info.get("estimated_tokens_before", 0),
+            "tokens_context_window": _ctx_window,
+            "context_trimmed": bool(_trimmed),
         })
 
         # Persist full task result to task_results/{task_id}.json
@@ -327,8 +414,12 @@ class DpcAgent:
             log.info("DPC Agent disabled in firewall")
             return set()  # No tools allowed
 
-        allowed = self._firewall.get_allowed_agent_tools()
-        log.debug(f"Firewall allowed tools: {len(allowed)} tools")
+        if self._firewall_profile:
+            allowed = self._firewall.get_allowed_agent_tools_for_profile(self._firewall_profile)
+            log.debug(f"Firewall allowed tools (profile={self._firewall_profile}): {len(allowed)} tools")
+        else:
+            allowed = self._firewall.get_allowed_agent_tools()
+            log.debug(f"Firewall allowed tools (global): {len(allowed)} tools")
         return allowed
 
     def get_memory(self) -> Memory:
@@ -364,6 +455,9 @@ class DpcAgent:
 
         self._consciousness = BackgroundConsciousness(
             agent=self,
+            think_interval_min=self.config.consciousness_think_interval_min,
+            think_interval_max=self.config.consciousness_think_interval_max,
+            budget_fraction=self.config.consciousness_budget_fraction,
             emit_progress=emit_progress,
         )
         self._consciousness.start()
@@ -380,6 +474,51 @@ class DpcAgent:
         """Check if consciousness is running."""
         return self._consciousness is not None and self._consciousness.is_running()
 
+    def archive_old_task_results(self, max_age_hours: int = 24) -> int:
+        """Archive task_results older than max_age_hours into daily JSONL files.
+
+        Moves individual JSON files from task_results/ into
+        task_results/archive/YYYY-MM-DD.jsonl (one JSON object per line).
+        Returns number of files archived.
+        """
+        import json as _json
+        from datetime import datetime, timezone, timedelta
+
+        results_dir = self.agent_root / "task_results"
+        if not results_dir.exists():
+            return 0
+
+        archive_dir = results_dir / "archive"
+        archive_dir.mkdir(exist_ok=True)
+
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=max_age_hours)
+        archived = 0
+
+        for f in sorted(results_dir.glob("*.json")):
+            try:
+                data = _json.loads(f.read_text(encoding="utf-8"))
+                completed = data.get("completed_at") or data.get("started_at", "")
+                if not completed:
+                    continue
+                ts = datetime.fromisoformat(completed.replace("Z", "+00:00"))
+                if ts >= cutoff:
+                    continue
+
+                # Append to daily archive file
+                day_str = ts.strftime("%Y-%m-%d")
+                archive_file = archive_dir / f"{day_str}.jsonl"
+                with open(archive_file, "a", encoding="utf-8") as af:
+                    af.write(_json.dumps(data, ensure_ascii=False) + "\n")
+
+                f.unlink()
+                archived += 1
+            except Exception as e:
+                log.debug("Skipping task result %s: %s", f.name, e)
+
+        if archived:
+            log.info("Archived %d old task results (>%dh)", archived, max_age_hours)
+        return archived
+
     # -------------------------------------------------------------------------
     # Task Queue Methods
     # -------------------------------------------------------------------------
@@ -389,6 +528,12 @@ class DpcAgent:
         if not self._queue_enabled:
             log.debug("Task queue not enabled")
             return
+
+        # Archive old task results on startup
+        try:
+            self.archive_old_task_results(max_age_hours=24)
+        except Exception as e:
+            log.warning("Task result archival failed: %s", e)
 
         # Set callbacks
         async def on_task_start(task: Task) -> None:
@@ -722,11 +867,55 @@ class DpcAgent:
                 # This handles cases where agent passes structured data to chat task
                 text = self._convert_task_data_to_prompt(task.data)
 
-            return await self.process(
+            # Use the originating conversation_id so streaming progress and the
+            # final history update appear in the correct chat (not a dead task.id).
+            reply_conversation_id = task.data.get("_reply_conversation_id") or task.id
+            reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
+
+            result = await self.process(
                 text,
-                conversation_id=task.id,
+                conversation_id=reply_conversation_id,
                 dpc_context=task.data.get("dpc_context"),
+                reply_telegram_chat_id=reply_telegram_chat_id,
             )
+
+            # Deliver result back to Telegram if the task originated from there
+            if reply_telegram_chat_id:
+                send_fn = getattr(self, "_telegram_send_fn", None)
+                if send_fn:
+                    try:
+                        await send_fn(reply_telegram_chat_id, result)
+                    except Exception as e:
+                        log.warning("Failed to deliver task result to Telegram: %s", e)
+
+            return result
+        elif task.task_type == "reminder":
+            # Deliver reminder message directly — no LLM call to prevent scheduling loops
+            message = task.data.get("message", task.data.get("text", ""))
+            if not message:
+                return "Reminder task has no message"
+
+            reply_telegram_chat_id = task.data.get("_reply_telegram_chat_id")
+            formatted = f"⏰ Reminder: {message}"
+
+            # Send to Telegram chat if available
+            if reply_telegram_chat_id:
+                send_fn = getattr(self, "_telegram_send_fn", None)
+                if send_fn:
+                    try:
+                        await send_fn(reply_telegram_chat_id, formatted)
+                    except Exception as e:
+                        log.warning("Failed to deliver reminder to Telegram: %s", e)
+
+            # Also broadcast via event system (e.g. DPC UI notifications)
+            try:
+                from .events import emit_agent_message
+                await emit_agent_message(formatted, priority="high", agent_id=self.agent_root.name)
+            except Exception as e:
+                log.warning("Failed to emit reminder event: %s", e)
+
+            log.info("Reminder delivered for task %s: %s", task.id, message[:80])
+            return f"Reminder sent: {message}"
         elif task.task_type == "improvement":
             # Execute planned improvement via evolution
             if self._evolution:
@@ -740,9 +929,37 @@ class DpcAgent:
             return f"Unknown task type: {task.task_type}. Register a handler with register_task_handler('{task.task_type}', handler)"
 
     async def _execute_review(self, data: Dict[str, Any]) -> str:
-        """Execute a code review task."""
-        # TODO: Implement review logic
-        return "Review not implemented"
+        """Execute a code review task using self_review + request_critique tools."""
+        target = data.get("target", data.get("text", ""))
+        focus = data.get("focus", "")
+        reply_conversation_id = data.get("_reply_conversation_id") or "review_task"
+        reply_telegram_chat_id = data.get("_reply_telegram_chat_id")
+
+        if not target:
+            return "Review task requires a 'target' field (file path, code snippet, or description)"
+
+        focus_clause = f" Focus on: {focus}." if focus else ""
+        prompt = (
+            f"Please review the following:{focus_clause}\n\n"
+            f"{target}\n\n"
+            f"Use your self_review and request_critique tools to produce a thorough review "
+            f"covering correctness, quality, edge cases, and any improvements."
+        )
+
+        result = await self.process(
+            prompt,
+            conversation_id=reply_conversation_id,
+        )
+
+        if reply_telegram_chat_id:
+            send_fn = getattr(self, "_telegram_send_fn", None)
+            if send_fn:
+                try:
+                    await send_fn(reply_telegram_chat_id, result)
+                except Exception as e:
+                    log.warning("Failed to deliver review result to Telegram: %s", e)
+
+        return result
 
     def schedule_task(
         self,
@@ -763,11 +980,11 @@ class DpcAgent:
         Returns:
             Scheduled task
         """
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
         scheduled_at = None
         if delay_seconds > 0:
-            scheduled_at = datetime.utcnow() + timedelta(seconds=delay_seconds)
+            scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
 
         task = self.queue.schedule(
             task_type=task_type,

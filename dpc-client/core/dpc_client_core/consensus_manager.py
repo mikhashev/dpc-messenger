@@ -349,6 +349,9 @@ class ConsensusManager:
                 consensus_type="unanimous" if approval_rate == 1.0 else "majority",
                 approved_by=[nid for nid, v in votes.items() if v.vote == "approve"],
                 rejected_by=[nid for nid, v in votes.items() if v.vote == "reject"],
+                vote_comments={nid: v.comment for nid, v in votes.items() if v.comment},
+                proposed_by=proposal.proposed_by,
+                initiated_by=proposal.initiated_by,
                 cultural_perspectives_considered=proposal.cultural_perspectives,
                 confidence_score=proposal.avg_confidence,
                 sources_cited=[],  # Could extract from entries
@@ -357,7 +360,8 @@ class ConsensusManager:
                 extraction_host=proposal.extraction_host,  # Track which compute host was used
                 # Use the proposer's HEAD anchored in the proposal so all nodes compute
                 # the same commit_hash (parent_commit_id is part of the hash input).
-                parent_commit_id=proposal.parent_commit_id
+                parent_commit_id=proposal.parent_commit_id,
+                proposal_id=proposal.proposal_id,
             )
 
             # Apply commit to local context; only fire success callbacks if write succeeded
@@ -541,6 +545,9 @@ class ConsensusManager:
                 'participants': commit.participants,
                 'approved_by': commit.approved_by,
                 'rejected_by': commit.rejected_by,
+                'vote_comments': commit.vote_comments,
+                'proposed_by': commit.proposed_by,
+                'initiated_by': commit.initiated_by,
                 'consensus': commit.consensus_type,
                 'confidence_score': commit.confidence_score,
                 'signatures': commit.signatures,
@@ -755,7 +762,7 @@ class ConsensusManager:
 
         for pid, session in self.sessions.items():
             if session.deadline and session.deadline < cutoff:
-                if session.status in ["approved", "rejected", "timeout", "revision_needed"]:
+                if session.status in ["approved", "rejected", "timeout", "revision_needed", "apply_failed"]:
                     to_remove.append(pid)
 
         for pid in to_remove:

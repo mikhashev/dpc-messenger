@@ -1,5 +1,10 @@
 # --- D-PC Messenger .gitignore ---
 
+# 0. Internal AI/team docs (not for public repo)
+CLAUDE.md
+docs/REFACTORING_GUIDELINES_FOR_CLAUDE_CODE.md
+archive/
+
 # 1. Environments & Dependencies
 # Never commit virtual environments or local dependency caches.
 .venv/
@@ -106,3 +111,21 @@ ideas/
 
 # 15. Audit folder (codebase analysis - local only)
 audit/
+
+# 16. Sprint logs (internal team workflow - not for public repo)
+sprint-logs/
+
+# 17. Dead code & obsolete docs (kept locally, excluded from repo)
+docs/BACKUP_RESTORE.md
+dpc-client/core/dpc_client_core/backup_manager.py
+dpc-client/core/dpc_client_core/cli_backup.py
+
+# 18. Internal backlog (security-sensitive, not for public repo)
+# Triaged task list for Mike + Ark + CC. Contains unpatched security findings
+# and WIP architecture decisions. See conversations/ for decision history.
+backlog.md
+
+# 19. Internal process protocol (CC + Ark + Mike operating agreement)
+# Triple-agent collaboration rules, workflow patterns, internal references.
+# Moved from sprint-logs/ to repo root alongside backlog.md (S22, v1.9).
+protocol-13.md

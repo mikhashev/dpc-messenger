@@ -40,6 +40,53 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
+class _TelegramNetworkErrorFilter(logging.Filter):
+    """
+    Suppress repetitive Telegram NetworkError log spam.
+
+    The telegram library's network_retry_loop retries polling indefinitely,
+    logging an ERROR-level traceback for every failure. When Telegram is
+    unavailable this produces hundreds of error lines per minute.
+
+    This filter passes the first `threshold` occurrences, then suppresses
+    subsequent messages and emits a summary every `report_every` occurrences.
+    """
+
+    def __init__(self, threshold: int = 3, report_every: int = 50):
+        super().__init__()
+        self._threshold = threshold
+        self._report_every = report_every
+        self._count = 0
+
+    def reset(self) -> None:
+        self._count = 0
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        is_network_noise = (
+            'Exception happened while polling' in msg
+            or 'Network Retry Loop' in msg
+            or 'NetworkError' in msg
+            or 'httpx.ReadError' in msg
+            or 'httpcore.ReadError' in msg
+        )
+        if not is_network_noise:
+            self._count = 0
+            return True
+
+        self._count += 1
+        if self._count <= self._threshold:
+            return True
+        if self._count % self._report_every == 0:
+            # Emit a single summary at WARNING so it's visible but not noisy
+            logger.warning(
+                "Telegram polling: %d consecutive network errors "
+                "(Telegram may be unreachable). Continuing to retry silently.",
+                self._count,
+            )
+        return False
+
 # Telegram Bot API limits
 TELEGRAM_MESSAGE_MAX_LENGTH = 4096  # Text messages
 TELEGRAM_CAPTION_MAX_LENGTH = 1024  # Caption for media (voice, photo, document)
@@ -121,6 +168,10 @@ class TelegramBotManager:
         self._outgoing_queue: asyncio.Queue = asyncio.Queue()
         self._sender_task: Optional[asyncio.Task] = None
 
+        # Network error log filter (installed on polling start, removed on stop)
+        self._network_filter = _TelegramNetworkErrorFilter(threshold=3, report_every=50)
+        self._filtered_loggers: list[logging.Logger] = []
+
         logger.info(
             f"TelegramBotManager initialized (webhook={self.use_webhook}, "
             f"whitelist={len(self.allowed_chat_ids)} chat_ids, "
@@ -166,7 +217,7 @@ class TelegramBotManager:
                 # Import telegram library (lazy import for optional dependency)
                 from telegram import Update
                 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-                from telegram.error import InvalidToken, NetworkError
+                from telegram.error import InvalidToken, NetworkError, Conflict
 
                 # Build bot application
                 self.application = (
@@ -239,6 +290,25 @@ class TelegramBotManager:
                     await self.application.initialize()
                     await self.application.start()
 
+                    # Stop bot immediately when a Conflict error is detected (another instance running)
+                    async def _conflict_error_handler(update, context):
+                        if isinstance(context.error, Conflict):
+                            logger.error(
+                                "Telegram bot conflict: another instance is already running. "
+                                "Stop the other DPC Messenger process and restart."
+                            )
+                            await self._broadcast_error_event(
+                                "Bot Already Running",
+                                "Another DPC Messenger instance is already using this Telegram bot. "
+                                "Stop the other instance first."
+                            )
+                            # Stop polling to avoid infinite conflict loop
+                            asyncio.create_task(self.stop())
+                            return
+                        raise context.error
+
+                    self.application.add_error_handler(_conflict_error_handler)
+
                     # Determine if we should drop pending updates
                     # Only drop if history fetching is disabled (to avoid duplicates)
                     # If history fetching is enabled, we'll fetch them manually first
@@ -253,6 +323,18 @@ class TelegramBotManager:
                             logger.error(f"Failed to fetch historical messages: {e}", exc_info=True)
                             drop_updates = True  # Fallback to prevent duplicates
                             logger.warning("Falling back to drop_pending_updates=True to prevent duplicates")
+
+                    # Install network error filter to suppress log spam when
+                    # Telegram is unreachable (library retries indefinitely).
+                    self._network_filter.reset()
+                    self._filtered_loggers = [
+                        logging.getLogger('telegram.ext._updater'),
+                        logging.getLogger('telegram.ext._utils.networkloop'),
+                        logging.getLogger('httpcore'),
+                        logging.getLogger('httpx'),
+                    ]
+                    for _lg in self._filtered_loggers:
+                        _lg.addFilter(self._network_filter)
 
                     await self.application.updater.start_polling(drop_pending_updates=drop_updates)
                     logger.info(f"Telegram bot started (polling mode, drop_updates={drop_updates})")
@@ -317,6 +399,11 @@ class TelegramBotManager:
                     await self._sender_task
                 except asyncio.CancelledError:
                     pass
+
+            # Remove network error filter from all loggers
+            for _lg in self._filtered_loggers:
+                _lg.removeFilter(self._network_filter)
+            self._filtered_loggers.clear()
 
             # Stop bot application
             if self.application:

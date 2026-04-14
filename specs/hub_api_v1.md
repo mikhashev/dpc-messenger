@@ -1,7 +1,7 @@
 # API Specification: D-PC Federation Hub v1.0
 
 **Version:** 1.0
-**Status:** Proposal for MVP 2.0
+**Status:** Working Draft (implemented in v0.21.0)
 **Date:** November 2, 2025
 
 ## 1. General Principles
@@ -24,6 +24,19 @@ The Hub does not manage passwords. Authentication is handled via trusted third-p
     -   **Description:** The callback URL that the provider redirects to after successful authentication.
     -   **Action:** The Hub server exchanges the received code for an access token from the provider, identifies the user, creates an account if one doesn't exist, and generates a short-lived D-PC Hub JWT.
     -   **Response:** Redirects the user back to the client application with the JWT (e.g., in a query parameter).
+
+## 2.1. Known Limitations
+
+### Single Device Per User
+
+The current Hub implementation supports **one active device per user account**. When a user authenticates from a new device using the same OAuth identity (email), the Hub updates the `node_id` association, orphaning the previous device.
+
+**Impact on API Usage:**
+- Calling `PUT /profile` from a second device will silently invalidate the first device's Hub registration
+- WebSocket signaling (`/ws/signal`) will only work for the most recently authenticated device
+- Direct P2P connections (TLS/WebRTC without Hub) remain unaffected
+
+**See:** [CONFIGURATION.md - Multi-Device Considerations](../docs/CONFIGURATION.md#device-identity-and-multi-device-considerations) for full details and workarounds.
 
 ## 3. Profile Management
 

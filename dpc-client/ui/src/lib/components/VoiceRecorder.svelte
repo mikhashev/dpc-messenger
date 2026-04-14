@@ -4,7 +4,7 @@
   interface VoiceRecorderProps {
     disabled?: boolean;
     maxDuration?: number;
-    onRecordingComplete: (blob: Blob, duration: number) => void;
+    onRecordingComplete: (blob: Blob, duration: number, filePath?: string) => void;
   }
 
   let { disabled = false, maxDuration = 300, onRecordingComplete }: VoiceRecorderProps = $props();
@@ -161,7 +161,7 @@
       // Create a blob from the WAV file (48 kHz mono, 16-bit PCM)
       // Python backend will transcode to OGG/Opus for transmission
       const blob = new Blob([contents], { type: 'audio/wav' });
-      onRecordingComplete(blob, recordingDuration);
+      onRecordingComplete(blob, recordingDuration, outputPath);
 
     } catch (error) {
       console.error('[VoiceRecorder] Error stopping recording:', error);

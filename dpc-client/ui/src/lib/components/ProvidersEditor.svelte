@@ -9,7 +9,7 @@
 
   const dispatch = createEventDispatcher();
 
-  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper' | 'dpc_agent';
+  type ProviderType = 'ollama' | 'openai_compatible' | 'anthropic' | 'zai' | 'local_whisper' | 'dpc_agent' | 'gemini' | 'github_models' | 'gigachat';
 
   type Provider = {
     alias: string;
@@ -42,6 +42,10 @@
       enabled?: boolean;
       budget_tokens?: number;
     };
+    // GigaChat specific (v0.21.0+)
+    scope?: string;        // 'GIGACHAT_API_PERS' | 'GIGACHAT_API_B2B' | 'GIGACHAT_API_CORP'
+    verify_ssl?: boolean;
+    ca_bundle_file?: string;
   };
 
   type ProvidersConfig = {
@@ -371,6 +375,17 @@
       // dpc_agent doesn't require model - it uses the default AI provider
       // Optionally can have peer_id for remote inference
       delete provider.model;
+    } else if (newProvider.type === 'gemini') {
+      provider.api_key_env = 'GEMINI_API_KEY';
+      provider.context_window = 1000000;
+    } else if (newProvider.type === 'github_models') {
+      provider.api_key_env = 'GITHUB_TOKEN';
+      provider.context_window = 128000;
+    } else if (newProvider.type === 'gigachat') {
+      provider.api_key_env = 'GIGACHAT_CREDENTIALS';
+      provider.scope = 'GIGACHAT_API_PERS';
+      provider.verify_ssl = true;
+      provider.context_window = 128000;
     }
 
     editedConfig.providers.push(provider);
@@ -498,10 +513,9 @@
 <svelte:window on:keydown={handleKeydown} />
 
 {#if open && displayConfig}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={close} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="modal-title" tabindex="-1">
+  <div class="modal-overlay" role="presentation">
+    <div class="modal" role="dialog" aria-labelledby="modal-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="modal-title">AI Providers Configuration</h2>
         <div class="header-actions">
@@ -582,6 +596,9 @@
                         <option value="zai">Z.AI</option>
                         <option value="local_whisper">Local Whisper</option>
                         <option value="dpc_agent">DPC Agent</option>
+                        <option value="gemini">Google Gemini</option>
+                        <option value="github_models">GitHub Models</option>
+                        <option value="gigachat">GigaChat (Sberbank)</option>
                       </select>
                     </div>
 
@@ -900,6 +917,43 @@
                       </div>
                     {/if}
 
+                    {#if editedConfig.providers[i].type === 'gigachat'}
+                      <div class="form-group">
+                        <label for="gigachat-scope-{i}">Scope</label>
+                        <select id="gigachat-scope-{i}" bind:value={editedConfig.providers[i].scope}>
+                          <option value="GIGACHAT_API_PERS">Personal / Free (GIGACHAT_API_PERS)</option>
+                          <option value="GIGACHAT_API_B2B">Business (GIGACHAT_API_B2B)</option>
+                          <option value="GIGACHAT_API_CORP">Corporate (GIGACHAT_API_CORP)</option>
+                        </select>
+                        <p class="help-text">Match your Sberbank account type</p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="gigachat-verify-ssl-{i}">
+                          <input
+                            id="gigachat-verify-ssl-{i}"
+                            type="checkbox"
+                            bind:checked={editedConfig.providers[i].verify_ssl}
+                          />
+                          Verify SSL (requires Russian CA cert)
+                        </label>
+                        <p class="help-text">
+                          Install cert once: <code>curl -k "https://gu-st.ru/content/lending/russian_trusted_root_ca_pem.crt" -w "\n" >> $(python -m certifi)</code>
+                        </p>
+                      </div>
+
+                      <div class="form-group">
+                        <label for="gigachat-ca-bundle-{i}">CA Bundle File (optional)</label>
+                        <input
+                          id="gigachat-ca-bundle-{i}"
+                          type="text"
+                          bind:value={editedConfig.providers[i].ca_bundle_file}
+                          placeholder="/path/to/russian_trusted_root_ca_pem.crt"
+                        />
+                        <p class="help-text">Alternative to installing cert via certifi</p>
+                      </div>
+                    {/if}
+
                     <div class="form-group">
                       <label for="context-window-{i}">Context Window (optional)</label>
                       <select
@@ -1102,6 +1156,9 @@
                 <option value="zai">Z.AI</option>
                 <option value="local_whisper">Local Whisper</option>
                 <option value="dpc_agent">DPC Agent</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="github_models">GitHub Models</option>
+                <option value="gigachat">GigaChat (Sberbank)</option>
               </select>
             </div>
 
@@ -1117,6 +1174,9 @@
                     newProvider.type === 'openai_compatible' ? 'gpt-4o' :
                     newProvider.type === 'local_whisper' ? 'openai/whisper-large-v3' :
                     newProvider.type === 'zai' ? 'glm-4.7' :
+                    newProvider.type === 'gemini' ? 'gemini-2.0-flash' :
+                    newProvider.type === 'github_models' ? 'gpt-4o' :
+                    newProvider.type === 'gigachat' ? 'GigaChat-2-Pro' :
                     'claude-3-5-sonnet-20240620'
                   }
                 />
@@ -1136,6 +1196,18 @@
                 <p>Device: Auto-detect (CUDA if available)</p>
                 <p>Model will download on first use (~3GB)</p>
                 <p>GPU acceleration recommended for fast transcription</p>
+              {:else if newProvider.type === 'gemini'}
+                <p>API key env var: GEMINI_API_KEY</p>
+                <p>Get a free key at Google AI Studio (aistudio.google.com)</p>
+                <p>All Gemini models support vision natively (1M token context)</p>
+              {:else if newProvider.type === 'github_models'}
+                <p>API key env var: GITHUB_TOKEN (needs models:read permission)</p>
+                <p>Endpoint: https://models.inference.ai.azure.com (auto-configured)</p>
+                <p>Free tier: 15 RPM / 150 RPD for low-complexity models</p>
+              {:else if newProvider.type === 'gigachat'}
+                <p>API key env var: GIGACHAT_CREDENTIALS (from developers.sber.ru/studio)</p>
+                <p>Scope defaults to GIGACHAT_API_PERS (personal/free tier)</p>
+                <p>Install Russian CA cert before use (see edit mode for command)</p>
               {:else if newProvider.type === 'dpc_agent'}
                 <p>Embedded autonomous AI agent for task automation</p>
                 <p>Uses your configured default AI provider</p>
@@ -1164,10 +1236,9 @@
 
 <!-- Model Info Modal -->
 {#if showModelInfo}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={closeModelInfo} role="presentation">
-    <div class="modal model-info-modal" on:click|stopPropagation role="dialog" aria-labelledby="model-info-title" tabindex="-1">
+  <div class="modal-overlay" role="presentation">
+    <div class="modal model-info-modal" role="dialog" aria-labelledby="model-info-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="model-info-title">🔍 Model Information</h2>
         <button class="close-btn" on:click={closeModelInfo} aria-label="Close">×</button>

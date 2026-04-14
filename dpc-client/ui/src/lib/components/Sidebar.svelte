@@ -517,7 +517,7 @@
         <div class="connection-help-content">
           <p class="small">
             🔍 <strong>Auto-Discovery (DHT):</strong> <code>dpc-node-abc123...</code><br/>
-            <span class="small-detail">Tries: DHT → Cache → Hub</span>
+            <span class="small-detail">Tries: DHT → Cache → IPv4 → Hub → Relay → Gossip</span>
           </p>
           <p class="small">
             🏠 <strong>Direct TLS (Local):</strong> <code>dpc://192.168.1.100:8888?node_id=...</code>
@@ -602,7 +602,6 @@
                 }}
                 title="{agent.name} (Profile: {agent.profile_name}, LLM: {agent.provider_alias})"
               >
-                <span class="agent-icon">🤖</span>
                 <span class="agent-name">{agent.name}</span>
                 <span class="agent-provider">{agent.provider_alias}</span>
                 {#if agent.telegram_enabled}
@@ -753,10 +752,7 @@
             type="button"
             class="add-group-btn"
             onclick={() => onCreateGroup?.()}
-            disabled={!nodeStatus?.p2p_peers || nodeStatus.p2p_peers.length === 0}
-            title={nodeStatus?.p2p_peers && nodeStatus.p2p_peers.length > 0
-              ? "Create new group chat"
-              : "Connect to peers first to create a group"}
+            title="Create new group chat"
           >
             + Group
           </button>
@@ -1407,10 +1403,6 @@
     align-items: center;
     gap: 0.5rem;
     width: 100%;
-  }
-
-  .agent-button .agent-icon {
-    font-size: 1rem;
   }
 
   .agent-button .agent-name {

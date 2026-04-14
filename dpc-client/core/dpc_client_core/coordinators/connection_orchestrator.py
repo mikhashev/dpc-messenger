@@ -155,8 +155,23 @@ class ConnectionOrchestrator:
 
         if not endpoints:
             logger.warning("Peer %s not found in DHT", node_id[:20])
-            self.stats["failed_connections"] += 1
-            raise ConnectionFailedError(f"Peer {node_id[:20]} not announced in DHT")
+            # Fall back to peer cache when DHT routing table is empty (e.g., freshly started client)
+            cached = self.p2p_manager.peer_cache.get_peer(node_id)
+            if cached and cached.last_direct_ip:
+                from ..models.peer_endpoint import PeerEndpoint, IPv4Info
+                local_addr = f"{cached.last_direct_ip}:{cached.last_direct_port}"
+                endpoints = PeerEndpoint(
+                    schema_version="1.0",
+                    node_id=node_id,
+                    ipv4=IPv4Info(local=local_addr),
+                )
+                logger.info(
+                    "Using cached endpoint for %s at %s (DHT empty)",
+                    node_id[:20], local_addr
+                )
+            else:
+                self.stats["failed_connections"] += 1
+                raise ConnectionFailedError(f"Peer {node_id[:20]} not found in DHT or peer cache")
 
         logger.info(
             "Found peer %s endpoints (IPv6=%s, relay=%s, punch=%s)",
@@ -252,6 +267,17 @@ class ConnectionOrchestrator:
         return {
             **self.stats,
             "active_strategies": [s.name for s in self.strategies],
+        }
+
+    def get_state(self) -> dict:
+        """Snapshot of orchestrator state for CoreService.get_state()."""
+        return {
+            **self.get_stats(),
+            "strategy_count": len(self.strategies),
+            "hub_available": self.hub_client is not None,
+            "hole_punch_available": self.hole_punch_manager is not None,
+            "relay_available": self.relay_manager is not None,
+            "gossip_available": self.gossip_manager is not None,
         }
 
     def add_strategy(self, strategy: ConnectionStrategy):

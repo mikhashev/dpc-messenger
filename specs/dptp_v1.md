@@ -1,6 +1,6 @@
-# DPTP Specification: D-PC Transfer Protocol v1.4
+# DPTP Specification: D-PC Transfer Protocol v1.5
 
-**Version:** 1.4
+**Version:** 1.5
 **Status:** Draft / PoC
 **Date:** February 2026
 **License:** CC0 1.0 Universal (Public Domain)
@@ -186,6 +186,13 @@ Requests the peer to execute an AI inference query using their local compute res
     "prompt": "What is the capital of France?",
     "model": "llama3.1:70b",  // Optional
     "provider": "ollama",     // Optional
+    "images": [               // Optional: vision queries (v0.12.0+)
+      {
+        "path": "screenshot.png",
+        "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg...",
+        "mime_type": "image/png"
+      }
+    ],
     "thinking": {             // Optional: thinking mode configuration
       "enabled": true,
       "budget_tokens": 10000  // For Claude Extended Thinking
@@ -199,6 +206,10 @@ Requests the peer to execute an AI inference query using their local compute res
 - `prompt` (string, required): AI query text
 - `model` (string, optional): Specific model to use
 - `provider` (string, optional): AI provider (ollama, openai, anthropic)
+- `images` (array, optional): Image objects for vision queries (v0.12.0+). Peer must support vision (`supports_vision: true` in PROVIDERS_RESPONSE).
+  - `path` (string, optional): Original filename
+  - `base64` (string, required): Base64-encoded image data (data URL format)
+  - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
 - `thinking` (object, optional): Thinking mode configuration
   - `enabled` (boolean): Enable extended thinking/reasoning
   - `budget_tokens` (integer): Token budget for thinking (Claude Extended Thinking)
@@ -1372,45 +1383,12 @@ Clients select relays using weighted scoring:
 
 ---
 
-### 3.13 Vision & Image Messages (v0.12.0)
+### 3.14 Vision & Image Queries (v0.12.0)
 
-Remote vision inference and image analysis capabilities.
-
-#### SEND_IMAGE
-
-Requests remote vision inference on one or more images.
-
-**Format:**
-```json
-{
-  "command": "SEND_IMAGE",
-  "payload": {
-    "request_id": "550e8400-e29b-41d4-a716-446655440000",
-    "prompt": "What's in this screenshot?",
-    "images": [
-      {
-        "path": "screenshot_20251225_103045.png",
-        "base64": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg...",
-        "mime_type": "image/png"
-      }
-    ],
-    "model": "llava:13b",
-    "provider": "ollama"
-  }
-}
-```
-
-**Fields:**
-- `request_id` (string, required): UUID for request/response correlation
-- `prompt` (string, required): Text prompt for vision model
-- `images` (array, required): List of image objects
-  - `path` (string, optional): Original filename
-  - `base64` (string, required): Base64-encoded image data (data URL format)
-  - `mime_type` (string, required): MIME type (e.g., image/png, image/jpeg)
-- `model` (string, optional): Specific vision model to use (e.g., llava:13b, gpt-4-vision)
-- `provider` (string, optional): AI provider (ollama, openai, anthropic)
-
-**Response:** REMOTE_INFERENCE_RESPONSE (reuses existing message type)
+> **Implementation note:** There is no separate `SEND_IMAGE` wire command. Remote vision inference
+> uses **REMOTE_INFERENCE_REQUEST** (§3.4) with the optional `images` field (added v0.12.0).
+> The peer must advertise `supports_vision: true` in PROVIDERS_RESPONSE before vision queries
+> are sent. The response uses the standard REMOTE_INFERENCE_RESPONSE format.
 
 **Use Cases:**
 - Screenshot analysis and OCR
@@ -1423,7 +1401,7 @@ Requests remote vision inference on one or more images.
 
 ---
 
-### 3.14 Session Management Messages (v0.12.0)
+### 3.15 Session Management Messages (v0.12.0)
 
 Collaborative session reset with voting to prevent accidental data loss in multi-party conversations.
 
@@ -1520,7 +1498,7 @@ Notifies all participants of voting outcome.
 
 ---
 
-### 3.15 Chat History Synchronization (v0.12.0)
+### 3.16 Chat History Synchronization (v0.12.0)
 
 Enables peers to synchronize conversation history after reconnection or page refresh.
 
@@ -1588,6 +1566,158 @@ Returns conversation history to requesting peer.
 - **Partial sync**: Request only recent messages using `since_timestamp`
 
 **Security:** History shared based on firewall rules (can be restricted per-peer)
+
+---
+
+### 3.17 Skill Sharing Messages (v0.21.0)
+
+Enables agents to discover and exchange procedural skills (SKILL.md strategies) directly
+over P2P connections without involving a central server.
+
+Firewall permission `dpc_agent.skills.accept_peer_skills` gates all inbound skill receipt.
+Only skills with `sharing.shareable: true` in their frontmatter are ever sent to peers.
+
+---
+
+#### SKILL_SEARCH
+
+Request a peer's shareable skill catalog. Optionally filter by tags or freetext query.
+
+**Format:**
+```json
+{
+  "command": "SKILL_SEARCH",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "tags": ["code", "analysis"],
+    "query": "analyze repository"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): UUID used to match the SKILLS_CATALOG response
+- `tags` (array of strings, optional): Only return skills matching any of these tags
+- `query` (string, optional): Freetext filter on skill name and description
+
+**Response:** SKILLS_CATALOG
+
+---
+
+#### SKILLS_CATALOG
+
+Peer's response to SKILL_SEARCH; contains metadata only (no strategy content).
+
+**Format:**
+```json
+{
+  "command": "SKILLS_CATALOG",
+  "payload": {
+    "request_id": "550e8400-e29b-41d4-a716-446655440000",
+    "skills": [
+      {
+        "name": "code-analysis",
+        "description": "Systematic codebase analysis strategy",
+        "tags": ["code", "analysis"],
+        "version": 3
+      }
+    ]
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): Echoed from SKILL_SEARCH for Future resolution
+- `skills` (array): List of shareable skill metadata objects
+  - `name` (string): Kebab-case skill identifier
+  - `description` (string): Human-readable summary
+  - `tags` (array of strings): Classification tags
+  - `version` (integer): Monotonically increasing version counter
+
+---
+
+#### SKILL_REQUEST
+
+Request the full SKILL.md content for a specific skill.
+
+**Format:**
+```json
+{
+  "command": "SKILL_REQUEST",
+  "payload": {
+    "request_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "skill_name": "code-analysis"
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): UUID for response matching
+- `skill_name` (string, required): Name of the skill to retrieve
+
+**Response:** SKILL_DATA
+
+---
+
+#### SKILL_DATA
+
+Peer's response to SKILL_REQUEST; contains the full SKILL.md text.
+Empty `content` indicates the skill is not available or not shareable.
+
+**Format:**
+```json
+{
+  "command": "SKILL_DATA",
+  "payload": {
+    "request_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+    "skill_name": "code-analysis",
+    "content": "---\nname: code-analysis\nversion: 3\n...\n---\n\n## Strategy\n..."
+  }
+}
+```
+
+**Fields:**
+- `request_id` (string, required): Echoed from SKILL_REQUEST
+- `skill_name` (string, required): Name of the skill
+- `content` (string): Full SKILL.md text including YAML frontmatter; empty string if unavailable
+
+**Provenance patching on receipt:**
+The receiving node automatically patches the following frontmatter fields before saving:
+- `provenance.source` → `"peer"`
+- `provenance.origin_peer` → sender's `node_id`
+- `provenance.created_at` → current UTC timestamp
+- `sharing.shareable` → `false` (received skills not re-shared by default)
+
+---
+
+#### SKILL_OFFER
+
+Peer proactively pushes a skill without a preceding SKILL_REQUEST.
+The receiver may accept or silently discard based on firewall settings.
+
+**Format:**
+```json
+{
+  "command": "SKILL_OFFER",
+  "payload": {
+    "skill_name": "web-research",
+    "description": "Efficient web research and source evaluation strategy",
+    "tags": ["web", "research"],
+    "version": 2,
+    "content": "---\nname: web-research\n...\n---\n\n## Strategy\n..."
+  }
+}
+```
+
+**Fields:**
+- `skill_name` (string, required): Kebab-case identifier
+- `description` (string): Human-readable summary shown in UI notification
+- `tags` (array of strings): Classification tags
+- `version` (integer): Skill version number
+- `content` (string, required): Full SKILL.md text
+
+**Firewall:** Receiver silently discards if `accept_peer_skills` is disabled.
+A `skill_received` WebSocket event is broadcast to the UI on successful save.
 
 ---
 
@@ -1846,6 +1976,15 @@ DPTP is designed to be extensible. New commands can be added by:
 
 ## 9. Changelog
 
+### v1.5 (March 2026)
+- **New message types: P2P Skill Sharing (v0.21.0 Phase 5a Memento-Skills)**
+  - SKILL_SEARCH / SKILLS_CATALOG — discover shareable skills from a connected peer
+  - SKILL_REQUEST / SKILL_DATA — retrieve full SKILL.md strategy content from a peer
+  - SKILL_OFFER — peer proactively pushes a skill without a preceding request
+  - Firewall-gated: `accept_peer_skills` controls all inbound skill receipt
+  - Provenance patched on receipt: `source=peer`, `origin_peer=<node_id>`, `shareable=false`
+  - UI notification: `skill_received` WebSocket event on successful save
+
 ### v1.4 (February 2026)
 - **Thinking Mode Support:**
   - Added `thinking` and `thinking_tokens` fields to REMOTE_INFERENCE_RESPONSE
@@ -1861,9 +2000,9 @@ DPTP is designed to be extensible. New commands can be added by:
   - Reuses file transfer infrastructure (FILE_OFFER/FILE_CHUNK/FILE_COMPLETE)
 
 ### v1.2 (December 2025)
-- **New message types: Vision & Image Support (v0.12.0)**
-  - SEND_IMAGE - Remote vision inference with image payload
-  - Reuses REMOTE_INFERENCE_RESPONSE for vision responses
+- **Vision & Image Support (v0.12.0)**
+  - Added optional `images` field to REMOTE_INFERENCE_REQUEST for vision queries
+  - No separate wire command — vision reuses the existing inference request/response pair
   - Enables screenshot analysis, OCR, diagram interpretation, visual Q&A
 - **New message types: Session Management (v0.12.0)**
   - PROPOSE_NEW_SESSION, VOTE_NEW_SESSION, NEW_SESSION_RESULT

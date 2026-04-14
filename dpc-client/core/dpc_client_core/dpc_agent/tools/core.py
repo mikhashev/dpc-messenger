@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .registry import ToolEntry, ToolContext
+from ..utils import auto_commit_agent_change
 
 log = logging.getLogger(__name__)
 
@@ -27,19 +28,56 @@ log = logging.getLogger(__name__)
 # File Operations (sandboxed)
 # ---------------------------------------------------------------------------
 
-def repo_read(ctx: ToolContext, path: str) -> str:
+def _paginate_content(content: str, path: str, offset: int | None, limit: int | None, fallback_truncate: int) -> str:
+    """Apply line-based pagination or fallback truncation to file content."""
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+
+    if offset is not None or limit is not None:
+        start = offset or 0
+        end = start + limit if limit is not None else total
+        selected = lines[start:end]
+        result = "".join(selected)
+        shown_start = start + 1  # 1-based for display
+        shown_end = min(end, total)
+        return f"[Lines {shown_start}-{shown_end} of {total} total | {path}]\n{result}"
+
+    # No pagination — apply legacy truncation
+    if len(content) > fallback_truncate:
+        content = content[:fallback_truncate] + f"\n\n... (truncated, {len(content)} total chars)"
+    return content
+
+
+def _resolve_file_path(ctx: ToolContext, path: str, require_write: bool = False) -> Path:
+    """Resolve path to a file: relative → sandbox, absolute → firewall-checked extended path."""
+    import os
+    if os.path.isabs(path):
+        # Check extended path access gates (S31)
+        if ctx.firewall:
+            if require_write and not getattr(ctx.firewall, 'extended_write_enabled', False):
+                raise PermissionError("Extended path write access is disabled. Enable it in Agent Permissions → Extended Paths.")
+            if not require_write and not getattr(ctx.firewall, 'extended_read_enabled', True):
+                raise PermissionError("Extended path read access is disabled. Enable it in Agent Permissions → Extended Paths.")
+        return ctx.validate_extended_path(path, require_write=require_write)
+    return ctx.repo_path(path)
+
+
+def read_file(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
     """
-    Read a file from the agent sandbox.
+    Read a file. Relative paths resolve to sandbox, absolute paths
+    are checked against firewall (sandbox_extensions).
 
     Args:
         ctx: Tool context
-        path: File path relative to agent root
+        path: Relative path (sandbox) or absolute path (firewall-checked)
+        offset: Start line (0-based). If provided, enables pagination.
+        limit: Number of lines to return. Used with offset for pagination.
 
     Returns:
-        File contents
+        File contents (paginated or full with truncation)
     """
     try:
-        file_path = ctx.repo_path(path)
+        file_path = _resolve_file_path(ctx, path)
 
         if not file_path.exists():
             return f"⚠️ File not found: {path}"
@@ -48,17 +86,19 @@ def repo_read(ctx: ToolContext, path: str) -> str:
             return f"⚠️ Not a file: {path}"
 
         content = file_path.read_text(encoding="utf-8", errors="replace")
-
-        # Truncate large files
-        if len(content) > 50000:
-            content = content[:50000] + f"\n\n... (truncated, {len(content)} total chars)"
-
-        return content
+        import os
+        truncate_limit = 100000 if os.path.isabs(path) else 50000
+        return _paginate_content(content, path, offset, limit, fallback_truncate=truncate_limit)
 
     except PermissionError as e:
-        return f"⚠️ Sandbox violation: {e}"
+        return f"⚠️ Access denied: {e}"
     except Exception as e:
         return f"⚠️ Error reading file: {e}"
+
+
+# Legacy aliases for backward compatibility
+def repo_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
+    return read_file(ctx, path, offset=offset, limit=limit)
 
 
 def repo_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
@@ -112,9 +152,9 @@ def repo_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str
         return f"⚠️ Error listing directory: {e}"
 
 
-def drive_read(ctx: ToolContext, path: str) -> str:
-    """Alias for repo_read (compatibility with Ouroboros tools)."""
-    return repo_read(ctx, path)
+def drive_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
+    """Legacy alias for read_file."""
+    return read_file(ctx, path, offset=offset, limit=limit)
 
 
 def drive_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> str:
@@ -122,37 +162,88 @@ def drive_list(ctx: ToolContext, path: str = ".", recursive: bool = False) -> st
     return repo_list(ctx, path, recursive)
 
 
-def repo_write(ctx: ToolContext, path: str, content: str) -> str:
+def write_file(ctx: ToolContext, path: str, content: str) -> str:
     """
-    Write a file to the agent sandbox.
+    Write a file. Relative paths resolve to sandbox, absolute paths
+    are checked against firewall (sandbox_extensions with write access).
 
     Args:
         ctx: Tool context
-        path: File path relative to agent root
+        path: Relative path (sandbox) or absolute path (firewall-checked)
         content: Content to write
 
     Returns:
         Result message
     """
     try:
-        file_path = ctx.repo_path(path)
+        import os
+        file_path = _resolve_file_path(ctx, path, require_write=os.path.isabs(path))
+
+        # Size limit for extended paths
+        if os.path.isabs(path) and len(content) > 500000:
+            return f"⚠️ Content too large ({len(content):,} chars). Maximum is 500,000 chars."
 
         # Create parent directories if needed
         file_path.parent.mkdir(parents=True, exist_ok=True)
 
         file_path.write_text(content, encoding="utf-8")
 
-        return f"✓ Wrote {len(content)} chars to {path}"
+        # Regenerate _index.md if writing to knowledge/ dir (sandbox only)
+        if not os.path.isabs(path) and path.startswith("knowledge/") and not path.endswith("_index.md"):
+            _update_knowledge_index(ctx, Path(path).stem)
+
+        return f"✓ Wrote {len(content):,} chars to {path}"
 
     except PermissionError as e:
-        return f"⚠️ Sandbox violation: {e}"
+        return f"⚠️ Access denied: {e}"
     except Exception as e:
         return f"⚠️ Error writing file: {e}"
 
 
+# Legacy alias
+def repo_write(ctx: ToolContext, path: str, content: str) -> str:
+    return write_file(ctx, path, content)
+
+
 def drive_write(ctx: ToolContext, path: str, content: str) -> str:
-    """Alias for repo_write (compatibility with Ouroboros tools)."""
-    return repo_write(ctx, path, content)
+    """Legacy alias for write_file."""
+    return write_file(ctx, path, content)
+
+
+def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
+    """
+    Delete a file or directory from the agent sandbox.
+
+    Args:
+        ctx: Tool context
+        path: Path relative to agent root
+        recursive: If True, delete directory and all contents
+
+    Returns:
+        Result message
+    """
+    try:
+        target = ctx.repo_path(path)
+
+        if not target.exists():
+            return f"⚠️ Not found: {path}"
+
+        if target.is_dir():
+            if not recursive:
+                return f"⚠️ '{path}' is a directory. Use recursive=true to delete it and all contents."
+            import shutil
+            count = sum(1 for _ in target.rglob("*") if _.is_file())
+            shutil.rmtree(target)
+            return f"✓ Deleted directory '{path}' ({count} files)"
+        else:
+            size = target.stat().st_size
+            target.unlink()
+            return f"✓ Deleted '{path}' ({size} bytes)"
+
+    except PermissionError as e:
+        return f"⚠️ Sandbox violation: {e}"
+    except Exception as e:
+        return f"⚠️ Error deleting: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -295,10 +386,11 @@ def deduplicate_identity(ctx: ToolContext) -> str:
                 total_removed += 1
             sections_cleaned.append(occurrences[0][1])  # Keep original header name
 
-        # Update timestamp
+        # Update timestamp (replace old, don't accumulate)
         for i, line in enumerate(lines):
             if line.strip() == "## Last Updated":
-                lines[i] = f"## Last Updated"
+                while i + 1 < len(lines) and lines[i + 1].strip() and not lines[i + 1].startswith("##"):
+                    del lines[i + 1]
                 lines.insert(i + 1, datetime.now(timezone.utc).isoformat())
                 break
 
@@ -311,7 +403,13 @@ def deduplicate_identity(ctx: ToolContext) -> str:
         return f"⚠️ Error deduplicating identity: {e}"
 
 
-def update_identity(ctx: ToolContext, section: str, content: str, mode: str = "replace") -> str:
+def update_identity(
+    ctx: ToolContext,
+    section: str,
+    content: str,
+    mode: str = "replace",
+    commit_message: Optional[str] = None,
+) -> str:
     """
     Update a section of the agent's identity file.
 
@@ -324,6 +422,9 @@ def update_identity(ctx: ToolContext, section: str, content: str, mode: str = "r
               - append: Add content to existing section (removes duplicates first)
               - merge: Combine content with existing section (removes duplicates first)
               - deduplicate: Just remove duplicate sections without adding content
+        commit_message: Conventional commit message for this change
+            (e.g. 'chore(identity): refine core values after security audit').
+            Defaults to 'chore(identity): update {section}'.
 
     Returns:
         Result message
@@ -393,7 +494,19 @@ This file tracks the agent's self-understanding and evolving identity.
             if mode == "replace":
                 new_section_content = content
             elif mode == "append":
-                new_section_content = existing_content + "\n\n" + content if existing_content else content
+                # Line-level dedup: only append lines not already in section.
+                # Prevents duplicates from repeated append calls across sessions.
+                # Substring check is fragile (whitespace/newline variance); line-by-line
+                # is robust — same approach as merge mode. See S32 fix.
+                if existing_content:
+                    existing_lines = set(line.strip() for line in existing_content.split("\n") if line.strip())
+                    new_lines = [line for line in content.split("\n") if line.strip() and line.strip() not in existing_lines]
+                    if new_lines:
+                        new_section_content = existing_content + "\n\n" + "\n".join(new_lines)
+                    else:
+                        new_section_content = existing_content
+                else:
+                    new_section_content = content
             elif mode == "merge":
                 # Merge without duplicating lines that already exist
                 existing_lines = set(line.strip() for line in existing_content.split("\n") if line.strip())
@@ -413,11 +526,13 @@ This file tracks the agent's self-understanding and evolving identity.
             else:
                 new_lines = lines + ["", section_header, content]
 
-        # Update timestamp
+        # Update timestamp (replace old timestamp, don't accumulate)
         timestamp_updated = False
         for i, line in enumerate(new_lines):
             if line.strip() == "## Last Updated":
-                new_lines[i] = f"## Last Updated"
+                # Remove old timestamp line(s) after the header
+                while i + 1 < len(new_lines) and new_lines[i + 1].strip() and not new_lines[i + 1].startswith("##"):
+                    del new_lines[i + 1]
                 new_lines.insert(i + 1, datetime.now(timezone.utc).isoformat())
                 timestamp_updated = True
                 break
@@ -434,6 +549,10 @@ This file tracks the agent's self-understanding and evolving identity.
         new_content = "\n".join(new_lines)
         identity_path.write_text(new_content, encoding="utf-8")
 
+        # Auto-commit identity changes (best-effort)
+        msg = commit_message or f"chore(identity): update {section}"
+        auto_commit_agent_change(ctx.agent_root, msg)
+
         msg = f"✓ Updated identity section '{section}'"
         if duplicates_removed > 0:
             msg += f" (removed {duplicates_removed} duplicate(s))"
@@ -444,45 +563,61 @@ This file tracks the agent's self-understanding and evolving identity.
         return f"⚠️ Error updating identity: {e}"
 
 
-def chat_history(ctx: ToolContext, limit: int = 10) -> str:
+def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_internals: bool = False) -> str:
     """
-    Read recent chat history from the logs.
+    Read conversation messages (user and assistant turns).
+
+    Use this to review the full conversation, assess context window usage,
+    and decide whether to extract knowledge or suggest a session reset.
 
     Args:
         ctx: Tool context
-        limit: Maximum number of entries to return
+        limit: Max messages to return. 0 = all messages (default).
+        offset: Start position. -1 = from end/newest (default).
+                0+ = from start/oldest (e.g. offset=0 returns oldest messages first).
+
+    Examples:
+        chat_history()                    → all messages (full session review)
+        chat_history(limit=10)            → last 10 messages (most recent)
+        chat_history(limit=1, offset=0)   → first message in session
+        chat_history(limit=10, offset=0)  → first 10 messages (oldest)
+        chat_history(limit=10, offset=20) → messages 20-29 from start
 
     Returns:
-        Recent chat history
+        Conversation messages with role, sender, timestamp, and content
     """
     try:
-        events_path = ctx.logs_path("events.jsonl")
+        limit = int(limit) if limit is not None else 0
+        offset = int(offset) if offset is not None else -1
 
-        if not events_path.exists():
-            return "No chat history available"
+        monitor = getattr(ctx, 'conversation_monitor', None)
+        if not monitor:
+            return "No conversation monitor available for this session"
 
-        entries = []
-        with open(events_path, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
+        history = monitor.message_history
+        if not history:
+            return "No conversation history yet"
 
-        if not entries:
-            return "No chat history available"
+        if offset >= 0:
+            selected = history[offset:offset + limit] if limit > 0 else history[offset:]
+        else:
+            selected = history[-limit:] if limit > 0 else history
 
-        # Get most recent entries
-        recent = entries[-limit:]
-
-        output_lines = [f"Recent chat history ({len(recent)} entries):\n"]
-        for entry in recent:
-            ts = entry.get("ts", "unknown time")
-            event_type = entry.get("type", "unknown")
-            text = entry.get("text", "")[:100]
-            output_lines.append(f"[{ts}] {event_type}: {text}...")
+        output_lines = [f"Conversation ({len(selected)} of {len(history)} total messages):\n"]
+        for msg in selected:
+            role = msg.get("role", "unknown")
+            sender = msg.get("sender_name", role)
+            ts = msg.get("timestamp", "")
+            content = msg.get("content", "")
+            ts_str = f" [{ts[:19]}]" if ts else ""
+            output_lines.append(f"{sender}{ts_str}: {content}")
+            if include_internals:
+                thinking = msg.get("thinking")
+                streaming_raw = msg.get("streaming_raw")
+                if thinking:
+                    output_lines.append(f"  [THINKING]: {thinking[:500]}")
+                if streaming_raw:
+                    output_lines.append(f"  [RAW]: {streaming_raw[:500]}")
 
         return "\n".join(output_lines)
 
@@ -517,7 +652,12 @@ def knowledge_read(ctx: ToolContext, topic: str) -> str:
         return f"⚠️ Error reading knowledge: {e}"
 
 
-def knowledge_write(ctx: ToolContext, topic: str, content: str) -> str:
+def knowledge_write(
+    ctx: ToolContext,
+    topic: str,
+    content: str,
+    commit_message: Optional[str] = None,
+) -> str:
     """
     Write or update a knowledge base topic with firewall check.
 
@@ -525,6 +665,9 @@ def knowledge_write(ctx: ToolContext, topic: str, content: str) -> str:
         ctx: Tool context
         topic: Topic name
         content: Topic content (markdown)
+        commit_message: Conventional commit message for this change
+            (e.g. 'docs(knowledge): add TurboQuant complexity analysis').
+            Defaults to 'docs(knowledge): update {topic}'.
 
     Returns:
         Result message
@@ -550,6 +693,10 @@ Last updated: {datetime.now(timezone.utc).isoformat()}
 
         # Update index
         _update_knowledge_index(ctx, topic)
+
+        # Auto-commit knowledge changes (best-effort)
+        msg = commit_message or f"docs(knowledge): update {topic}"
+        auto_commit_agent_change(ctx.agent_root, msg)
 
         return f"✓ Wrote knowledge topic '{topic}' ({len(content)} chars)"
 
@@ -771,17 +918,18 @@ def get_dpc_context(ctx: ToolContext, context_type: str = "personal") -> str:
         Context content
     """
     try:
-        # Check firewall if available via DPC service
+        # Check firewall if available via DPC service (per-agent profile if set)
         if ctx.dpc_service and hasattr(ctx.dpc_service, 'firewall'):
             firewall = ctx.dpc_service.firewall
+            _profile = getattr(getattr(ctx, "_agent", None), "_firewall_profile", None)
 
             if not getattr(firewall, 'dpc_agent_enabled', True):
                 return "⚠️ DPC Agent is disabled via firewall rules"
 
-            if context_type == "personal" and not getattr(firewall, 'dpc_agent_personal_context_access', True):
+            if context_type == "personal" and not firewall.can_agent_access_context("personal", profile_name=_profile):
                 return "⚠️ Personal context access is disabled via firewall rules"
 
-            if context_type == "device" and not getattr(firewall, 'dpc_agent_device_context_access', True):
+            if context_type == "device" and not firewall.can_agent_access_context("device", profile_name=_profile):
                 return "⚠️ Device context access is disabled via firewall rules"
 
         dpc_dir = Path.home() / ".dpc"
@@ -845,7 +993,7 @@ def schedule_task(
             return "⚠️ Task queue not available"
 
         # Check if task type can be handled
-        builtin_types = {"chat", "improvement", "review"}
+        builtin_types = {"chat", "improvement", "review", "reminder"}
         custom_handlers = getattr(ctx._agent, '_task_handlers', {})
         if task_type not in builtin_types and task_type not in custom_handlers:
             available = list(builtin_types) + list(custom_handlers.keys())
@@ -866,6 +1014,16 @@ def schedule_task(
             "low": TaskPriority.LOW,
         }
         task_priority = priority_map.get(priority.lower(), TaskPriority.NORMAL)
+
+        # Inject reply routing so the executor knows where to send the result.
+        # _reply_conversation_id: the conversation that triggered this schedule call,
+        #   so streaming progress and the final result appear in the right chat.
+        # _reply_telegram_chat_id: set when the trigger came from Telegram,
+        #   so the result is sent back to that Telegram chat automatically.
+        if "_reply_conversation_id" not in data and ctx.current_task_id:
+            data["_reply_conversation_id"] = ctx.current_task_id
+        if "_reply_telegram_chat_id" not in data and getattr(ctx, "reply_telegram_chat_id", None):
+            data["_reply_telegram_chat_id"] = ctx.reply_telegram_chat_id
 
         # Schedule task
         task = ctx._agent.schedule_task(
@@ -1137,7 +1295,7 @@ def get_evolution_stats(ctx: ToolContext) -> str:
         return f"⚠️ Error getting evolution stats: {e}"
 
 
-def approve_evolution_change(ctx: ToolContext, change_id: str) -> str:
+async def approve_evolution_change(ctx: ToolContext, change_id: str) -> str:
     """
     Approve a pending evolution change.
 
@@ -1152,24 +1310,11 @@ def approve_evolution_change(ctx: ToolContext, change_id: str) -> str:
         if not hasattr(ctx, '_agent'):
             return "⚠️ Agent not available"
 
-        # Note: This is a sync wrapper around async method
-        # In practice, the agent should handle this via its async methods
         if ctx._agent._evolution:
-            # Queue approval for async execution
-            import asyncio
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # Schedule for later
-                    asyncio.create_task(ctx._agent.approve_evolution_change(change_id))
-                    return f"✓ Change {change_id} approval queued"
-                else:
-                    success = loop.run_until_complete(ctx._agent.approve_evolution_change(change_id))
-                    if success:
-                        return f"✓ Change {change_id} approved and applied"
-                    return f"⚠️ Failed to approve change {change_id}"
-            except RuntimeError:
-                return "⚠️ Cannot approve from sync context - use async API"
+            success = await ctx._agent.approve_evolution_change(change_id)
+            if success:
+                return f"✓ Change {change_id} approved and applied"
+            return f"⚠️ Failed to approve change {change_id} — not found or already applied"
         return "⚠️ Evolution not enabled"
 
     except Exception as e:
@@ -1206,7 +1351,7 @@ def reject_evolution_change(ctx: ToolContext, change_id: str) -> str:
 # Extended Sandbox Tools (v0.16.0+)
 # ---------------------------------------------------------------------------
 
-def extended_path_read(ctx: ToolContext, path: str) -> str:
+def extended_path_read(ctx: ToolContext, path: str, offset: int | None = None, limit: int | None = None) -> str:
     """
     Read a file from an extended sandbox path (outside ~/.dpc/agent/).
 
@@ -1216,9 +1361,11 @@ def extended_path_read(ctx: ToolContext, path: str) -> str:
     Args:
         ctx: Tool context
         path: Absolute file path (must be in extended sandbox)
+        offset: Start line (0-based). If provided, enables pagination.
+        limit: Number of lines to return. Used with offset for pagination.
 
     Returns:
-        File contents
+        File contents (paginated or full with truncation)
     """
     try:
         file_path = ctx.validate_extended_path(path, require_write=False)
@@ -1230,12 +1377,7 @@ def extended_path_read(ctx: ToolContext, path: str) -> str:
             return f"⚠️ Not a file: {path}"
 
         content = file_path.read_text(encoding="utf-8", errors="replace")
-
-        # Truncate large files
-        if len(content) > 100000:
-            content = content[:100000] + f"\n\n... (truncated, {len(content)} total chars)"
-
-        return content
+        return _paginate_content(content, path, offset, limit, fallback_truncate=100000)
 
     except PermissionError as e:
         return f"⚠️ Access denied: {e}"
@@ -1462,8 +1604,8 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
                 for line_num, line in enumerate(content.splitlines(), 1):
                     if regex.search(line):
                         # Truncate long lines
-                        display_line = line.strip()[:150]
-                        if len(line.strip()) > 150:
+                        display_line = line.strip()[:300]
+                        if len(line.strip()) > 300:
                             display_line += "..."
 
                         matches.append(f"{rel_path}:{line_num}: {display_line}")
@@ -1558,7 +1700,10 @@ def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines
                 match_block = [f"\n### Line {i + 1}"]
                 for j in range(start, end):
                     prefix = ">>>" if j == i else "   "
-                    matches.append(f"{prefix} {j + 1:4d}: {lines[j][:120]}")
+                    line_text = lines[j][:300]
+                    if len(lines[j]) > 300:
+                        line_text += "..."
+                    matches.append(f"{prefix} {j + 1:4d}: {line_text}")
 
         if not matches:
             return f"No matches found for pattern '{pattern}' in {file_path}"
@@ -1571,93 +1716,10 @@ def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines
         return f"⚠️ Search error: {e}"
 
 
-# ---------------------------------------------------------------------------
-# Knowledge Extraction (Session Management)
-# ---------------------------------------------------------------------------
 
-def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool = False) -> str:
-    """
-    Extract knowledge from the current conversation and save to knowledge base.
-
-    This tool uses the existing ConversationMonitor's generate_commit_proposal()
-    method to extract structured knowledge from the conversation history.
-
-    Args:
-        ctx: Tool context
-        topic: Optional topic to focus extraction on
-        force: Extract even if knowledge threshold not met
-
-    Returns:
-        Summary of extracted knowledge or error message
-    """
-    try:
-        # Get ConversationMonitor from context
-        monitor = getattr(ctx, 'conversation_monitor', None)
-        if not monitor:
-            return "⚠️ No conversation monitor available for this session"
-
-        # Check message count
-        if len(monitor.message_history) < 2:
-            return "⚠️ Not enough messages in conversation to extract knowledge (need at least 2)"
-
-        # Run async extraction in sync context
-        import asyncio
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            # We're in an async context, but this is a sync tool
-            # Use asyncio.run_coroutine_threadsafe or return a message
-            return "⚠️ Knowledge extraction requires async context. Use force=True to attempt extraction."
-
-        # Run extraction
-        proposal = asyncio.run(monitor.generate_commit_proposal(force=force))
-
-        if not proposal:
-            return "No knowledge extracted from conversation. Try with force=True to extract anyway."
-
-        # Save to agent's knowledge directory
-        knowledge_dir = ctx.agent_root / "knowledge"
-        knowledge_dir.mkdir(parents=True, exist_ok=True)
-
-        # Generate filename from topic or timestamp
-        safe_topic = "".join(c if c.isalnum() or c in " _-" else "_" for c in (topic or proposal.topic or "knowledge"))
-        safe_topic = safe_topic[:50].strip() or "knowledge"
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = f"{safe_topic}_{timestamp}.json"
-        filepath = knowledge_dir / filename
-
-        # Build knowledge entry
-        knowledge_entry = {
-            "topic": proposal.topic,
-            "summary": proposal.summary,
-            "entries": [
-                {
-                    "content": entry.content if hasattr(entry, 'content') else str(entry),
-                    "tags": entry.tags if hasattr(entry, 'tags') else [],
-                    "confidence": entry.confidence if hasattr(entry, 'confidence') else 1.0,
-                }
-                for entry in (proposal.entries or [])
-            ],
-            "conversation_id": proposal.conversation_id,
-            "participants": proposal.participants if hasattr(proposal, 'participants') else [],
-            "extracted_at": datetime.now(timezone.utc).isoformat(),
-            "extraction_method": "agent_tool",
-        }
-
-        # Write to file
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(knowledge_entry, f, indent=2, ensure_ascii=False)
-
-        log.info(f"Extracted knowledge saved to {filepath}")
-
-        return f"✅ Knowledge extracted successfully!\n\n**Topic:** {proposal.topic}\n**Summary:** {proposal.summary[:200]}...\n**Entries:** {len(proposal.entries)}\n**Saved to:** knowledge/{filename}"
-
-    except Exception as e:
-        log.error(f"Knowledge extraction error: {e}", exc_info=True)
-        return f"⚠️ Knowledge extraction error: {e}"
+# extract_knowledge and get_proposal_result tools removed (ADR-009, S33/S34).
+# Agent saves knowledge via write_file() + discipline (P18 session closing ritual).
+# Mike's Extract Knowledge button (knowledge_service.end_conversation_session) is unchanged.
 
 
 # ---------------------------------------------------------------------------
@@ -1667,24 +1729,32 @@ def extract_knowledge(ctx: ToolContext, topic: Optional[str] = None, force: bool
 def get_tools() -> List[ToolEntry]:
     """Export core tools for registry."""
     return [
-        # File operations
+        # File operations (unified read_file / write_file — S31)
         ToolEntry(
-            name="repo_read",
+            name="read_file",
             schema={
-                "name": "repo_read",
-                "description": "Read a file from the agent sandbox directory",
+                "name": "read_file",
+                "description": "Read a file. Relative paths read from sandbox, absolute paths are checked against firewall (sandbox_extensions). Supports line-based pagination via offset/limit for large files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "File path relative to agent root"
+                            "description": "Relative path (sandbox) or absolute path (firewall-checked)"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Start line (0-based). Enables pagination when provided."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Number of lines to return. Use with offset for pagination."
                         }
                     },
                     "required": ["path"]
                 }
             },
-            handler=repo_read,
+            handler=read_file,
             timeout_sec=30,
         ),
 
@@ -1715,26 +1785,6 @@ def get_tools() -> List[ToolEntry]:
         ),
 
         ToolEntry(
-            name="drive_read",
-            schema={
-                "name": "drive_read",
-                "description": "Read a file from the agent sandbox (alias for repo_read)",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "File path relative to agent root"
-                        }
-                    },
-                    "required": ["path"]
-                }
-            },
-            handler=drive_read,
-            timeout_sec=30,
-        ),
-
-        ToolEntry(
             name="drive_list",
             schema={
                 "name": "drive_list",
@@ -1761,41 +1811,41 @@ def get_tools() -> List[ToolEntry]:
         ),
 
         ToolEntry(
-            name="repo_write_commit",
+            name="repo_delete",
             schema={
-                "name": "repo_write_commit",
-                "description": "Write a file to the agent sandbox directory",
+                "name": "repo_delete",
+                "description": "Delete a file or directory from the agent sandbox. Use recursive=true for directories.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "File path relative to agent root"
+                            "description": "Path relative to agent root to delete"
                         },
-                        "content": {
-                            "type": "string",
-                            "description": "Content to write"
+                        "recursive": {
+                            "type": "boolean",
+                            "description": "Delete directory and all contents (required for directories)",
+                            "default": False
                         }
                     },
-                    "required": ["path", "content"]
+                    "required": ["path"]
                 }
             },
-            handler=repo_write,
+            handler=repo_delete,
             timeout_sec=30,
-            is_code_tool=True,
         ),
 
         ToolEntry(
-            name="drive_write",
+            name="write_file",
             schema={
-                "name": "drive_write",
-                "description": "Write a file to the agent sandbox (alias for repo_write)",
+                "name": "write_file",
+                "description": "Write a file. Relative paths write to sandbox, absolute paths are checked against firewall (sandbox_extensions with write access).",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "File path relative to agent root"
+                            "description": "Relative path (sandbox) or absolute path (firewall-checked)"
                         },
                         "content": {
                             "type": "string",
@@ -1805,7 +1855,7 @@ def get_tools() -> List[ToolEntry]:
                     "required": ["path", "content"]
                 }
             },
-            handler=drive_write,
+            handler=write_file,
             timeout_sec=30,
             is_code_tool=True,
         ),
@@ -1841,7 +1891,14 @@ def get_tools() -> List[ToolEntry]:
             name="update_identity",
             schema={
                 "name": "update_identity",
-                "description": "Update a section of the agent's identity (self-understanding). Automatically removes duplicate sections. Use mode='deduplicate' to just clean up duplicates without adding content.",
+                "description": (
+                    "Update a section of the agent's identity (self-understanding). "
+                    "Automatically removes duplicate sections. "
+                    "Use mode='deduplicate' to just clean up duplicates without adding content. "
+                    "Provide commit_message in Conventional Commits format to describe why you made this change "
+                    "(e.g. 'chore(identity): refine core values after security audit'). "
+                    "You own this commit message — write it to reflect what actually changed and why."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1858,6 +1915,14 @@ def get_tools() -> List[ToolEntry]:
                             "description": "Update mode",
                             "enum": ["replace", "append", "merge", "deduplicate"],
                             "default": "replace"
+                        },
+                        "commit_message": {
+                            "type": "string",
+                            "description": (
+                                "Conventional Commits message for this change: type(scope): description. "
+                                "E.g. 'chore(identity): refine core values after coevolution task'. "
+                                "Omit to use the default."
+                            )
                         }
                     },
                     "required": ["section"]
@@ -1886,7 +1951,7 @@ def get_tools() -> List[ToolEntry]:
             name="chat_history",
             schema={
                 "name": "chat_history",
-                "description": "Read recent chat history from agent logs",
+                "description": "Read recent conversation messages (user and assistant turns) from the current session's history",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1896,6 +1961,11 @@ def get_tools() -> List[ToolEntry]:
                             "default": 10,
                             "minimum": 1,
                             "maximum": 100
+                        },
+                        "include_internals": {
+                            "type": "boolean",
+                            "description": "Include thinking and streaming_raw blocks in output",
+                            "default": False
                         }
                     },
                     "required": []
@@ -1930,7 +2000,12 @@ def get_tools() -> List[ToolEntry]:
             name="knowledge_write",
             schema={
                 "name": "knowledge_write",
-                "description": "Write or update a knowledge base topic",
+                "description": (
+                    "Write or update a knowledge base topic. "
+                    "Provide commit_message in Conventional Commits format to describe what you learned "
+                    "(e.g. 'docs(knowledge): add TurboQuant complexity analysis with benchmarks'). "
+                    "You own this commit message — make it meaningful."
+                ),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -1941,6 +2016,14 @@ def get_tools() -> List[ToolEntry]:
                         "content": {
                             "type": "string",
                             "description": "Topic content (markdown)"
+                        },
+                        "commit_message": {
+                            "type": "string",
+                            "description": (
+                                "Conventional Commits message for this change: type(scope): description. "
+                                "E.g. 'docs(knowledge): add TurboQuant complexity analysis'. "
+                                "Omit to use the default."
+                            )
                         }
                     },
                     "required": ["topic", "content"]
@@ -1987,31 +2070,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=15,
         ),
 
-        # Knowledge extraction from conversation
-        ToolEntry(
-            name="extract_knowledge",
-            schema={
-                "name": "extract_knowledge",
-                "description": "Extract knowledge from the current conversation and save to knowledge base. Use this when the conversation contains valuable insights worth preserving.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "topic": {
-                            "type": "string",
-                            "description": "Optional topic to focus extraction on"
-                        },
-                        "force": {
-                            "type": "boolean",
-                            "description": "Extract even if knowledge threshold not met",
-                            "default": False
-                        }
-                    },
-                    "required": []
-                }
-            },
-            handler=extract_knowledge,
-            timeout_sec=60,  # May need time for LLM-based extraction
-        ),
+        # extract_knowledge + get_proposal_result removed (ADR-009, S34)
 
         # DPC integration
         ToolEntry(
@@ -2041,17 +2100,17 @@ def get_tools() -> List[ToolEntry]:
             name="schedule_task",
             schema={
                 "name": "schedule_task",
-                "description": "Schedule a task for future or background execution. For custom tasks: 1) First call register_task_type to define execution instructions, 2) Then call schedule_task. For 'chat' tasks: task_data must include 'text' field with the message to process.",
+                "description": "Schedule a task for future or background execution. For custom tasks: 1) First call register_task_type to define execution instructions, 2) Then call schedule_task. For 'chat' tasks: task_data must include 'text' field with the message to process. For reminders: use task_type='reminder' with task_data={\"message\": \"...\"} — this sends the message directly WITHOUT going through the LLM, preventing accidental re-scheduling loops.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "task_type": {
                             "type": "string",
-                            "description": "Type of task. Built-in: 'chat' (conversation), 'improvement' (self-improvement), 'review' (code review). Custom: any type registered via register_task_type."
+                            "description": "Type of task. Built-in: 'chat' (LLM conversation), 'reminder' (direct message delivery, no LLM — use for notifications/alerts), 'improvement' (self-improvement), 'review' (code review). Custom: any type registered via register_task_type."
                         },
                         "task_data": {
                             "type": "string",
-                            "description": "JSON string with task payload. For 'chat' tasks: {\"text\": \"your message here\"}. For custom types: match the input_schema defined in register_task_type."
+                            "description": "JSON string with task payload. For 'chat' tasks: {\"text\": \"your message here\"}. For 'reminder' tasks: {\"message\": \"reminder text\"}. For custom types: match the input_schema defined in register_task_type."
                         },
                         "delay_seconds": {
                             "type": "integer",
@@ -2249,27 +2308,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=10,
         ),
 
-        # Extended sandbox tools (v0.16.0+)
-        ToolEntry(
-            name="extended_path_read",
-            schema={
-                "name": "extended_path_read",
-                "description": "Read a file from an extended sandbox path (outside ~/.dpc/agent/). Requires sandbox_extensions configuration.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute file path (must be in configured extended sandbox)"
-                        }
-                    },
-                    "required": ["path"]
-                }
-            },
-            handler=extended_path_read,
-            timeout_sec=30,
-        ),
-
+        # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file in S31)
         ToolEntry(
             name="extended_path_list",
             schema={
@@ -2293,31 +2332,6 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=extended_path_list,
             timeout_sec=30,
-        ),
-
-        ToolEntry(
-            name="extended_path_write",
-            schema={
-                "name": "extended_path_write",
-                "description": "Write a file to an extended sandbox path. Requires read_write access in sandbox_extensions.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "path": {
-                            "type": "string",
-                            "description": "Absolute file path"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Content to write"
-                        }
-                    },
-                    "required": ["path", "content"]
-                }
-            },
-            handler=extended_path_write,
-            timeout_sec=30,
-            is_code_tool=True,
         ),
 
         ToolEntry(

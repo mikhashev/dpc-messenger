@@ -59,9 +59,9 @@
       <button
         class="btn-end-session-banner"
         onclick={onEndSession}
-        aria-label="End session to save knowledge"
+        aria-label="Extract knowledge from conversation"
       >
-        End Session Now
+        Extract Knowledge
       </button>
       {#if dismissible}
         <button

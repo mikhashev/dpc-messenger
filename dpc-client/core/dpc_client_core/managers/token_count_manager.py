@@ -57,10 +57,11 @@ class TokenCountManager:
         # Mistral family - use public Instruct variant
         "mistral": "mistralai/Mistral-7B-Instruct-v0.2",
         "mixtral": "mistralai/Mistral-7B-Instruct-v0.2",
-        # Qwen family - publicly accessible
-        "qwen": "Qwen/Qwen-7B",
-        "qwen2": "Qwen/Qwen2-7B",
+        # Qwen family - more-specific prefixes must precede shorter ones (startswith matching)
+        "qwen3": "Qwen/Qwen2.5-7B",    # Qwen3/3.5 uses Qwen2.5 tokenizer; no trust_remote_code
         "qwen2.5": "Qwen/Qwen2.5-7B",
+        "qwen2": "Qwen/Qwen2-7B",
+        "qwen": "Qwen/Qwen2-7B",        # Legacy Qwen1 → Qwen2 tokenizer (no trust_remote_code)
         # Gemma - use smaller public variant
         "gemma": "google/gemma-2b",
         # Phi - publicly accessible
@@ -225,8 +226,15 @@ class TokenCountManager:
             # Find matching tokenizer
             for family, hf_model in self.OLLAMA_TOKENIZER_MAP.items():
                 if model_family.startswith(family):
-                    logger.info("Loading tokenizer for %s: %s", model, hf_model)
-                    tokenizer = AutoTokenizer.from_pretrained(hf_model)
+                    # Try local cache first — avoids 23s+ DNS retry loop when
+                    # huggingface.co is unreachable (blocks the asyncio event loop).
+                    # Falls back to network download only on a genuine cache miss.
+                    try:
+                        logger.info("Loading tokenizer for %s: %s (local cache)", model, hf_model)
+                        tokenizer = AutoTokenizer.from_pretrained(hf_model, local_files_only=True)
+                    except Exception:
+                        logger.info("Loading tokenizer for %s: %s (downloading)", model, hf_model)
+                        tokenizer = AutoTokenizer.from_pretrained(hf_model)
                     self._tokenizer_cache[model] = tokenizer
                     return tokenizer
 

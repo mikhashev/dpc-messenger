@@ -173,10 +173,9 @@
 </script>
 
 {#if open && context}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={close} on:keydown={handleKeydown} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="context-dialog-title" tabindex="-1">
+  <div class="modal-overlay" on:keydown={handleKeydown} role="presentation">
+    <div class="modal" role="dialog" aria-labelledby="context-dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="context-dialog-title">Personal Context - {context.profile.name}</h2>
         <div class="header-actions">
@@ -417,7 +416,7 @@
         {:else if selectedTab === 'knowledge'}
           <div class="section">
             <h3>Knowledge Topics</h3>
-            {#each Object.entries(context.knowledge) as [topicName, topic]}
+            {#each Object.entries(context.knowledge).reverse() as [topicName, topic]}
               <div class="topic-card">
                 <div class="topic-header">
                   <h4>{topicName.replace(/_/g, ' ')}</h4>
@@ -455,7 +454,7 @@
         {:else if selectedTab === 'history'}
           <div class="section">
             <h3>Commit History</h3>
-            {#each context.commit_history as commit}
+            {#each [...context.commit_history].reverse() as commit}
               <div class="commit-card">
                 <div class="commit-header">
                   <code class="commit-id">{commit.commit_id}</code>

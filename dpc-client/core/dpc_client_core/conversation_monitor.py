@@ -54,7 +54,8 @@ class ConversationMonitor:
         settings = None,  # Settings instance (optional, for config like cultural_perspectives_enabled)
         ai_query_func = None,  # Callable for AI queries (supports both local and remote inference)
         auto_detect: bool = True,  # Enable/disable automatic detection
-        instruction_set_name: str = "general"  # NEW: Which instruction set to use for this conversation
+        instruction_set_name: str = "general",  # NEW: Which instruction set to use for this conversation
+        display_name: str = None,  # Human-readable name appended to folder (e.g. "Work", "Mike MacOS")
     ):
         """Initialize conversation monitor
 
@@ -68,8 +69,10 @@ class ConversationMonitor:
                           If provided, enables remote inference for knowledge detection.
             auto_detect: If True, automatically detect and propose commits. If False, only buffer messages for manual extraction.
             instruction_set_name: Key of the instruction set to use for AI queries in this conversation (default: "general")
+            display_name: Optional human-readable label appended to the conversation folder name for easy navigation
         """
         self.conversation_id = conversation_id
+        self.display_name = display_name
         self.participants = participants
         self.llm_manager = llm_manager
         self.knowledge_threshold = knowledge_threshold
@@ -82,6 +85,10 @@ class ConversationMonitor:
         self.message_buffer: List[Message] = []  # Cleared after each extraction (for incremental auto-detect)
         self.full_conversation: List[Message] = []  # Never cleared (for manual "End Session" extraction)
         self.knowledge_score: float = 0.0
+
+        # Flag to prevent concurrent knowledge extraction (e.g., auto-detect + end_session running simultaneously).
+        # Note: not a proper lock — just a best-effort guard.
+        self._extracting: bool = False
 
         # Tracking
         self.proposals_created: int = 0
@@ -177,8 +184,10 @@ class ConversationMonitor:
             if self.knowledge_score > self.knowledge_threshold:
                 # Check for consensus signals
                 if self._detect_consensus():
-                    # Generate commit proposal
-                    proposal = await self._generate_commit_proposal()
+                    # Generate commit proposal (auto-threshold path)
+                    proposal = await self._generate_commit_proposal(
+                        proposed_by="auto_monitor", initiated_by="auto_monitor"
+                    )
 
                     # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
                     # Buffer will be cleared by consensus_manager when proposal is approved
@@ -188,11 +197,19 @@ class ConversationMonitor:
 
         return None
 
-    async def generate_commit_proposal(self, force: bool = False) -> Optional[KnowledgeCommitProposal]:
+    async def generate_commit_proposal(
+        self,
+        force: bool = False,
+        proposed_by: str = "auto_monitor",
+        initiated_by: str = "auto_monitor",
+    ) -> Optional[KnowledgeCommitProposal]:
         """Manually generate a knowledge commit proposal
 
         Args:
             force: If True, generate proposal even if below threshold
+            proposed_by: Agent ID or node_id that triggered extraction
+            initiated_by: How extraction was triggered: "auto_monitor", "agent_tool",
+                          "telegram", or "user_request"
 
         Returns:
             KnowledgeCommitProposal if knowledge detected (or forced), None otherwise
@@ -200,29 +217,46 @@ class ConversationMonitor:
         if not self.message_buffer:
             return None
 
-        # Calculate score if not already done
-        if self.knowledge_score == 0.0:
-            self.knowledge_score = await self._calculate_knowledge_score()
-            self.last_analysis_time = datetime.now(timezone.utc).isoformat()
+        # Best-effort guard against concurrent extractions (e.g., auto-detect racing
+        # with end_session).
+        if self._extracting:
+            logger.warning(
+                "generate_commit_proposal called while extraction already in progress for %s — skipping",
+                self.conversation_id,
+            )
+            return "EXTRACTION_IN_PROGRESS"
 
-        # Check if we should generate proposal
-        if force or self.knowledge_score > self.knowledge_threshold:
-            try:
-                # Generate proposal
-                proposal = await self._generate_commit_proposal()
+        self._extracting = True
+        try:
+            # Calculate score only when needed for the threshold check.
+            # Skip when force=True — score is irrelevant and the extra LLM call
+            # doubles the extraction time (1-2 min wasted).
+            if not force and self.knowledge_score == 0.0:
+                self.knowledge_score = await self._calculate_knowledge_score()
+                self.last_analysis_time = datetime.now(timezone.utc).isoformat()
 
-                # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
-                # Buffer will be cleared by consensus_manager when proposal is approved
-                if proposal is not None:
-                    self.proposals_created += 1
+            # Check if we should generate proposal
+            if force or self.knowledge_score > self.knowledge_threshold:
+                try:
+                    # Generate proposal
+                    proposal = await self._generate_commit_proposal(
+                        proposed_by=proposed_by, initiated_by=initiated_by
+                    )
 
-                return proposal
-            except Exception as e:
-                # Log error but DON'T clear buffer to allow retry (v0.14.0 fix)
-                logger.error(f"Error generating proposal (buffer preserved for retry): {e}", exc_info=True)
-                raise  # Re-raise so caller knows it failed
+                    # DON'T reset buffer yet - wait for all peers to approve (v0.15.1 fix)
+                    # Buffer will be cleared by consensus_manager when proposal is approved
+                    if proposal is not None:
+                        self.proposals_created += 1
 
-        return None
+                    return proposal
+                except Exception as e:
+                    # Log error but DON'T clear buffer to allow retry (v0.14.0 fix)
+                    logger.error(f"Error generating proposal (buffer preserved for retry): {e}", exc_info=True)
+                    raise  # Re-raise so caller knows it failed
+
+            return None
+        finally:
+            self._extracting = False
 
     def _infer_inference_settings(self) -> tuple[str | None, str | None, str | None]:
         """Infer inference settings when not explicitly tracked.
@@ -246,6 +280,12 @@ class ConversationMonitor:
                        self.conversation_id, self.conversation_id)
             return (self.conversation_id, self.last_model, None)  # Peer compute fallback
 
+        # PRIORITY 2b: Use last known compute host (works for group and P2P conversations)
+        if self.last_compute_host:
+            logger.info("Monitor %s: Using last_compute_host %s for knowledge extraction",
+                       self.conversation_id, self.last_compute_host)
+            return (self.last_compute_host, self.last_model, self.last_provider)
+
         # PRIORITY 3: Final fallback - try local anyway (will fail gracefully if no providers)
         logger.warning("Monitor %s: No inference provider available for knowledge extraction",
                       self.conversation_id)
@@ -258,7 +298,8 @@ class ConversationMonitor:
         (for manual extraction) and message_buffer (for auto-detection).
 
         Returns:
-            Conversation type: "task", "technical", "decision", or "general"
+            Conversation type: "task", "technical", "decision", "general", or
+            "self_reflection_candidate" (requires async LLM confirmation before use)
         """
         # Use full_conversation if available (manual extraction), otherwise message_buffer
         messages = self.full_conversation if self.full_conversation else self.message_buffer
@@ -287,10 +328,25 @@ class ConversationMonitor:
             "recommend", "suggest", "evaluate", "tradeoff", "pros and cons"
         ]
 
+        # Self-reflection keywords (multi-word phrases for low false-positive rate)
+        # Single words like "reflect", "analyze", "behavior" are too common in technical contexts
+        self_reflection_keywords = [
+            "self-reflection", "self reflection", "retrospective",
+            "my habit", "my behavior", "my routine", "my pattern",
+            "i tend to", "reflecting on myself", "who am i",
+            "my values", "my progress", "lessons learned",
+            "context anxiety", "self-analysis"
+        ]
+
         # Count keyword matches
         task_count = sum(1 for kw in task_keywords if kw in all_text)
         technical_count = sum(1 for kw in technical_keywords if kw in all_text)
         decision_count = sum(1 for kw in decision_keywords if kw in all_text)
+        self_reflection_count = sum(1 for kw in self_reflection_keywords if kw in all_text)
+
+        # Self-reflection candidate: requires async LLM confirmation (handled in _generate_commit_proposal)
+        if self_reflection_count > 0:
+            return "self_reflection_candidate"
 
         # Determine type based on highest count (task has priority for ties)
         if task_count >= technical_count and task_count >= decision_count and task_count > 0:
@@ -301,6 +357,51 @@ class ConversationMonitor:
             return "decision"
         else:
             return "general"
+
+    async def _is_self_reflection_conversation(self, messages_text: str) -> bool:
+        """Use LLM to confirm whether a conversation is a self-reflection.
+
+        Only called when self_reflection keywords matched (pre-filter). Prevents
+        false positives where technical language coincidentally matches phrases like
+        "this reflects the architecture decision".
+
+        Returns:
+            True if LLM confirms self-reflection, False otherwise (falls back to general)
+        """
+        logger.debug("Monitor %s: Running LLM self-reflection confirmation (keyword pre-filter matched)",
+                     self.conversation_id)
+
+        prompt = f"""Analyze this conversation. Is it a SELF-REFLECTION?
+
+SELF-REFLECTION: Discussion of personal behaviors, habits, routines, identity,
+emotional patterns, self-performance review ("I tend to...", "My habit is...",
+"Who am I", "My values").
+
+NOT self-reflection: Technical discussions (even with "analyze", "reflect"),
+task planning (even with "my goals"), external decisions.
+
+Return ONLY: "yes" or "no"
+
+Conversation:
+{messages_text}"""
+
+        try:
+            result = await asyncio.wait_for(
+                self.llm_manager.query(prompt=prompt),
+                timeout=10.0  # Don't block extraction if LLM is slow
+            )
+            confirmed = result.strip().lower().startswith("yes")
+            logger.debug("Monitor %s: Self-reflection LLM confirmation: %s",
+                         self.conversation_id, confirmed)
+            return confirmed
+        except asyncio.TimeoutError:
+            logger.warning("Monitor %s: Self-reflection LLM confirmation timed out — falling back to general",
+                           self.conversation_id)
+            return False
+        except Exception as e:
+            logger.warning("Monitor %s: Self-reflection LLM confirmation failed (%s) — falling back to general",
+                           self.conversation_id, e)
+            return False
 
     def _get_task_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
         """Build extraction prompt optimized for task/planning conversations.
@@ -316,10 +417,10 @@ class ConversationMonitor:
       "tags": ["task_assignment", "deadline", "status"],
       "confidence": 0.9,
       "sources": ["participant_name"],
-      "reasoning": "Direct statement or agreed commitment"
+      "reasoning": "Direct statement or agreed commitment",
+      "alternatives": []
     }
   ],
-  "alternatives": [],
   "devil_advocate": "Any risks or unclear requirements",
   "flagged_assumptions": ["Implicit assumptions about scope or timeline"]
 }"""
@@ -373,10 +474,10 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
       "tags": ["architecture", "implementation", "technical_decision"],
       "confidence": 0.8,
       "sources": ["participant_name"],
-      "reasoning": "Technical rationale or evidence"
+      "reasoning": "Technical rationale or evidence",
+      "alternatives": ["Alternative technical approach specific to THIS entry"]
     }
   ],
-  "alternatives": ["Alternative technical approaches discussed"],
   "devil_advocate": "Technical risks or tradeoffs",
   "flagged_assumptions": ["Technical assumptions to validate"]
 }"""
@@ -420,10 +521,10 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
       "tags": ["decision", "option_evaluation", "consensus"],
       "confidence": 0.85,
       "sources": ["participant_name"],
-      "reasoning": "Evidence or criteria used for decision"
+      "reasoning": "Evidence or criteria used for decision",
+      "alternatives": ["Options that were NOT chosen and why, specific to THIS entry"]
     }
   ],
-  "alternatives": ["Options that were NOT chosen and why"],
   "devil_advocate": "Counter-arguments or dissenting views",
   "flagged_assumptions": ["Assumptions underlying the decision"]
 }"""
@@ -474,19 +575,19 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
       "confidence": 0.8,
       "cultural_context": "Universal",
       "sources": ["participant_name"],
-      "reasoning": "Why notable"
+      "reasoning": "Why notable",
+      "alternatives": ["Alternative perspective specific to THIS entry"]
     }
   ],
   "cultural_perspectives": ["Western individualistic", "Eastern collective"],
-  "alternatives": ["Alternative perspective 1"],
   "devil_advocate": "Critical analysis",
   "flagged_assumptions": ["Assumption if any"]
 }"""
             rules_section = """RULES:
 - Rate confidence 0.0-1.0 for each claim
 - Mark cultural_context as "Universal" or "Context: [specific culture]"
-- Include devil's advocate critique
-- List alternative viewpoints
+- Include devil's advocate critique (one per commit)
+- List alternative viewpoints PER ENTRY (each entry gets its own unique alternatives)
 - Flag cultural assumptions"""
         else:
             json_format = """{
@@ -498,17 +599,17 @@ DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON o
       "tags": ["tag1", "tag2"],
       "confidence": 0.8,
       "sources": ["participant_name"],
-      "reasoning": "Why notable"
+      "reasoning": "Why notable",
+      "alternatives": ["Alternative perspective specific to THIS entry"]
     }
   ],
-  "alternatives": ["Alternative perspective 1"],
-  "devil_advocate": "Critical analysis",
+  "devil_advocate": "Critical analysis of the overall extraction",
   "flagged_assumptions": ["Assumption if any"]
 }"""
             rules_section = """RULES:
 - Rate confidence 0.0-1.0 for each claim
-- Include devil's advocate critique
-- List alternative viewpoints
+- Include devil's advocate critique (one per commit, not per entry)
+- List alternative viewpoints PER ENTRY (each entry gets its own unique alternatives)
 - Flag problematic assumptions"""
 
         return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
@@ -517,6 +618,61 @@ CONVERSATION:
 {messages_text}
 
 TASK: Extract structured knowledge with bias mitigation.
+
+REQUIRED JSON FORMAT (output ONLY this, nothing else):
+{json_format}
+
+{rules_section}
+
+DO NOT include any explanatory text. DO NOT use markdown. Output ONLY the JSON object."""
+
+    def _get_self_reflection_extraction_prompt(self, messages_text: str, cultural_section: str) -> str:
+        """Build extraction prompt optimized for self-reflection conversations.
+
+        Focuses on: behavioral patterns, habits, identity insights, improvement areas.
+        Key difference from general: devil's advocate critiques insights, not the process.
+        """
+        json_format = """{
+  "topic": "reflection_topic_name",
+  "summary": "One sentence: what was reflected on and the key realization",
+  "entries": [
+    {
+      "content": "Specific behavior, habit, pattern, or identity insight",
+      "tags": ["behavior_pattern", "habit", "identity", "emotion", "goal"],
+      "confidence": 0.8,
+      "sources": ["participant_name"],
+      "reasoning": "Context or evidence supporting this insight"
+    }
+  ],
+  "behavioral_patterns": ["Recurring behaviors or habits identified"],
+  "identity_insights": ["Insights about values, goals, or self-perception"],
+  "improvement_areas": ["Areas mentioned for growth or change"],
+  "devil_advocate": "Critique the INSIGHTS themselves — what assumptions might be wrong, what context might be missing — but do NOT question whether reflection was warranted",
+  "flagged_assumptions": ["Statements presented as facts that might be projections"]
+}"""
+
+        rules_section = """EXTRACTION RULES FOR SELF-REFLECTION CONVERSATIONS:
+1. BEHAVIORS: Capture specific recurring behaviors ("I tend to work until 3 AM")
+2. HABITS: Extract named habits, routines, or patterns
+3. IDENTITY: Note values, self-perception, "who am I" explorations
+4. NUANCE: Self-reflection is inherently uncertain — preserve "maybe", "I think", "seems like"
+5. IMPROVEMENT: What the person wants to change, grow, or explore
+6. DEVIL'S ADVOCATE — CRITICAL RULE:
+   - CORRECT: "This insight assumes X is a problem, but what if it's a coping strategy?"
+   - CORRECT: "The conclusion may overlook Y factor"
+   - WRONG: "Why reflect on this?" / "Trigger threshold too low" / "This doesn't warrant analysis"
+   - The devil's advocate should challenge the SUBSTANCE of insights, never the act of reflecting
+7. CONFIDENCE: Lower (0.6-0.75) for uncertain self-assessments, higher (0.85+) for clearly stated patterns
+"""
+
+        return f"""CRITICAL INSTRUCTION: You must respond with ONLY valid JSON. No explanations before or after. No markdown code blocks. Just raw JSON.
+
+CONVERSATION TYPE: Self-Reflection (personal behavior, habits, identity analysis)
+{cultural_section}
+CONVERSATION:
+{messages_text}
+
+TASK: Extract behavioral patterns, identity insights, and improvement areas from self-reflection.
 
 REQUIRED JSON FORMAT (output ONLY this, nothing else):
 {json_format}
@@ -684,6 +840,38 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
         threshold = len(self.participants) * 0.6
         return consensus_count >= threshold
 
+    def _extract_json_object(self, text: str) -> Optional[str]:
+        """Extract the first balanced JSON object from text, handling arbitrary nesting.
+
+        Unlike a simple regex, this correctly handles 3+ levels of nesting so that
+        the outermost JSON object is always returned, not an inner fragment.
+        """
+        start = text.find('{')
+        if start == -1:
+            return None
+        depth = 0
+        in_string = False
+        escape_next = False
+        for i, char in enumerate(text[start:], start):
+            if escape_next:
+                escape_next = False
+                continue
+            if char == '\\' and in_string:
+                escape_next = True
+                continue
+            if char == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if char == '{':
+                depth += 1
+            elif char == '}':
+                depth -= 1
+                if depth == 0:
+                    return text[start:i + 1]
+        return None  # Unbalanced braces
+
     def _repair_json(self, json_str: str) -> str:
         """Attempt to repair common JSON malformations from LLM responses.
 
@@ -732,7 +920,11 @@ DO NOT include any text before or after the JSON. DO NOT use markdown code block
 
         return json_str
 
-    async def _generate_commit_proposal(self) -> KnowledgeCommitProposal:
+    async def _generate_commit_proposal(
+        self,
+        proposed_by: str = "auto_monitor",
+        initiated_by: str = "auto_monitor",
+    ) -> KnowledgeCommitProposal:
         """Generate knowledge commit proposal from conversation
 
         Uses bias-aware prompting to extract structured knowledge with:
@@ -784,6 +976,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 {', '.join(cultural_contexts) if cultural_contexts else 'Not specified'}
 """
 
+        # LLM confirmation for self-reflection candidate (keyword pre-filter ran in _detect_conversation_type)
+        if self.conversation_type == "self_reflection_candidate":
+            confirmed = await self._is_self_reflection_conversation(messages_text)
+            self.conversation_type = "self_reflection" if confirmed else "general"
+
         # Select type-specific prompt builder (v0.9.3)
         if self.conversation_type == "task":
             prompt = self._get_task_extraction_prompt(messages_text, cultural_section)
@@ -791,6 +988,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             prompt = self._get_technical_extraction_prompt(messages_text, cultural_section)
         elif self.conversation_type == "decision":
             prompt = self._get_decision_extraction_prompt(messages_text, cultural_section)
+        elif self.conversation_type == "self_reflection":
+            prompt = self._get_self_reflection_extraction_prompt(messages_text, cultural_section)
         else:  # general (fallback)
             prompt = self._get_general_extraction_prompt(messages_text, cultural_section)
 
@@ -831,14 +1030,16 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                         except Exception as local_error:
                             logger.error("Local inference fallback also failed: %s", local_error)
 
-                    # Case 2: Local failed (or wasn't configured), try remote as fallback for peer conversations
-                    elif not compute_host and self.conversation_id.startswith("dpc-node-"):
-                        logger.warning("Local inference failed, trying remote inference as fallback: %s", primary_error)
+                    # Case 2: Local failed (or wasn't configured), try remote as fallback
+                    # Works for peer conversations (dpc-node-) and group conversations (last_compute_host set)
+                    elif not compute_host and (self.conversation_id.startswith("dpc-node-") or self.last_compute_host):
+                        remote_host = self.last_compute_host or self.conversation_id
+                        logger.warning("Local inference failed, trying remote compute %s as fallback: %s", remote_host[:20], primary_error)
                         fallback_attempted = True
                         try:
                             inference_result = await self.ai_query_func(
                                 prompt=prompt,
-                                compute_host=self.conversation_id,  # Try peer compute
+                                compute_host=remote_host,
                                 model=self.last_model,
                                 provider=None
                             )
@@ -868,10 +1069,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             result = None
             json_str = None
 
-            # Attempt 1: Try to find JSON object in response (handles markdown wrapping)
-            json_match = re.search(r'\{(?:[^{}]|\{[^{}]*\})*\}', response, re.DOTALL)
-            if json_match:
-                json_str = json_match.group(0)
+            # Attempt 1: Extract outermost JSON object with balanced-bracket parser.
+            # Handles arbitrary nesting depth — the old regex only handled 2 levels and
+            # would capture an inner fragment (e.g. the bias section) when the LLM wraps
+            # its output in a 3-level structure like {"analysis": {"entries": [...]}}.
+            json_str = self._extract_json_object(response)
+            if json_str:
                 try:
                     result = json.loads(json_str)
                 except json.JSONDecodeError:
@@ -907,6 +1110,14 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             extraction_host_name = "local" if not compute_host else compute_host
 
             # Build knowledge entries
+            if not result.get('entries'):
+                logger.warning(
+                    "Knowledge extraction returned no entries for %s. "
+                    "Result keys: %s | Response preview: %.300s",
+                    self.conversation_id,
+                    list(result.keys()),
+                    response,
+                )
             entries = []
             for entry_data in result.get('entries', []):
                 source = KnowledgeSource(
@@ -929,7 +1140,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                     confidence=entry_data.get('confidence', 1.0),
                     cultural_specific=(cultural_context != 'Universal') if cultural_perspectives_enabled else False,
                     requires_context=[cultural_context] if (cultural_perspectives_enabled and cultural_context != 'Universal') else [],
-                    alternative_viewpoints=result.get('alternatives', [])
+                    # Per-entry alternatives (S34 fix). Fallback to commit-level for backward compat.
+                    alternative_viewpoints=entry_data.get('alternatives', []) or result.get('alternatives', [])
                 )
                 entries.append(entry)
 
@@ -971,7 +1183,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 summary=result.get('summary', 'Knowledge from group discussion'),
                 entries=entries,
                 participants=[p['node_id'] for p in self.participants],
-                proposed_by='ai',
+                proposed_by=proposed_by,
+                initiated_by=initiated_by,
                 cultural_perspectives=result.get('cultural_perspectives', []),
                 alternatives=alternatives,
                 flagged_assumptions=result.get('flagged_assumptions', []),
@@ -1164,7 +1377,9 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
     def add_message(self, role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None,
                     timestamp: Optional[str] = None, sender_node_id: Optional[str] = None,
-                    sender_name: Optional[str] = None, message_id: Optional[str] = None):
+                    sender_name: Optional[str] = None, message_id: Optional[str] = None,
+                    thinking: Optional[str] = None, streaming_raw: Optional[str] = None,
+                    source: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1176,8 +1391,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             sender_node_id: Optional sender node ID (for proper attribution in chat history)
             sender_name: Optional sender display name
             message_id: Optional unique message ID (auto-generated if not provided)
+            thinking: Optional extended chain-of-thought from reasoning models (persisted to history.json)
+            streaming_raw: Optional full streamed text output (persisted to history.json, for UI restore)
 
         Note: This also adds to message_buffer and full_conversation for knowledge extraction.
+        thinking and streaming_raw are stored in history.json but excluded from knowledge extraction.
         """
         import uuid
 
@@ -1195,6 +1413,12 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["sender_node_id"] = sender_node_id
         if sender_name:
             message_dict["sender_name"] = sender_name
+        if thinking:
+            message_dict["thinking"] = thinking
+        if streaming_raw:
+            message_dict["streaming_raw"] = streaming_raw
+        if source:
+            message_dict["source"] = source
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)
@@ -1257,13 +1481,176 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         old_hash = self.peer_context_hashes.get(node_id, "")
         return new_hash != old_hash
 
-    def reset_conversation(self):
-        """Reset conversation history and context tracking (for "New Chat" button)"""
+    def _archive_current_session(self, reason: str = "reset", max_sessions: int = 10) -> int:
+        """Archive the current history.json to archive/ before clearing.
+
+        Writes to ~/.dpc/conversations/{conversation_id}/archive/{timestamp}_{reason}_session.json
+        Keeps the last max_sessions archives, pruning oldest when exceeded.
+
+        Args:
+            reason: Label for why the session was archived (e.g. "reset", "new_session")
+            max_sessions: Maximum number of archived sessions to retain
+
+        Returns:
+            Number of archives in the folder after archiving (0 if skipped or error).
+        """
+        if not self.message_history:
+            return 0
+
+        path = self._get_history_path()
+        if not path.exists():
+            return 0
+
+        try:
+            now = datetime.now(timezone.utc)
+            ts = now.strftime("%Y-%m-%dT%H-%M-%S")
+            # ADR-008: YYYY/MM subdirectory layout for scalable archive storage
+            archive_base = path.parent / "archive"
+            archive_dir = archive_base / now.strftime("%Y") / now.strftime("%m")
+            archive_dir.mkdir(parents=True, exist_ok=True)
+
+            archive_path = archive_dir / f"{ts}_{reason}_session.json"
+
+            # Read current file content and inject archive metadata
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            data["archived_at"] = datetime.now(timezone.utc).isoformat()
+            data["session_reason"] = reason
+
+            with open(archive_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+
+            logger.info(f"Archived session to {archive_path}")
+
+            # Generate incremental session digest (derived data — can be rebuilt from archives)
+            self._generate_session_digest(data, archive_path)
+
+            # Prune oldest archives beyond max_sessions (rglob for YYYY/MM layout)
+            archives = sorted(archive_base.rglob("*_session.json"))
+            if len(archives) > max_sessions:
+                for old in archives[: len(archives) - max_sessions]:
+                    old.unlink()
+                    logger.debug(f"Pruned old archive: {old.name}")
+                    # Clean up empty YYYY/MM dirs after pruning
+                    try:
+                        old.parent.rmdir()  # only removes if empty
+                    except OSError:
+                        pass
+
+            return len(list(archive_base.rglob("*_session.json")))
+
+        except Exception as e:
+            logger.warning(f"Failed to archive session for {self.conversation_id}: {e}")
+            return 0
+
+    def _generate_session_digest(self, session_data: Dict[str, Any], archive_path: Path) -> None:
+        """Generate an incremental session digest and append to digest.jsonl.
+
+        Extracts structured metadata from the archived session via parsing (no LLM).
+        The digest is derived data — if lost, it can be rebuilt from session archives.
+
+        Args:
+            session_data: The archived session JSON data.
+            archive_path: Path to the archive file (for logging).
+        """
+        try:
+            messages = session_data.get("messages", [])
+            if not messages:
+                return
+
+            # Parse timestamps for duration
+            timestamps = [m.get("timestamp", "") for m in messages if m.get("timestamp")]
+            duration_mins = 0.0
+            if len(timestamps) >= 2:
+                try:
+                    first = datetime.fromisoformat(timestamps[0].replace("Z", "+00:00"))
+                    last = datetime.fromisoformat(timestamps[-1].replace("Z", "+00:00"))
+                    duration_mins = round((last - first).total_seconds() / 60, 1)
+                except (ValueError, TypeError):
+                    pass
+
+            # Count tool calls from tools.jsonl (agent log) by timestamp range
+            tool_stats: Dict[str, int] = {}
+            tool_durations: Dict[str, list] = {}
+            if timestamps and self.conversation_id.startswith("agent_"):
+                try:
+                    tools_path = (
+                        Path.home() / ".dpc" / "agents"
+                        / self.conversation_id / "logs" / "tools.jsonl"
+                    )
+                    if tools_path.exists():
+                        first_ts = timestamps[0]
+                        last_ts = timestamps[-1]
+                        with open(tools_path, encoding="utf-8") as tf:
+                            for line in tf:
+                                try:
+                                    entry = json.loads(line.strip())
+                                    ts = entry.get("ts", "")
+                                    if first_ts <= ts <= last_ts or entry.get("session_id") == self.conversation_id:
+                                        name = entry.get("tool", "unknown")
+                                        tool_stats[name] = tool_stats.get(name, 0) + 1
+                                        dur = entry.get("duration_ms")
+                                        if dur is not None:
+                                            tool_durations.setdefault(name, []).append(dur)
+                                except (json.JSONDecodeError, TypeError):
+                                    continue
+                except Exception as e:
+                    logger.debug(f"Could not read tools.jsonl for digest: {e}")
+
+            # Extract basic topics from user messages (first 5 user messages as topic hints)
+            user_messages = [m.get("content", "")[:100] for m in messages
+                            if m.get("role") == "user" and m.get("content")]
+
+            # Compute avg duration per tool
+            tool_avg_duration: Dict[str, int] = {}
+            for name, durations in tool_durations.items():
+                if durations:
+                    tool_avg_duration[name] = round(sum(durations) / len(durations))
+
+            digest_entry = {
+                "date": session_data.get("archived_at", datetime.now(timezone.utc).isoformat()),
+                "session_id": self.conversation_id,
+                "message_count": len(messages),
+                "duration_mins": duration_mins,
+                "tool_stats": tool_stats,
+                "tool_avg_duration_ms": tool_avg_duration,
+                "user_message_previews": user_messages[:5],
+                "archive_file": archive_path.name,
+            }
+
+            # Write to digest.jsonl in the conversation directory (next to archive/)
+            # Use explicit conversation dir instead of parent chain (ADR-008: archive_path
+            # is now inside YYYY/MM subdirs, so parent.parent would be wrong)
+            conversation_dir = self._get_history_path().parent
+            digest_path = conversation_dir / "digest.jsonl"
+            with open(digest_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(digest_entry, ensure_ascii=False) + "\n")
+
+            logger.info(f"Session digest appended to {digest_path}")
+
+        except Exception as e:
+            # Digest failure must not block archival
+            logger.warning(f"Failed to generate session digest: {e}")
+
+    def reset_conversation(self, preserve: bool = True, max_sessions: int = 10) -> int:
+        """Reset conversation history and context tracking (for "New Chat" button).
+
+        Args:
+            preserve: If True, archive the current session before clearing.
+            max_sessions: Maximum archived sessions to keep (passed to _archive_current_session).
+
+        Returns:
+            Archive count after reset (0 if preserve=False or nothing was archived).
+        """
+        # Archive before wiping
+        archive_count = self._archive_current_session(reason="reset", max_sessions=max_sessions) if preserve else 0
+
         self.message_history = []
         self.message_ids = set()
         self._history_dirty = False
         self.peer_context_hashes = {}
         self.current_token_count = 0
+        self._last_context_estimated = 0  # reset so token counter shows 0 on fresh session
         self.message_buffer = []
         self.knowledge_score = 0.0
         # Clear peer context caches
@@ -1278,6 +1665,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 logger.info(f"Deleted history file on reset: {path}")
             except Exception as e:
                 logger.error(f"Failed to delete history file {path}: {e}")
+
+        return archive_count
 
     def _remap_attachment_paths(self, attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Remap file paths in attachments from peer's filesystem to local filesystem.
@@ -1344,12 +1733,17 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         exported = []
         for msg in self.message_history:
             exported_msg = {
+                "id": msg.get("id"),  # Preserve ID so merge_history can deduplicate
                 "role": msg["role"],
                 "content": msg["content"],
-                "timestamp": datetime.now(timezone.utc).isoformat(),  # Add current timestamp
+                "timestamp": msg.get("timestamp", datetime.now(timezone.utc).isoformat()),
             }
             if "attachments" in msg:
                 exported_msg["attachments"] = msg["attachments"]
+            if "sender_node_id" in msg:
+                exported_msg["sender_node_id"] = msg["sender_node_id"]
+            if "sender_name" in msg:
+                exported_msg["sender_name"] = msg["sender_name"]
             exported.append(exported_msg)
 
         logger.info(f"Exported {len(exported)} messages from conversation history")
@@ -1465,13 +1859,44 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
     # --- Conversation History Persistence (v0.21.0: Unified storage) ---
 
+    @staticmethod
+    def _slugify(name: str) -> str:
+        """Convert a display name to a filesystem-safe slug."""
+        import re
+        slug = name.lower()
+        slug = re.sub(r'[^a-z0-9\s-]', '', slug)
+        slug = re.sub(r'\s+', '-', slug)
+        slug = re.sub(r'-+', '-', slug).strip('-')
+        return slug[:20]
+
+    def _get_folder_name(self) -> str:
+        """Return the folder name for this conversation, with display_name suffix if set."""
+        if self.display_name:
+            slug = self._slugify(self.display_name)
+            if slug:
+                return f"{self.conversation_id}-{slug}"
+        return self.conversation_id
+
     def _get_conversation_dir(self) -> Path:
         """Get the conversation folder path.
 
         Returns:
-            Path to ~/.dpc/conversations/{conversation_id}/
+            Path to ~/.dpc/conversations/{conversation_id}-{slug}/
+            Falls back to ~/.dpc/conversations/{conversation_id}/ if no display_name.
+            Auto-migrates old unnamed folder to new named folder on first access.
         """
-        return Path.home() / ".dpc" / "conversations" / self.conversation_id
+        base = Path.home() / ".dpc" / "conversations"
+        folder = self._get_folder_name()
+        new_dir = base / folder
+        old_dir = base / self.conversation_id
+        if folder != self.conversation_id and old_dir.exists() and not new_dir.exists():
+            try:
+                old_dir.rename(new_dir)
+                logger.info("Renamed conversation folder: %s → %s", old_dir.name, new_dir.name)
+            except Exception as e:
+                logger.warning("Could not rename conversation folder %s: %s", old_dir.name, e)
+                return old_dir
+        return new_dir
 
     def _get_history_path(self) -> Path:
         """Get path to history file for this conversation
@@ -1617,6 +2042,11 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 "last_updated": datetime.now(timezone.utc).isoformat(),
                 "message_count": len(self.message_history),
                 "history_hash": self.compute_history_hash(),
+                "token_stats": {
+                    "current_token_count": self.current_token_count,
+                    "token_limit": self.token_limit,
+                    "context_estimated": getattr(self, '_last_context_estimated', 0),
+                },
                 "messages": self.message_history
             }
 
@@ -1673,6 +2103,13 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 if m.get("id")
             }
 
+            # Restore token stats so the UI token counter shows correct values after restart
+            token_stats = data.get("token_stats", {})
+            if token_stats:
+                self.current_token_count = token_stats.get("current_token_count", self.current_token_count)
+                self.token_limit = token_stats.get("token_limit", self.token_limit)
+                self._last_context_estimated = token_stats.get("context_estimated", 0)
+
             self._history_dirty = False
             logger.info(f"Loaded {len(messages)} messages from {path}")
             return True
@@ -1680,6 +2117,44 @@ PARTICIPANTS' CULTURAL CONTEXTS:
         except Exception as e:
             logger.error(f"Failed to load history from {path}: {e}")
             return False
+
+    def rebuild_extraction_buffers_from_history(self) -> int:
+        """Rebuild full_conversation and message_buffer from message_history.
+
+        Called after load_history() to restore the knowledge-extraction buffers
+        that are NOT persisted to disk. Without this, end_session extraction
+        only sees messages from the current in-memory session, missing all
+        historical messages loaded from disk.
+
+        Only adds messages that are not already in full_conversation (by message_id),
+        so it is safe to call even when some messages were added via add_message().
+
+        Returns:
+            Number of messages added to full_conversation
+        """
+        import uuid as _uuid
+        existing_ids = {msg.message_id for msg in self.full_conversation}
+        added = 0
+        for msg in self.message_history:
+            msg_id = msg.get("id", "")
+            if msg_id and msg_id in existing_ids:
+                continue  # already present
+            message_obj = Message(
+                message_id=msg_id or str(_uuid.uuid4()),
+                conversation_id=self.conversation_id,
+                sender_node_id=msg.get("sender_node_id", "local"),
+                sender_name=msg.get("sender_name", msg.get("role", "user").capitalize()),
+                text=msg.get("content", ""),
+                timestamp=msg.get("timestamp", datetime.now(timezone.utc).isoformat()),
+            )
+            self.full_conversation.append(message_obj)
+            self.message_buffer.append(message_obj)
+            if msg_id:
+                existing_ids.add(msg_id)
+            added += 1
+        if added:
+            logger.debug(f"Rebuilt extraction buffers: added {added} historical messages for {self.conversation_id}")
+        return added
 
     def add_message_with_id(self, message: Dict[str, Any]) -> bool:
         """Add a message to history with duplicate detection
@@ -1737,11 +2212,21 @@ PARTICIPANTS' CULTURAL CONTEXTS:
 
         return added
 
-    def clear_history(self):
-        """Clear all message history and delete persisted file
+    def clear_history(self, preserve: bool = True, max_sessions: int = 10) -> int:
+        """Clear all message history and delete persisted file.
 
         Called when a new session is approved.
+
+        Args:
+            preserve: If True, archive the current session before clearing.
+            max_sessions: Maximum archived sessions to keep.
+
+        Returns:
+            Archive count after clearing (0 if preserve=False or nothing was archived).
         """
+        # Archive before wiping
+        archive_count = self._archive_current_session(reason="new_session", max_sessions=max_sessions) if preserve else 0
+
         self.message_history = []
         self.message_ids = set()
         self._history_dirty = False
@@ -1754,6 +2239,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
                 logger.info(f"Deleted history file: {path}")
             except Exception as e:
                 logger.error(f"Failed to delete history file {path}: {e}")
+
+        return archive_count
 
     def delete_conversation_folder(self) -> bool:
         """Delete the entire conversation folder including history, settings, and files.

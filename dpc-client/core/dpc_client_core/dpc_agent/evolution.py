@@ -24,7 +24,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -100,7 +100,12 @@ class EvolutionManager:
         "memory/scratchpad.md",
         "memory/knowledge/",
         "config/agent.json",
+        "skills/",  # Skill strategies (SKILL.md files under skills/*/SKILL.md)
     }
+
+    # Skill appends are auto-approved even when auto_apply=False.
+    # Only memory/identity changes require manual approval.
+    SKILL_AUTO_APPROVE_PATH_PREFIX = "skills/"
 
     # Patterns that are NEVER allowed in paths
     FORBIDDEN_PATTERNS = [
@@ -144,10 +149,13 @@ class EvolutionManager:
         self._evolution_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
 
-        # Pending changes awaiting approval
-        self._pending_changes: List[ProposedChange] = []
+        # Pending changes awaiting approval — load from disk to survive restarts
+        self._pending_changes: List[ProposedChange] = self._load_pending_changes()
 
-        log.info(f"EvolutionManager initialized (enabled={enabled}, auto_apply={auto_apply})")
+        log.info(
+            "EvolutionManager initialized (enabled=%s, auto_apply=%s, pending=%d)",
+            enabled, auto_apply, len(self._pending_changes),
+        )
 
     def is_path_allowed(self, path: str) -> bool:
         """
@@ -186,6 +194,30 @@ class EvolutionManager:
         log.warning(f"Path not in allowed list: {path}")
         return False
 
+    def _get_skill_existing_sections(self, skill_name: str) -> Dict[str, Any]:
+        """
+        Read existing SKILL.md for a skill and return section headers + size info.
+
+        Used by _generate_proposals to prevent duplicate content.
+        """
+        skill_path = self.agent_root / "skills" / skill_name / "SKILL.md"
+        result: Dict[str, Any] = {"sections": [], "size": 0, "over_limit": False}
+        try:
+            if not skill_path.exists():
+                return result
+            content = skill_path.read_text(encoding="utf-8")
+            result["size"] = len(content)
+            result["over_limit"] = len(content) > self.MAX_SKILL_FILE_SIZE
+            # Extract markdown ## headers as section names
+            result["sections"] = [
+                line.lstrip("#").strip()
+                for line in content.splitlines()
+                if line.startswith("## ")
+            ]
+        except Exception as e:
+            log.debug(f"Failed to read skill sections for {skill_name}: {e}")
+        return result
+
     async def run_evolution_cycle(self) -> EvolutionCycle:
         """
         Run one evolution cycle.
@@ -206,11 +238,14 @@ class EvolutionManager:
         self._current_cycle = cycle
 
         emitter = get_event_emitter()
+        _agent_id = self.agent_root.name
         await emitter.emit(EventType.EVOLUTION_CYCLE_STARTED, {
             "cycle_id": cycle.id,
             "cycle_number": self._cycle_count,
+            "agent_id": _agent_id,
         })
 
+        proposals: List[Dict[str, Any]] = []
         try:
             # Step 1: Analyze state
             log.info(f"Starting evolution cycle {self._cycle_count}")
@@ -236,9 +271,10 @@ class EvolutionManager:
                         await emitter.emit(EventType.CODE_MODIFIED, {
                             "path": proposal["path"],
                             "description": proposal["description"][:200],
+                            "agent_id": _agent_id,
                         })
                 else:
-                    # Queue for human approval
+                    # Queue for human approval (memory/identity changes)
                     self._queue_for_approval(proposal)
 
             # Step 4: Update identity with learnings
@@ -258,11 +294,24 @@ class EvolutionManager:
             self._status = EvolutionStatus.IDLE
             self._current_cycle = None
 
+            # Brief summary of each proposal for downstream notifiers (Telegram bridge etc.)
+            proposals_summary = [
+                {
+                    "path": str(p.get("path", "?")),
+                    "change_type": str(p.get("change_type", "")),
+                    "description": str(p.get("description", ""))[:200],
+                }
+                for p in proposals
+            ]
+
             await emitter.emit(EventType.EVOLUTION_CYCLE_COMPLETED, {
                 "cycle_id": cycle.id,
                 "files_modified": cycle.files_modified,
+                "changes_proposed": cycle.changes_proposed,
                 "changes_applied": cycle.changes_applied,
+                "proposals_summary": proposals_summary,
                 "description": cycle.description,
+                "agent_id": _agent_id,
             })
 
         # Log cycle to file
@@ -274,11 +323,16 @@ class EvolutionManager:
         """Analyze current agent state for improvement opportunities."""
         memory = self.agent.memory
 
-        # Read recent tool usage
-        tools_log = memory.read_jsonl_tail("tools.jsonl", 50)
+        # Read recent tool usage (temporal window: last 24h instead of fixed tail)
+        tools_log = memory.read_jsonl_since("tools.jsonl", hours=24.0, max_entries=500)
+        if not tools_log:
+            # Fallback to tail if no recent entries (e.g., first run after upgrade)
+            tools_log = memory.read_jsonl_tail("tools.jsonl", 50)
 
-        # Read recent consciousness thoughts
-        thoughts_log = memory.read_jsonl_tail("consciousness.jsonl", 20)
+        # Read recent consciousness thoughts (temporal window: last 24h)
+        thoughts_log = memory.read_jsonl_since("consciousness.jsonl", hours=24.0, max_entries=100)
+        if not thoughts_log:
+            thoughts_log = memory.read_jsonl_tail("consciousness.jsonl", 20)
 
         # Read current identity
         identity = memory.load_identity()
@@ -287,55 +341,240 @@ class EvolutionManager:
         # Count knowledge topics
         knowledge_topics = memory.list_knowledge_topics()
 
+        # Read skill performance data (_stats.json) — primary signal for improvement
+        skill_stats: Dict[str, Any] = {}
+        underperforming_skills: List[Dict[str, Any]] = []
+        try:
+            skill_store = getattr(self.agent, "skill_store", None)
+            if skill_store is not None:
+                skill_stats = skill_store.get_stats()
+                available_skills = skill_store.list_skill_names()
+                for skill_name in available_skills:
+                    stats = skill_stats.get(skill_name, {})
+                    total = stats.get("success_count", 0) + stats.get("failure_count", 0)
+                    if total < 3:
+                        continue  # Not enough data yet
+                    failure_rate = stats.get("failure_count", 0) / total
+                    avg_rounds = stats.get("avg_rounds", 0)
+                    # Flag as underperforming if >30% failure rate or avg rounds > 10
+                    if failure_rate > 0.30 or avg_rounds > 10:
+                        underperforming_skills.append({
+                            "name": skill_name,
+                            "failure_rate": round(failure_rate, 2),
+                            "avg_rounds": avg_rounds,
+                            "total_uses": total,
+                            "improvement_count": len(stats.get("improvement_log", [])),
+                        })
+        except Exception as e:
+            log.debug(f"Failed to read skill stats: {e}")
+
+        # Analyze tool usage quality from tools.jsonl (error rate + diversity + categories + duration)
+        tool_error_count = 0
+        tool_frequency: Dict[str, int] = {}
+        tool_durations: Dict[str, list] = {}
+        error_categories: Dict[str, int] = {}
+        for entry in tools_log:
+            tool_name = entry.get("tool", "unknown")
+            tool_frequency[tool_name] = tool_frequency.get(tool_name, 0) + 1
+            dur = entry.get("duration_ms")
+            if dur is not None:
+                tool_durations.setdefault(tool_name, []).append(dur)
+            is_err = entry.get("is_error", False)
+            if not is_err:
+                result = str(entry.get("result_preview", ""))
+                is_err = result.startswith("⚠️") or "error" in result.lower()[:50]
+            if is_err:
+                tool_error_count += 1
+                cat = entry.get("error_category", "unknown")
+                error_categories[cat] = error_categories.get(cat, 0) + 1
+
+        tool_error_rate = round(tool_error_count / len(tools_log), 2) if tools_log else 0.0
+        # Top 5 most used tools
+        top_tools = sorted(tool_frequency.items(), key=lambda x: -x[1])[:5]
+        # Slow tools (avg duration > 1000ms, at least 3 calls)
+        slow_tools = []
+        for name, durations in tool_durations.items():
+            if len(durations) >= 3:
+                avg = round(sum(durations) / len(durations))
+                if avg > 1000:
+                    slow_tools.append({"tool": name, "avg_ms": avg, "calls": len(durations)})
+        slow_tools.sort(key=lambda x: -x["avg_ms"])
+
+        # Read cross-session trends from digest.jsonl
+        digest_trends: List[Dict[str, Any]] = []
+        try:
+            from pathlib import Path
+            digest_path = Path.home() / ".dpc" / "conversations" / self.agent_root.name / "digest.jsonl"
+            if digest_path.exists():
+                with open(digest_path, encoding="utf-8") as df:
+                    for line in df:
+                        line = line.strip()
+                        if line:
+                            try:
+                                digest_trends.append(json.loads(line))
+                            except Exception:
+                                continue
+        except Exception:
+            log.debug("Failed to read digest.jsonl for evolution trends", exc_info=True)
+
+        # Summarize recent consciousness thoughts for Evolution prompt
+        # Supports both structured (v2) and freeform (v1) formats
+        recent_thoughts: List[str] = []
+        for entry in thoughts_log[-5:]:
+            thought_type = entry.get("type", "unknown")
+            # Structured format (v2): has "observation" field
+            if "observation" in entry:
+                obs = str(entry.get("observation", ""))[:200]
+                pattern = entry.get("pattern_detected")
+                severity = entry.get("severity", "low")
+                action = entry.get("action_suggestion")
+                parts = [f"[{thought_type}] {obs}"]
+                if pattern:
+                    parts.append(f"pattern={pattern}")
+                if severity in ("medium", "high"):
+                    parts.append(f"severity={severity}")
+                if action:
+                    parts.append(f"action={action[:100]}")
+                recent_thoughts.append(" | ".join(parts))
+            else:
+                # Freeform format (v1): has "response_preview" field
+                preview = str(entry.get("response_preview", ""))[:200]
+                if preview.strip():
+                    recent_thoughts.append(f"[{thought_type}] {preview}")
+
         return {
-            "files_examined": 4,
+            "files_examined": 5,
             "tool_calls_count": len(tools_log),
+            "tool_error_rate": tool_error_rate,
+            "tool_error_count": tool_error_count,
+            "error_categories": error_categories,
+            "top_tools": top_tools,
+            "slow_tools": slow_tools[:5],
             "thoughts_count": len(thoughts_log),
             "identity_length": len(identity),
             "scratchpad_length": len(scratchpad),
             "knowledge_topics": len(knowledge_topics),
+            "underperforming_skills": underperforming_skills,
+            "total_skill_stats": len(skill_stats),
             "improvement_areas": [],  # Will be populated by LLM
+            "recent_thoughts": recent_thoughts,
+            "digest_sessions": len(digest_trends),
+            "digest_latest": digest_trends[-3:] if digest_trends else [],
         }
+
+    # Maximum size for skill files — beyond this, append proposals are skipped
+    MAX_SKILL_FILE_SIZE = 10_000  # characters
 
     async def _generate_proposals(self, analysis: Dict) -> List[Dict]:
         """Generate improvement proposals using LLM."""
-        prompt = f"""Analyze the agent state and propose specific improvements.
+        underperforming = analysis.get("underperforming_skills", [])
 
-Current state:
-- Tool calls made recently: {analysis['tool_calls_count']}
-- Background thoughts completed: {analysis['thoughts_count']}
-- Identity document length: {analysis['identity_length']} chars
-- Scratchpad length: {analysis['scratchpad_length']} chars
+        # Build the skill-focused section of the prompt, including existing content
+        # to prevent duplicate proposals
+        if underperforming:
+            skill_section = "## Underperforming Skills (primary improvement target)\n"
+            for s in underperforming[:3]:
+                skill_section += (
+                    f"\n- **{s['name']}**: failure_rate={s['failure_rate']:.0%}, "
+                    f"avg_rounds={s['avg_rounds']:.1f}, uses={s['total_uses']}, "
+                    f"prior_improvements={s['improvement_count']}"
+                )
+
+                # Read existing SKILL.md to prevent duplicate proposals
+                existing_info = self._get_skill_existing_sections(s['name'])
+                if existing_info["over_limit"]:
+                    skill_section += (
+                        f"\n  ⚠ SKILL.md is {existing_info['size']} chars "
+                        f"(limit {self.MAX_SKILL_FILE_SIZE}). "
+                        f"DO NOT propose appends for this skill — file is too large."
+                    )
+                elif existing_info["sections"]:
+                    skill_section += (
+                        f"\n  Existing sections in SKILL.md: "
+                        f"{', '.join(existing_info['sections'])}"
+                        f"\n  DO NOT propose content that duplicates these sections."
+                    )
+
+            skill_section += (
+                "\n\nFor each underperforming skill (that is NOT over the size limit), "
+                "propose an APPEND to skills/{skill-name}/SKILL.md that adds a "
+                "GENUINELY NEW step or common-failure entry not already covered. "
+                "Path format: skills/{name}/SKILL.md"
+            )
+        else:
+            skill_section = (
+                "No skills are underperforming right now. "
+                "Consider memory/identity.md or memory/knowledge/ improvements only."
+            )
+
+        # Build consciousness insights section
+        recent_thoughts = analysis.get("recent_thoughts", [])
+        if recent_thoughts:
+            thoughts_section = (
+                "## Recent Agent Self-Reflections (from Consciousness)\n"
+                "Use these insights to inform your proposals — "
+                "the agent has already been thinking about these topics:\n\n"
+                + "\n".join(f"- {t}" for t in recent_thoughts)
+            )
+        else:
+            thoughts_section = ""
+
+        # Build tool usage quality section
+        tool_error_rate = analysis.get("tool_error_rate", 0.0)
+        top_tools = analysis.get("top_tools", [])
+        error_cats = analysis.get("error_categories", {})
+        if tool_error_rate > 0.1 or top_tools:
+            tool_quality_section = "## Tool Usage Quality\n"
+            tool_quality_section += f"- Error rate: {tool_error_rate:.0%} ({analysis.get('tool_error_count', 0)} errors in {analysis['tool_calls_count']} calls)\n"
+            if top_tools:
+                tool_quality_section += "- Most used: " + ", ".join(f"{name}({count})" for name, count in top_tools) + "\n"
+            if error_cats:
+                tool_quality_section += "- Error breakdown: " + ", ".join(f"{cat}={cnt}" for cat, cnt in sorted(error_cats.items(), key=lambda x: -x[1])) + "\n"
+                if error_cats.get("firewall_blocked", 0) > 0:
+                    tool_quality_section += "  - firewall_blocked: tool is disabled by user — stop calling it\n"
+            if tool_error_rate > 0.15:
+                tool_quality_section += "- ⚠️ HIGH error rate — consider if search patterns or file paths need improvement\n"
+        else:
+            tool_quality_section = ""
+
+        prompt = f"""You are an evolution cycle for an AI agent. Propose targeted improvements based on performance data and the agent's own self-reflections.
+
+## Performance Data
+- Recent tool calls: {analysis['tool_calls_count']}
 - Knowledge topics: {analysis['knowledge_topics']}
+- Skills tracked: {analysis['total_skill_stats']}
 
-Sandbox constraints - you can ONLY modify these files under ~/.dpc/agent/:
-- memory/identity.md (your self-understanding)
-- memory/scratchpad.md (your working notes)
-- memory/knowledge/*.md (your knowledge base)
+{tool_quality_section}
 
-You CANNOT access:
-- DPC Messenger code
-- ~/.dpc/personal.json (user's personal data)
-- ~/.dpc/config.ini (user configuration)
+{thoughts_section}
 
-Propose 1-3 specific, actionable improvements. Focus on:
-1. Learning from recent mistakes or successes
-2. Consolidating insights into knowledge
-3. Updating your identity with new understanding
+{skill_section}
 
-Respond with a JSON object in this exact format:
+## Sandbox — ONLY these paths are allowed:
+- skills/{{name}}/SKILL.md  (append only — fix underperforming skills)
+- memory/identity.md        (append only — add new self-understanding)
+- memory/knowledge/{{topic}}.md  (append — add new knowledge)
+
+## Rules
+1. Prefer skill improvements when underperforming skills exist — they have measurable impact
+2. Skill changes MUST be "append" only — never replace full SKILL.md
+3. Content for skill appends should go under a new markdown section heading
+4. Only propose changes that address a specific observed gap, not hypothetical improvements
+5. Propose at most 2 changes total
+
+Respond with JSON only:
 {{
   "proposals": [
     {{
-      "path": "memory/identity.md",
+      "path": "skills/code-analysis/SKILL.md",
       "change_type": "append",
-      "content": "## Recent Learning\\n\\n...",
-      "description": "Brief description of what this adds"
+      "content": "## Additional Tips\\n\\n- Always check X before Y...",
+      "description": "Add missing step for handling monorepos"
     }}
   ]
 }}
 
-If no improvements are needed, respond with: {{"proposals": []}}
+If no improvements are warranted: {{"proposals": []}}
 """
 
         try:
@@ -345,7 +584,7 @@ If no improvements are needed, respond with: {{"proposals": []}}
                 {"role": "user", "content": prompt},
             ]
 
-            response, usage = await self.agent.llm.chat(messages, tools=None)
+            response, usage = await self.agent.llm.chat(messages, tools=None, background=True)
             content = response.get("content", "")
 
             # Parse JSON from response
@@ -422,6 +661,12 @@ If no improvements are needed, respond with: {{"proposals": []}}
             # Apply change based on type
             if change_type == "append":
                 current = full_path.read_text(encoding="utf-8") if full_path.exists() else ""
+                if len(current) > self.MAX_SKILL_FILE_SIZE and path.startswith("skills/"):
+                    log.warning(
+                        "Blocked append to %s — file size %d exceeds limit %d",
+                        path, len(current), self.MAX_SKILL_FILE_SIZE,
+                    )
+                    return False
                 new_content = current + "\n\n" + content
                 full_path.write_text(new_content, encoding="utf-8")
 
@@ -448,12 +693,23 @@ If no improvements are needed, respond with: {{"proposals": []}}
         """
         Queue a change for human approval.
 
+        Skips if a pending change already targets the same path (dedup).
+
         Args:
             proposal: The change proposal
 
         Returns:
-            Change ID
+            Change ID, or empty string if skipped as duplicate
         """
+        # Dedup: skip if we already have a pending change for the same path
+        for existing in self._pending_changes:
+            if existing.path == proposal["path"]:
+                log.info(
+                    "Skipping duplicate proposal for %s — pending change %s already exists",
+                    proposal["path"], existing.id,
+                )
+                return ""
+
         change_id = f"change-{uuid.uuid4().hex[:8]}"
 
         pending_change = ProposedChange(
@@ -471,6 +727,30 @@ If no improvements are needed, respond with: {{"proposals": []}}
 
         log.info(f"Queued change {change_id} for approval: {pending_change.description}")
         return change_id
+
+    def _load_pending_changes(self) -> List[ProposedChange]:
+        """Load pending changes from disk (survives restarts)."""
+        pending_file = self.agent_root / "state" / "pending_changes.json"
+        if not pending_file.exists():
+            return []
+        try:
+            data = json.loads(pending_file.read_text(encoding="utf-8"))
+            changes = []
+            for c in data.get("changes", []):
+                changes.append(ProposedChange(
+                    id=c["id"],
+                    path=c["path"],
+                    change_type=c["change_type"],
+                    content=c["content"],
+                    description=c["description"],
+                    created_at=c.get("created_at", ""),
+                ))
+            if changes:
+                log.info("Loaded %d pending evolution changes from disk", len(changes))
+            return changes
+        except Exception as e:
+            log.warning("Failed to load pending changes: %s", e)
+            return []
 
     def _save_pending_changes(self) -> None:
         """Save pending changes to disk."""
@@ -540,6 +820,7 @@ If no improvements are needed, respond with: {{"proposals": []}}
                         "path": change.path,
                         "description": change.description,
                         "approved": True,
+                        "agent_id": self.agent_root.name,
                     })
 
                 return success
@@ -622,8 +903,43 @@ If no improvements are needed, respond with: {{"proposals": []}}
         async def _evolution_loop():
             log.info(f"Starting automatic evolution (interval={self.interval_minutes}min)")
 
+            # Skip first cycle if last one was recent (prevents evolution-on-every-restart)
+            try:
+                log_file = self.agent_root / "logs" / "evolution.jsonl"
+                if log_file.exists():
+                    # Read only the last line efficiently
+                    with open(log_file, "rb") as f:
+                        f.seek(0, 2)  # Seek to end
+                        size = f.tell()
+                        # Read last 4KB (more than enough for one JSONL entry)
+                        f.seek(max(0, size - 4096))
+                        last_line = f.read().decode("utf-8").strip().rsplit("\n", 1)[-1]
+                    last_cycle = json.loads(last_line)
+                    completed = datetime.fromisoformat(last_cycle["completed_at"])
+                    if completed.tzinfo is None:
+                        completed = completed.replace(tzinfo=timezone.utc)
+                    elapsed = (datetime.now(timezone.utc) - completed).total_seconds()
+                    remaining = self.interval_minutes * 60 - elapsed
+                    if remaining > 0:
+                        log.info(f"Last evolution cycle was {elapsed:.0f}s ago, waiting {remaining:.0f}s before first cycle")
+                        try:
+                            await asyncio.wait_for(self._stop_event.wait(), timeout=remaining)
+                            log.info("Automatic evolution stopped during initial wait")
+                            self._evolution_task = None
+                            return
+                        except asyncio.TimeoutError:
+                            pass  # Time to run
+            except Exception as e:
+                log.debug(f"Could not read last evolution timestamp, running immediately: {e}")
+
             while not self._stop_event.is_set():
                 try:
+                    # Yield to user interaction — don't compete for LLM provider
+                    if getattr(self.agent, '_user_active', False):
+                        log.debug("Skipping evolution cycle — user interaction active")
+                        await asyncio.sleep(10)  # Check again shortly
+                        continue
+
                     await self.run_evolution_cycle()
 
                     # Wait for next cycle

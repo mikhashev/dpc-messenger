@@ -3,6 +3,7 @@
 
 <script lang="ts">
   import { createEventDispatcher } from 'svelte';
+  import type { KnowledgeCommitProposal, KnowledgeEntry } from '$lib/types.js';
 
   // Props
   export let proposal: KnowledgeCommitProposal | null = null;
@@ -10,41 +11,20 @@
 
   const dispatch = createEventDispatcher();
 
-  type KnowledgeEntry = {
-    content: string;
-    tags: string[];
-    confidence: number;
-    cultural_specific: boolean;
-    requires_context: string[];
-    alternative_viewpoints: string[];
-    edited_by?: string | null;  // Phase 5 - inline editing attribution
-    edited_at?: string | null;  // Phase 5 - inline editing timestamp
-  };
-
-  type KnowledgeCommitProposal = {
-    proposal_id: string;
-    topic: string;
-    summary: string;
-    entries: KnowledgeEntry[];
-    participants: string[];
-    cultural_perspectives: string[];
-    alternatives: string[];
-    devil_advocate: string | null;
-    avg_confidence: number;
-  };
-
   let voteComment = '';
   let showDetails = false;
 
   // Phase 5: Inline editing state
   let editMode = false;
   let editedEntries: KnowledgeEntry[] = [];
+  let editedSummary = '';
   let currentUserId = ''; // Will be set from nodeStatus
 
   // Initialize edited entries when entering edit mode
   function startEditing() {
     if (proposal) {
       editedEntries = JSON.parse(JSON.stringify(proposal.entries)); // Deep copy
+      editedSummary = proposal.summary;
       editMode = true;
     }
   }
@@ -52,6 +32,7 @@
   function cancelEditing() {
     editMode = false;
     editedEntries = [];
+    editedSummary = '';
   }
 
   function saveEdits() {
@@ -64,15 +45,40 @@
         edited_at: now
       }));
       proposal.entries = editedEntries;
+      proposal.summary = editedSummary;
     }
     editMode = false;
+  }
+
+  function deleteEntry(index: number) {
+    editedEntries = editedEntries.filter((_, i) => i !== index);
+  }
+
+  function addEntry() {
+    editedEntries = [...editedEntries, {
+      content: '',
+      tags: [],
+      source: { type: 'manual' },
+      confidence: 1.0,
+      last_updated: new Date().toISOString(),
+      edited_by: currentUserId || 'user',
+      edited_at: new Date().toISOString(),
+      usage_count: 0,
+      effectiveness_score: 1.0,
+      review_due: null,
+      cultural_specific: false,
+      requires_context: [],
+      alternative_viewpoints: []
+    } as KnowledgeEntry];
   }
 
   function handleVote(vote: 'approve' | 'reject' | 'request_changes') {
     dispatch('vote', {
       proposal_id: proposal?.proposal_id,
       vote,
-      comment: voteComment
+      comment: voteComment,
+      entries: proposal?.entries,
+      summary: proposal?.summary
     });
     voteComment = '';
   }
@@ -89,10 +95,9 @@
 </script>
 
 {#if open && proposal}
-  <!-- svelte-ignore a11y-click-events-have-key-events -->
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div class="modal-overlay" on:click={close} on:keydown={handleKeydown} role="presentation">
-    <div class="modal" on:click|stopPropagation role="dialog" aria-labelledby="dialog-title" tabindex="-1">
+  <div class="modal-overlay" on:keydown={handleKeydown} role="presentation">
+    <div class="modal" role="dialog" aria-labelledby="dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="dialog-title">Knowledge Commit Proposal</h2>
         <div class="header-actions">
@@ -110,7 +115,11 @@
         <!-- Summary -->
         <div class="section">
           <h3>Summary</h3>
-          <p class="summary">{proposal.summary}</p>
+          {#if editMode}
+            <textarea class="summary-edit" bind:value={editedSummary} rows="3" placeholder="Edit summary..."></textarea>
+          {:else}
+            <p class="summary">{proposal.summary}</p>
+          {/if}
         </div>
 
         <!-- Topic -->
@@ -125,6 +134,9 @@
             <div class="entry">
               <div class="entry-header">
                 <span class="entry-number">#{i + 1}</span>
+                {#if editMode}
+                  <button class="btn-delete-entry" on:click={() => deleteEntry(i)} title="Delete entry">&times;</button>
+                {/if}
                 <span class="confidence" class:high={entry.confidence >= 0.8} class:medium={entry.confidence >= 0.5 && entry.confidence < 0.8} class:low={entry.confidence < 0.5}>
                   {Math.round(entry.confidence * 100)}% confidence
                 </span>
@@ -172,6 +184,9 @@
               {/if}
             </div>
           {/each}
+          {#if editMode}
+            <button class="btn-add-entry" on:click={addEntry}>+ Add Entry</button>
+          {/if}
         </div>
 
         <!-- Bias Mitigation Info -->
@@ -377,6 +392,51 @@
     padding: 0.75rem;
     background: #f5f5f5;
     border-radius: 4px;
+  }
+
+  .summary-edit {
+    width: 100%;
+    font-size: 1rem;
+    padding: 0.75rem;
+    border: 2px solid #4a90d9;
+    border-radius: 4px;
+    resize: vertical;
+    box-sizing: border-box;
+  }
+
+  .btn-delete-entry {
+    background: #e74c3c;
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 24px;
+    height: 24px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+    margin-left: 0.5rem;
+  }
+
+  .btn-delete-entry:hover {
+    background: #c0392b;
+  }
+
+  .btn-add-entry {
+    display: block;
+    width: 100%;
+    padding: 0.75rem;
+    margin-top: 0.5rem;
+    background: #f0f7ff;
+    border: 2px dashed #4a90d9;
+    border-radius: 6px;
+    color: #4a90d9;
+    font-weight: 600;
+    cursor: pointer;
+    font-size: 0.95rem;
+  }
+
+  .btn-add-entry:hover {
+    background: #dceeff;
   }
 
   .entry {

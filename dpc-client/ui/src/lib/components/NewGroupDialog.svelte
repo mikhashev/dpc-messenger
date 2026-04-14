@@ -24,7 +24,6 @@
 
   function handleCreate() {
     if (!groupName.trim()) return;
-    if (selectedPeers.size === 0) return;
 
     dispatch('create', {
       name: groupName.trim(),
@@ -49,7 +48,7 @@
 </script>
 
 {#if open}
-  <div class="modal-overlay" role="presentation" on:click|self={handleCancel}>
+  <div class="modal-overlay" role="presentation">
     <div class="modal" role="dialog" aria-labelledby="dialog-title" tabindex="-1">
       <div class="modal-header">
         <h2 id="dialog-title">New Group Chat</h2>
@@ -106,7 +105,7 @@
         <button
           class="btn-create"
           on:click={handleCreate}
-          disabled={!groupName.trim() || selectedPeers.size === 0}
+          disabled={!groupName.trim()}
         >
           Create Group
         </button>

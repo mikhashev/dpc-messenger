@@ -12,11 +12,11 @@
     visible: boolean;
     query: string;
     members: Member[];
-    position: { top: number; left: number };
+    position: { bottom: number; left: number };
     selectedIndex: number;
   }
 
-  let { visible = false, query = '', members = [], position = { top: 0, left: 0 }, selectedIndex = 0 }: Props = $props();
+  let { visible = false, query = '', members = [], position = { bottom: 0, left: 0 }, selectedIndex = 0 }: Props = $props();
 
   const dispatch = createEventDispatcher();
 
@@ -60,7 +60,7 @@
 {#if visible && filteredMembers.length > 0}
   <div
     class="mention-dropdown"
-    style="top: {position.top}px; left: {position.left}px;"
+    style="bottom: {position.bottom}px; left: {position.left}px;"
     role="listbox"
     aria-label="Mention suggestions"
   >
@@ -92,7 +92,7 @@
     box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
     max-height: 200px;
     overflow-y: auto;
-    z-index: 1001;
+    z-index: 9999;
     min-width: 180px;
     padding: 4px 0;
   }

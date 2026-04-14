@@ -12,12 +12,14 @@ to keep dependencies minimal. These tools use simple HTTP requests.
 
 from __future__ import annotations
 
+import html as html_module
 import logging
 import re
 import ssl
 from html.parser import HTMLParser
 from io import StringIO
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 from .registry import ToolEntry, ToolContext
 
@@ -47,7 +49,10 @@ def _fetch_url(url: str, timeout: int = 30) -> Dict[str, Any]:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                       "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        # Prefer markdown/plain text — servers that support content negotiation
+        # (GitHub, Reddit, many CMS) return clean content, cutting token usage 77–86%.
+        # Falls back to HTML for servers that ignore the header.
+        "Accept": "text/markdown, text/plain, text/html;q=0.9, */*;q=0.8",
         "Accept-Language": "en-US,en;q=0.5",
     }
 
@@ -56,18 +61,24 @@ def _fetch_url(url: str, timeout: int = 30) -> Dict[str, Any]:
             response = requests.get(url, headers=headers, timeout=timeout)
             response.raise_for_status()
             content = response.text
+            return {
+                "success": True,
+                "content": content,
+                "status_code": response.status_code,
+                "content_type": response.headers.get("Content-Type", ""),
+            }
         else:
             req = urllib.request.Request(url, headers=headers)
             # Create SSL context with system certificates for proper TLS verification
             ssl_context = ssl.create_default_context()
             with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as response:
                 content = response.read().decode("utf-8", errors="replace")
-
-        return {
-            "success": True,
-            "content": content,
-            "status_code": 200 if not HAS_REQUESTS else response.status_code,
-        }
+                return {
+                    "success": True,
+                    "content": content,
+                    "status_code": 200,
+                    "content_type": response.headers.get("Content-Type", ""),
+                }
 
     except Exception as e:
         return {"success": False, "error": str(e)}
@@ -160,17 +171,22 @@ def browse_page(ctx: ToolContext, url: str, extract_text: bool = True) -> str:
         return f"⚠️ Failed to fetch page: {result['error']}"
 
     content = result["content"]
+    content_type = result.get("content_type", "")
+    is_clean_text = any(ct in content_type for ct in ("text/markdown", "text/plain"))
 
-    if extract_text:
+    if extract_text and not is_clean_text:
+        # Server returned HTML — strip tags and extract readable text
         text = _extract_text(content)
-        # Truncate if too long
         if len(text) > 10000:
             text = text[:10000] + f"\n\n... (truncated, {len(text)} total chars)"
         return f"Content from {url}:\n\n{text}"
     else:
-        if len(content) > 15000:
-            content = content[:15000] + f"\n\n... (truncated, {len(content)} total chars)"
-        return f"Raw HTML from {url}:\n\n{content}"
+        # Server returned markdown/plain (or raw HTML was requested) — use as-is
+        limit = 10000 if is_clean_text else 15000
+        label = "raw HTML" if not extract_text else "content"
+        if len(content) > limit:
+            content = content[:limit] + f"\n\n... (truncated, {len(content)} total chars)"
+        return f"{label.capitalize()} from {url}:\n\n{content}"
 
 
 def fetch_json(ctx: ToolContext, url: str) -> str:
@@ -292,27 +308,31 @@ def search_duckduckgo(ctx: ToolContext, query: str, max_results: int = 5) -> str
     Returns:
         Search results
     """
-    # Use DuckDuckGo HTML version for scraping
-    url = f"https://html.duckduckgo.com/html/?q={query}"
+    # Use DuckDuckGo HTML version for scraping (query must be URL-encoded)
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
 
     result = _fetch_url(url)
 
     if not result["success"]:
         return f"⚠️ Search failed: {result['error']}"
 
-    html = result["content"]
+    html_content = result["content"]
 
-    # Extract search results from DDG HTML
+    # Extract search results from DDG HTML.
+    # DDG wraps destination URLs in redirect links: /l/?uddg=<percent-encoded-url>
+    # Use DOTALL so titles spanning multiple lines are captured correctly.
     results = []
+    result_pattern = r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
+    matches = re.findall(result_pattern, html_content, re.IGNORECASE | re.DOTALL)
 
-    # DDG result pattern
-    result_pattern = r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>([^<]+)</a>'
-    matches = re.findall(result_pattern, html, re.IGNORECASE)
-
-    for href, title in matches[:max_results]:
-        # Clean up title
-        title = re.sub(r"<[^>]+>", "", title).strip()
-        results.append(f"  • {title}\n    {href}")
+    for raw_href, raw_title in matches[:max_results]:
+        # Decode DDG redirect to get the real destination URL
+        parsed = urlparse(raw_href)
+        qs = parse_qs(parsed.query)
+        real_url = unquote(qs["uddg"][0]) if "uddg" in qs else raw_href
+        # Strip any residual HTML tags and decode entities in the title
+        title = html_module.unescape(re.sub(r"<[^>]+>", "", raw_title).strip())
+        results.append(f"  • {title}\n    {real_url}")
 
     if not results:
         return f"No results found for: {query}"

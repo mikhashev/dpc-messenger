@@ -595,7 +595,8 @@ class DHTManager:
         relay_uptime: float = 0.99,
         punch_supported: bool = False,
         punch_port: Optional[int] = None,
-        punch_success_rate: float = 0.0
+        punch_success_rate: float = 0.0,
+        skills: Optional[List] = None,
     ) -> int:
         """
         Announce node presence with full Phase 6 endpoint information.
@@ -679,7 +680,8 @@ class DHTManager:
             ipv4=ipv4,
             ipv6=ipv6,
             relay=relay,
-            punch=punch
+            punch=punch,
+            skills=skills if skills else None,
         )
 
         # Store JSON on all k nodes (excluding self)
@@ -699,11 +701,12 @@ class DHTManager:
         success_count = sum(1 for r in results if r is True)
 
         logger.info(
-            "Announced full endpoint to %d/%d nodes (IPv6=%s, relay=%s, punch=%s)",
+            "Announced full endpoint to %d/%d nodes (IPv6=%s, relay=%s, punch=%s, skills=%d)",
             success_count, len(target_nodes),
             "yes" if ipv6 else "no",
             "yes" if relay_available else "no",
-            "yes" if punch_supported else "no"
+            "yes" if punch_supported else "no",
+            len(skills) if skills else 0,
         )
 
         return success_count

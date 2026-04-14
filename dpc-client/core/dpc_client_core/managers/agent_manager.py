@@ -117,9 +117,19 @@ class DpcAgentManager:
             raise RuntimeError("CoreService does not have llm_manager")
 
         # Build agent config (same as default but with different provider)
-        evolution_enabled = self.firewall.evolution_enabled if self.firewall else False
-        evolution_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
-        evolution_auto = self.firewall.evolution_auto_apply if self.firewall else False
+        # Evolution settings: per-agent profile overrides global dpc_agent settings
+        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
+        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
+        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
+        _per_agent_profile = (
+            self.firewall.get_agent_profile_settings(self.agent_id)
+            if (self.firewall and self.agent_id)
+            else None
+        )
+        _per_agent_evo = _per_agent_profile.get('evolution', {}) if _per_agent_profile else {}
+        evolution_enabled = _per_agent_evo.get('enabled', _evo_global_enabled)
+        evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
+        evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
 
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
@@ -138,7 +148,10 @@ class DpcAgentManager:
             config=agent_config,
             agent_root=self.agent_root,
             firewall=self.firewall,
-            provider_alias=provider_alias,  # Phase 3: Use specific provider
+            provider_alias=provider_alias,   # Phase 3: Use specific provider
+            firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
+            service=self.service,            # For tools that need service access
+            compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
 
         # Cache for reuse
@@ -153,21 +166,59 @@ class DpcAgentManager:
             log.warning("Agent already initialized")
             return
 
-        # Check if agent is enabled via firewall
-        if self.firewall and not self.firewall.dpc_agent_enabled:
-            log.warning("DPC Agent is disabled via firewall - not starting")
+        # Check if agent is enabled: per-agent profile overrides global dpc_agent setting
+        _per_agent_enabled = (
+            self.firewall.get_agent_profile_settings(self.agent_id) if (self.firewall and self.agent_id) else None
+        )
+        _agent_enabled = (
+            _per_agent_enabled.get('enabled', self.firewall.dpc_agent_enabled)
+            if _per_agent_enabled is not None
+            else (self.firewall.dpc_agent_enabled if self.firewall else True)
+        )
+        if not _agent_enabled:
+            log.warning("DPC Agent is disabled (firewall profile=%s) - not starting", self.agent_id or 'global')
             return
 
         # Build agent config (tool control is via firewall, not config)
-        # Evolution settings come from firewall (privacy_rules.json), not provider config
-        evolution_enabled = self.firewall.evolution_enabled if self.firewall else False
-        evolution_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
-        evolution_auto = self.firewall.evolution_auto_apply if self.firewall else False
+        # Per-agent profile overrides global dpc_agent settings
+        _per_agent_profile = (
+            self.firewall.get_agent_profile_settings(self.agent_id)
+            if (self.firewall and self.agent_id)
+            else None
+        )
+
+        # Evolution settings: firewall global → per-agent profile override
+        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
+        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
+        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
+        _per_agent_evo = _per_agent_profile.get('evolution', {}) if _per_agent_profile else {}
+        evolution_enabled = _per_agent_evo.get('enabled', _evo_global_enabled)
+        evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
+        evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
+
+        # Consciousness settings: firewall global → per-agent profile override
+        _con_global_enabled = self.firewall.consciousness_enabled if self.firewall else False
+        _con_global_min = getattr(self.firewall, 'consciousness_think_interval_min', 60) if self.firewall else 60
+        _con_global_max = getattr(self.firewall, 'consciousness_think_interval_max', 300) if self.firewall else 300
+        _con_global_budget = getattr(self.firewall, 'consciousness_budget_fraction', 0.1) if self.firewall else 0.1
+        _per_agent_con = _per_agent_profile.get('consciousness', {}) if _per_agent_profile else {}
+        consciousness_enabled = _per_agent_con.get('enabled', _con_global_enabled)
+        consciousness_interval_min = _per_agent_con.get('think_interval_min', _con_global_min)
+        consciousness_interval_max = _per_agent_con.get('think_interval_max', _con_global_max)
+        consciousness_budget = _per_agent_con.get('budget_fraction', _con_global_budget)
+
+        if _per_agent_evo or _per_agent_con:
+            log.debug("Agent %s: per-agent overrides (evolution=%s, consciousness=%s, con_interval=%d-%ds)",
+                      self.agent_id, evolution_enabled, consciousness_enabled,
+                      consciousness_interval_min, consciousness_interval_max)
 
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
-            background_consciousness=self.config.get("background_consciousness", False),
+            background_consciousness=consciousness_enabled,
+            consciousness_think_interval_min=consciousness_interval_min,
+            consciousness_think_interval_max=consciousness_interval_max,
+            consciousness_budget_fraction=consciousness_budget,
             enable_task_queue=self.config.get("enable_task_queue", True),
             evolution_enabled=evolution_enabled,
             evolution_interval_minutes=evolution_interval,
@@ -185,7 +236,10 @@ class DpcAgentManager:
             llm_manager=llm_manager,
             config=agent_config,
             agent_root=self.agent_root,
-            firewall=self.firewall,  # Firewall controls tool access
+            firewall=self.firewall,           # Firewall controls tool access
+            firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
+            service=self.service,             # For tools that need service access (e.g. knowledge_write firewall)
+            compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
 
         # Start background consciousness if enabled
@@ -206,7 +260,65 @@ class DpcAgentManager:
         # Initialize Telegram bridge for agent notifications
         await self._start_telegram_bridge()
 
+        # Wire Telegram send-back so scheduled tasks can deliver their results
+        self._agent._telegram_send_fn = self._deliver_telegram_result
+
         log.info("DpcAgent started successfully")
+
+    def sync_firewall_settings(self) -> None:
+        """Re-read evolution/consciousness settings from firewall and start/stop accordingly.
+
+        Called after firewall rules are saved via UI to apply changes without restart.
+        """
+        if self._agent is None:
+            return
+
+        # Read current settings from firewall (same logic as start())
+        _per_agent_profile = (
+            self.firewall.get_agent_profile_settings(self.agent_id)
+            if (self.firewall and self.agent_id)
+            else None
+        )
+
+        # Evolution
+        _evo_global = self.firewall.evolution_enabled if self.firewall else False
+        _per_evo = (_per_agent_profile or {}).get('evolution', {})
+        evo_enabled = _per_evo.get('enabled', _evo_global)
+
+        if evo_enabled and not self._agent.is_evolution_running():
+            self._agent._evolution_enabled = True
+            self._agent.config.evolution_enabled = True
+            self._agent.config.evolution_interval_minutes = _per_evo.get(
+                'interval_minutes',
+                self.firewall.evolution_interval_minutes if self.firewall else 60,
+            )
+            self._agent.config.evolution_auto_apply = _per_evo.get(
+                'auto_apply',
+                self.firewall.evolution_auto_apply if self.firewall else False,
+            )
+            self._agent.start_evolution()
+            log.info("Evolution started via firewall sync")
+        elif not evo_enabled and self._agent.is_evolution_running():
+            self._agent.stop_evolution()
+            self._agent._evolution_enabled = False
+            self._agent.config.evolution_enabled = False
+            log.info("Evolution stopped via firewall sync")
+
+        # Consciousness
+        _con_global = self.firewall.consciousness_enabled if self.firewall else False
+        _per_con = (_per_agent_profile or {}).get('consciousness', {})
+        con_enabled = _per_con.get('enabled', _con_global)
+
+        if con_enabled and not self._agent.is_consciousness_running():
+            self._agent._consciousness_enabled = True
+            self._agent.config.background_consciousness = True
+            self._agent.start_consciousness(emit_progress=self._emit_progress)
+            log.info("Consciousness started via firewall sync")
+        elif not con_enabled and self._agent.is_consciousness_running():
+            self._agent.stop_consciousness()
+            self._agent._consciousness_enabled = False
+            self._agent.config.background_consciousness = False
+            log.info("Consciousness stopped via firewall sync")
 
     async def ensure_started(self) -> "DpcAgentManager":
         """
@@ -353,9 +465,9 @@ class DpcAgentManager:
                 self._telegram_bridge = None
                 return
 
-            # Connect to event emitter
+            # Connect to event emitter, scoped to this agent's conversation_id
             emitter = get_event_emitter()
-            emitter.add_listener(create_telegram_bridge_callback(self._telegram_bridge))
+            emitter.add_listener(create_telegram_bridge_callback(self._telegram_bridge, agent_id=self.agent_id))
 
             agent_desc = self.agent_id if self.agent_id else "singleton"
             log.info(
@@ -369,6 +481,21 @@ class DpcAgentManager:
         except Exception as e:
             agent_desc = self.agent_id if self.agent_id else "singleton"
             log.error(f"Failed to initialize Telegram bridge for agent {agent_desc}: {e}", exc_info=True)
+
+    async def _deliver_telegram_result(self, chat_id: str, text: str) -> None:
+        """Send a scheduled task result back to a Telegram chat.
+
+        Called by _execute_task when task.data contains _reply_telegram_chat_id.
+        Uses the existing _telegram_bridge._send_message so all escaping/retry
+        logic is reused.
+        """
+        if not self._telegram_bridge or not text:
+            return
+        try:
+            await self._telegram_bridge._send_message(chat_id, text)
+            log.info("Delivered task result to Telegram chat %s", chat_id)
+        except Exception as e:
+            log.warning("Failed to deliver task result to Telegram chat %s: %s", chat_id, e)
 
     async def stop(self) -> None:
         """Shutdown the agent and Telegram bridge."""
@@ -397,6 +524,13 @@ class DpcAgentManager:
         image_caption: Optional[str] = None,
         # Phase 3: Per-agent provider selection
         agent_llm_provider: Optional[str] = None,
+        # Sender attribution (e.g. "mike (Telegram)" vs "User")
+        sender_name: str = "User",
+        # When set, injected into ToolContext so schedule_task auto-fills
+        # _reply_telegram_chat_id in task data for later result delivery.
+        telegram_chat_id: Optional[str] = None,
+        # When True, don't save user message to history (already saved by caller)
+        _skip_history: bool = False,
     ) -> str:
         """
         Process a user message through the agent.
@@ -431,16 +565,24 @@ class DpcAgentManager:
         # Get or create ConversationMonitor for this agent conversation (reuse existing)
         monitor = self._get_or_create_agent_monitor(conversation_id)
 
-        # Track user message in monitor (reuse existing method)
-        node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
-        monitor.add_message(
-            role="user",
-            content=message,
-            timestamp=utc_now_iso(),
-            sender_node_id=node_id,
-            sender_name="User"
-        )
-        monitor.save_history()  # Save to disk immediately
+        # Track user message in monitor (skip when caller already saved it, e.g. CC chain trigger)
+        if not _skip_history:
+            node_id = getattr(self.service.p2p_manager, "node_id", "local-user")
+            monitor.add_message(
+                role="user",
+                content=message,
+                timestamp=utc_now_iso(),
+                sender_node_id=node_id,
+                sender_name=sender_name
+            )
+            monitor.save_history()  # Save to disk immediately
+
+            # Update context_estimated immediately so UI counter reflects user message (#4)
+            # Token stats will be included in Ark's response via get_session_state()
+            user_tokens = len(message) // 4
+            old_estimate = getattr(monitor, '_last_context_estimated', 0)
+            if old_estimate:
+                monitor._last_context_estimated = old_estimate + user_tokens
 
         # Use agent_id as sender name for better identification in chat UI
         agent_display_name = self.agent_id or "DPC Agent"
@@ -455,8 +597,12 @@ class DpcAgentManager:
             def emit_progress_with_context(msg: str, tool: str = None, round: int = None):
                 self._emit_progress(msg, conversation_id, tool, round)
 
+            # Accumulate streaming chunks for persistence to history.json
+            _stream_chunks: list = []
+
             # Create streaming callback that broadcasts text chunks via local_api
             async def emit_stream_chunk(chunk: str, conv_id: str):
+                _stream_chunks.append(chunk)
                 # Broadcast text_chunk event for WebSocket (UI streaming display)
                 try:
                     local_api = getattr(self.service, "local_api", None)
@@ -478,33 +624,67 @@ class DpcAgentManager:
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
 
-            response = await agent.process(
-                message=message,
-                conversation_id=conversation_id,
-                dpc_context=dpc_context,
-                emit_progress=emit_progress_with_context,
-                on_stream_chunk=emit_stream_chunk,
-                session_state=session_state,
-                conversation_monitor=monitor,  # For knowledge extraction tool
-                task_id=task_id,  # Unique per-message ID for event logging
-                # Pass image parameters for vision queries
-                image_base64=image_base64,
-                image_mime=image_mime,
-                image_caption=image_caption,
-            )
+            # Signal consciousness/evolution to yield while user interaction runs
+            agent._user_active = True
+            try:
+                response = await agent.process(
+                    message=message,
+                    conversation_id=conversation_id,
+                    dpc_context=dpc_context,
+                    emit_progress=emit_progress_with_context,
+                    on_stream_chunk=emit_stream_chunk,
+                    session_state=session_state,
+                    conversation_monitor=monitor,  # For knowledge extraction tool
+                    task_id=task_id,  # Unique per-message ID for event logging
+                    # Pass image parameters for vision queries
+                    image_base64=image_base64,
+                    image_mime=image_mime,
+                    image_caption=image_caption,
+                    reply_telegram_chat_id=telegram_chat_id,
+                )
+            finally:
+                agent._user_active = False
 
-            # Track agent response in monitor — skip thinking-only fallback responses
-            # since they contain no real content for knowledge extraction or continuity
+            # Track agent response in monitor.
+            # Always save if there's content, thinking, or streaming_raw — the UI
+            # already shows thinking/raw blocks, so they must be persisted to history.
             _THINKING_FALLBACK = "(thinking completed - see reasoning for details)"
-            if response and response.strip() != _THINKING_FALLBACK:
+            _thinking = agent._last_usage.get("thinking") if agent._last_usage else None
+            _raw = "".join(_stream_chunks) if _stream_chunks else None
+            _streaming_raw = _raw if _raw and _raw.strip() != (response or "").strip() else None
+            _has_content = response and response.strip() != _THINKING_FALLBACK
+            _has_extras = _thinking or _streaming_raw
+
+            # Skip saving LLM errors to history — they pollute context for future requests
+            _is_llm_error = response and response.startswith("⚠️ LLM error:")
+
+            if (_has_content or _has_extras) and not _is_llm_error:
                 monitor.add_message(
                     role="assistant",
-                    content=response,
+                    content=response or "",
                     timestamp=utc_now_iso(),
                     sender_node_id=conversation_id,
-                    sender_name=agent_display_name
+                    sender_name=agent_display_name,
+                    thinking=_thinking,
+                    streaming_raw=_streaming_raw,
                 )
                 monitor.save_history()  # Save to disk immediately
+            elif _is_llm_error:
+                log.warning(f"LLM error not saved to history: {response[:100]}")
+
+            # Store full context estimate from this request so next request's session_state
+            # can expose it. One request stale, but accurate — context grows incrementally.
+            # Prefer accurate token count from LLM adapter (first_prompt_tokens = round-1 context
+            # before tool results inflate it); fall back to chars/4 estimate from cap_info.
+            if hasattr(agent, '_last_usage') and agent._last_usage:
+                accurate = (agent._last_usage.get("first_prompt_tokens")
+                            or agent._last_usage.get("prompt_tokens", 0))
+                if accurate:
+                    monitor._last_context_estimated = accurate
+                elif hasattr(agent, '_last_cap_info') and agent._last_cap_info:
+                    monitor._last_context_estimated = agent._last_cap_info.get("estimated_tokens_before", 0)
+            elif hasattr(agent, '_last_cap_info') and agent._last_cap_info:
+                monitor._last_context_estimated = agent._last_cap_info.get("estimated_tokens_before", 0)
 
             # Update token count in monitor after agent response.
             # Count tokens directly from the conversation history (user + assistant messages)
@@ -512,15 +692,51 @@ class DpcAgentManager:
             # This excludes constant overhead (system prompt, tool schemas, agent memory) so the
             # counter reflects only the growing conversation portion, consistent with the intent
             # of the local AI chat token counter.
-            conversation_tokens = sum(
-                len(msg.get("content", "") or "")
+            # Use accurate tokenizer if available (via agent's LLM adapter).
+            _history_text = " ".join(
+                msg.get("content", "") or ""
                 for msg in monitor.message_history
-            ) // 4
+            )
+            _token_counter = getattr(getattr(agent, 'llm_adapter', None), '_token_counter', None)
+            _model_name = (getattr(agent.llm_adapter, 'default_model', lambda: None)()
+                           if hasattr(agent, 'llm_adapter') else None)
+            if _token_counter and _model_name and _history_text:
+                conversation_tokens = _token_counter.count_tokens(_history_text, _model_name)
+            else:
+                conversation_tokens = len(_history_text) // 4
             if conversation_tokens:
                 llm_manager = getattr(self.service, "llm_manager", None)
                 if llm_manager:
-                    model = llm_manager.get_active_model_name()
-                    context_window = llm_manager.get_context_window(model)
+                    # Use stored context_window from agent config when available
+                    # (remote agents have a different context window than the local default model)
+                    stored_cw = self.config.get("context_window")
+                    if stored_cw:
+                        context_window = int(stored_cw)
+                    else:
+                        # Try to resolve context window without stored value.
+                        # This handles agents created before context_window was persisted.
+                        provider_alias = self.config.get("provider_alias", "")
+                        compute_host = self.config.get("compute_host", "")
+                        context_window = None
+                        if provider_alias and provider_alias in llm_manager.providers:
+                            # Local provider: resolve model name then look up window
+                            model = llm_manager.providers[provider_alias].model
+                            context_window = llm_manager.get_context_window(model)
+                        elif compute_host and provider_alias:
+                            # Remote provider: check peer_metadata cache for the provider
+                            peer_meta = getattr(self.service, "peer_metadata", {})
+                            peer_providers = peer_meta.get(compute_host, {}).get("providers", [])
+                            for p in peer_providers:
+                                if p.get("alias") == provider_alias:
+                                    cw = p.get("context_window")
+                                    if cw:
+                                        context_window = int(cw)
+                                    elif p.get("model"):
+                                        context_window = llm_manager.get_context_window(p["model"])
+                                    break
+                        if not context_window:
+                            model = llm_manager.get_active_model_name()
+                            context_window = llm_manager.get_context_window(model)
                     monitor.set_token_limit(context_window)
                 monitor.set_token_count(conversation_tokens)
 
@@ -609,8 +825,8 @@ class DpcAgentManager:
                     "context": "local"
                 },
                 {
-                    "node_id": "dpc-agent",
-                    "name": "DPC Agent",
+                    "node_id": self.agent_id or "dpc-agent",
+                    "name": self.agent_id or "DPC Agent",
                     "context": "agent"
                 }
             ]
@@ -620,7 +836,7 @@ class DpcAgentManager:
             llm_manager = getattr(self.service, "llm_manager", None)
 
             # Create monitor with same settings as P2P conversations
-            self._agent_monitors[conversation_id] = ConversationMonitor(
+            monitor = ConversationMonitor(
                 conversation_id=conversation_id,
                 participants=participants,
                 llm_manager=llm_manager,
@@ -631,6 +847,21 @@ class DpcAgentManager:
                 instruction_set_name="general"
             )
 
+            # Load history from disk immediately so existing messages are preserved
+            # when Telegram (or any other caller) sends the first message after a restart.
+            # Without this, process_message() would start with an empty monitor and
+            # save_history() would overwrite the disk file with only the new messages.
+            history_path = monitor._get_history_path()
+            if history_path.exists():
+                monitor.load_history()
+                log.debug(f"Loaded {len(monitor.message_history)} messages from disk for {conversation_id}")
+                # Also restore full_conversation/message_buffer for knowledge extraction.
+                # load_history() only fills message_history (the dict store); without this
+                # rebuild, end_session would only analyze messages from the current
+                # in-memory session and miss all historical context.
+                monitor.rebuild_extraction_buffers_from_history()
+
+            self._agent_monitors[conversation_id] = monitor
             log.debug(f"Created ConversationMonitor for agent conversation: {conversation_id}")
 
         return self._agent_monitors[conversation_id]
@@ -646,8 +877,7 @@ class DpcAgentManager:
             conversation_id: The conversation to get state for
 
         Returns:
-            Dict with tokens_used, tokens_limit, usage_percent, messages_count,
-            should_extract_knowledge
+            Dict with tokens_used, tokens_limit, usage_percent, messages_count
         """
         monitor = self._agent_monitors.get(conversation_id)
         if not monitor:
@@ -656,16 +886,24 @@ class DpcAgentManager:
                 "tokens_limit": 128000,
                 "usage_percent": 0,
                 "messages_count": 0,
-                "should_extract_knowledge": False,
             }
 
         usage = monitor.get_token_usage()
+        token_limit = usage.get("token_limit", 128000)
+        history_tokens = usage.get("tokens_used", 0)
+        context_estimated = getattr(monitor, '_last_context_estimated', 0)
         return {
-            "tokens_used": usage.get("tokens_used", 0),
-            "tokens_limit": usage.get("token_limit", 128000),
-            "usage_percent": usage.get("usage_percent", 0),
+            # Conversation history only (user+assistant text ÷ 4).
+            # Same basis as the token counter shown in the UI.
+            "history_tokens": history_tokens,
+            "history_usage_percent": round(history_tokens / token_limit, 4) if token_limit else 0,
+            # Full context estimate from previous request (one request stale).
+            # Includes: system prompt + scratchpad + identity + knowledge + tools + history.
+            # This is what the log "Context size: X%" reports.
+            "context_estimated": context_estimated,
+            "context_usage_percent": round(context_estimated / token_limit, 4) if token_limit and context_estimated else 0,
+            "tokens_limit": token_limit,
             "messages_count": len(monitor.message_history),
-            "should_extract_knowledge": monitor.should_suggest_extraction(),
         }
 
     def reset_conversation(self, conversation_id: str) -> bool:
@@ -680,11 +918,39 @@ class DpcAgentManager:
         """
         monitor = self._agent_monitors.get(conversation_id)
         if monitor:
-            monitor.reset_conversation()
-            log.info(f"Reset conversation: {conversation_id}")
+            preserve, max_sessions = self._get_history_settings()
+            archive_count = monitor.reset_conversation(preserve=preserve, max_sessions=max_sessions)
+            log.info(f"Reset conversation: {conversation_id} (preserve={preserve}, archives={archive_count})")
+            # Broadcast warning if archive is approaching the retention limit (≥80%)
+            if preserve and archive_count >= int(max_sessions * 0.8):
+                import asyncio
+                local_api = getattr(self.service, "local_api", None)
+                if local_api:
+                    asyncio.ensure_future(local_api.broadcast_event("session_archive_warning", {
+                        "conversation_id": conversation_id,
+                        "archive_count": archive_count,
+                        "max_sessions": max_sessions,
+                    }))
             return True
         log.debug(f"Conversation not found for reset: {conversation_id}")
         return False
+
+    def _get_history_settings(self) -> tuple:
+        """Return (preserve_on_reset, max_archived_sessions) from firewall config."""
+        if not self.firewall:
+            return True, 40
+        preserve = getattr(self.firewall, "history_preserve_on_reset", True)
+        max_sessions = getattr(self.firewall, "history_max_archived_sessions", 40)
+        # Per-agent profile override
+        if self.agent_id:
+            profile = self.firewall.rules.get("agent_profiles", {}).get(self.agent_id, {})
+            if profile:
+                hist = profile.get("history", {})
+                if "preserve_on_reset" in hist:
+                    preserve = hist["preserve_on_reset"]
+                if "max_archived_sessions" in hist:
+                    max_sessions = max(1, min(200, int(hist["max_archived_sessions"])))
+        return preserve, max_sessions
 
     def _emit_progress(
         self,

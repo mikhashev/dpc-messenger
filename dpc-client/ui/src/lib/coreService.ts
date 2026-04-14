@@ -1,163 +1,148 @@
 // dpc-client/ui/src/lib/coreService.ts
 // PRODUCTION VERSION - Clean, no excessive logging
 
-import { writable, get } from 'svelte/store';
-import { setLogSender } from '$lib/logger';
+import { get } from 'svelte/store';
+import { setLogSender, clearLogSender } from '$lib/logger';
 
-// TypeScript types for dual provider system
-export interface ProviderInfo {
-    alias: string;
-    model: string;
-    type: string;
-    supports_vision: boolean;
-    supports_voice?: boolean;  // v0.13.0+: Voice transcription support
-}
+// Import and re-export all shared interfaces from types.ts for backward compatibility
+import type {
+    ProviderInfo,
+    DefaultProvidersResponse,
+    ProvidersListResponse,
+    AgentInfo,
+    AgentConfig,
+    FileTransfer,
+    GroupChat,
+    NodeStatus,
+    PeerInfo,
+    P2PMessage,
+    MessageAttachment,
+    KnowledgeCommit,
+    KnowledgeCommitProposal,
+    KnowledgeEntry,
+    VoteTally,
+    VoiceTranscription,
+    // Event payload types (v0.22+)
+    AgentProgressEvent,
+    AgentProgressClearEvent,
+    AgentTextChunkEvent,
+    AgentTelegramLinkedEvent,
+    AgentTelegramUnlinkedEvent,
+    AgentHistoryUpdatedEvent,
+    FileTransferOfferEvent,
+    FileTransferProgressEvent,
+    FileTransferCompleteEvent,
+    FileTransferCancelledEvent,
+    FilePreparationStartedEvent,
+    FilePreparationProgressEvent,
+    FilePreparationCompletedEvent,
+    WhisperModelEvent,
+    WhisperModelFailedEvent,
+    GroupMessageEvent,
+    GroupFileEvent,
+    GroupMemberLeftEvent,
+    GroupDeletedEvent,
+    GroupHistorySyncedEvent,
+    TelegramStatusEvent,
+    TelegramMessageEvent,
+    TelegramVoiceEvent,
+    TelegramImageEvent,
+    TelegramFileEvent,
+    HistoryRestoredEvent,
+    NewSessionProposalEvent,
+    NewSessionResultEvent,
+    ConversationEvent,
+    ConversationSettingsChangedEvent,
+    ContextUpdatedEvent,
+    TokenWarningEvent,
+    ExtractionFailureEvent,
+    KnowledgeCommitResultEvent,
+    AIResponseWithImageEvent,
+} from '$lib/types';
 
-export interface DefaultProvidersResponse {
-    default_provider: string;
-    vision_provider: string;
-    voice_provider?: string;  // v0.13.0+
-    agent_provider?: string;  // v0.18.0+
-}
+export type {
+    ProviderInfo,
+    DefaultProvidersResponse,
+    ProvidersListResponse,
+    AgentInfo,
+    AgentConfig,
+    FileTransfer,
+    GroupChat,
+    NodeStatus,
+    PeerInfo,
+    P2PMessage,
+    MessageAttachment,
+    KnowledgeCommit,
+    KnowledgeCommitProposal,
+    KnowledgeEntry,
+    VoteTally,
+    VoiceTranscription,
+    // Event payload types (v0.22+)
+    AgentProgressEvent,
+    AgentProgressClearEvent,
+    AgentTextChunkEvent,
+    AgentTelegramLinkedEvent,
+    AgentTelegramUnlinkedEvent,
+    AgentHistoryUpdatedEvent,
+    FileTransferOfferEvent,
+    FileTransferProgressEvent,
+    FileTransferCompleteEvent,
+    FileTransferCancelledEvent,
+    FilePreparationStartedEvent,
+    FilePreparationProgressEvent,
+    FilePreparationCompletedEvent,
+    WhisperModelEvent,
+    WhisperModelFailedEvent,
+    GroupMessageEvent,
+    GroupFileEvent,
+    GroupMemberLeftEvent,
+    GroupDeletedEvent,
+    GroupHistorySyncedEvent,
+    TelegramStatusEvent,
+    TelegramMessageEvent,
+    TelegramVoiceEvent,
+    TelegramImageEvent,
+    TelegramFileEvent,
+    HistoryRestoredEvent,
+    NewSessionProposalEvent,
+    NewSessionResultEvent,
+    ConversationEvent,
+    ConversationSettingsChangedEvent,
+    ContextUpdatedEvent,
+    TokenWarningEvent,
+    ExtractionFailureEvent,
+    KnowledgeCommitResultEvent,
+    AIResponseWithImageEvent,
+};
 
-export interface ProvidersListResponse {
-    providers: ProviderInfo[];
-    default_provider: string;
-    vision_provider: string;
-}
+// --- Service store imports (Step 2c: stores now live in services/) ---
+// Imported here for use by the event handler and command functions; re-exported below for
+// backward compat (8 components + +page.svelte import from '$lib/coreService').
 
-export const connectionStatus = writable<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
-export const nodeStatus = writable<any>(null);
-export const coreMessages = writable<any>(null);
-export const p2pMessages = writable<any>(null);
+import { connectionStatus, nodeStatus, coreMessages } from './services/connection';
+import { p2pMessages, unreadMessageCounts } from './services/messaging';
+import { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated } from './services/providers';
+import { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted } from './services/fileTransfer';
+import { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed } from './services/voice';
+import { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced } from './services/groups';
+import { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage } from './services/agents';
+import { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated } from './services/telegram';
+import { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings } from './services/knowledge';
+import { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted } from './services/session';
 
-// Knowledge Architecture stores (Phase 1-6 integration)
-export const knowledgeCommitProposal = writable<any>(null);
-export const knowledgeCommitResult = writable<any>(null);
-export const personalContext = writable<any>(null);
-
-// Token tracking stores (Phase 2)
-export const tokenWarning = writable<any>(null);
-
-// Knowledge extraction failure store (Phase 4)
-export const extractionFailure = writable<any>(null);
-
-// AI Providers store (legacy)
-export const availableProviders = writable<any>(null);
-
-// Dual Provider Stores (Phase 1: Dual Dropdowns)
-export const defaultProviders = writable<DefaultProvidersResponse | null>(null);
-export const providersList = writable<ProviderInfo[]>([]);
-
-// Peer Providers store (node_id -> provider list)
-export const peerProviders = writable<Map<string, any[]>>(new Map());
-
-// Phase 7: Context update stores (for status indicators)
-export const contextUpdated = writable<any>(null);
-export const peerContextUpdated = writable<any>(null);
-
-// Firewall rules update store (for AI scope reload)
-// IMPORTANT: If you add new UI-reactive fields from privacy_rules.json (like node_groups,
-// compute settings, device_sharing, etc.), follow this pattern:
-// 1. Create a writable store here (e.g., export const computeSettingsUpdated = writable<any>(null))
-// 2. Add event handler below for 'firewall_rules_updated' event
-// 3. In +page.svelte (or relevant component), add reactive statement to reload data
-// This ensures UI updates immediately when firewall rules are saved via the editor.
-export const firewallRulesUpdated = writable<any>(null);
-
-// Unread message counter (v0.9.3)
-export const unreadMessageCounts = writable<Map<string, number>>(new Map());
-
-// File transfer stores (Week 1)
-export const fileTransferOffer = writable<any>(null);  // Incoming file offer notifications
-export const fileTransferProgress = writable<any>(null);  // Progress updates
-export const fileTransferComplete = writable<any>(null);  // Completed transfers
-export const fileTransferCancelled = writable<any>(null);  // Cancelled transfers
-
-// Vision/Image stores (Phase 2)
-export const aiResponseWithImage = writable<any>(null);  // AI vision analysis responses
-
-// Track active file transfers (transfer_id -> {node_id, filename, direction, progress, status})
-export const activeFileTransfers = writable<Map<string, any>>(new Map());
-
-// File preparation stores (v0.11.2 - for Send File dialog progress indicator)
-export const filePreparationStarted = writable<any>(null);  // {filename, size_bytes, size_mb}
-export const filePreparationProgress = writable<any>(null);  // {filename, phase, percent, bytes_processed, total_size}
-export const filePreparationCompleted = writable<any>(null);  // {filename, hash, total_chunks}
-
-// Chat history restore store (v0.11.2 - for auto-restore on reconnect)
-export const historyRestored = writable<any>(null);  // {conversation_id, message_count, messages}
-
-// New session proposal store (v0.11.3 - mutual session approval)
-export const newSessionProposal = writable<any>(null);  // {proposal_id, initiator_node_id, conversation_id, timestamp}
-export const newSessionResult = writable<any>(null);  // {proposal_id, result, clear_history, vote_tally}
-
-// Conversation reset store (v0.11.3 - for AI chats and approved P2P session resets)
-export const conversationReset = writable<any>(null);  // {conversation_id}
-
-// Conversation settings store (v0.21.0 - per-conversation persistence settings)
-export const conversationSettings = writable<any>(null);  // {conversation_id, persist_history, ...}
-export const conversationSettingsChanged = writable<any>(null);  // {conversation_id, persist_history}
-export const conversationDeleted = writable<any>(null);  // {conversation_id}
-
-// Knowledge integrity warning store (v0.19.2 - startup tamper/corruption detection)
-// Populated from backend _startup_integrity_check() which runs verify_markdown_integrity()
-// on every ~/.dpc/knowledge/*_commit-*.md file and checks for orphaned personal.json refs.
-// Payload: { count: number, warnings: Array<{file, type, severity, message, ...}> }
-// Warning types: content_tampered | filename_mismatch | invalid_signature | missing_parent | missing_markdown
-export const integrityWarnings = writable<{count: number, warnings: any[], dismissed: boolean} | null>(null);
-
-// Voice message stores (v0.13.0 - voice recording and playback)
-export const voiceOfferReceived = writable<any>(null);  // {transfer_id, node_id, sender_name, filename, size_bytes, duration_seconds, ...voice_metadata}
-
-// Voice transcription stores (v0.13.2 - auto-transcription)
-export const voiceTranscriptionReceived = writable<any>(null);  // {transfer_id, node_id, text, provider, transcriber_node_id, confidence, language, timestamp}
-export const voiceTranscriptionComplete = writable<any>(null);  // {transfer_id, node_id, text, provider, ...} (local transcription completed)
-export const voiceTranscriptionConfig = writable<any>(null);  // Voice transcription settings updated
-
-// Telegram bot integration stores (v0.14.0+)
-export const telegramEnabled = writable<boolean>(false);
-export const telegramConnected = writable<boolean>(false);
-export const telegramLinkedChats = writable<Map<string, string>>(new Map()); // conversation_id -> chat_id
-export const telegramMessages = writable<Map<string, any[]>>(new Map()); // conversation_id -> messages
-export const telegramMessageReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, text, timestamp}
-export const telegramVoiceReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, duration_seconds, transcription, transcription_provider}
-export const telegramImageReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes}
-export const telegramFileReceived = writable<any>(null);  // {conversation_id, telegram_chat_id, sender_name, filename, file_path, caption, size_bytes, mime_type}
-export const telegramStatus = writable<any>(null);  // {enabled, connected, webhook_mode, whitelist_count, transcription_enabled, bridge_to_p2p, conversation_links}
-export const telegramError = writable<{ title: string; message: string; timestamp: string } | null>(null);  // {title, message, timestamp}
-
-// Agent Telegram linking events (v0.15.0+)
-export const agentTelegramLinked = writable<any>(null);  // {agent_id, chat_id, timestamp}
-export const agentTelegramUnlinked = writable<any>(null);  // {agent_id, timestamp}
-export const agentHistoryUpdated = writable<any>(null);  // {conversation_id, messages, message_count} - silent refresh from Telegram bridge
-
-// Whisper model loading stores (v0.13.3 - model pre-loading)
-export const whisperModelLoadingStarted = writable<any>(null);  // {provider}
-export const whisperModelLoaded = writable<any>(null);  // {provider}
-export const whisperModelLoadingFailed = writable<any>(null);  // {provider, error}
-export const whisperModelUnloaded = writable<any>(null);  // {reason, vram_freed_gb} (v0.13.4+ VRAM unloading)
-
-// Whisper model download stores (v0.13.5+ - interactive download dialog)
-export const whisperModelDownloadRequired = writable<any>(null);  // {model_name, cache_path, download_size_gb, provider_alias}
-export const whisperModelDownloadStarted = writable<any>(null);  // {provider, model_name}
-export const whisperModelDownloadCompleted = writable<any>(null);  // {provider, model_name, cache_path}
-export const whisperModelDownloadFailed = writable<any>(null);  // {provider, error}
-
-// DPC Agent progress stores (v0.15.0+ - real-time agent progress in chat)
-export const agentProgress = writable<any>(null);  // {conversation_id, message, round, tool_name, ts}
-export const agentProgressClear = writable<any>(null);  // {conversation_id} - signal to clear progress
-export const agentTextChunk = writable<any>(null);  // {conversation_id, chunk, ts} - streaming text chunks
-
-// Group chat stores (v0.19.0)
-export const groupChats = writable<Map<string, any>>(new Map());  // group_id -> {group_id, name, topic, created_by, members, version}
-export const groupTextReceived = writable<any>(null);  // {group_id, sender_node_id, sender_name, text, message_id}
-export const groupFileReceived = writable<any>(null);  // {group_id, sender_node_id, sender_name, message_id, attachments}
-export const groupInviteReceived = writable<any>(null);  // {group_id, name, topic, created_by, creator_name, members}
-export const groupUpdated = writable<any>(null);  // {group_id, name, topic, members, version}
-export const groupMemberLeft = writable<any>(null);  // {group_id, node_id, member_name, remaining_members}
-export const groupDeleted = writable<any>(null);  // {group_id, deleted_by}
-export const groupHistorySynced = writable<any>(null);  // {group_id, message_count}
+// Re-export all service stores for backward compatibility.
+// NOTE: When adding new UI-reactive fields from privacy_rules.json, add the store in
+// services/providers.ts and re-export it here. See CLAUDE.md "UI Integration Pattern".
+export { connectionStatus, nodeStatus, coreMessages };
+export { p2pMessages, unreadMessageCounts };
+export { availableProviders, defaultProviders, providersList, peerProviders, aiResponseWithImage, firewallRulesUpdated };
+export { fileTransferOffer, fileTransferProgress, fileTransferComplete, fileTransferCancelled, activeFileTransfers, filePreparationStarted, filePreparationProgress, filePreparationCompleted };
+export { voiceOfferReceived, voiceTranscriptionReceived, voiceTranscriptionComplete, voiceTranscriptionConfig, whisperModelLoadingStarted, whisperModelLoaded, whisperModelLoadingFailed, whisperModelUnloaded, whisperModelDownloadRequired, whisperModelDownloadStarted, whisperModelDownloadCompleted, whisperModelDownloadFailed };
+export { groupChats, groupTextReceived, groupFileReceived, groupInviteReceived, groupUpdated, groupMemberLeft, groupDeleted, groupHistorySynced };
+export { agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles, agentProgress, agentProgressClear, agentTextChunk, agentChatMessage };
+export { telegramEnabled, telegramConnected, telegramStatus, telegramError, telegramLinkedChats, telegramMessages, telegramMessageReceived, telegramVoiceReceived, telegramImageReceived, telegramFileReceived, agentTelegramLinked, agentTelegramUnlinked, agentHistoryUpdated };
+export { personalContext, contextUpdated, peerContextUpdated, knowledgeCommitProposal, knowledgeCommitResult, extractionFailure, tokenWarning, integrityWarnings };
+export { historyRestored, newSessionProposal, newSessionResult, conversationReset, conversationSettings, conversationSettingsChanged, conversationDeleted };
 
 // Track currently active chat to prevent unread badges on open chats
 let activeChat: string | null = null;
@@ -187,14 +172,11 @@ function startPolling() {
             return;
         }
 
-        // Check if connection opened
-        if (socket.readyState === WebSocket.OPEN && get(connectionStatus) !== 'connected') {
-            console.log("✅ WebSocket connection established");
-            connectionStatus.set('connected');
-            reconnectAttempts = 0;
-            sendCommand("get_status");
-            
-            // Stop polling once connected
+        // Connection opened: stop polling and let the 'open' event handler
+        // do the auth handshake + initial commands. We must NOT sendCommand
+        // from here — that would race the auth message and the backend would
+        // close us with 1008 (auth required) before we sent the token.
+        if (socket.readyState === WebSocket.OPEN) {
             if (pollingInterval) {
                 clearInterval(pollingInterval);
                 pollingInterval = null;
@@ -234,7 +216,7 @@ function startPolling() {
     }, 200); // Poll every 200ms
 }
 
-export function connectToCoreService() {
+export async function connectToCoreService() {
     if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
         return;
     }
@@ -252,6 +234,22 @@ export function connectToCoreService() {
     connectionStatus.set('connecting');
     console.log(`Connecting to Core Service at ${API_URL}...`);
 
+    // Read the local API auth token BEFORE opening the socket. The backend
+    // writes a fresh random token to ~/.dpc/.ws_token on every startup; we
+    // present it as the first WebSocket message. We read it up-front (rather
+    // than inside the open handler) because any await between socket creation
+    // and the auth send opens a race window where polling or the close handler
+    // can null `socket` out from under us.
+    let authToken: string;
+    try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        authToken = await invoke<string>('get_ws_token');
+    } catch (e) {
+        console.error("❌ Failed to read WS auth token:", e);
+        connectionStatus.set('error');
+        return;
+    }
+
     try {
         socket = new WebSocket(API_URL);
 
@@ -261,6 +259,12 @@ export function connectToCoreService() {
         // Set up event listeners (belt and suspenders)
         socket.addEventListener('open', () => {
             console.log("✅ WebSocket opened via event");
+
+            // Send auth as the FIRST message — synchronously, no awaits.
+            // Without this the backend closes us with code 1008 after a 5s timeout.
+            // See local_api.py:_authenticate.
+            socket!.send(JSON.stringify({ command: 'auth', token: authToken, id: 'auth-init' }));
+
             connectionStatus.set('connected');
             reconnectAttempts = 0;
 
@@ -837,6 +841,12 @@ export function connectToCoreService() {
                     // payload: {conversation_id, chunk, ts}
                     agentTextChunk.set(message.payload);
                 }
+                else if (message.event === "agent_chat_message") {
+                    // CC response injected into agent chat
+                    // payload: {conversation_id, message_id, role, content, sender_name, timestamp}
+                    console.log("[AgentChatMessage] CC response in", message.payload?.conversation_id);
+                    agentChatMessage.set(message.payload);
+                }
                 // Group chat events (v0.19.0)
                 else if (message.event === "group_text_received") {
                     groupTextReceived.set(message.payload);
@@ -981,12 +991,38 @@ export function connectToCoreService() {
         });
 
         socket.addEventListener('error', (error) => {
+            clearLogSender();
             console.error("WebSocket error:", error);
             connectionStatus.set('error');
         });
 
         socket.addEventListener('close', (event) => {
+            clearLogSender();
             console.log("WebSocket closed:", event.code, event.reason);
+            nodeStatus.set(null);
+            socket = null;
+
+            // Code 1008 = policy violation. The backend uses this exclusively for
+            // local API auth failures (missing/invalid token, timeout). The token
+            // won't change until the backend restarts, so retrying with the same
+            // stale token would just spin forever.
+            if (event.code === 1008) {
+                console.error(`❌ Local API auth rejected: ${event.reason}`);
+                connectionStatus.set('error');
+                reconnectAttempts = MAX_RECONNECT_ATTEMPTS;
+                return;
+            }
+
+            // Reconnect unless manually disconnected (disconnectFromCoreService sets reconnectAttempts = MAX)
+            if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                connectionStatus.set('disconnected');
+                reconnectAttempts++;
+                const delay = Math.min(RECONNECT_DELAY * Math.pow(2, reconnectAttempts - 1), 30000);
+                console.log(`Reconnecting in ${delay}ms... (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+                reconnectTimeout = setTimeout(() => connectToCoreService(), delay);
+            } else {
+                connectionStatus.set('error');
+            }
         });
 
     } catch (error) {
@@ -1097,11 +1133,15 @@ export function sendCommand(command: string, payload: any = {}, commandId?: stri
             'update_agent_config',  // DPC Agent isolation - update agent configuration
             'delete_agent',  // DPC Agent isolation - delete agent
             'list_agent_profiles',  // DPC Agent isolation - list permission profiles
+            'get_agent_permissions',  // Agent permissions transparency (v0.22.0)
             // Agent Task Board (v0.20.0)
             'get_agent_tasks',
             'get_agent_learning',
             'get_agent_task_result',
             'schedule_agent_task',
+            // Session archive (S25 Batch 1.1 fix)
+            'get_session_archive_info',
+            'clear_session_archives',
         ].includes(command);
 
         if (expectsResponse) {
@@ -1439,46 +1479,9 @@ export async function deleteConversation(conversationId: string): Promise<any> {
 }
 
 // --- DPC Agent Management (v0.19.0+) ---
-
-export interface AgentInfo {
-    agent_id: string;
-    name: string;
-    provider_alias: string;
-    profile_name: string;
-    instruction_set_name: string;
-    created_at: string;
-    updated_at?: string;
-    // Telegram integration fields (v0.22.0+)
-    telegram_enabled?: boolean;
-    telegram_bot_token?: string;
-    telegram_allowed_chat_ids?: string[];
-    telegram_event_filter?: string[];
-    telegram_max_events_per_minute?: number;
-    telegram_cooldown_seconds?: number;
-    telegram_transcription_enabled?: boolean;
-    telegram_linked_at?: string;
-    // Legacy field (deprecated in favor of telegram_allowed_chat_ids)
-    telegram_chat_id?: string;
-}
-
-export interface AgentConfig {
-    agent_id: string;
-    name: string;
-    provider_alias: string;
-    profile_name: string;
-    instruction_set_name: string;
-    created_at: string;
-    updated_at?: string;
-    budget_usd?: number;
-    max_rounds?: number;
-}
-
-// Agent stores
-export const agentsList = writable<AgentInfo[]>([]);
-export const agentCreated = writable<any>(null);
-export const agentUpdated = writable<any>(null);
-export const agentDeleted = writable<any>(null);
-export const agentProfiles = writable<string[]>([]);
+// AgentInfo and AgentConfig interfaces are in src/lib/types.ts
+// Agent stores (agentsList, agentCreated, agentUpdated, agentDeleted, agentProfiles) are in
+// services/agents.ts and re-exported above.
 
 /**
  * Create a new DPC Agent with isolated storage.
@@ -1489,7 +1492,9 @@ export async function createAgent(
     profileName: string = "default",
     instructionSetName: string = "general",
     budgetUsd: number = 50.0,
-    maxRounds: number = 200
+    maxRounds: number = 200,
+    computeHost?: string,
+    contextWindow?: number,
 ): Promise<any> {
     return sendCommand('create_agent', {
         name,
@@ -1497,7 +1502,9 @@ export async function createAgent(
         profile_name: profileName,
         instruction_set_name: instructionSetName,
         budget_usd: budgetUsd,
-        max_rounds: maxRounds
+        max_rounds: maxRounds,
+        ...(computeHost ? { compute_host: computeHost } : {}),
+        ...(contextWindow ? { context_window: contextWindow } : {}),
     });
 }
 

@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import List, Dict, Tuple, Any, Optional, Set
 import fnmatch
@@ -31,11 +32,17 @@ class ContextFirewall:
         except Exception as e:
             raise ValueError(f"Failed to load firewall rules: {e}")
 
-        # Parse file groups (aliases for groups of files)
-        self.file_groups: Dict[str, List[str]] = self.rules.get('file_groups', {})
+        # Parse file groups (aliases for groups of files) — skip _comment keys
+        self.file_groups: Dict[str, List[str]] = {
+            k: v for k, v in self.rules.get('file_groups', {}).items()
+            if not k.startswith('_') and isinstance(v, list)
+        }
 
-        # Parse node groups (which nodes belong to which groups)
-        self.node_groups: Dict[str, List[str]] = self.rules.get('node_groups', {})
+        # Parse node groups (which nodes belong to which groups) — skip _comment keys
+        self.node_groups: Dict[str, List[str]] = {
+            k: v for k, v in self.rules.get('node_groups', {}).items()
+            if not k.startswith('_') and isinstance(v, list)
+        }
 
         # Parse compute sharing settings
         self._parse_compute_settings()
@@ -97,36 +104,40 @@ class ContextFirewall:
         self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', True)
         self.dpc_agent_knowledge_access = dpc_agent.get('knowledge_access', 'read_only')
 
-        # All available tools with their default values
-        # True = enabled by default, False = disabled by default (security)
+        # All available tools with their default values.
+        # True = enabled by default, False = disabled by default (security).
+        # When adding a new tool: add it here with default enabled/disabled.
         all_tools_defaults = {
-            # File operations (sandboxed to ~/.dpc/agent/)
-            'repo_read': True,
+            # File operations (unified read_file/write_file — S31)
+            'read_file': True,   # Read from sandbox or firewall-checked extended paths
+            'write_file': False,  # Write to sandbox or firewall-checked extended paths
             'repo_list': True,
-            'repo_write_commit': False,  # Can write files
-            # Drive operations (direct file system access)
-            'drive_read': False,
+            'repo_delete': False,  # Can delete files/directories in sandbox
             'drive_list': False,
-            'drive_write': False,
-            # Extended sandbox (v0.16.0+ - paths outside default sandbox)
-            'extended_path_read': False,  # Requires sandbox_extensions config
-            'extended_path_list': False,
-            'extended_path_write': False,  # Requires read_write in sandbox_extensions
-            'list_extended_sandbox_paths': True,  # Safe - just lists config
-            # Search tools (v0.16.0+ - grep-like functionality)
             'search_files': True,  # Safe - read-only search
             'search_in_file': True,  # Safe - read-only search
+            # Extended sandbox (v0.16.0+)
+            'extended_path_list': False,
+            'list_extended_sandbox_paths': True,  # Safe - just lists config
             # Memory/identity
             'update_scratchpad': True,
             'update_identity': True,
             'chat_history': True,
+            'deduplicate_identity': True,
             # Knowledge
             'knowledge_read': True,
             'knowledge_write': False,  # Controlled by knowledge_access
             'knowledge_list': True,
-            'get_task_board': True,     # Read task history + learning progress (Agent Progress Board)
-            'extract_knowledge': True,  # Extract knowledge from conversation to knowledge base
-            'deduplicate_identity': True,  # Clean up duplicate sections in identity
+            'get_task_board': True,  # Read task history + learning progress
+            # Memento-Skills tools (v0.20.0+)
+            'execute_skill': True,  # Load skill strategy by name
+            # Inter-agent skill sharing tools (v0.21.0+)
+            'list_local_agents': True,  # Read-only: list registered agents
+            'list_agent_skills': True,  # Read-only: list another agent's skills
+            'import_skill_from_agent': False,  # Opt-in: needs accept_peer_skills
+            # Self-introspection tools
+            'list_my_tools': True,  # Read-only: list own available tools
+            'list_my_skills': True,  # Read-only: list own installed skills
             # DPC integration
             'get_dpc_context': True,
             # Web tools
@@ -145,11 +156,16 @@ class ContextFirewall:
             'git_status': False,
             'git_diff': False,
             'git_log': False,
-            # Git tools (modify files)
+            'git_branch': False,
+            # Git tools (modify files / history)
             'git_add': False,
             'git_commit': False,
-            'git_branch': False,
             'git_init': False,
+            'git_checkout': False,
+            'git_merge': False,
+            'git_tag': False,
+            'git_reset': False,
+            'git_snapshot': False,
             'repo_commit_push': False,  # Can push to remote
             # Restricted tools (security sensitive)
             'run_shell': False,
@@ -161,26 +177,48 @@ class ContextFirewall:
             'pause_evolution': True,  # Control, doesn't modify files
             'resume_evolution': True,  # Control, doesn't modify files
             'get_evolution_stats': True,  # Read-only
-            'approve_evolution_change': False,  # Modifies files, requires explicit permission
+            'approve_evolution_change': False,  # Modifies files
             'reject_evolution_change': True,  # Safe, just removes pending change
             # Messaging tools (v0.18.0+)
             'send_user_message': True,  # Agent-initiated Telegram messages
             # Task type management tools (v0.18.0+)
-            'register_task_type': True,  # Register custom task types
-            'list_task_types': True,  # List registered task types (safe, read-only)
-            'unregister_task_type': True,  # Unregister custom task types
+            'register_task_type': True,
+            'list_task_types': True,  # Read-only
+            'unregister_task_type': True,
+            # Session archive tools (v0.22.0+ - read-only access to own history)
+            'read_session_archive': True,  # Read session summaries
+            'read_session_detail': True,  # Read session messages
         }
 
         # Parse tool permissions from config, using defaults for missing tools
+        # Legacy tool name mapping (S31: 6 tools merged into read_file/write_file)
+        _legacy_tool_map = {
+            'read_file': ['repo_read', 'extended_path_read', 'drive_read'],
+            'write_file': ['repo_write_commit', 'extended_path_write', 'drive_write'],
+        }
         tools = dpc_agent.get('tools', {})
         self.dpc_agent_tools: Dict[str, bool] = {}
         for tool_name, default_enabled in all_tools_defaults.items():
-            self.dpc_agent_tools[tool_name] = tools.get(tool_name, default_enabled)
+            if tool_name in tools:
+                self.dpc_agent_tools[tool_name] = tools.get(tool_name, default_enabled)
+            elif tool_name in _legacy_tool_map:
+                # Check if any legacy name is present in config
+                legacy_val = None
+                for legacy_name in _legacy_tool_map[tool_name]:
+                    if legacy_name in tools:
+                        legacy_val = tools[legacy_name]
+                        break
+                self.dpc_agent_tools[tool_name] = legacy_val if legacy_val is not None else default_enabled
+            else:
+                self.dpc_agent_tools[tool_name] = default_enabled
 
         # Parse sandbox extensions (v0.16.0+ - custom paths outside default sandbox)
         sandbox_extensions = dpc_agent.get('sandbox_extensions', {})
         self.sandbox_read_only_paths: List[str] = sandbox_extensions.get('read_only', [])
         self.sandbox_read_write_paths: List[str] = sandbox_extensions.get('read_write', [])
+        # Extended path access gates (S31 — UI checkboxes)
+        self.extended_read_enabled: bool = sandbox_extensions.get('extended_read_enabled', True)
+        self.extended_write_enabled: bool = sandbox_extensions.get('extended_write_enabled', False)
 
         # Validate and normalize paths
         self.sandbox_read_only_paths = [self._normalize_path(p) for p in self.sandbox_read_only_paths if p]
@@ -192,14 +230,27 @@ class ContextFirewall:
         self.evolution_interval_minutes = evolution.get('interval_minutes', 60)
         self.evolution_auto_apply = evolution.get('auto_apply', False)
 
-        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s",
+        # Parse consciousness settings (v0.23.0+)
+        consciousness = dpc_agent.get('consciousness', {})
+        self.consciousness_enabled = consciousness.get('enabled', False)
+        self.consciousness_think_interval_min = consciousness.get('think_interval_min', 60)
+        self.consciousness_think_interval_max = consciousness.get('think_interval_max', 300)
+        self.consciousness_budget_fraction = consciousness.get('budget_fraction', 0.1)
+
+        # Parse history settings (v0.22.0+)
+        history = dpc_agent.get('history', {})
+        self.history_preserve_on_reset = history.get('preserve_on_reset', True)
+        self.history_max_archived_sessions = max(1, min(200, int(history.get('max_archived_sessions', 40))))
+
+        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s, consciousness=%s",
                      self.dpc_agent_enabled,
                      self.dpc_agent_personal_context_access,
                      self.dpc_agent_device_context_access,
                      self.dpc_agent_knowledge_access,
                      len([t for t in self.dpc_agent_tools.values() if t]),
                      len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths),
-                     self.evolution_enabled)
+                     self.evolution_enabled,
+                     self.consciousness_enabled)
 
     def _normalize_path(self, path_str: str) -> str:
         """Normalize a path string for comparison."""
@@ -210,13 +261,46 @@ class ContextFirewall:
             logger.warning(f"Invalid path in sandbox_extensions: {path_str}")
             return ""
 
-    def is_extended_path_allowed(self, path: str, require_write: bool = False) -> bool:
+    def _get_profile_or_global(self, profile_name: Optional[str], *keys, default=None):
+        """
+        Read a value from a per-agent profile if present, else from the global dpc_agent section.
+
+        Args:
+            profile_name: Agent profile key (typically agent_id), or None for global-only
+            *keys: Sequence of dict keys to traverse (e.g. 'evolution', 'enabled')
+            default: Value returned when key is absent everywhere
+        """
+        # Try per-agent profile first
+        if profile_name:
+            profile = self.rules.get('agent_profiles', {}).get(profile_name)
+            if profile is not None:
+                val = profile
+                for k in keys:
+                    if isinstance(val, dict):
+                        val = val.get(k)
+                    else:
+                        val = None
+                        break
+                if val is not None:
+                    return val
+        # Fall back to global dpc_agent
+        val = self.rules.get('dpc_agent', {})
+        for k in keys:
+            if isinstance(val, dict):
+                val = val.get(k)
+            else:
+                return default
+        return val if val is not None else default
+
+    def is_extended_path_allowed(self, path: str, require_write: bool = False,
+                                 profile_name: Optional[str] = None) -> bool:
         """
         Check if a path is in the extended sandbox (outside ~/.dpc/agent/).
 
         Args:
             path: Path to check
             require_write: If True, check for write access; if False, read access is sufficient
+            profile_name: Per-agent profile key; when set, per-agent sandbox_extensions are used
 
         Returns:
             True if the path is allowed for the requested access level
@@ -229,9 +313,22 @@ class ContextFirewall:
         except Exception:
             return False
 
+        # Resolve sandbox paths: per-agent profile overrides global
+        if profile_name:
+            sandbox = self._get_profile_or_global(profile_name, 'sandbox_extensions', default={})
+            rw_paths = [self._normalize_path(p) for p in sandbox.get('read_write', []) if p]
+            ro_paths = [self._normalize_path(p) for p in sandbox.get('read_only', []) if p]
+        else:
+            rw_paths = self.sandbox_read_write_paths
+            ro_paths = self.sandbox_read_only_paths
+
         # Check read_write paths first (they also allow read)
-        for allowed_path in self.sandbox_read_write_paths:
-            if allowed_path and (normalized == allowed_path or normalized.startswith(allowed_path + "/")):
+        for allowed_path in rw_paths:
+            if allowed_path and (
+                normalized == allowed_path
+                or normalized.startswith(allowed_path + os.sep)
+                or normalized.startswith(allowed_path + "/")
+            ):
                 return True
 
         # If write is required, read_only paths are not sufficient
@@ -239,25 +336,37 @@ class ContextFirewall:
             return False
 
         # Check read_only paths
-        for allowed_path in self.sandbox_read_only_paths:
-            if allowed_path and (normalized == allowed_path or normalized.startswith(allowed_path + "/")):
+        for allowed_path in ro_paths:
+            if allowed_path and (
+                normalized == allowed_path
+                or normalized.startswith(allowed_path + os.sep)
+                or normalized.startswith(allowed_path + "/")
+            ):
                 return True
 
         return False
 
-    def get_extended_paths(self) -> Dict[str, List[str]]:
-        """Get all extended sandbox paths."""
+    def get_extended_paths(self, profile_name: Optional[str] = None) -> Dict[str, List[str]]:
+        """Get all extended sandbox paths, optionally scoped to a per-agent profile."""
+        if profile_name:
+            sandbox = self._get_profile_or_global(profile_name, 'sandbox_extensions', default={})
+            return {
+                'read_only': [self._normalize_path(p) for p in sandbox.get('read_only', []) if p],
+                'read_write': [self._normalize_path(p) for p in sandbox.get('read_write', []) if p],
+            }
         return {
             'read_only': self.sandbox_read_only_paths,
             'read_write': self.sandbox_read_write_paths,
         }
 
-    def can_agent_access_context(self, context_type: str) -> bool:
+    def can_agent_access_context(self, context_type: str,
+                                  profile_name: Optional[str] = None) -> bool:
         """
         Check if the DPC agent can access a specific context type.
 
         Args:
             context_type: Type of context ('personal', 'device', 'knowledge')
+            profile_name: Per-agent profile key; when set, per-agent settings override global
 
         Returns:
             True if agent can access this context type
@@ -266,20 +375,54 @@ class ContextFirewall:
             return False
 
         if context_type == 'personal':
-            return self.dpc_agent_personal_context_access
+            return bool(self._get_profile_or_global(
+                profile_name, 'personal_context_access',
+                default=self.dpc_agent_personal_context_access))
         elif context_type == 'device':
-            return self.dpc_agent_device_context_access
+            return bool(self._get_profile_or_global(
+                profile_name, 'device_context_access',
+                default=self.dpc_agent_device_context_access))
         elif context_type == 'knowledge':
-            # knowledge_access can be 'read_only', 'read_write', or 'none'
-            return self.dpc_agent_knowledge_access != 'none'
+            ka = self._get_profile_or_global(
+                profile_name, 'knowledge_access',
+                default=self.dpc_agent_knowledge_access)
+            return ka != 'none'
 
         return False
 
-    def can_agent_write_knowledge(self) -> bool:
+    def can_agent_write_knowledge(self, profile_name: Optional[str] = None) -> bool:
         """Check if the agent can write to knowledge base."""
         if not self.dpc_agent_enabled:
             return False
-        return self.dpc_agent_knowledge_access == 'read_write'
+        ka = self._get_profile_or_global(
+            profile_name, 'knowledge_access',
+            default=self.dpc_agent_knowledge_access)
+        return ka == 'read_write'
+
+    def get_agent_skill_permission(self, operation: str,
+                                    profile_name: Optional[str] = None) -> bool:
+        """
+        Check if agent has permission for a skill self-modification operation.
+
+        Args:
+            operation: One of: 'self_modify', 'create_new', 'rewrite_existing',
+                       'accept_peer_skills', 'auto_announce_to_dht'
+            profile_name: Per-agent profile key; when set, per-agent skills settings are used
+
+        Returns:
+            True if permitted, False otherwise (defaults to False = safe)
+        """
+        if not self.dpc_agent_enabled:
+            return False
+        global_skills = self.rules.get('dpc_agent', {}).get('skills', {})
+        global_val = bool(global_skills.get(operation, False))
+        if profile_name:
+            profile = self.rules.get('agent_profiles', {}).get(profile_name)
+            if profile is not None:
+                skills = profile.get('skills', {})
+                if operation in skills:
+                    return bool(skills[operation])
+        return global_val
 
     def get_allowed_agent_tools(self) -> set:
         """
@@ -305,6 +448,10 @@ class ContextFirewall:
         # Override: knowledge_write requires read_write access
         if self.dpc_agent_knowledge_access != 'read_write':
             allowed.discard('knowledge_write')
+
+        # Override: import_skill_from_agent requires accept_peer_skills
+        if not self.get_agent_skill_permission('accept_peer_skills'):
+            allowed.discard('import_skill_from_agent')
 
         return allowed
 
@@ -332,30 +479,97 @@ class ContextFirewall:
             return profiles[profile_name].copy()
         return None
 
+    def get_agent_permissions_summary(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+        """
+        Get a complete permissions summary for an agent — for UI transparency.
+
+        Returns all access paths, tools, and capabilities so the user can see
+        exactly what the agent has access to.
+
+        Args:
+            agent_id: Agent identifier (e.g., "agent_001")
+
+        Returns:
+            Dict with sandbox_paths, tools, capabilities, and archive_access
+        """
+        # Determine which tool set to use (per-profile or global)
+        allowed_tools = self.get_allowed_agent_tools_for_profile(agent_id)
+
+        # Categorize tools
+        from .dpc_agent.tools.registry import CORE_TOOL_NAMES, RESTRICTED_TOOL_NAMES
+        core_enabled = sorted(allowed_tools & CORE_TOOL_NAMES)
+        restricted_enabled = sorted(allowed_tools & RESTRICTED_TOOL_NAMES)
+        other_enabled = sorted(allowed_tools - CORE_TOOL_NAMES - RESTRICTED_TOOL_NAMES)
+
+        return {
+            "agent_id": agent_id,
+            "enabled": self.dpc_agent_enabled,
+            "sandbox_paths": {
+                "agent_root": str(Path.home() / ".dpc" / "agents" / agent_id),
+                "read_only": self.sandbox_read_only_paths,
+                "read_write": self.sandbox_read_write_paths,
+            },
+            "tools": {
+                "core_enabled": core_enabled,
+                "core_total": len(CORE_TOOL_NAMES),
+                "restricted_enabled": restricted_enabled,
+                "other_enabled": other_enabled,
+            },
+            "capabilities": {
+                "personal_context_access": self.dpc_agent_personal_context_access,
+                "device_context_access": self.dpc_agent_device_context_access,
+                "knowledge_access": self.dpc_agent_knowledge_access,
+                "evolution_enabled": self.evolution_enabled,
+                "consciousness_enabled": self.consciousness_enabled,
+            },
+            "archive_access": True,  # read_session_archive is a core tool, always available
+        }
+
     def get_allowed_agent_tools_for_profile(self, profile_name: str) -> Set[str]:
         """
         Get allowed tools for a specific agent profile.
 
+        Uses global dpc_agent tools as the baseline, then applies per-profile overrides.
+        Also enforces per-profile knowledge_access, personal_context_access, and skills
+        overrides (same logic as get_allowed_agent_tools() but scoped to the profile).
+
         Args:
-            profile_name: Name of the profile to get tools for
+            profile_name: Agent profile key (typically agent_id)
 
         Returns:
-            Set of allowed tool names based on profile configuration
+            Set of allowed tool names based on per-agent profile configuration
         """
         profile = self.get_agent_profile_settings(profile_name)
         if not profile:
-            # Fallback to global settings
+            # No per-agent profile — fall back to global settings
             return self.get_allowed_agent_tools()
 
-        if not profile.get('enabled', True):
+        if not profile.get('enabled', self.dpc_agent_enabled):
             return set()
 
-        tools_config = profile.get('tools', {})
+        # Start from global tool defaults, then override with per-profile values
+        profile_tools = profile.get('tools', {})
         allowed = set()
-
-        for tool_name, is_enabled in tools_config.items():
-            if is_enabled:
+        for tool_name, global_enabled in self.dpc_agent_tools.items():
+            if bool(profile_tools.get(tool_name, global_enabled)):
                 allowed.add(tool_name)
+
+        # Per-profile overrides mirroring get_allowed_agent_tools()
+        personal_access = profile.get('personal_context_access', self.dpc_agent_personal_context_access)
+        if not personal_access:
+            allowed.discard('get_dpc_context')
+
+        knowledge_access = profile.get('knowledge_access', self.dpc_agent_knowledge_access)
+        if knowledge_access != 'read_write':
+            allowed.discard('knowledge_write')
+
+        profile_skills = profile.get('skills', {})
+        accept_peer = profile_skills.get(
+            'accept_peer_skills',
+            bool(self.rules.get('dpc_agent', {}).get('skills', {}).get('accept_peer_skills', False))
+        )
+        if not accept_peer:
+            allowed.discard('import_skill_from_agent')
 
         return allowed
 
@@ -390,9 +604,10 @@ class ContextFirewall:
                 'device_context_access': True,
                 'knowledge_access': 'read_only',
                 'tools': {
-                    'repo_read': True,
+                    'read_file': True,
+                    'write_file': False,
                     'repo_list': True,
-                    'repo_write_commit': False,
+                    'repo_delete': False,
                     'update_scratchpad': True,
                     'browse_page': True,
                     'search_web': True,
@@ -545,12 +760,11 @@ class ContextFirewall:
                     },
                     "tools": {
                         "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
-                        "repo_read": True,
+                        "read_file": True,
+                        "write_file": False,
                         "repo_list": True,
-                        "repo_write_commit": False,
-                        "drive_read": False,
+                        "repo_delete": False,
                         "drive_list": False,
-                        "drive_write": False,
                         "update_scratchpad": True,
                         "update_identity": True,
                         "chat_history": True,
@@ -576,6 +790,11 @@ class ContextFirewall:
                         "git_commit": False,
                         "git_branch": False,
                         "git_init": False,
+                        "git_checkout": False,
+                        "git_merge": False,
+                        "git_tag": False,
+                        "git_reset": False,
+                        "git_snapshot": False,
                         "repo_commit_push": False,
                         "run_shell": False,
                         "claude_code_edit": False,
@@ -587,7 +806,14 @@ class ContextFirewall:
                         "resume_evolution": True,
                         "get_evolution_stats": True,
                         "approve_evolution_change": False,
-                        "reject_evolution_change": True
+                        "reject_evolution_change": True,
+                        "_comment_skills": "Skill and introspection tools",
+                        "execute_skill": True,
+                        "list_local_agents": True,
+                        "list_agent_skills": True,
+                        "import_skill_from_agent": False,
+                        "list_my_tools": True,
+                        "list_my_skills": True
                     }
                 },
                 "file_transfer": {
@@ -1410,10 +1636,9 @@ class ContextFirewall:
                         else:
                             # All valid tool names
                             valid_tools = {
-                                # File operations
-                                'repo_read', 'repo_list', 'repo_write_commit',
-                                # Drive operations
-                                'drive_read', 'drive_list', 'drive_write',
+                                # File operations (unified S31)
+                                'read_file', 'write_file', 'repo_list', 'repo_delete',
+                                'drive_list',
                                 # Memory/identity
                                 'update_scratchpad', 'update_identity', 'chat_history',
                                 # Knowledge
@@ -1427,6 +1652,7 @@ class ContextFirewall:
                                 'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                 # Git tools
                                 'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
+                                'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
                                 'repo_commit_push',
                                 # Restricted tools
                                 'run_shell', 'claude_code_edit',
@@ -1437,15 +1663,24 @@ class ContextFirewall:
                                 'approve_evolution_change', 'reject_evolution_change',
                                 # Search tools (v0.16.0+)
                                 'search_files', 'search_in_file',
-                                # Extended sandbox tools (v0.16.0+)
-                                'extended_path_read', 'extended_path_list', 'extended_path_write',
+                                # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file S31)
+                                'extended_path_list',
                                 'list_extended_sandbox_paths',
                                 # Messaging tools (v0.18.0+)
                                 'send_user_message',
-                                # Knowledge extraction tools (v0.18.0+)
-                                'extract_knowledge', 'deduplicate_identity',
+                                # Knowledge tools (v0.18.0+)
+                                'deduplicate_identity',
                                 # Task type management tools (v0.18.0+)
                                 'register_task_type', 'list_task_types', 'unregister_task_type',
+                                # Memento-Skills tools (v0.20.0+)
+                                'execute_skill',
+                                # Inter-agent skill sharing tools (v0.21.0+)
+                                'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
+                                # Self-introspection tools
+                                'list_my_tools', 'list_my_skills',
+                                # Legacy aliases (S31 migration — accepted but mapped to read_file/write_file)
+                                'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
+                                'extended_path_read', 'extended_path_write',
                             }
                             for tool_name, tool_enabled in tools.items():
                                 if tool_name.startswith('_'):
@@ -1470,6 +1705,39 @@ class ContextFirewall:
                                     errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
                             if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
                                 errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
+
+                    # Validate consciousness settings (v0.23.0+)
+                    if 'consciousness' in dpc_agent:
+                        consciousness = dpc_agent['consciousness']
+                        if not isinstance(consciousness, dict):
+                            errors.append("'dpc_agent.consciousness' must be a dictionary")
+                        else:
+                            if 'enabled' in consciousness and not isinstance(consciousness['enabled'], bool):
+                                errors.append("'dpc_agent.consciousness.enabled' must be a boolean")
+                            if 'think_interval_min' in consciousness:
+                                if not isinstance(consciousness['think_interval_min'], int):
+                                    errors.append("'dpc_agent.consciousness.think_interval_min' must be an integer")
+                                elif consciousness['think_interval_min'] < 10:
+                                    errors.append("'dpc_agent.consciousness.think_interval_min' must be at least 10")
+                            if 'think_interval_max' in consciousness:
+                                if not isinstance(consciousness['think_interval_max'], int):
+                                    errors.append("'dpc_agent.consciousness.think_interval_max' must be an integer")
+                            if 'budget_fraction' in consciousness:
+                                val = consciousness['budget_fraction']
+                                if not isinstance(val, (int, float)) or val <= 0 or val > 1:
+                                    errors.append("'dpc_agent.consciousness.budget_fraction' must be a number between 0 and 1")
+
+                    # Validate skills settings (v0.20.0+)
+                    if 'skills' in dpc_agent:
+                        skills = dpc_agent['skills']
+                        if not isinstance(skills, dict):
+                            errors.append("'dpc_agent.skills' must be a dictionary")
+                        else:
+                            bool_fields = ('self_modify', 'create_new', 'rewrite_existing',
+                                           'accept_peer_skills', 'auto_announce_to_dht')
+                            for field in bool_fields:
+                                if field in skills and not isinstance(skills[field], bool):
+                                    errors.append(f"'dpc_agent.skills.{field}' must be a boolean")
 
             # Validate agent_profiles section (v0.19.0+)
             if 'agent_profiles' in config_dict:
@@ -1502,8 +1770,8 @@ class ContextFirewall:
                                 else:
                                     # Use the same valid tools as dpc_agent
                                     valid_tools = {
-                                        'repo_read', 'repo_list', 'repo_write_commit',
-                                        'drive_read', 'drive_list', 'drive_write',
+                                        'read_file', 'write_file', 'repo_list', 'repo_delete',
+                                        'drive_list',
                                         'update_scratchpad', 'update_identity', 'chat_history',
                                         'knowledge_read', 'knowledge_write', 'knowledge_list',
                                         'get_task_board',
@@ -1511,17 +1779,27 @@ class ContextFirewall:
                                         'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
                                         'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                         'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
+                                        'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
                                         'repo_commit_push',
                                         'run_shell', 'claude_code_edit',
                                         'schedule_task', 'get_task_status',
                                         'pause_evolution', 'resume_evolution', 'get_evolution_stats',
                                         'approve_evolution_change', 'reject_evolution_change',
                                         'search_files', 'search_in_file',
-                                        'extended_path_read', 'extended_path_list', 'extended_path_write',
+                                        'extended_path_list',
                                         'list_extended_sandbox_paths',
                                         'send_user_message',
-                                        'extract_knowledge', 'deduplicate_identity',
+                                        'deduplicate_identity',
                                         'register_task_type', 'list_task_types', 'unregister_task_type',
+                                        # Memento-Skills tools (v0.20.0+)
+                                        'execute_skill',
+                                        # Inter-agent skill sharing tools (v0.21.0+)
+                                        'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
+                                        # Self-introspection tools
+                                        'list_my_tools', 'list_my_skills',
+                                        # Legacy aliases (S31 migration)
+                                        'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
+                                        'extended_path_read', 'extended_path_write',
                                     }
                                     for tool_name, tool_enabled in tools.items():
                                         if tool_name.startswith('_'):

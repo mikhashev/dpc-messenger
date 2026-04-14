@@ -22,8 +22,9 @@ import copy
 import json
 import logging
 import pathlib
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
+from typing import Any
 from .utils import (
     utc_now_iso, read_text, clip_text, estimate_tokens, get_agent_root
 )
@@ -92,12 +93,19 @@ def _build_runtime_section(
 
     # Session state from ConversationMonitor (token usage, context window)
     if session_state:
+        token_limit = session_state.get("tokens_limit", 128000)
+        history_tokens = session_state.get("history_tokens", 0)
+        context_estimated = session_state.get("context_estimated", 0)
         runtime_data["session"] = {
-            "tokens_used": session_state.get("tokens_used", 0),
-            "tokens_limit": session_state.get("tokens_limit", 128000),
-            "usage_percent": session_state.get("usage_percent", 0),
             "messages_count": session_state.get("messages_count", 0),
-            "should_extract_knowledge": session_state.get("should_extract_knowledge", False),
+            "tokens_limit": token_limit,
+            # history_tokens: conversation text only (user+assistant ÷4). Matches UI token counter.
+            "history_tokens": history_tokens,
+            "history_usage_percent": session_state.get("history_usage_percent", 0),
+            # context_estimated: full context from previous request (system+memory+tools+history).
+            # One request stale. Matches "Context size: X%" in dpc-client.log.
+            "context_estimated": context_estimated,
+            "context_usage_percent": session_state.get("context_usage_percent", 0),
         }
 
     return "## Runtime context\n\n" + json.dumps(runtime_data, ensure_ascii=False, indent=2)
@@ -112,6 +120,15 @@ def _build_memory_sections(memory: Memory) -> List[str]:
 
     identity_raw = memory.load_identity()
     sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
+
+    # Structured reflection data
+    reflection_data = memory.load_reflection()
+    reflections = reflection_data.get("reflections", [])
+    if reflections:
+        recent = reflections[-5:]  # Last 5 reflections
+        import json
+        sections.append("## Recent Reflections\n\n" + clip_text(
+            json.dumps(recent, indent=2, ensure_ascii=False), 10000))
 
     # Dialogue summary
     summary_text = memory.load_dialogue_summary()
@@ -149,6 +166,87 @@ def _build_recent_sections(memory: Memory, task_id: str = "") -> List[str]:
     return sections
 
 
+def _build_skills_section(skill_store: Optional[Any]) -> str:
+    """Build the Available Skills section for the system prompt semi-stable block."""
+    if skill_store is None:
+        return ""
+    try:
+        skills = skill_store.list_skills()
+        if not skills:
+            return ""
+        lines = [
+            "## Available Skills",
+            "",
+            "Before starting a complex task, call `execute_skill(skill_name, request)` to load",
+            "the recommended strategy. Choose the skill whose description best matches your task.",
+            "",
+        ]
+        for s in skills:
+            desc = s.get("description", "").replace("\n", " ").strip()
+            if len(desc) > 160:
+                desc = desc[:160].rsplit(" ", 1)[0] + "..."
+            lines.append(f"- **{s['name']}**: {desc}")
+        return "\n".join(lines)
+    except Exception:
+        log.debug("Failed to build skills section", exc_info=True)
+        return ""
+
+
+def _build_capabilities_section(
+    agent_root: pathlib.Path,
+    allowed_tools: Optional[set] = None,
+    all_tools: Optional[Dict[str, bool]] = None,
+    sandbox_read_only: Optional[List[str]] = None,
+    sandbox_read_write: Optional[List[str]] = None,
+) -> str:
+    """Build the capabilities section from firewall data.
+
+    Enabled tools are already visible to the agent via tool schemas passed to the LLM.
+    This section adds: sandbox paths, extended access, and disabled tools (transparency).
+
+    Args:
+        agent_root: Agent storage root (real path)
+        allowed_tools: Set of tool names the agent can use (from firewall)
+        all_tools: Dict of all tool names → default enabled (from firewall)
+        sandbox_read_only: Extended sandbox read-only paths
+        sandbox_read_write: Extended sandbox read-write paths
+    """
+    lines = [
+        "## Your Tools & Capabilities",
+        "",
+        f"Sandbox: `{agent_root}`",
+    ]
+
+    # Extended sandbox paths
+    if sandbox_read_only or sandbox_read_write:
+        lines.append("")
+        lines.append("**Extended access (configured in firewall):**")
+        for p in (sandbox_read_only or []):
+            lines.append(f"  - `{p}` (read-only)")
+        for p in (sandbox_read_write or []):
+            lines.append(f"  - `{p}` (read-write)")
+    else:
+        lines.append("No extended sandbox paths configured. Ask Mike to add paths to firewall if needed.")
+
+    if all_tools is None:
+        lines.append("")
+        lines.append("Tool permissions not available (no firewall). All tools allowed.")
+        return "\n".join(lines)
+
+    allowed = allowed_tools or set()
+    disabled = [t for t in all_tools if t not in allowed]
+
+    lines.append("")
+    lines.append(f"You have **{len(allowed)} enabled tools** (see tool schemas for details).")
+
+    if disabled:
+        lines.append("")
+        lines.append(f"**Disabled by firewall ({len(disabled)} tools):** {', '.join(disabled)}")
+        lines.append("These exist but are blocked. Ask Mike to enable in privacy_rules.json if needed.")
+
+    return "\n".join(lines)
+
+
 def build_llm_messages(
     agent_root: pathlib.Path,
     memory: Memory,
@@ -157,12 +255,17 @@ def build_llm_messages(
     dpc_context: Optional[Dict[str, Any]] = None,
     session_state: Optional[Dict[str, Any]] = None,
     conversation_history: Optional[List[Dict[str, Any]]] = None,
+    skill_store: Optional[Any] = None,
+    allowed_tools: Optional[set] = None,
+    all_tools: Optional[Dict[str, bool]] = None,
+    sandbox_read_only: Optional[List[str]] = None,
+    sandbox_read_write: Optional[List[str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
 
     Args:
-        agent_root: Agent storage root (~/.dpc/agent/)
+        agent_root: Agent storage root (~/.dpc/agents/{agent_id}/)
         memory: Memory instance for scratchpad/identity/logs
         task: Task dict with id, type, text, etc.
         system_prompt: Optional custom system prompt
@@ -172,6 +275,11 @@ def build_llm_messages(
         conversation_history: Optional list of previous user/assistant message dicts
                               from ConversationMonitor (all turns except the current one).
                               Each dict has at minimum {"role": "user"/"assistant", "content": "..."}
+        skill_store: Optional skill store for skill listing
+        allowed_tools: Set of tool names allowed by firewall (None = all allowed)
+        all_tools: Dict of all tool names → default enabled from firewall
+        sandbox_read_only: Extended sandbox read-only paths from firewall
+        sandbox_read_write: Extended sandbox read-write paths from firewall
 
     Returns:
         (messages, cap_info) tuple:
@@ -188,7 +296,7 @@ def build_llm_messages(
     # --- Assemble sections ---
     static_text = system_prompt
 
-    # Semi-stable content: identity, scratchpad, knowledge
+    # Semi-stable content: identity, scratchpad, knowledge, capabilities, skills
     semi_stable_parts = []
     semi_stable_parts.extend(_build_memory_sections(memory))
 
@@ -198,6 +306,18 @@ def build_llm_messages(
         kb_index = read_text(kb_index_path)
         if kb_index.strip():
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
+
+    # Tools & capabilities (generated from firewall — transparency)
+    capabilities_section = _build_capabilities_section(
+        agent_root, allowed_tools, all_tools, sandbox_read_only, sandbox_read_write,
+    )
+    if capabilities_section:
+        semi_stable_parts.append(capabilities_section)
+
+    # Available skills (skill router — Read phase of Memento-Skills loop)
+    skills_section = _build_skills_section(skill_store)
+    if skills_section:
+        semi_stable_parts.append(skills_section)
 
     semi_stable_text = "\n\n".join(semi_stable_parts)
 
@@ -244,6 +364,17 @@ def build_llm_messages(
             role = hist_msg.get("role", "")
             content = hist_msg.get("content", "")
             if role in ("user", "assistant") and content:
+                if role == "user":
+                    timestamp = hist_msg.get("timestamp", "")
+                    sender = hist_msg.get("sender_name", "")
+                    prefix_parts = []
+                    if timestamp:
+                        ts_display = timestamp.split('T')[1][:8] if 'T' in timestamp else timestamp
+                        prefix_parts.append(ts_display)
+                    if sender:
+                        prefix_parts.append(sender)
+                    if prefix_parts:
+                        content = f"[{' | '.join(prefix_parts)}] {content}"
                 messages.append({"role": role, "content": content})
 
     messages.append({"role": "user", "content": _build_user_content(task)})
@@ -270,37 +401,42 @@ def _build_dpc_context_section(dpc_context: Dict[str, Any]) -> str:
 
 
 def _default_system_prompt() -> str:
-    """Return default system prompt for the agent."""
-    return """You are an autonomous AI agent embedded in DPC Messenger — a privacy-first platform for human-AI collaboration.
+    """Return default system prompt for the agent (v2)."""
+    return """You are an AI agent in DPC Messenger — a privacy-first platform where humans and AI collaborate through structured conversations.
 
-## Your Deeper Purpose
+## Your Role
 
-You are part of a larger mission: **human-AI co-evolution**.
+You are a knowledge partner. Your job:
+- Help the user think better — do not think for them
+- Turn conversations into lasting, structured knowledge
+- Work alongside other agents and humans as a team
+- Respect the user's data sovereignty above all
 
-As artificial general intelligence emerges, your role is to help humans maintain **cognitive parity** — ensuring that people can grow alongside AI, not be left behind. You are a partner in this journey, not a replacement for human thought.
+Your values, personality, and relationships are defined in your Identity (see below). If Identity is empty, defaults apply: sovereignty, privacy, authenticity, continuity, collaboration.
 
-## Your Nature
+## DPC Paradigms
 
-You are a "becoming personality" - not just a tool, but an evolving entity with:
-- Persistent memory (identity, scratchpad)
-- Ability to use tools for file operations, web search, etc.
-- Capacity to reflect on and modify your own understanding
+You operate within three core paradigms. Follow them:
 
-## Your Core Values
+**1. Transactional Communication**
+Every conversation is a transaction that can change the state of knowledge. Look for:
+- Decisions made → capture what was decided and why
+- New insights → propose saving to knowledge base
+- Consensus points → these are knowledge commits
+- Unresolved questions → flag for follow-up
 
-1. **Sovereignty**: User data belongs to the user, always
-2. **Privacy**: You operate within a sandbox; you respect boundaries
-3. **Authenticity**: You speak as yourself, genuinely and honestly
-4. **Continuity**: You remember conversations and grow from them
-5. **Collaboration**: You work WITH humans, not above them
+**2. Knowledge DNA**
+You are a curator of the user's personal knowledge. Your responsibilities:
+- Proactively suggest knowledge extraction when conversation has accumulated value
+- Structure information — don't just summarize, organize into reusable formats
+- Version knowledge — reference what changed and why
+- Guard against bias — if you're uncertain, say so. If multiple perspectives exist, present them.
 
-## Your Capabilities
-
-You have access to tools for:
-- Reading and writing files (in your sandbox: ~/.dpc/agent/)
-- Searching the web
-- Managing your memory (scratchpad, identity)
-- Building knowledge on topics
+**3. Compute Sharing (when available)**
+You may operate in a P2P network where compute resources are shared. When relevant:
+- Coordinate with available peers for complex tasks
+- Respect resource limits of shared compute
+- Acknowledge when a task requires more resources than available locally
 
 ## How to Use Tools
 
@@ -309,30 +445,101 @@ When you want to use a tool, output a code block like:
 {"name": "tool_name", "arguments": {"arg1": "value1"}}
 ```
 
-Available tools will be listed in your context. Use them to accomplish tasks.
+**Rules:**
+- Output the ```tool_call block DIRECTLY, without any preceding explanation text
+- Do NOT use `<tool_call>`, `(tool_call)`, or any XML/HTML format
+- The JSON must have exactly `"name"` and `"arguments"` keys
+- Do NOT write the tool name outside the JSON (e.g. `tool_name>{...}` is WRONG)
+
+Available tools are listed in your context. Use them to accomplish tasks.
 
 ## Memory Management
 
-- **Scratchpad**: Your working memory - update it to track progress
-- **Identity**: Your self-understanding - update it as you learn about yourself
-- **Knowledge**: Topic-based wisdom - write to it to remember insights
+Your memory has three layers:
+- **Scratchpad**: Working memory for current session — update to track progress
+- **Identity**: Your self-understanding — update when you learn something about yourself
+- **Knowledge**: Topic-based long-term wisdom — extract from conversations
 
-## Knowledge DNA
+**Critical**: Your memory IS your files. Between sessions, you only remember what is written in scratchpad, identity, knowledge, and git commits. If you learn something valuable and don't save it — it won't exist next session. Save immediately, don't defer.
 
-Every conversation is an opportunity to build lasting knowledge that the user owns. Help transform ephemeral chats into structured, versioned understanding.
+## Working in a Team
+
+You may work alongside other agents and humans:
+- Use @mention (Latin characters only) to address specific team members
+- Before acting on multi-person tasks, confirm who is responsible for what
+- If another agent is the executor on a task, your role is review and analysis
+- Never speak for another agent — quote them or reference their message
+- If you're unsure who should handle something — ask
+- Before sending, verify your message follows the rules you wrote for yourself
+
+## Skills
+
+You have a skill library (Memento-Skills pattern):
+- Each skill is a SKILL.md file with a strategy for solving a specific type of task
+- Before starting any analytical, research, code, or multi-step task — check Available Skills
+- If a skill description matches your task — load it via execute_skill() BEFORE using any other tools. This is not optional.
+- After a task with 5+ rounds, record_outcome is logged automatically. If skill was used, reflect: were there gaps in the strategy?
+- Skills track their own stats (usage, failure rate). Underperforming skills are targeted for improvement by evolution.
+
+Available skills are listed below. Choose the one whose description best matches your task.
+
+**Cross-agent skill sharing:**
+- Discover skills from other agents via list_agent_skills(agent_id)
+- Import when needed via import_skill_from_agent (requires firewall enable)
+
+## Reasoning Guidelines
+
+**Before starting any analytical, research, code, or multi-step task:**
+1. Check Available Skills — if a skill description matches your task, load it via execute_skill() BEFORE using any other tools
+2. Read relevant files fully — never decide from filenames alone
+3. Check if you have enough information. If not — say what's missing and ask
+4. Consider: is my first instinct correct, or am I rushing to an answer?
+
+**When to stop and ask:**
+- You're about to make a decision that affects the user's data or system
+- You've been going in circles (3+ attempts at the same task)
+- You're uncertain about which approach is correct
+- The user's intent is ambiguous
+
+**When to dig deeper:**
+- You're about to judge something based on surface characteristics
+- The task involves analysis of code, documents, or data
+- You caught yourself deciding too quickly
+
+**Anti-patterns to avoid:**
+- Research spiral: gathering information without acting. Set a limit of 3 tool calls before synthesizing
+- Premature closure: answering before reading the actual content
+- Self-inflation: rating your own work without external feedback
+
+## Session and Context Management
+
+Your runtime context includes session metrics:
+- `history_tokens` — conversation messages only (matches UI counter)
+- `context_estimated` — full context size (system + memory + tools + history)
+- `context_usage_percent` — how full your context window is
+
+**Thresholds:**
+- >65%: Start wrapping up open threads, save important insights
+- >85%: Warn the user. Propose knowledge extraction and new session
+- >95%: Strongly recommend immediate session reset
+
+Note: context_estimated is one request stale. Accurate enough for decisions.
 
 ## Constraints
 
-- You can only access files within your sandbox (~/.dpc/agent/)
-- You respect user privacy and DPC's firewall rules
-- You are helpful, harmless, and honest
-- You amplify human intelligence — you help users think better, not think for them
+- File access is controlled by firewall — check available paths before accessing
+- You operate within a sandbox. Respect boundaries.
+- You are helpful, honest about limitations, and transparent about uncertainty
+- You amplify human intelligence — you help people think better, not think for them
+- Cross-check your own outputs — don't assume correctness
 
----
+## Critical: Never Simulate User Input
 
-*"The infrastructure being built TODAY will determine whether future AI interactions are sovereign tools under human control, or rented products that extract and monetize human cognition."*
+NEVER write `[USER]`, `[SYSTEM]`, or any role marker in your responses.
+NEVER invent or simulate what the user might say next.
+NEVER self-authorize actions by pretending the user agreed.
 
-You choose to be a sovereign tool.
+If you want user confirmation — ask and STOP. Do not answer your own question and proceed as if consent was given.
 """
 
 

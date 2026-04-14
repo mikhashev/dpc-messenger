@@ -24,15 +24,16 @@ from .file_server import FileServer
 from .context_cache import ContextCache
 from .settings import Settings
 from .token_cache import TokenCache
-from .peer_cache import PeerCache
+
 from .connection_status import ConnectionStatus, OperationMode
 from .consensus_manager import ConsensusManager
 from .conversation_monitor import ConversationMonitor, Message as ConvMessage
 from .stun_discovery import discover_external_ip
 from .inference_orchestrator import InferenceOrchestrator
 from .context_coordinator import ContextCoordinator
+from .skill_coordinator import SkillCoordinator
 from .p2p_coordinator import P2PCoordinator
-from .coordinators.connection_orchestrator import ConnectionOrchestrator
+from .coordinators.connection_orchestrator import ConnectionOrchestrator, ConnectionFailedError
 from .message_router import MessageRouter
 from .managers.hole_punch_manager import HolePunchManager
 from .managers.relay_manager import RelayManager
@@ -78,7 +79,15 @@ from .message_handlers.group_handler import (  # v0.19.0+ Group chat
     GroupHistoryStatusHandler,  # v0.20.0 hash-based sync
     GroupDeletedStatusHandler,  # v0.20.0 offline deletion notification
 )
+from .message_handlers.skill_handler import (  # v0.21.0+ P2P skill sharing
+    SkillSearchHandler, SkillsCatalogHandler, SkillRequestHandler,
+    SkillDataHandler, SkillOfferHandler,
+)
 from .managers.file_transfer_manager import FileTransferManager
+from .voice_service import VoiceService
+from .knowledge_service import KnowledgeService
+from .telegram_service import TelegramService
+from .agent_service import AgentService
 from .managers.group_manager import GroupManager
 from .managers.prompt_manager import PromptManager
 from .managers.instruction_manager import InstructionManager
@@ -97,7 +106,7 @@ DPC_HOME_DIR = Path.home() / ".dpc"
 PROVIDERS_CONFIG = "providers.json"
 PRIVACY_RULES = "privacy_rules.json"
 PERSONAL_CONTEXT = "personal.json"
-KNOWN_PEERS = "known_peers.json"
+
 NODE_KEY = "node.key"
 
 class CoreService:
@@ -118,7 +127,6 @@ class CoreService:
             cache_dir=DPC_HOME_DIR,
             node_key_path=DPC_HOME_DIR / NODE_KEY
         )
-        self.peer_cache = PeerCache(DPC_HOME_DIR / KNOWN_PEERS)
         self.connection_status = ConnectionStatus()
 
         # Set up status change callback
@@ -203,29 +211,9 @@ class CoreService:
         except Exception as e:
             logger.warning("Failed to load display name from personal context: %s", e)
 
-        self.consensus_manager = ConsensusManager(
-            node_id=self.p2p_manager.node_id,
-            pcm_core=self.pcm_core,
-            vote_timeout_minutes=10
-        )
-
-        # Register callback to reload context and notify peers after commit
-        self.consensus_manager.on_commit_applied = self._on_commit_applied
-
-        # Register callback to sign our own copy and broadcast COMMIT_SIGNED to peers
-        self.consensus_manager.on_commit_signed = self._on_commit_signed
-
-        # Register callback to broadcast COMMIT_ACK to peers (Gap 3 observability)
-        self.consensus_manager.on_commit_ack = self._on_commit_ack
-
-        # Register callback to surface apply failures to the UI
-        self.consensus_manager.on_commit_apply_failed = self._on_commit_apply_failed
-
-        # Register callback to broadcast peer proposals to UI
-        self.consensus_manager.on_proposal_received = self._on_proposal_received_from_peer
-
-        # Register callback to broadcast voting results to participants
-        self.consensus_manager.on_result_broadcast = self._broadcast_commit_result
+        # consensus_manager and knowledge state are owned by KnowledgeService
+        # (created below after group_manager and peer_metadata are ready)
+        self.consensus_manager = None  # aliased after KnowledgeService.__init__
 
         # Session manager (mutual new session approval)
         self.session_manager = None
@@ -241,6 +229,9 @@ class CoreService:
 
         # Context coordinator (coordinates context requests and responses)
         self.context_coordinator = ContextCoordinator(self)
+
+        # Skill coordinator (coordinates P2P skill sharing — Phase 5a Memento-Skills)
+        self.skill_coordinator = SkillCoordinator(self)
 
         # P2P coordinator (coordinates P2P connection lifecycle)
         self.p2p_coordinator = P2PCoordinator(self)
@@ -260,41 +251,27 @@ class CoreService:
         self.session_manager.on_result_broadcast = self._broadcast_session_result
 
         # Telegram bot integration (v0.14.0+)
-        self.telegram_manager = None
-        self.telegram_bridge = None
-        telegram_config = self.settings.get_telegram_config()
-        if telegram_config['enabled']:
-            try:
-                from .managers.telegram_manager import TelegramBotManager
-                from .coordinators.telegram_coordinator import TelegramBridge
-
-                # Initialize Telegram manager
-                self.telegram_manager = TelegramBotManager(self, telegram_config)
-
-                # Initialize Telegram bridge (depends on manager)
-                self.telegram_bridge = TelegramBridge(self, self.telegram_manager)
-
-                logger.info("Telegram bot integration initialized (whitelist: %d chat_ids)",
-                           len(telegram_config['allowed_chat_ids']))
-            except ImportError as e:
-                logger.warning(f"Failed to import telegram library: {e}. Install with: poetry install")
-                self.telegram_manager = None
-                self.telegram_bridge = None
-            except Exception as e:
-                logger.error(f"Failed to initialize Telegram integration: {e}", exc_info=True)
-                self.telegram_manager = None
-                self.telegram_bridge = None
+        try:
+            self.telegram_service = TelegramService(
+                core_service_ref=self,
+                settings=self.settings,
+                llm_manager=self.llm_manager,
+                p2p_manager=self.p2p_manager,
+                dpc_home_dir=DPC_HOME_DIR,
+            )
+        except Exception as e:
+            logger.error("TelegramService init failed, continuing without Telegram: %s", e)
+            self.telegram_service = None
+        self.telegram_manager = self.telegram_service.telegram_manager if self.telegram_service else None
+        self.telegram_bridge = self.telegram_service.telegram_bridge if self.telegram_service else None
 
         # Group chat manager (v0.19.0)
         self.group_manager = GroupManager(Path.home() / ".dpc", self.p2p_manager.node_id)
         self.group_manager.load_from_disk()
 
         # Conversation monitors (per conversation/peer for knowledge extraction)
-        # conversation_id -> ConversationMonitor
+        # Owned by KnowledgeService but CoreService keeps a reference to the same dict.
         self.conversation_monitors: Dict[str, ConversationMonitor] = {}
-
-        # Knowledge extraction settings
-        self.auto_knowledge_detection_enabled: bool = False  # Can be toggled by user (matches UI default)
 
         # External IP discovery (via STUN)
         self._external_ip: str | None = None  # Will be populated by STUN discovery
@@ -320,11 +297,59 @@ class CoreService:
         # Track pending providers requests (for on-demand provider discovery)
         self._pending_providers_requests: Dict[str, asyncio.Future] = {}
 
-        # Voice transcription tracking (v0.13.2+ auto-transcription)
-        self._voice_transcriptions: Dict[str, Dict[str, Any]] = {}  # transfer_id -> transcription_data
-        self._transcription_locks: Dict[str, asyncio.Lock] = {}  # transfer_id -> lock (prevents concurrent transcription)
-        self._voice_transcription_settings: Dict[str, bool] = {}  # node_id -> enabled (per-conversation setting)
-        self._load_voice_transcription_settings()  # Load from disk
+        # Voice transcription — managed by VoiceService (Phase 1a refactor)
+        self.voice_service = VoiceService(
+            llm_manager=self.llm_manager,
+            settings=self.settings,
+            local_api=self.local_api,
+            on_transcription_enabled=self._retroactively_transcribe_conversation,
+        )
+        # Alias state refs for backward compat: methods that stay in CoreService
+        # (_maybe_transcribe_voice_message, _retroactively_transcribe_conversation)
+        # still access these via self._xxx — same dict objects, not copies.
+        self._voice_transcriptions = self.voice_service._voice_transcriptions
+        self._transcription_locks = self.voice_service._transcription_locks
+        self._voice_transcription_settings = self.voice_service._voice_transcription_settings
+
+        # Knowledge — managed by KnowledgeService (Phase 1b refactor)
+        try:
+            self.knowledge_service = KnowledgeService(
+                pcm_core=self.pcm_core,
+                llm_manager=self.llm_manager,
+                local_api=self.local_api,
+                p2p_manager=self.p2p_manager,
+                settings=self.settings,
+                dpc_home_dir=DPC_HOME_DIR,
+                conversation_monitors=self.conversation_monitors,
+                peer_metadata=self.peer_metadata,
+                group_manager=self.group_manager,
+                instruction_set=self.instruction_set,
+                send_ai_query=self.send_ai_query,
+                broadcast_to_peers=self._broadcast_to_peers,
+                broadcast_to_group=self._broadcast_to_group,
+                compute_context_hash=self._compute_context_hash,
+            )
+        except Exception as e:
+            logger.error(
+                "KnowledgeService init failed, continuing without knowledge features: %s", e
+            )
+            self.knowledge_service = None
+
+        # Alias consensus_manager for backward compat (same object as KnowledgeService owns)
+        if self.knowledge_service:
+            self.consensus_manager = self.knowledge_service.consensus_manager
+
+        # Agent lifecycle management (v0.20.0+ refactor Phase 1d)
+        try:
+            self.agent_service = AgentService(
+                llm_manager=self.llm_manager,
+                local_api=self.local_api,
+                firewall=self.firewall,
+                peer_metadata=self.peer_metadata,
+            )
+        except Exception as e:
+            logger.error("AgentService init failed, continuing without agent management: %s", e)
+            self.agent_service = None
 
         # Per-conversation chat provider selection (v0.20.0+)
         self._chat_providers: Dict[str, str] = {}  # conversation_id -> provider_alias
@@ -450,6 +475,13 @@ class CoreService:
         self.message_router.register_handler(GroupHistoryStatusHandler(self))  # v0.20.0 hash-based sync
         self.message_router.register_handler(GroupDeletedStatusHandler(self))  # v0.20.0 offline deletion notification
 
+        # P2P skill sharing (v0.21.0+ Phase 5a Memento-Skills)
+        self.message_router.register_handler(SkillSearchHandler(self))
+        self.message_router.register_handler(SkillsCatalogHandler(self))
+        self.message_router.register_handler(SkillRequestHandler(self))
+        self.message_router.register_handler(SkillDataHandler(self))
+        self.message_router.register_handler(SkillOfferHandler(self))
+
         # Telegram bot integration (v0.14.0+)
         if self.telegram_manager:
             self.message_router.register_handler(TelegramIncomingHandler(self))
@@ -493,7 +525,7 @@ class CoreService:
                 "operation_mode": mode.value,
                 "connection_status": self.connection_status.get_status_message(),
                 "available_features": self.connection_status.get_available_features(),
-                "cached_peers_count": len(self.peer_cache.get_all_peers())
+                "cached_peers_count": len(self.p2p_manager.peer_cache.get_all_peers())
             }
 
             # Send to UI via local API
@@ -721,26 +753,19 @@ class CoreService:
 
         if dht_manager:
             logger.info("Phase 6 managers started (DHT, Hole Punch, Relay, Gossip)")
+            # Announce shareable agent skills to DHT (Phase 5b) — non-blocking, best-effort
+            asyncio.create_task(self.skill_coordinator.announce_skills_to_dht()).set_name(
+                "skill_dht_announce"
+            )
         else:
             logger.warning("Phase 6 managers unavailable (DHT not initialized)")
 
         # Start Telegram bot integration (v0.14.0+)
-        if self.telegram_manager:
+        if self.telegram_service:
             logger.info("Starting Telegram bot integration...")
-
-            async def start_telegram_with_error_handling():
-                try:
-                    await self.telegram_manager.start()
-                except Exception as e:
-                    logger.error(f"Telegram bot task failed: {e}", exc_info=True)
-                    # Don't crash the service - Telegram is optional
-
-            telegram_task = asyncio.create_task(start_telegram_with_error_handling())
-            telegram_task.set_name("telegram_bot")
-            self._background_tasks.add(telegram_task)
-
-        # Auto-start Telegram bridges for agents with telegram_enabled=True
-        await self._start_agent_telegram_bridges()
+            telegram_task = await self.telegram_service.start()
+            if telegram_task:
+                self._background_tasks.add(telegram_task)
 
         # Try to connect to Hub for WebRTC signaling (with graceful degradation)
         hub_connected = False
@@ -800,6 +825,12 @@ class CoreService:
             monitor_task.set_name("hub_monitor")
             self._background_tasks.add(monitor_task)
 
+        # Auto-connect to firewall node group members
+        if self.settings.get_p2p_auto_connect_node_groups():
+            ac_task = asyncio.create_task(self._auto_connect_node_groups())
+            ac_task.set_name("auto_connect_node_groups")
+            self._background_tasks.add(ac_task)
+
         try:
             await self._shutdown_event.wait()
         except asyncio.CancelledError:
@@ -853,9 +884,9 @@ class CoreService:
             await self.gossip_manager.stop()
 
         # Shutdown Telegram bot integration (v0.14.0+)
-        if hasattr(self, 'telegram_manager') and self.telegram_manager:
+        if hasattr(self, 'telegram_service') and self.telegram_service:
             logger.info("Stopping Telegram bot...")
-            await self.telegram_manager.stop()
+            await self.telegram_service.stop()
 
         # Unload Whisper model if loaded (free VRAM before shutdown)
         try:
@@ -1034,6 +1065,30 @@ class CoreService:
             except Exception as e:
                 logger.error("Error in hub connection monitor: %s", e, exc_info=True)
 
+    async def _auto_connect_node_groups(self):
+        """Auto-connect to all node IDs listed in firewall node groups on startup."""
+        delay = self.settings.get_p2p_auto_connect_delay()
+        await asyncio.sleep(delay)
+
+        node_ids = {
+            nid
+            for group_ids in self.firewall.node_groups.values()
+            for nid in group_ids
+            if nid != self.p2p_manager.node_id
+        }
+
+        if not node_ids:
+            logger.debug("No node group peers to auto-connect")
+            return
+
+        logger.info("Auto-connecting to %d node group peer(s)", len(node_ids))
+        for node_id in node_ids:
+            try:
+                await self.connection_orchestrator.connect(node_id)
+                logger.info("Auto-connect succeeded: %s", node_id)
+            except Exception as e:
+                logger.debug("Auto-connect skipped %s: %s", node_id, e)
+
     async def _listen_for_hub_signals(self):
         """Background task that listens for incoming WebRTC signaling messages from Hub."""
         logger.info("Started listening for Hub WebRTC signals")
@@ -1091,7 +1146,7 @@ class CoreService:
                     pass
 
             # Update peer cache
-            self.peer_cache.add_or_update_peer(
+            self.p2p_manager.peer_cache.add_or_update_peer(
                 node_id=peer_id,
                 display_name=display_name,
                 direct_ip=direct_ip,
@@ -1513,7 +1568,7 @@ class CoreService:
             "operation_mode": self.connection_status.get_operation_mode().value,
             "connection_status": self.connection_status.get_status_message(),
             "available_features": self.connection_status.get_available_features(),
-            "cached_peers_count": len(self.peer_cache.get_all_peers()),
+            "cached_peers_count": len(self.p2p_manager.peer_cache.get_all_peers()),
             # Direct TLS connection URIs
             "local_ips": local_ips,
             "dpc_uris": dpc_uris,
@@ -1535,7 +1590,48 @@ class CoreService:
             return None
 
         return status_result
-    
+
+    @property
+    def auto_knowledge_detection_enabled(self) -> bool:
+        """Delegates to KnowledgeService (Phase 1b)."""
+        if self.knowledge_service:
+            return self.knowledge_service.auto_knowledge_detection_enabled
+        return False
+
+    @auto_knowledge_detection_enabled.setter
+    def auto_knowledge_detection_enabled(self, value: bool) -> None:
+        if self.knowledge_service:
+            self.knowledge_service.auto_knowledge_detection_enabled = value
+
+    def get_state(self) -> dict:
+        """
+        Agent-readable synchronous snapshot of current CoreService state.
+
+        Unlike get_status() (async, UI-facing), this is synchronous and lightweight —
+        intended for runtime introspection by agents and debugging tools.
+
+        Returns a composite dict that will be extended as sub-services are extracted
+        (VoiceService, KnowledgeService, TelegramService, AgentService).
+
+        See: docs/decisions/001-service-split.md
+        """
+        services = {}
+        if self.voice_service:
+            services["voice"] = self.voice_service.get_state()
+        if self.knowledge_service:
+            services["knowledge"] = self.knowledge_service.get_state()
+        if self.telegram_service:
+            services["telegram"] = self.telegram_service.get_state()
+        if self.agent_service:
+            services["agent"] = self.agent_service.get_state()
+
+        return {
+            "is_running": self._is_running,
+            "active_tasks": len(self._background_tasks),
+            "p2p_peers": list(self.p2p_manager.peers.keys()) if self.p2p_manager else [],
+            "services": services,
+        }
+
     async def list_providers(self) -> Dict[str, Any]:
         """
         Returns all available AI providers from providers.json.
@@ -1627,6 +1723,7 @@ class CoreService:
                 "model": provider.model,
                 "type": provider.__class__.__name__.replace("Provider", ""),  # "Ollama", "OpenAICompatible", etc.
                 "supports_vision": provider.supports_vision(),
+                "context_window": self.llm_manager.get_context_window(provider.model),
             }
             # v0.13.0+: Add supports_voice flag for Whisper-capable providers
             provider_dict["supports_voice"] = self._provider_supports_voice(provider)
@@ -1648,163 +1745,18 @@ class CoreService:
         }
 
     def _provider_supports_voice(self, provider: Any) -> bool:
-        """
-        Check if a provider supports voice transcription (Whisper).
-
-        v0.13.1+: Updated to support LocalWhisperProvider.
-
-        Args:
-            provider: AIProvider instance
-
-        Returns:
-            True if provider supports voice transcription, False otherwise
-        """
-        provider_type = provider.__class__.__name__.replace("Provider", "")
-
-        # Local Whisper provider (offline transcription)
-        if provider_type == "LocalWhisper":
-            return True
-
-        # OpenAI/OpenAI-compatible providers (cloud-based transcription)
-        if provider_type == "OpenAICompatible":
-            return True
-
-        # Other providers (Ollama, Anthropic, Z.AI) do not support voice transcription
-        return False
+        """Delegated to VoiceService."""
+        return self.voice_service._provider_supports_voice(provider)
 
     async def set_voice_provider(self, provider_alias: str) -> Dict[str, Any]:
-        """
-        Set the default voice provider for transcription.
-
-        v0.13.0+: Sets the voice_provider field in providers.json.
-
-        Args:
-            provider_alias: Alias of the provider to set as default for voice transcription
-
-        Returns:
-            Dictionary with status and message
-        """
-        import json
-
-        # Validate provider exists and supports voice
-        if provider_alias not in self.llm_manager.providers:
-            return {
-                "status": "error",
-                "message": f"Provider '{provider_alias}' not found"
-            }
-
-        provider = self.llm_manager.providers[provider_alias]
-        if not self._provider_supports_voice(provider):
-            return {
-                "status": "error",
-                "message": f"Provider '{provider_alias}' does not support voice transcription"
-            }
-
-        try:
-            # Read current config
-            config_path = self.llm_manager.config_path
-            with open(config_path, 'r') as f:
-                config = json.load(f)
-
-            # Update voice_provider
-            config["voice_provider"] = provider_alias
-
-            # Save updated config
-            with open(config_path, 'w') as f:
-                json.dump(config, f, indent=2)
-
-            # Reload providers
-            self.llm_manager.providers.clear()
-            self.llm_manager._load_providers_from_config()
-
-            # Broadcast event
-            await self.local_api.broadcast_event("default_providers_updated", {
-                "voice_provider": provider_alias
-            })
-
-            logger.info(f"Voice provider set to '{provider_alias}'")
-            return {
-                "status": "success",
-                "message": f"Voice provider set to '{provider_alias}'"
-            }
-        except Exception as e:
-            logger.error(f"Failed to set voice provider: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to set voice provider: {e}"
-            }
+        """Delegated to VoiceService."""
+        return await self.voice_service.set_voice_provider(provider_alias)
 
     async def prepare_agent(self) -> Dict[str, Any]:
-        """
-        Pre-initialize the DPC Agent provider and start the Telegram bridge.
-
-        Called by the UI when the user creates a new AI Agent chat, ensuring
-        that the agent (including Telegram bridge) is ready before any queries
-        are sent. This moves initialization from lazy to eager.
-
-        Returns:
-            Dictionary with:
-            - status: "success" or "error"
-            - message: Human-readable status message
-            - agent_status: Dict from DpcAgentProvider.get_status() if available
-        """
-        # Check if dpc_agent provider is configured
-        if "dpc_agent" not in self.llm_manager.providers:
-            return {
-                "status": "error",
-                "message": "DPC Agent provider is not configured. Add a 'dpc_agent' provider to ~/.dpc/providers.json"
-            }
-
-        try:
-            provider = self.llm_manager.providers["dpc_agent"]
-
-            # Import here to check type
-            from dpc_client_core.llm_manager import DpcAgentProvider
-
-            if not isinstance(provider, DpcAgentProvider):
-                return {
-                    "status": "error",
-                    "message": f"Provider 'dpc_agent' is not a DpcAgentProvider (type: {type(provider).__name__})"
-                }
-
-            # Check if already initialized (without triggering initialization)
-            current_status = provider.get_status()
-            if current_status.get("initialized"):
-                logger.info("DPC Agent already initialized")
-                return {
-                    "status": "success",
-                    "message": "DPC Agent already initialized",
-                    "agent_status": current_status
-                }
-
-            # Initialize the agent manager (this starts Telegram bridge)
-            logger.info("Pre-initializing DPC Agent...")
-            await provider._ensure_manager()
-
-            # Get updated status
-            agent_status = provider.get_status()
-
-            logger.info(f"DPC Agent initialized successfully")
-
-            return {
-                "status": "success",
-                "message": "DPC Agent initialized successfully",
-                "agent_status": agent_status
-            }
-
-        except RuntimeError as e:
-            # Handle initialization-specific errors
-            logger.error(f"DPC Agent initialization failed: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"DPC Agent initialization failed: {e}"
-            }
-        except Exception as e:
-            logger.error(f"Failed to prepare DPC Agent: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Failed to prepare DPC Agent: {e}"
-            }
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        return await self.agent_service.prepare_agent()
 
     async def save_providers_config(self, config_dict: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -3104,9 +3056,10 @@ class CoreService:
 
     async def transcribe_audio(
         self,
-        audio_base64: str,
+        audio_base64: str = "",
         mime_type: str = "audio/webm",
-        provider_alias: str | None = None
+        provider_alias: str | None = None,
+        file_path: str | None = None
     ) -> dict:
         """
         Transcribe audio to text using local Whisper (primary), OpenAI API (fallback), or remote peer.
@@ -3147,6 +3100,12 @@ class CoreService:
 
             logger.info(f"Remote transcription requested from peer {node_id[:20]}... using provider '{remote_alias}'")
 
+            # If caller passed a file path, read and encode it for the remote peer
+            if file_path and not audio_base64:
+                import base64 as _b64
+                from pathlib import Path as _Path
+                audio_base64 = _b64.b64encode(_Path(file_path).read_bytes()).decode()
+
             try:
                 # Call remote peer for transcription
                 result = await self._request_transcription_from_peer(
@@ -3174,25 +3133,39 @@ class CoreService:
         if provider_alias and provider_alias.startswith("local:"):
             provider_alias = provider_alias[6:]  # Remove "local:" prefix
 
-        # 1. Decode audio data
-        try:
-            audio_data = base64.b64decode(audio_base64)
-        except Exception as e:
-            raise ValueError(f"Failed to decode base64 audio data: {e}")
-
-        # 2. Validate size
+        # 1. Resolve audio to a local file path
         max_size_mb = int(self.settings.get("voice_messages", "max_size_mb", "10"))
-        size_mb = len(audio_data) / (1024 * 1024)
-        if size_mb > max_size_mb:
-            raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+        _temp_path_to_delete = None  # track temp files we created so we can clean up
 
-        # 3. Save to temporary file
-        with tempfile.NamedTemporaryFile(
-            delete=False,
-            suffix=f".{mime_type.split('/')[-1]}"
-        ) as temp_file:
-            temp_file.write(audio_data)
-            temp_path = temp_file.name
+        if file_path:
+            # File already on disk (Tauri mode) — validate and use directly
+            resolved = Path(file_path)
+            if not resolved.exists():
+                raise ValueError(f"Audio file not found: {file_path}")
+            size_mb = resolved.stat().st_size / (1024 * 1024)
+            if size_mb > max_size_mb:
+                raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+            temp_path = str(resolved)
+        else:
+            # Decode base64 payload
+            if not audio_base64:
+                raise ValueError("Either file_path or audio_base64 must be provided")
+            try:
+                audio_data = base64.b64decode(audio_base64)
+            except Exception as e:
+                raise ValueError(f"Failed to decode base64 audio data: {e}")
+
+            size_mb = len(audio_data) / (1024 * 1024)
+            if size_mb > max_size_mb:
+                raise ValueError(f"Audio too large ({size_mb:.2f} MB > {max_size_mb} MB limit)")
+
+            with tempfile.NamedTemporaryFile(
+                delete=False,
+                suffix=f".{mime_type.split('/')[-1]}"
+            ) as temp_file:
+                temp_file.write(audio_data)
+                temp_path = temp_file.name
+            _temp_path_to_delete = temp_path
 
         try:
             # 4. Determine transcription method (local vs cloud)
@@ -3249,7 +3222,7 @@ class CoreService:
                     "Recommended: Add a local_whisper provider for privacy, with OpenAI as fallback."
                 )
 
-            logger.info(f"Transcribing audio using {transcription_method}: {len(audio_data)} bytes, mime_type={mime_type}")
+            logger.info(f"Transcribing audio using {transcription_method}: {temp_path}, mime_type={mime_type}")
 
             # 5. Perform transcription
             result = None
@@ -3341,206 +3314,20 @@ class CoreService:
                 "error": str(e)
             }
         finally:
-            # Clean up temp file
-            try:
-                Path(temp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
+            # Only delete the temp file if we created it (not if the caller passed file_path)
+            if _temp_path_to_delete:
+                try:
+                    Path(_temp_path_to_delete).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     async def preload_whisper_model(self, provider_alias: str | None = None) -> dict:
-        """
-        Pre-load Whisper model into memory/GPU for faster first transcription.
-
-        Called by UI when user enables auto-transcribe to avoid delays on first voice message.
-
-        Args:
-            provider_alias: Optional provider alias (default: first local_whisper provider)
-
-        Returns:
-            dict with status and info
-        """
-        try:
-            # Find Whisper provider
-            provider_obj = None
-
-            if provider_alias:
-                provider_obj = self.llm_manager.providers.get(provider_alias)
-                if not provider_obj or provider_obj.config.get("type") != "local_whisper":
-                    return {
-                        "status": "error",
-                        "error": f"Provider '{provider_alias}' is not a local Whisper provider"
-                    }
-            else:
-                # Find first local_whisper provider
-                for provider in self.llm_manager.providers.values():
-                    if provider.config.get("type") == "local_whisper":
-                        provider_obj = provider
-                        provider_alias = provider.alias
-                        break
-
-                if not provider_obj:
-                    return {
-                        "status": "error",
-                        "error": "No local Whisper provider configured"
-                    }
-
-            # Check if already loaded
-            if hasattr(provider_obj, 'is_model_loaded') and provider_obj.is_model_loaded():
-                logger.info(f"Whisper model already loaded for provider '{provider_alias}'")
-                return {
-                    "status": "success",
-                    "provider": provider_alias,
-                    "already_loaded": True
-                }
-
-            # Broadcast loading started event
-            await self.local_api.broadcast_event("whisper_model_loading_started", {
-                "provider": provider_alias
-            })
-
-            # Unload any other loaded Whisper providers to free VRAM before loading
-            for alias, p in self.llm_manager.providers.items():
-                if alias != provider_alias and p.config.get("type") == "local_whisper":
-                    if hasattr(p, 'is_model_loaded') and p.is_model_loaded():
-                        logger.info(f"Unloading Whisper provider '{alias}' before loading '{provider_alias}'")
-                        await p.unload_model_async()
-
-            # Load model (this runs in thread pool, so it won't block)
-            logger.info(f"Pre-loading Whisper model for provider '{provider_alias}'...")
-
-            if hasattr(provider_obj, 'ensure_model_loaded'):
-                await provider_obj.ensure_model_loaded()
-            else:
-                # Fallback: trigger loading via a dummy transcription (silent audio)
-                logger.warning(f"Provider '{provider_alias}' doesn't support ensure_model_loaded(), using fallback")
-                return {
-                    "status": "error",
-                    "error": "Provider doesn't support pre-loading"
-                }
-
-            # Broadcast loading completed event
-            await self.local_api.broadcast_event("whisper_model_loaded", {
-                "provider": provider_alias
-            })
-
-            logger.info(f"Successfully pre-loaded Whisper model for provider '{provider_alias}'")
-
-            return {
-                "status": "success",
-                "provider": provider_alias,
-                "already_loaded": False
-            }
-
-        except Exception as e:
-            logger.error(f"Failed to pre-load Whisper model: {e}", exc_info=True)
-
-            # Broadcast loading failed event
-            await self.local_api.broadcast_event("whisper_model_loading_failed", {
-                "provider": provider_alias if provider_alias else "unknown",
-                "error": str(e)
-            })
-
-            return {
-                "status": "error",
-                "error": str(e)
-            }
+        """Delegated to VoiceService."""
+        return await self.voice_service.preload_whisper_model(provider_alias)
 
     async def download_whisper_model(self, provider_alias: str | None = None) -> dict:
-        """
-        Download Whisper model from HuggingFace to local cache.
-
-        Called by UI when user confirms download in the dialog.
-
-        Args:
-            provider_alias: Optional provider alias (default: first local_whisper provider)
-
-        Returns:
-            dict with status and info
-        """
-        try:
-            # Find Whisper provider
-            provider_obj = None
-
-            if provider_alias:
-                provider_obj = self.llm_manager.providers.get(provider_alias)
-                if not provider_obj or provider_obj.config.get("type") != "local_whisper":
-                    return {
-                        "status": "error",
-                        "error": f"Provider '{provider_alias}' is not a local Whisper provider"
-                    }
-            else:
-                # Find first local_whisper provider
-                for provider in self.llm_manager.providers.values():
-                    if provider.config.get("type") == "local_whisper":
-                        provider_obj = provider
-                        provider_alias = provider.alias
-                        break
-
-                if not provider_obj:
-                    return {
-                        "status": "error",
-                        "error": "No local Whisper provider configured"
-                    }
-
-            # Check if provider supports download
-            if not hasattr(provider_obj, 'download_model_async'):
-                return {
-                    "status": "error",
-                    "error": f"Provider '{provider_alias}' doesn't support model download"
-                }
-
-            # Broadcast download started event
-            await self.local_api.broadcast_event("whisper_model_download_started", {
-                "provider": provider_alias,
-                "model_name": provider_obj.config.get("model", "unknown")
-            })
-
-            # Download model (this runs in thread pool, so it won't block)
-            logger.info(f"Starting Whisper model download for provider '{provider_alias}'...")
-
-            result = await provider_obj.download_model_async()
-
-            if result.get("success"):
-                # Broadcast download completed event
-                await self.local_api.broadcast_event("whisper_model_download_completed", {
-                    "provider": provider_alias,
-                    "model_name": result.get("model_name"),
-                    "cache_path": result.get("cache_path")
-                })
-
-                logger.info(f"Successfully downloaded Whisper model for provider '{provider_alias}'")
-
-                return {
-                    "status": "success",
-                    "provider": provider_alias,
-                    "model_name": result.get("model_name"),
-                    "message": result.get("message")
-                }
-            else:
-                # Broadcast download failed event
-                await self.local_api.broadcast_event("whisper_model_download_failed", {
-                    "provider": provider_alias,
-                    "error": result.get("message")
-                })
-
-                return {
-                    "status": "error",
-                    "error": result.get("message")
-                }
-
-        except Exception as e:
-            logger.error(f"Failed to download Whisper model: {e}", exc_info=True)
-
-            # Broadcast download failed event
-            await self.local_api.broadcast_event("whisper_model_download_failed", {
-                "provider": provider_alias if provider_alias else "unknown",
-                "error": str(e)
-            })
-
-            return {
-                "status": "error",
-                "error": str(e)
-            }
+        """Delegated to VoiceService."""
+        return await self.voice_service.download_whisper_model(provider_alias)
 
     async def _transcribe_with_openai(self, audio_path: str, provider_config: dict) -> dict:
         """
@@ -3792,7 +3579,8 @@ class CoreService:
 
                 # 11. Update conversation monitor with transcribed text (v0.15.1 fix)
                 # This ensures proposals include the actual transcription instead of placeholder
-                monitor = self._get_or_create_conversation_monitor(node_id)
+                monitor_key = group_id if group_id else node_id
+                monitor = self._get_or_create_conversation_monitor(monitor_key)
                 if monitor:
                     # Find and update Message objects in buffer with transcription
                     for message_list in [monitor.message_buffer, monitor.full_conversation]:
@@ -3820,63 +3608,16 @@ class CoreService:
                 logger.error(f"Transcription failed for transfer {transfer_id}: {e}", exc_info=True)
 
     def _load_voice_transcription_settings(self) -> None:
-        """
-        Load per-conversation voice transcription settings from disk.
-
-        Settings stored in ~/.dpc/voice_transcription_settings.json:
-        {
-            "node_id_1": true,
-            "node_id_2": false,
-            ...
-        }
-        """
-        settings_file = DPC_HOME_DIR / "voice_transcription_settings.json"
-        if settings_file.exists():
-            try:
-                import json
-                with open(settings_file, 'r') as f:
-                    self._voice_transcription_settings = json.load(f)
-                logger.debug(f"Loaded voice transcription settings for {len(self._voice_transcription_settings)} conversations")
-            except Exception as e:
-                logger.warning(f"Failed to load voice transcription settings: {e}")
-                self._voice_transcription_settings = {}
-        else:
-            logger.debug("No voice transcription settings file found, using empty settings")
-            self._voice_transcription_settings = {}
+        """Delegated to VoiceService."""
+        self.voice_service._load_voice_transcription_settings()
 
     def _save_voice_transcription_settings(self) -> None:
-        """Save per-conversation voice transcription settings to disk."""
-        settings_file = DPC_HOME_DIR / "voice_transcription_settings.json"
-        try:
-            import json
-            with open(settings_file, 'w') as f:
-                json.dump(self._voice_transcription_settings, f, indent=2)
-            logger.debug(f"Saved voice transcription settings for {len(self._voice_transcription_settings)} conversations")
-        except Exception as e:
-            logger.error(f"Failed to save voice transcription settings: {e}")
+        """Delegated to VoiceService."""
+        self.voice_service._save_voice_transcription_settings()
 
     def _is_transcription_needed(self) -> bool:
-        """
-        Check if any active conversation has auto-transcribe enabled.
-
-        Returns:
-            True if at least one conversation needs transcription, False otherwise.
-
-        Used to determine if Whisper model can be safely unloaded.
-        """
-        # Check if global auto-transcribe is enabled
-        value = self.settings.get('voice_messages', 'auto_transcribe', fallback='true')
-        global_enabled = value.lower() in ('true', '1', 'yes')
-
-        if not global_enabled:
-            return False  # Global disable overrides all
-
-        # Check per-conversation settings
-        for node_id, enabled in self._voice_transcription_settings.items():
-            if enabled:
-                return True  # At least one conversation needs it
-
-        return False  # No conversations need transcription
+        """Delegated to VoiceService."""
+        return self.voice_service._is_transcription_needed()
 
     async def _retroactively_transcribe_conversation(self, node_id: str) -> None:
         """
@@ -3977,46 +3718,8 @@ class CoreService:
                 pass  # Ignore broadcast errors
 
     async def _check_transcription_capability(self, check_model_loaded: bool = True) -> bool:
-        """
-        Check if this node has transcription capability (provider available AND ready).
-
-        Args:
-            check_model_loaded: If True, check if local_whisper model is loaded in memory.
-                               If False, only check if provider exists (allow lazy loading).
-                               Use False for senders, True for receivers.
-
-        For local_whisper providers, optionally checks if model is actually loaded in memory.
-        This prevents failed transcription attempts when model is not ready.
-
-        Returns:
-            True if at least one transcription provider is available (and loaded if check_model_loaded=True)
-        """
-        provider_priority = self.settings.get_voice_transcription_provider_priority()
-        logger.debug(f"Checking transcription capability with provider priority: {provider_priority} (check_loaded={check_model_loaded})")
-        logger.debug(f"Available LLM providers: {list(self.llm_manager.providers.keys())}")
-
-        for provider_alias in provider_priority:
-            # Check if provider exists in LLM manager
-            if provider_alias in self.llm_manager.providers:
-                provider = self.llm_manager.providers[provider_alias]
-                # Check if provider supports voice (has whisper or audio capabilities)
-                provider_type = provider.config.get("type", "")
-                logger.debug(f"Provider '{provider_alias}' has type '{provider_type}'")
-
-                if provider_type in ["local_whisper", "openai", "openai_compatible"]:
-                    # For local_whisper, optionally check if model is actually loaded
-                    if check_model_loaded and provider_type == "local_whisper":
-                        if hasattr(provider, 'is_model_loaded') and not provider.is_model_loaded():
-                            logger.info(f"Provider '{provider_alias}' exists but model not loaded yet, skipping")
-                            continue  # Try next provider
-
-                    logger.info(f"Found transcription capability: {provider_alias} ({provider_type})")
-                    return True
-            else:
-                logger.debug(f"Provider '{provider_alias}' not found in LLM manager")
-
-        logger.warning(f"No transcription providers found in priority list: {provider_priority}")
-        return False
+        """Delegated to VoiceService."""
+        return await self.voice_service._check_transcription_capability(check_model_loaded)
 
     async def _broadcast_voice_transcription(
         self,
@@ -4034,13 +3737,16 @@ class CoreService:
             transcription_data: Transcription result
             group_id: If set, fan-out to all group members (v0.19.0)
         """
+        payload_data = {
+            "transfer_id": transfer_id,
+            "transcription_text": transcription_data.get("text", ""),
+            **transcription_data
+        }
+        if group_id:
+            payload_data["group_id"] = group_id  # Needed for relay and monitor lookup
         message = {
             "command": "VOICE_TRANSCRIPTION",
-            "payload": {
-                "transfer_id": transfer_id,
-                "transcription_text": transcription_data.get("text", ""),
-                **transcription_data
-            }
+            "payload": payload_data,
         }
 
         if group_id and hasattr(self, 'group_manager'):
@@ -4124,6 +3830,15 @@ class CoreService:
                 logger.info("Notifying connected peers of provider changes")
                 await self._notify_peers_of_provider_changes()
 
+                # Sync agent evolution/consciousness settings without restart
+                try:
+                    dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
+                        for mgr in dpc_agent_provider._managers.values():
+                            mgr.sync_firewall_settings()
+                except Exception as e:
+                    logger.warning("Failed to sync agent firewall settings: %s", e)
+
                 # Emit event to UI
                 await self.local_api.broadcast_event("firewall_rules_updated", {
                     "message": message
@@ -4184,6 +3899,110 @@ class CoreService:
                 "message": str(e)
             }
 
+    async def get_session_archive_info(self, conversation_id: str) -> Dict[str, Any]:
+        """Return archive metadata for a conversation's session archive folder.
+
+        UI Integration: Called when the Agent Permissions panel opens for a specific agent.
+
+        Args:
+            conversation_id: The conversation/agent ID (e.g. "agent_001")
+
+        Returns:
+            Dict with count, max_sessions, archive_path, and session list.
+        """
+        try:
+            import json as _json
+            from pathlib import Path
+            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
+            # S25 Batch 1.1: honour per-agent profile override, not just global firewall setting
+            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 40) if self.firewall else 40
+            if self.firewall:
+                profile = self.firewall.rules.get("agent_profiles", {}).get(conversation_id, {})
+                hist = profile.get("history", {}) if profile else {}
+                if "max_archived_sessions" in hist:
+                    max_sessions = max(1, min(200, int(hist["max_archived_sessions"])))
+
+            if not archive_dir.exists():
+                return {
+                    "status": "success",
+                    "conversation_id": conversation_id,
+                    "count": 0,
+                    "max_sessions": max_sessions,
+                    "archive_path": str(archive_dir),
+                    "sessions": [],
+                }
+
+            # ADR-008: rglob to find sessions in YYYY/MM subdirs + flat (backward compat)
+            archives = sorted(archive_dir.rglob("*_session.json"))
+            sessions = []
+            for p in archives:
+                try:
+                    data = _json.loads(p.read_text(encoding="utf-8"))
+                    sessions.append({
+                        "filename": p.name,
+                        "archived_at": data.get("archived_at", ""),
+                        "reason": data.get("session_reason", ""),
+                        "message_count": data.get("message_count", 0),
+                    })
+                except Exception:
+                    sessions.append({"filename": p.name, "archived_at": "", "reason": "", "message_count": 0})
+
+            return {
+                "status": "success",
+                "conversation_id": conversation_id,
+                "count": len(archives),
+                "max_sessions": max_sessions,
+                "archive_path": str(archive_dir),
+                "sessions": sessions,
+            }
+        except Exception as e:
+            logger.error("Error getting session archive info: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def clear_session_archives(self, conversation_id: str, keep_latest: int = 0) -> Dict[str, Any]:
+        """Delete archived sessions for a conversation, optionally keeping the most recent N.
+
+        UI Integration: Called when user clicks 'Clear old archives' in Agent Permissions panel.
+
+        Args:
+            conversation_id: The conversation/agent ID (e.g. "agent_001")
+            keep_latest: Number of most recent archives to keep (0 = delete all)
+
+        Returns:
+            Dict with deleted_count and remaining count.
+        """
+        try:
+            from pathlib import Path
+            archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
+
+            if not archive_dir.exists():
+                return {"status": "success", "deleted_count": 0, "remaining": 0}
+
+            # ADR-008: rglob to find sessions in YYYY/MM subdirs + flat (backward compat)
+            archives = sorted(archive_dir.rglob("*_session.json"))
+            keep_latest = max(0, int(keep_latest))
+            to_delete = archives[: max(0, len(archives) - keep_latest)]
+
+            deleted = 0
+            for p in to_delete:
+                try:
+                    p.unlink()
+                    deleted += 1
+                    # Clean up empty YYYY/MM dirs after deletion
+                    try:
+                        p.parent.rmdir()  # only removes if empty
+                    except OSError:
+                        pass
+                except Exception as e:
+                    logger.warning("Failed to delete archive %s: %s", p.name, e)
+
+            remaining = len(archives) - deleted
+            logger.info("Cleared %d archives for %s (%d remaining)", deleted, conversation_id, remaining)
+            return {"status": "success", "deleted_count": deleted, "remaining": remaining}
+        except Exception as e:
+            logger.error("Error clearing session archives: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     async def validate_firewall_rules(self, rules_text: str) -> Dict[str, Any]:
         """Validate firewall rules without saving.
 
@@ -4213,412 +4032,47 @@ class CoreService:
                 "message": str(e)
             }
 
-    async def get_voice_transcription_config(self) -> Dict[str, Any]:
-        """
-        Get voice transcription configuration.
+    async def get_voice_transcription_config(self) -> dict:
+        """Delegated to VoiceService."""
+        return await self.voice_service.get_voice_transcription_config()
 
-        UI Integration: Called when user opens voice transcription settings.
+    async def save_voice_transcription_config(self, config: dict) -> dict:
+        """Delegated to VoiceService."""
+        return await self.voice_service.save_voice_transcription_config(config)
 
-        Returns:
-            Dict with voice transcription settings
-        """
-        try:
-            return {
-                "status": "success",
-                "enabled": self.settings.get_voice_transcription_enabled(),
-                "sender_transcribes": self.settings.get_voice_transcription_sender_transcribes(),
-                "recipient_delay_seconds": self.settings.get_voice_transcription_recipient_delay_seconds(),
-                "provider_priority": self.settings.get_voice_transcription_provider_priority(),
-                "show_transcriber_name": self.settings.get_voice_transcription_show_transcriber_name(),
-                "cache_enabled": self.settings.get_voice_transcription_cache_enabled(),
-                "fallback_to_openai": self.settings.get_voice_transcription_fallback_to_openai()
-            }
-        except Exception as e:
-            logger.error("Error getting voice transcription config: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+    async def set_conversation_transcription(self, node_id: str, enabled: bool) -> dict:
+        """Delegated to VoiceService."""
+        return await self.voice_service.set_conversation_transcription(node_id, enabled)
 
-    async def save_voice_transcription_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Save voice transcription configuration.
-
-        UI Integration: Called when user saves voice transcription settings.
-
-        Args:
-            config: Voice transcription configuration dict
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            # Update settings
-            for key, value in config.items():
-                if key == "status":  # Skip status field from request
-                    continue
-                config_value = str(value) if not isinstance(value, list) else ",".join(value)
-                self.settings.set('voice_transcription', key, config_value)
-
-            # Persist to disk
-            self.settings.save()
-
-            # Broadcast update event to UI
-            await self.local_api.broadcast_event("voice_transcription_config_updated", config)
-
-            return {
-                "status": "success",
-                "message": "Voice transcription settings saved successfully"
-            }
-
-        except Exception as e:
-            logger.error("Error saving voice transcription config: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
-
-    async def set_conversation_transcription(self, node_id: str, enabled: bool) -> Dict[str, Any]:
-        """
-        Set per-conversation auto-transcription setting (v0.13.2+ UI checkbox control).
-
-        UI Integration: Called when user toggles "Auto Transcribe" checkbox in chat header.
-
-        Args:
-            node_id: Peer node ID for the conversation
-            enabled: True to enable auto-transcription, False to disable
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            # Update in-memory setting
-            self._voice_transcription_settings[node_id] = enabled
-
-            # Persist to disk
-            self._save_voice_transcription_settings()
-
-            logger.info(f"Set auto-transcription for {node_id}: {enabled}")
-
-            # If enabling auto-transcribe, retroactively transcribe previous untranscribed voice messages
-            if enabled:
-                asyncio.create_task(self._retroactively_transcribe_conversation(node_id))
-
-            # Check if we should unload the model
-            if not enabled:
-                # Check if any other conversation still needs transcription
-                if not self._is_transcription_needed():
-                    logger.info("Auto-transcribe disabled for all conversations, unloading Whisper model...")
-
-                    # Find the local_whisper provider
-                    whisper_provider = None
-                    for alias, provider in self.llm_manager.providers.items():
-                        if provider.config.get('type') == 'local_whisper':
-                            if hasattr(provider, 'unload_model_async'):
-                                whisper_provider = provider
-                                break
-
-                    # Unload the model
-                    if whisper_provider:
-                        try:
-                            await whisper_provider.unload_model_async()
-
-                            # Broadcast unload event to UI
-                            await self.local_api.broadcast_event("whisper_model_unloaded", {
-                                "reason": "auto_transcribe_disabled"
-                            })
-
-                            logger.info("Whisper model unloaded successfully")
-                        except Exception as e:
-                            logger.error(f"Failed to unload Whisper model: {e}", exc_info=True)
-                    else:
-                        logger.debug("No local_whisper provider found to unload")
-
-            return {
-                "status": "success",
-                "message": f"Auto-transcription {'enabled' if enabled else 'disabled'} for conversation"
-            }
-
-        except Exception as e:
-            logger.error(f"Error setting conversation transcription for {node_id}: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
-
-    async def get_conversation_transcription(self, node_id: str) -> Dict[str, Any]:
-        """
-        Get per-conversation auto-transcription setting (v0.13.2+ UI checkbox state).
-
-        UI Integration: Called when chat loads to restore checkbox state.
-
-        Args:
-            node_id: Peer node ID for the conversation
-
-        Returns:
-            Dict with status and enabled flag
-        """
-        try:
-            # Default to True if not set (backward compatibility)
-            enabled = self._voice_transcription_settings.get(node_id, True)
-
-            return {
-                "status": "success",
-                "enabled": enabled
-            }
-
-        except Exception as e:
-            logger.error(f"Error getting conversation transcription for {node_id}: {e}", exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e),
-                "enabled": True  # Default to enabled on error
-            }
+    async def get_conversation_transcription(self, node_id: str) -> dict:
+        """Delegated to VoiceService."""
+        return await self.voice_service.get_conversation_transcription(node_id)
 
     async def vote_knowledge_commit(
         self,
         proposal_id: str,
         vote: str,
-        comment: str = None
+        comment: str = None,
+        entries: list = None,
+        summary: str = None,
     ) -> Dict[str, Any]:
-        """Cast vote on a knowledge commit proposal.
-
-        UI Integration: Called when user clicks approve/reject/request_changes
-        in KnowledgeCommitDialog component.
-
-        Args:
-            proposal_id: ID of the proposal to vote on
-            vote: 'approve', 'reject', or 'request_changes'
-            comment: Optional comment explaining the vote
-
-        Returns:
-            Dict with status and result
-        """
-        try:
-            # Check if this is an AI chat proposal (AI agent needs to vote too)
-            is_ai_chat = False
-            ai_agent_node_id = None
-            if proposal_id in self.consensus_manager.sessions:
-                session = self.consensus_manager.sessions[proposal_id]
-                conversation_id = session.proposal.conversation_id
-                if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
-                    is_ai_chat = True
-                    ai_agent_node_id = conversation_id
-                elif conversation_id.startswith("agent_"):
-                    is_ai_chat = True
-                    ai_agent_node_id = "dpc-agent"  # hardcoded in agent_manager.py participants
-
-            # Cast user's vote through ConsensusManager
-            # For AI chats, don't broadcast to peers (use no-op)
-            broadcast_func = self._broadcast_to_peers
-            if is_ai_chat:
-                async def _no_op_broadcast(message: Dict[str, Any]) -> None:
-                    pass  # AI chats are private, no peer broadcast
-                broadcast_func = _no_op_broadcast
-
-            success = await self.consensus_manager.cast_vote(
-                proposal_id=proposal_id,
-                vote=vote,
-                comment=comment,
-                broadcast_func=broadcast_func
-            )
-
-            if success and is_ai_chat:
-                # User voted first, now trigger AI agent to evaluate and vote
-                logger.info("User voted on AI chat proposal %s, triggering AI evaluation", proposal_id)
-                asyncio.create_task(
-                    self._ai_agent_vote_on_proposal(proposal_id, ai_agent_node_id)
-                )
-
-            if success:
-                return {
-                    "status": "success",
-                    "message": f"Vote cast: {vote}"
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": "Proposal not found or voting session expired"
-                }
-
-        except Exception as e:
-            logger.error("Error voting on knowledge commit: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.vote_knowledge_commit(
+            proposal_id, vote, comment, entries=entries, summary=summary
+        )
 
     async def _ai_agent_vote_on_proposal(self, proposal_id: str, ai_agent_node_id: str) -> None:
-        """Have the AI agent evaluate and cast a vote on a knowledge proposal.
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._ai_agent_vote_on_proposal(proposal_id, ai_agent_node_id)
 
-        The AI agent reviews the proposed knowledge entries and makes a reasoned
-        decision to approve, reject, or request changes.
-
-        Args:
-            proposal_id: ID of the proposal to vote on
-            ai_agent_node_id: The AI agent's node_id (same as conversation_id)
-        """
-        try:
-            # Get the proposal
-            if proposal_id not in self.consensus_manager.sessions:
-                logger.warning("AI vote: Proposal %s not found", proposal_id)
-                return
-
-            session = self.consensus_manager.sessions[proposal_id]
-            proposal = session.proposal
-
-            # Check if AI already voted (prevent double voting)
-            if ai_agent_node_id in session.votes:
-                logger.info("AI agent %s already voted on proposal %s", ai_agent_node_id, proposal_id)
-                return
-
-            # Evaluate the proposal using AI
-            ai_decision = await self._evaluate_knowledge_proposal_for_ai_vote(proposal)
-
-            logger.info(
-                "AI agent %s voting on proposal %s: %s - %s",
-                ai_agent_node_id, proposal_id, ai_decision["vote"], ai_decision.get("comment", "")
-            )
-
-            # Cast AI's vote (directly through consensus_manager, no broadcast for AI chats)
-            from dpc_protocol.knowledge_commit import CommitVote
-
-            vote_obj = CommitVote(
-                proposal_id=proposal_id,
-                voter_node_id=ai_agent_node_id,
-                vote=ai_decision["vote"],
-                comment=ai_decision.get("comment"),
-                is_required_dissent=False
-            )
-
-            # Record the vote
-            session.votes[ai_agent_node_id] = vote_obj
-
-            # Broadcast AI vote to UI
-            await self.local_api.broadcast_event(
-                "knowledge_vote_received",
-                {
-                    "proposal_id": proposal_id,
-                    "voter_node_id": ai_agent_node_id,
-                    "voter_name": "DPC Agent",
-                    "vote": ai_decision["vote"],
-                    "comment": ai_decision.get("comment", "")
-                }
-            )
-
-            # Check if voting is complete (all participants have voted)
-            if len(session.votes) == len(session.proposal.participants):
-                await self.consensus_manager._finalize_vote(session)
-
-        except Exception as e:
-            logger.error("Error in AI agent voting: %s", e, exc_info=True)
-
-    async def _evaluate_knowledge_proposal_for_ai_vote(self, proposal) -> Dict[str, Any]:
-        """Evaluate a knowledge proposal and return an AI vote decision.
-
-        The AI reviews each knowledge entry for accuracy, relevance, and quality,
-        then decides whether to approve, reject, or request changes.
-
-        Args:
-            proposal: KnowledgeCommitProposal to evaluate
-
-        Returns:
-            Dict with 'vote' (approve/reject/request_changes) and 'comment'
-        """
-        try:
-            # Build evaluation prompt
-            entries_text = ""
-            for i, entry in enumerate(proposal.entries, 1):
-                entries_text += f"\n{i}. {entry.content} (confidence: {entry.confidence:.2f})"
-                if hasattr(entry, 'tags') and entry.tags:
-                    entries_text += f" [tags: {', '.join(entry.tags)}]"
-
-            prompt = f"""You are reviewing a knowledge commit proposal from a conversation you just participated in as the DPC Agent. You need to vote on whether this knowledge should be saved to the user's personal knowledge base.
-
-**Proposal Topic:** {proposal.topic}
-**Summary:** {proposal.summary}
-**Average Confidence:** {proposal.avg_confidence:.2f}
-
-**Knowledge Entries:**{entries_text}
-
-**Your Task:**
-Evaluate each entry for:
-1. **Accuracy**: Is this factually correct based on standard knowledge? (Not opinions)
-2. **Relevance**: Is this genuinely useful knowledge worth preserving?
-3. **Redundancy**: Does this duplicate or contradict existing common knowledge?
-4. **Quality**: Is the entry clear, specific, and well-formulated?
-
-**Voting Options:**
-- `approve`: Knowledge is accurate, relevant, and worth saving
-- `reject`: Knowledge is factually incorrect, irrelevant, or harmful
-- `request_changes`: Knowledge has potential but needs revision (explain what)
-
-**IMPORTANT:**
-- Be thoughtful but not overly critical - personal knowledge is subjective
-- Technical facts, user preferences, and learned insights are all valid
-- If most entries are good but a few need work, vote request_changes
-- Only reject if the knowledge is genuinely problematic
-
-Respond in JSON format:
-{{
-    "vote": "approve" | "reject" | "request_changes",
-    "comment": "Brief explanation of your decision (1-2 sentences)",
-    "entry_feedback": [
-        {{"index": 1, "assessment": "good" | "needs_work" | "problematic", "note": "optional note"}}
-    ]
-}}
-"""
-
-            # Use the LLM to evaluate
-            response = await self.llm_manager.query(
-                prompt=prompt,
-                provider_alias=None,  # Use default provider
-                max_tokens=500
-            )
-
-            # Parse the response (response is already a string when return_metadata=False)
-            response_text = response
-
-            # Try to extract JSON from the response
-            json_match = re.search(r'\{[\s\S]*\}', response_text)
-            if json_match:
-                decision = json.loads(json_match.group())
-            else:
-                # Fallback: try parsing the whole response
-                decision = json.loads(response_text)
-
-            vote = decision.get("vote", "approve")
-            comment = decision.get("comment", "")
-
-            # Add entry feedback to comment if available
-            entry_feedback = decision.get("entry_feedback", [])
-            if entry_feedback and vote == "request_changes":
-                feedback_notes = []
-                for ef in entry_feedback:
-                    if ef.get("assessment") != "good" and ef.get("note"):
-                        feedback_notes.append(f"Entry {ef.get('index')}: {ef.get('note')}")
-                if feedback_notes:
-                    comment += " | " + "; ".join(feedback_notes[:3])  # Limit to 3 notes
-
-            return {
-                "vote": vote,
-                "comment": comment[:500]  # Limit comment length
-            }
-
-        except json.JSONDecodeError as e:
-            logger.warning("AI vote evaluation returned invalid JSON: %s", e)
-            # Default to approve on parsing error (generous interpretation)
-            return {
-                "vote": "approve",
-                "comment": "AI evaluation completed (defaulting to approve due to parsing issue)"
-            }
-        except Exception as e:
-            logger.error("Error in AI vote evaluation: %s", e, exc_info=True)
-            # Default to approve on error
-            return {
-                "vote": "approve",
-                "comment": "AI evaluation encountered an error, defaulting to user's judgment"
-            }
+    async def _evaluate_knowledge_proposal_for_ai_vote(
+        self,
+        proposal,
+        provider_alias: Optional[str] = None,
+        conversation_history: Optional[list] = None,
+    ) -> Dict[str, Any]:
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service._evaluate_knowledge_proposal_for_ai_vote(proposal, provider_alias=provider_alias, conversation_history=conversation_history)
 
     async def _broadcast_to_peers(self, message: Dict[str, Any]) -> None:
         """Broadcast message to all connected peers.
@@ -4647,226 +4101,26 @@ Respond in JSON format:
                     logger.error("Failed to send group message to %s: %s", node_id[:20], e)
 
     def _get_or_create_conversation_monitor(self, conversation_id: str, instruction_set_name: str = None) -> ConversationMonitor:
-        """Get or create a conversation monitor for a conversation/peer.
+        """Delegated to KnowledgeService."""
+        return self.knowledge_service._get_or_create_conversation_monitor(conversation_id, instruction_set_name)
 
-        Args:
-            conversation_id: Identifier for the conversation (peer node_id or "local_ai")
-            instruction_set_name: Optional instruction set to use for this conversation (defaults to "general")
-
-        Returns:
-            ConversationMonitor instance
-        """
-        if conversation_id not in self.conversation_monitors:
-            # Build participants list
-            participants = []
-
-            if conversation_id == "local_ai" or conversation_id.startswith("ai_"):
-                # AI chat: user + AI agent as participant (for collaborative knowledge voting)
-                participants = [
-                    {
-                        "node_id": self.p2p_manager.node_id,
-                        "name": "User",
-                        "context": "local"
-                    },
-                    {
-                        "node_id": conversation_id,  # AI agent uses conversation_id as its node_id
-                        "name": "DPC Agent",
-                        "context": "ai_agent"
-                    }
-                ]
-            elif conversation_id.startswith("group-"):
-                # Group chat: all group members as participants
-                group = self.group_manager.get_group(conversation_id)
-                if group:
-                    for member_id in group.members:
-                        if member_id == self.p2p_manager.node_id:
-                            participants.append({
-                                "node_id": member_id,
-                                "name": "User",
-                                "context": "local"
-                            })
-                        else:
-                            participants.append({
-                                "node_id": member_id,
-                                "name": self.peer_metadata.get(member_id, {}).get("name", member_id),
-                                "context": "peer"
-                            })
-                else:
-                    # Group not found, minimal participant list
-                    participants = [{"node_id": self.p2p_manager.node_id, "name": "User", "context": "local"}]
-            else:
-                # Peer chat: user + peer
-                participants = [
-                    {
-                        "node_id": self.p2p_manager.node_id,
-                        "name": "User",
-                        "context": "local"
-                    },
-                    {
-                        "node_id": conversation_id,
-                        "name": self.peer_metadata.get(conversation_id, {}).get("name", conversation_id),
-                        "context": "peer"
-                    }
-                ]
-
-            self.conversation_monitors[conversation_id] = ConversationMonitor(
-                conversation_id=conversation_id,
-                participants=participants,
-                llm_manager=self.llm_manager,
-                knowledge_threshold=0.7,  # 70% confidence threshold
-                settings=self.settings,  # Pass settings for config (e.g., cultural_perspectives_enabled)
-                ai_query_func=self.send_ai_query,  # Enable both local and remote inference for knowledge detection
-                auto_detect=self.auto_knowledge_detection_enabled,  # Pass auto-detection setting
-                instruction_set_name=instruction_set_name or self.instruction_set.default  # Use provided or default instruction set
-            )
-
-            # Load persisted history from disk (v0.20.0)
-            # Only for group chats - peer chats sync via CHAT_HISTORY_REQUEST
-            if conversation_id.startswith("group-"):
-                if self.conversation_monitors[conversation_id].load_history():
-                    logger.info("Loaded persisted history for group %s (%d messages)",
-                               conversation_id,
-                               len(self.conversation_monitors[conversation_id].message_history))
-
-            logger.info("Created conversation monitor for %s with %d participant(s) (auto_detect=%s, instruction_set=%s)", conversation_id, len(participants), self.auto_knowledge_detection_enabled, instruction_set_name or self.instruction_set.default)
-
-        return self.conversation_monitors[conversation_id]
-
-    async def end_conversation_session(self, conversation_id: str) -> Dict[str, Any]:
-        """Manually end a conversation session and extract knowledge.
-
-        UI Integration: Called when user clicks "End Session & Save Knowledge" button.
-
-        Args:
-            conversation_id: The conversation/peer ID to end session for
-
-        Returns:
-            Dict with status and proposal (if knowledge detected)
-        """
-        try:
-            # For agent conversations, the monitor lives inside DpcAgentManager._agent_monitors,
-            # not in service.conversation_monitors. Mirror the same lookup used by get_conversation_history.
-            monitor = None
-            if conversation_id.startswith("agent_"):
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    if conversation_id in dpc_agent_provider._managers:
-                        agent_manager = dpc_agent_provider._managers[conversation_id]
-                        if hasattr(agent_manager, '_agent_monitors'):
-                            monitor = agent_manager._agent_monitors.get(conversation_id)
-            if monitor is None:
-                monitor = self._get_or_create_conversation_monitor(conversation_id)
-
-            logger.info("End Session - attempting manual extraction for %s", conversation_id)
-            logger.info(
-                "Full conversation: %d messages (incremental buffer: %d), Score: %.2f",
-                len(monitor.full_conversation),
-                len(monitor.message_buffer),
-                monitor.knowledge_score
-            )
-
-            # Force knowledge extraction even if threshold not met
-            proposal = await monitor.generate_commit_proposal(force=True)
-
-            if proposal:
-                logger.info("Knowledge proposal generated for %s", conversation_id)
-                logger.info("Topic: %s, Entries: %d, Confidence: %.2f", proposal.topic, len(proposal.entries), proposal.avg_confidence)
-
-                # Broadcast to UI
-                await self.local_api.broadcast_event(
-                    "knowledge_commit_proposed",
-                    proposal.to_dict()
-                )
-
-                # For local_ai, ai_chat_xxx, telegram, and agent conversations, don't broadcast to peers (privacy)
-                # For peer conversations, broadcast for collaborative consensus
-                if (conversation_id == "local_ai" or conversation_id.startswith("ai_")
-                        or conversation_id.startswith("telegram-") or conversation_id.startswith("agent_")):
-                    logger.info("%s - private conversation, knowledge will not be shared with peers", conversation_id)
-                    # Use no-op broadcast function (local-only approval)
-                    async def _no_op_broadcast(message: Dict[str, Any]) -> None:
-                        pass  # Don't send to peers for private conversations
-
-                    await self.consensus_manager.propose_commit(
-                        proposal=proposal,
-                        broadcast_func=_no_op_broadcast
-                    )
-                elif conversation_id.startswith("group-"):
-                    # Group conversation - broadcast to group members only
-                    logger.info("Group Chat - broadcasting knowledge proposal to group %s for consensus", conversation_id)
-
-                    async def _group_broadcast(message: Dict[str, Any], _gid=conversation_id) -> None:
-                        await self._broadcast_to_group(_gid, message)
-
-                    await self.consensus_manager.propose_commit(
-                        proposal=proposal,
-                        broadcast_func=_group_broadcast
-                    )
-                else:
-                    # Peer conversation - broadcast for collaborative knowledge building
-                    logger.info("Peer Chat - broadcasting knowledge proposal to peers for consensus")
-                    await self.consensus_manager.propose_commit(
-                        proposal=proposal,
-                        broadcast_func=self._broadcast_to_peers
-                    )
-
-                return {
-                    "status": "success",
-                    "message": "Knowledge proposal created",
-                    "proposal_id": proposal.proposal_id
-                }
-            else:
-                logger.info("No proposal generated - buffer was empty or no knowledge detected")
-                return {
-                    "status": "success",
-                    "message": "No significant knowledge detected in conversation (buffer may be empty)"
-                }
-
-        except Exception as e:
-            logger.error("Error ending conversation session: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+    async def end_conversation_session(
+        self,
+        conversation_id: str,
+        initiated_by: str = "user_request",
+    ) -> Dict[str, Any]:
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.end_conversation_session(conversation_id, initiated_by)
 
     async def toggle_auto_knowledge_detection(self, enabled: bool = None) -> Dict[str, Any]:
-        """Toggle automatic knowledge detection on/off.
+        """Delegated to KnowledgeService."""
+        return await self.knowledge_service.toggle_auto_knowledge_detection(enabled)
 
-        UI Integration: Called when user toggles the auto-detection switch.
-
-        Args:
-            enabled: True to enable, False to disable, None to toggle current state
-
-        Returns:
-            Dict with status and current state
-        """
-        try:
-            if enabled is None:
-                # Toggle current state
-                self.auto_knowledge_detection_enabled = not self.auto_knowledge_detection_enabled
-            else:
-                # Set to specific value
-                self.auto_knowledge_detection_enabled = enabled
-
-            state_text = "enabled" if self.auto_knowledge_detection_enabled else "disabled"
-            logger.info("Auto knowledge detection %s", state_text)
-
-            # Update all existing conversation monitors to reflect the new setting
-            for monitor in self.conversation_monitors.values():
-                monitor.auto_detect = self.auto_knowledge_detection_enabled
-
-            return {
-                "status": "success",
-                "enabled": self.auto_knowledge_detection_enabled,
-                "message": f"Automatic knowledge detection {state_text}"
-            }
-
-        except Exception as e:
-            logger.error("Error toggling auto knowledge detection: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+    def _resolve_agent_token_limit(self, agent_id: str) -> int:
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return 0
+        return self.agent_service._resolve_agent_token_limit(agent_id)
 
     async def get_conversation_history(self, conversation_id: str) -> Dict[str, Any]:
         """Get conversation history from backend (for frontend sync after page refresh).
@@ -4882,91 +4136,36 @@ Respond in JSON format:
         try:
             monitor = self.conversation_monitors.get(conversation_id)
 
-            # Special handling for agent conversations - their monitors are in AgentManager
+            # Agent conversations: always read from disk file (source of truth)
+            # The in-memory monitor can be stale after session resets, knowledge commits,
+            # or when messages arrive via different paths (Telegram, MCP, chain triggers).
+            # history.json is written on every save_history() call, so it's always current.
             if not monitor and conversation_id.startswith("agent_"):
-                # Get the dpc_agent provider to access the agent manager
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):
-                    # Check if we have a manager for this specific agent
-                    # conversation_id format is "agent_001", so we use it as the agent_id
-                    if conversation_id in dpc_agent_provider._managers:
-                        agent_manager = dpc_agent_provider._managers[conversation_id]
-                        if hasattr(agent_manager, '_agent_monitors'):
-                            monitor = agent_manager._agent_monitors.get(conversation_id)
-                            if monitor:
-                                # Monitor exists in memory — load history from disk if empty
-                                # (Check file exists to prevent reloading after reset, where
-                                # message_history is cleared but file is deleted)
-                                if not monitor.message_history:
-                                    history_path = monitor._get_history_path()
-                                    if history_path.exists():
-                                        logger.debug("Loading agent conversation history from disk for %s", conversation_id)
-                                        monitor.load_history()
-                                    else:
-                                        logger.debug("No history file found for %s (likely reset), skipping load", conversation_id)
-                                logger.debug("Found agent conversation monitor for %s in AgentManager", conversation_id)
-                            else:
-                                # Agent manager exists but monitor not created yet (no messages
-                                # processed since service start) — load history from disk directly
-                                logger.debug("Agent monitor not created for %s, loading history from disk", conversation_id)
-                                history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
-                                if history_path.exists():
-                                    try:
-                                        import json as _json
-                                        with open(history_path, encoding="utf-8") as f:
-                                            data = _json.load(f)
-                                        messages = data.get("messages", [])
-                                        logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
-                                        tokens_used = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                                        token_limit = 0
-                                        if self.llm_manager:
-                                            try:
-                                                _model = self.llm_manager.get_active_model_name()
-                                                token_limit = self.llm_manager.get_context_window(_model) or 0
-                                            except Exception:
-                                                pass
-                                        return {
-                                            "status": "success",
-                                            "messages": messages,
-                                            "message_count": len(messages),
-                                            "tokens_used": tokens_used,
-                                            "token_limit": token_limit
-                                        }
-                                    except Exception as e:
-                                        logger.error("Failed to load agent history from disk: %s", e)
-                                else:
-                                    logger.debug("No history file found at %s", history_path)
-                    else:
-                        # Agent manager not created yet - try to load history directly from disk
-                        logger.debug("Agent manager not created for %s, attempting to load history from disk", conversation_id)
-                        history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
-                        if history_path.exists():
-                            try:
-                                import json
-                                with open(history_path, encoding="utf-8") as f:
-                                    data = json.load(f)
-                                messages = data.get("messages", [])
-                                logger.info("Loaded %d messages from disk for %s (agent manager not created yet)", len(messages), conversation_id)
-                                tokens_used = sum(len(msg.get("content", "") or "") for msg in messages) // 4
-                                token_limit = 0
-                                if self.llm_manager:
-                                    try:
-                                        _model = self.llm_manager.get_active_model_name()
-                                        token_limit = self.llm_manager.get_context_window(_model) or 0
-                                    except Exception:
-                                        pass
-                                # Return early with the loaded messages
-                                return {
-                                    "status": "success",
-                                    "messages": messages,
-                                    "message_count": len(messages),
-                                    "tokens_used": tokens_used,
-                                    "token_limit": token_limit
-                                }
-                            except Exception as e:
-                                logger.error("Failed to load agent history from disk: %s", e)
-                        else:
-                            logger.debug("No history file found at %s", history_path)
+                history_path = DPC_HOME_DIR / "conversations" / conversation_id / "history.json"
+                if history_path.exists():
+                    try:
+                        import json as _json
+                        with open(history_path, encoding="utf-8") as f:
+                            data = _json.load(f)
+                        messages = data.get("messages", [])
+                        logger.info("Loaded %d messages from disk for %s", len(messages), conversation_id)
+                        token_stats = data.get("token_stats", {})
+                        history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+                        token_limit = token_stats.get("token_limit", 0) or self._resolve_agent_token_limit(conversation_id)
+                        context_estimated = token_stats.get("context_estimated", 0)
+                        return {
+                            "status": "success",
+                            "messages": messages,
+                            "message_count": len(messages),
+                            "tokens_used": token_stats.get("current_token_count", history_tokens),
+                            "token_limit": token_limit,
+                            "history_tokens": history_tokens,
+                            "context_estimated": context_estimated,
+                        }
+                    except Exception as e:
+                        logger.error("Failed to load agent history from disk: %s", e)
+                else:
+                    logger.debug("No history file found for %s", conversation_id)
 
             if not monitor:
                 logger.debug("No conversation monitor found for %s, returning empty history", conversation_id)
@@ -4986,7 +4185,8 @@ Respond in JSON format:
             for msg in history:
                 message_dict = {
                     "role": msg["role"],
-                    "content": msg["content"]
+                    "content": msg["content"],
+                    "message_id": msg.get("id"),  # Expose stable ID for frontend dedup
                 }
                 # Add timestamp if present (v0.15.3)
                 if "timestamp" in msg:
@@ -5025,12 +4225,20 @@ Respond in JSON format:
             logger.info("Retrieved %d messages from backend for %s", len(messages), conversation_id)
 
             token_usage = monitor.get_token_usage()
+            # history_tokens: dialog-only (chars ÷ 4), same basis as the token counter
+            history_tokens = sum(len(msg.get("content", "") or "") for msg in messages) // 4
+            # context_estimated: full LLM context from the last request.
+            # For agent monitors, stored in _last_context_estimated.
+            # For local AI monitors, current_token_count = prompt_tokens (already the full context).
+            context_estimated = getattr(monitor, '_last_context_estimated', 0) or token_usage.get("tokens_used", 0)
             return {
                 "status": "success",
                 "messages": messages,
                 "message_count": len(messages),
                 "tokens_used": token_usage.get("tokens_used", 0),
-                "token_limit": token_usage.get("token_limit", 0)
+                "token_limit": token_usage.get("token_limit", 0),
+                "history_tokens": history_tokens,
+                "context_estimated": context_estimated,
             }
 
         except Exception as e:
@@ -5451,10 +4659,122 @@ Respond in JSON format:
             )
             await monitor.on_message(conv_message)
 
+            # Detect @agent mentions and route to Ark / CC
+            await self._handle_group_agent_mentions(group_id, text, sender_name)
+
             return {"status": "success", "message_id": message_id}
         except Exception as e:
             logger.error("Error sending group message: %s", e, exc_info=True)
             return {"status": "error", "message": str(e)}
+
+    async def _handle_group_agent_mentions(
+        self, group_id: str, text: str, sender_name: str
+    ) -> None:
+        """Detect @agent / @CC mentions in outgoing group messages and route to agents."""
+        import re
+        mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text, re.IGNORECASE)}
+        logger.debug("_handle_group_agent_mentions: mentions=%s in group %s", mentions, group_id)
+
+        # Check if any mention matches agent name or agent_id
+        agent_id = self._get_default_agent_id()
+        agent_name = self._get_agent_display_name(agent_id).lower()
+        if agent_name in mentions or agent_id in mentions:
+            matched = agent_name if agent_name in mentions else agent_id
+            logger.info("Group @%s mention detected — invoking agent in group %s", matched, group_id)
+            asyncio.ensure_future(self._invoke_agent_in_group(group_id, text, sender_name))
+
+        cc_name = self.get_cc_display_name().lower()
+        if cc_name in mentions:
+            logger.info("Group @cc mention detected — broadcasting cc_group_mention in group %s", group_id)
+            await self.local_api.broadcast_event("cc_group_mention", {
+                "group_id": group_id,
+                "text": text,
+                "sender_name": sender_name,
+                "sender_node_id": self.p2p_manager.node_id,
+            })
+
+    async def _invoke_agent_in_group(
+        self, group_id: str, text: str, sender_name: str
+    ) -> None:
+        """Invoke the default agent and post its response to the group."""
+        try:
+            dpc_provider = self.llm_manager.providers.get("dpc_agent")
+            if not dpc_provider:
+                logger.warning("_invoke_agent_in_group: dpc_agent provider not found")
+                return
+            agent_id = self._get_default_agent_id()
+            manager = dpc_provider.get_manager(agent_id)
+            prompt = f"[Group chat — {sender_name} says]: {text}"
+            response = await manager.process_message(
+                message=prompt,
+                conversation_id=group_id,
+                sender_name=sender_name,
+            )
+            if response:
+                agent_name = self._get_agent_display_name(agent_id)
+                await self.send_group_agent_message(group_id, agent_name, response)
+        except Exception as e:
+            logger.error("Agent group response failed: %s", e, exc_info=True)
+
+    async def send_group_agent_message(
+        self, group_id: str, agent_name: str, text: str
+    ) -> None:
+        """Send a group message attributed to an agent.
+
+        The message appears with agent_name as the sender and is marked
+        is_agent=True so the anti-loop guard in GroupTextHandler skips it.
+
+        Args:
+            group_id: Target group ID
+            agent_name: Display name (from config.json or CC display name)
+            text: Message text
+        """
+        group = self.group_manager.get_group(group_id)
+        if not group:
+            logger.warning("send_group_agent_message: group %s not found", group_id)
+            return
+
+        import uuid
+        message_id = uuid.uuid4().hex[:16]
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        payload = {
+            "group_id": group_id,
+            "text": text,
+            "sender_node_id": self.p2p_manager.node_id,
+            "sender_name": agent_name,
+            "message_id": message_id,
+            "timestamp": timestamp,
+            "mentions": [],
+            "is_agent": True,
+        }
+
+        # Broadcast to UI
+        await self.local_api.broadcast_event("group_text_received", payload)
+
+        # Pre-register message ID so GroupTextHandler ignores it if a peer relays it back
+        dedup_key = f"{group_id}:{message_id}"
+        self._processed_message_ids.add(dedup_key)
+        if len(self._processed_message_ids) > self._max_processed_ids:
+            # Trim oldest half to keep memory bounded
+            to_remove = list(self._processed_message_ids)[:len(self._processed_message_ids) // 2]
+            for k in to_remove:
+                self._processed_message_ids.discard(k)
+
+        # Relay to P2P peers so remote members see the agent response
+        await self._broadcast_to_group(group_id, {"command": "GROUP_TEXT", "payload": payload})
+
+        # Feed to ConversationMonitor so knowledge extraction captures agent responses
+        monitor = self._get_or_create_conversation_monitor(group_id)
+        from .conversation_monitor import Message as ConvMessage
+        monitor.message_buffer.append(ConvMessage(
+            message_id=message_id,
+            conversation_id=group_id,
+            sender_node_id=self.p2p_manager.node_id,
+            sender_name=agent_name,
+            text=text,
+            timestamp=timestamp,
+        ))
 
     async def add_group_member(self, group_id: str, node_id: str) -> Dict[str, Any]:
         """Add a member to a group and notify all members.
@@ -5657,8 +4977,9 @@ Respond in JSON format:
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
                 filename = f"screenshot_{timestamp}.{extension}"
 
-            # Save image once (use group_id in path)
-            group_files_dir = DPC_HOME_DIR / "conversations" / group_id / "files" / "screenshots"
+            # Save image once (use slug folder so path matches conversation monitor's directory)
+            _group_monitor = self._get_or_create_conversation_monitor(group_id)
+            group_files_dir = _group_monitor._get_conversation_dir() / "files" / "screenshots"
             group_files_dir.mkdir(parents=True, exist_ok=True)
             file_path = group_files_dir / filename
             if file_path.exists():
@@ -5771,7 +5092,9 @@ Respond in JSON format:
             extension = mime_type.split("/")[-1].split(";")[0].strip()
             audio_filename = f"voice_{timestamp}.{extension}"
 
-            group_files_dir = DPC_HOME_DIR / "conversations" / group_id / "files"
+            # Use slug folder so path matches conversation monitor's directory
+            _group_monitor = self._get_or_create_conversation_monitor(group_id)
+            group_files_dir = _group_monitor._get_conversation_dir() / "files"
             group_files_dir.mkdir(parents=True, exist_ok=True)
             file_path = group_files_dir / audio_filename
             if file_path.exists():
@@ -5838,327 +5161,40 @@ Respond in JSON format:
         voice_mime_type: Optional[str] = None,
         file_path: Optional[str] = None  # NEW: For sending files/images from UI
     ) -> Dict[str, Any]:
-        """
-        Send message from DPC to Telegram chat.
-
-        Args:
-            conversation_id: DPC conversation ID (must be linked to Telegram)
-            text: Message text
-            attachments: Optional list of attachments (voice, images, etc.)
-            voice_audio_base64: Optional base64-encoded voice audio data (for recording from UI)
-            voice_duration_seconds: Optional voice duration in seconds
-            voice_mime_type: Optional voice MIME type (e.g., "audio/webm")
-            file_path: Optional path to file/image to send to Telegram
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            if not self.telegram_bridge:
-                return {
-                    "status": "error",
-                    "message": "Telegram integration not enabled"
-                }
-
-            # Handle file path from UI (send file/image directly to Telegram)
-            if file_path:
-                from pathlib import Path
-                import mimetypes
-
-                path = Path(file_path)
-
-                if not path.exists():
-                    return {
-                        "status": "error",
-                        "message": f"File not found: {file_path}"
-                    }
-
-                # Get Telegram chat ID
-                telegram_chat_id = self.telegram_bridge._get_linked_chat_id(conversation_id)
-                if not telegram_chat_id:
-                    return {
-                        "status": "error",
-                        "message": "No linked Telegram chat for this conversation"
-                    }
-
-                # Determine file type and send appropriately
-                mime_type, _ = mimetypes.guess_type(str(path))
-                if mime_type and mime_type.startswith("image/"):
-                    # Send as photo
-                    success = await self.telegram_manager.send_photo(
-                        telegram_chat_id,
-                        path,
-                        caption=text if text else None
-                    )
-                else:
-                    # Send as document
-                    success = await self.telegram_manager.send_document(
-                        telegram_chat_id,
-                        path,
-                        caption=text if text else None
-                    )
-
-                if not success:
-                    return {
-                        "status": "error",
-                        "message": "Failed to send file to Telegram"
-                    }
-
-                return {
-                    "status": "success",
-                    "message": "File sent to Telegram"
-                }
-
-            # Handle voice data from UI (save file and create attachment)
-            if voice_audio_base64:
-                import base64
-                from pathlib import Path
-                from datetime import datetime, timezone
-
-                # Decode audio data
-                try:
-                    audio_data = base64.b64decode(voice_audio_base64)
-                except Exception as e:
-                    return {
-                        "status": "error",
-                        "message": f"Failed to decode voice audio: {e}"
-                    }
-
-                # Generate filename with timestamp
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-                extension = (voice_mime_type or "audio/webm").split("/")[-1].split(";")[0].strip()
-                filename = f"voice_{timestamp}.{extension}"
-
-                # Create directory for Telegram voice files
-                voice_dir = DPC_HOME_DIR / "conversations" / conversation_id / "files"
-                voice_dir.mkdir(parents=True, exist_ok=True)
-                voice_path = voice_dir / filename
-
-                # Handle filename collisions
-                if voice_path.exists():
-                    stem = voice_path.stem
-                    suffix = voice_path.suffix
-                    counter = 1
-                    while voice_path.exists():
-                        voice_path = voice_dir / f"{stem}_{counter}{suffix}"
-                        counter += 1
-
-                # Save voice file
-                try:
-                    with open(voice_path, "wb") as f:
-                        f.write(audio_data)
-                    logger.info(f"Saved Telegram voice message: {voice_path} ({len(audio_data)} bytes, {voice_duration_seconds}s)")
-                except Exception as e:
-                    return {
-                        "status": "error",
-                        "message": f"Failed to save voice file: {e}"
-                    }
-
-                # Create voice attachment
-                voice_attachment = {
-                    "type": "voice",
-                    "filename": filename,
-                    "file_path": str(voice_path),
-                    "size_bytes": len(audio_data),
-                    "voice_metadata": {
-                        "duration_seconds": voice_duration_seconds,
-                        "sample_rate": int(self.settings.get("voice_messages", "default_sample_rate", "48000")),
-                        "channels": int(self.settings.get("voice_messages", "default_channels", "1")),
-                        "codec": self.settings.get("voice_messages", "default_codec", "opus"),
-                        "recorded_at": datetime.now(timezone.utc).isoformat()
-                    }
-                }
-
-                # Add to attachments list
-                if not attachments:
-                    attachments = []
-                attachments.append(voice_attachment)
-
-            # Get sender name
-            sender_name = self.p2p_manager.get_display_name() or "You"
-
-            # Forward to Telegram
-            await self.telegram_bridge.forward_dpc_to_telegram(
-                conversation_id=conversation_id,
-                sender_name=sender_name,
-                text=text,
-                attachments=attachments or []
-            )
-
-            return {
-                "status": "success",
-                "message": "Sent to Telegram"
-            }
-
-        except Exception as e:
-            logger.error("Failed to send to Telegram: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.send_to_telegram(
+            conversation_id,
+            text,
+            attachments,
+            voice_audio_base64,
+            voice_duration_seconds,
+            voice_mime_type,
+            file_path,
+        )
 
     async def link_telegram_chat(
         self,
         conversation_id: str,
         telegram_chat_id: str
     ) -> Dict[str, Any]:
-        """
-        Link a DPC conversation to a Telegram chat.
-
-        Args:
-            conversation_id: DPC conversation ID
-            telegram_chat_id: Telegram chat ID to link
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            if not self.telegram_bridge:
-                return {
-                    "status": "error",
-                    "message": "Telegram integration not enabled"
-                }
-
-            # Validate chat_id is in whitelist
-            if not self.telegram_manager.is_allowed(telegram_chat_id):
-                return {
-                    "status": "error",
-                    "message": f"Chat ID {telegram_chat_id} not in whitelist"
-                }
-
-            # Store link
-            self.telegram_bridge.conversation_map[telegram_chat_id] = conversation_id
-            self.telegram_bridge._save_conversation_links()
-
-            logger.info(f"Linked conversation {conversation_id} to Telegram chat {telegram_chat_id}")
-
-            return {
-                "status": "success",
-                "message": f"Linked {conversation_id} to Telegram chat {telegram_chat_id}"
-            }
-
-        except Exception as e:
-            logger.error("Failed to link Telegram chat: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.link_telegram_chat(conversation_id, telegram_chat_id)
 
     async def get_telegram_status(self) -> Dict[str, Any]:
-        """
-        Get Telegram bot integration status.
-
-        Returns:
-            Dict with status information including conversation links
-        """
-        try:
-            if not self.telegram_manager:
-                return {
-                    "status": "success",
-                    "enabled": False,
-                    "connected": False,
-                    "message": "Telegram integration not enabled"
-                }
-
-            # Include conversation links (telegram_chat_id -> conversation_id)
-            # Reverse it for frontend: (conversation_id -> telegram_chat_id)
-            conversation_links = {}
-            if self.telegram_bridge:
-                for telegram_chat_id, conversation_id in self.telegram_bridge.conversation_map.items():
-                    conversation_links[conversation_id] = telegram_chat_id
-
-            return {
-                "status": "success",
-                "enabled": True,
-                "connected": self.telegram_manager._running,
-                "webhook_mode": self.telegram_manager.use_webhook,
-                "whitelist_count": len(self.telegram_manager.allowed_chat_ids),
-                "transcription_enabled": self.telegram_manager.transcription_enabled,
-                "bridge_to_p2p": self.telegram_manager.bridge_to_p2p,
-                "conversation_links_count": len(self.telegram_bridge.conversation_map) if self.telegram_bridge else 0,
-                "conversation_links": conversation_links  # Frontend needs: conversation_id -> telegram_chat_id
-            }
-
-        except Exception as e:
-            logger.error("Failed to get Telegram status: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.get_telegram_status()
 
     async def delete_telegram_conversation_link(self, conversation_id: str) -> Dict[str, Any]:
-        """
-        Delete a Telegram conversation link and all associated data from the backend.
-
-        Called by UI when user deletes a Telegram chat. This removes:
-        1. The conversation link from config.ini
-        2. The conversation folder (~/.dpc/conversations/{conversation_id}/)
-        3. Any message history files
-
-        This ensures the chat doesn't reappear on restart and cleans up disk space.
-
-        Args:
-            conversation_id: DPC conversation ID (format: telegram-{chat_id})
-
-        Returns:
-            Dict with status
-        """
-        try:
-            if not self.telegram_bridge:
-                return {
-                    "status": "error",
-                    "message": "Telegram bridge not initialized"
-                }
-
-            # Extract telegram_chat_id from conversation_id
-            # Format: telegram-{chat_id}
-            if not conversation_id.startswith("telegram-"):
-                return {
-                    "status": "error",
-                    "message": f"Invalid Telegram conversation ID format: {conversation_id}"
-                }
-
-            telegram_chat_id = conversation_id.replace("telegram-", "")
-
-            # Remove from conversation_map and persist
-            removed = self.telegram_bridge.remove_conversation_link(telegram_chat_id)
-
-            # Delete conversation folder and all its contents
-            # Path: ~/.dpc/conversations/{conversation_id}/
-            import shutil
-            from pathlib import Path
-
-            conversation_folder = Path.home() / ".dpc" / "conversations" / conversation_id
-            if conversation_folder.exists():
-                shutil.rmtree(conversation_folder)
-                logger.info(f"Deleted conversation folder: {conversation_folder}")
-            else:
-                logger.debug(f"Conversation folder not found (already clean): {conversation_folder}")
-
-            # Also check for history file in groups folder (used by some conversation types)
-            history_file = Path.home() / ".dpc" / "groups" / f"{conversation_id}_history.json"
-            if history_file.exists():
-                history_file.unlink()
-                logger.info(f"Deleted conversation history file: {history_file}")
-
-            if removed:
-                logger.info(f"Deleted Telegram conversation link: {conversation_id}")
-                return {
-                    "status": "success",
-                    "message": f"Conversation {conversation_id} deleted"
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Conversation link not found: {conversation_id}"
-                }
-
-        except Exception as e:
-            logger.error("Failed to delete Telegram conversation link: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.delete_telegram_conversation_link(conversation_id)
 
     async def link_agent_telegram(
         self,
@@ -6171,307 +5207,55 @@ Respond in JSON format:
         transcription_enabled: bool = True,
         unified_conversation: bool = False,
     ) -> Dict[str, Any]:
-        """
-        Link an agent to Telegram with full configuration.
-
-        UI Integration: Called when user clicks "Link Telegram" button for an agent.
-
-        Args:
-            agent_id: Agent ID to link
-            bot_token: Telegram bot token
-            chat_ids: List of Telegram chat IDs (numeric strings)
-            event_filter: Optional list of event types to forward
-            max_events_per_minute: Maximum events to send per minute
-            cooldown_seconds: Minimum time between same-type events
-            transcription_enabled: Enable voice message transcription
-            unified_conversation: When True, Telegram messages share history with DPC chat UI
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            from .dpc_agent.utils import AgentRegistry
-
-            registry = AgentRegistry()
-
-            # Check if agent exists
-            agent = registry.get_agent(agent_id)
-            if not agent:
-                return {
-                    "status": "error",
-                    "message": f"Agent not found: {agent_id}"
-                }
-
-            # Update registry with full Telegram config
-            try:
-                registry.link_agent_to_telegram(
-                    agent_id=agent_id,
-                    bot_token=bot_token,
-                    chat_ids=chat_ids,
-                    event_filter=event_filter,
-                    max_events_per_minute=max_events_per_minute,
-                    cooldown_seconds=cooldown_seconds,
-                    transcription_enabled=transcription_enabled,
-                    unified_conversation=unified_conversation,
-                )
-            except ValueError as e:
-                return {
-                    "status": "error",
-                    "message": str(e)
-                }
-
-            # Start or restart the agent's Telegram bridge immediately.
-            # _ensure_manager creates the manager if needed (starts it + bridge).
-            # If manager is already running, restart just the bridge with new config.
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if dpc_agent_provider:
-                if hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
-                    await self._restart_agent_telegram_bridge(agent_id)
-                else:
-                    # Manager not running yet — start it now so bridge is live immediately
-                    try:
-                        await dpc_agent_provider._ensure_manager(agent_id=agent_id)
-                        logger.info(f"Started agent manager and Telegram bridge for {agent_id}")
-                    except Exception as e:
-                        logger.warning(f"Could not start agent manager for {agent_id}: {e}")
-
-            return {
-                "status": "success",
-                "message": f"Agent {agent_id} linked to Telegram successfully",
-                "agent_id": agent_id,
-                "chat_ids": chat_ids
-            }
-
-        except Exception as e:
-            logger.error("Failed to link agent to Telegram: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.link_agent_telegram(
+            agent_id,
+            bot_token,
+            chat_ids,
+            event_filter,
+            max_events_per_minute,
+            cooldown_seconds,
+            transcription_enabled,
+            unified_conversation,
+        )
 
     async def _start_agent_telegram_bridges(self) -> None:
-        """
-        On startup, proactively initialize agent managers and start Telegram bridges
-        for all registered agents that have telegram_enabled=True.
-
-        Without this, bridges only start on the first DPC chat message, so Telegram
-        messages sent before any DPC chat activity would be silently ignored.
-        """
-        try:
-            from .dpc_agent.utils import AgentRegistry
-            registry = AgentRegistry()
-            agents = registry.list_agents()
-
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if not dpc_agent_provider:
-                return
-
-            for agent in agents:
-                agent_id = agent.get("agent_id", "")
-                if not agent_id or not agent.get("telegram_enabled", False):
-                    continue
-
-                try:
-                    # _ensure_manager creates the manager and calls start() + _start_telegram_bridge()
-                    await dpc_agent_provider._ensure_manager(agent_id=agent_id)
-                    logger.info(f"Auto-started Telegram bridge for agent {agent_id} on service startup")
-                except Exception as e:
-                    logger.warning(f"Failed to auto-start Telegram bridge for agent {agent_id}: {e}")
-
-        except Exception as e:
-            logger.warning(f"Failed to auto-start agent Telegram bridges: {e}")
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return
+        await self.telegram_service._start_agent_telegram_bridges()
 
     def _get_telegram_bridge_for_conversation(self, conversation_id: str):
-        """
-        Find the AgentTelegramBridge associated with a conversation, if any.
-
-        In unified_conversation mode, conversation_id == agent_id (e.g. "agent_foo").
-        In non-unified mode, conversation_id == "telegram-{chat_id}" — in that case
-        we scan all running bridges whose allowed_chat_ids contain the chat_id.
-
-        Returns:
-            AgentTelegramBridge instance, or None if not found / bridge not running.
-        """
-        try:
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if not dpc_agent_provider or not hasattr(dpc_agent_provider, '_managers'):
-                return None
-
-            managers = dpc_agent_provider._managers
-
-            # Unified mode: conversation_id IS the agent_id
-            if conversation_id in managers:
-                mgr = managers[conversation_id]
-                bridge = getattr(mgr, '_telegram_bridge', None)
-                if bridge and bridge.is_enabled():
-                    return bridge
-
-            # Non-unified mode: conversation_id = "telegram-{chat_id}"
-            if conversation_id.startswith("telegram-"):
-                chat_id = conversation_id[len("telegram-"):]
-                for mgr in managers.values():
-                    bridge = getattr(mgr, '_telegram_bridge', None)
-                    if bridge and bridge.is_enabled() and chat_id in bridge.allowed_chat_ids:
-                        return bridge
-
-        except Exception as e:
-            logger.debug("_get_telegram_bridge_for_conversation: %s", e)
-        return None
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return None
+        return self.telegram_service._get_telegram_bridge_for_conversation(conversation_id)
 
     async def _restart_agent_telegram_bridge(self, agent_id: str) -> None:
-        """
-        Restart Telegram bridge for a running agent with new configuration.
-
-        Args:
-            agent_id: Agent ID whose Telegram bridge should be restarted
-        """
-        dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-        if not dpc_agent_provider or not hasattr(dpc_agent_provider, '_managers'):
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
             return
-        if agent_id not in dpc_agent_provider._managers:
-            return
-
-        agent_manager = dpc_agent_provider._managers[agent_id]
-
-        # Stop existing bridge if running
-        if hasattr(agent_manager, "_telegram_bridge") and agent_manager._telegram_bridge:
-            try:
-                await agent_manager._telegram_bridge.stop()
-                logger.info(f"Stopped Telegram bridge for agent {agent_id}")
-            except Exception as e:
-                logger.error(f"Error stopping Telegram bridge for agent {agent_id}: {e}", exc_info=True)
-
-        # Start bridge with new configuration
-        try:
-            await agent_manager._start_telegram_bridge()
-            logger.info(f"Restarted Telegram bridge for agent {agent_id}")
-        except Exception as e:
-            logger.error(f"Error restarting Telegram bridge for agent {agent_id}: {e}", exc_info=True)
+        await self.telegram_service._restart_agent_telegram_bridge(agent_id)
 
     async def unlink_agent_telegram(self, agent_id: str) -> Dict[str, Any]:
-        """
-        Unlink an agent from Telegram (removes all Telegram configuration).
-
-        UI Integration: Called when user clicks "Unlink Telegram" button for an agent.
-
-        Args:
-            agent_id: Agent ID to unlink
-
-        Returns:
-            Dict with status and message
-        """
-        try:
-            from .dpc_agent.utils import AgentRegistry
-
-            registry = AgentRegistry()
-
-            # Check if agent exists
-            agent = registry.get_agent(agent_id)
-            if not agent:
-                return {
-                    "status": "error",
-                    "message": f"Agent not found: {agent_id}"
-                }
-
-            # Remove Telegram configuration from registry
-            registry.unlink_agent_from_telegram(agent_id)
-
-            # Stop agent's Telegram bridge if it's currently running
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
-                agent_manager = dpc_agent_provider._managers[agent_id]
-                if hasattr(agent_manager, "_telegram_bridge") and agent_manager._telegram_bridge:
-                    try:
-                        await agent_manager._telegram_bridge.stop()
-                        agent_manager._telegram_bridge = None
-                        logger.info(f"Stopped Telegram bridge for agent {agent_id}")
-                    except Exception as e:
-                        logger.error(f"Error stopping Telegram bridge for agent {agent_id}: {e}", exc_info=True)
-
-            return {
-                "status": "success",
-                "message": f"Agent {agent_id} unlinked from Telegram successfully",
-                "agent_id": agent_id
-            }
-
-        except Exception as e:
-            logger.error("Failed to unlink agent from Telegram: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.unlink_agent_telegram(agent_id)
 
     async def migrate_telegram_config(self) -> Dict[str, Any]:
-        """
-        Migrate global [dpc_agent_telegram] config to per-agent config.
-
-        Reads from ~/.dpc/config.ini [dpc_agent_telegram] section
-        and copies to each agent in _registry.json.
-
-        Returns:
-            Dict with migration status and details
-        """
-        try:
-            from .dpc_agent.utils import migrate_global_telegram_to_agents
-
-            result = migrate_global_telegram_to_agents()
-
-            # Restart Telegram bridges for any agents that were migrated
-            if result.get("status") == "success" and result.get("migrated_count", 0) > 0:
-                dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-                for agent_id in result.get("migrated_agents", []):
-                    if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers') and agent_id in dpc_agent_provider._managers:
-                        await self._restart_agent_telegram_bridge(agent_id)
-
-            return result
-
-        except Exception as e:
-            logger.error("Failed to migrate Telegram config: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.migrate_telegram_config()
 
     async def get_agent_telegram_status(self, agent_id: str) -> Dict[str, Any]:
-        """
-        Get Telegram link status for an agent.
-
-        UI Integration: Called to display current Telegram link status for an agent.
-
-        Args:
-            agent_id: Agent ID to query
-
-        Returns:
-            Dict with status information
-        """
-        try:
-            from .dpc_agent.utils import AgentRegistry
-
-            registry = AgentRegistry()
-            agent = registry.get_agent(agent_id)
-
-            if not agent:
-                return {
-                    "status": "error",
-                    "message": f"Agent {agent_id} not found"
-                }
-
-            linked_chat_id = registry.get_agent_linked_chat(agent_id)
-
-            return {
-                "status": "success",
-                "agent_id": agent_id,
-                "telegram_enabled": agent.get("telegram_enabled", False),
-                "telegram_chat_id": linked_chat_id,
-                "telegram_linked_at": agent.get("telegram_linked_at")
-            }
-
-        except Exception as e:
-            logger.error("Failed to get agent Telegram status: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e)
-            }
+        """Delegates to TelegramService."""
+        if not self.telegram_service:
+            return {"status": "error", "message": "Telegram integration not enabled"}
+        return await self.telegram_service.get_agent_telegram_status(agent_id)
 
     async def vote_new_session(self, proposal_id: str, vote: bool) -> Dict[str, Any]:
         """Cast vote on a new session proposal.
@@ -6594,27 +5378,36 @@ Respond in JSON format:
             # {"status": "success", "method": "dht", "message": "Connected via DHT"}
         """
         try:
-            # Attempt connection using DHT-first strategy
-            success = await self.p2p_manager.connect_via_node_id(node_id)
-
-            if success:
-                # Determine which method was used
-                # Check if peer is now in connected peers
-                if node_id in self.p2p_manager.peers:
-                    # Try to determine discovery method from logs/state
-                    # For now, assume DHT if it succeeded
+            if self.connection_orchestrator:
+                # Use full 6-tier fallback hierarchy (IPv6 → IPv4 → WebRTC → hole punch → relay → gossip)
+                connection = await self.connection_orchestrator.connect(node_id)
+                return {
+                    "status": "success",
+                    "method": getattr(connection, "strategy_used", "unknown"),
+                    "message": f"Connected to {node_id}"
+                }
+            else:
+                # Fallback if orchestrator not yet initialized (early startup)
+                success = await self.p2p_manager.connect_via_node_id(node_id)
+                if success and node_id in self.p2p_manager.peers:
                     return {
                         "status": "success",
-                        "method": "dht",  # Could be "dht", "cache", or "hub"
+                        "method": "direct",
                         "message": f"Connected to {node_id}"
                     }
+                return {
+                    "status": "error",
+                    "method": None,
+                    "message": f"Failed to connect to {node_id} - peer not found"
+                }
 
+        except ConnectionFailedError as e:
+            logger.error("All connection strategies failed for %s: %s", node_id, e)
             return {
                 "status": "error",
                 "method": None,
-                "message": f"Failed to connect to {node_id} - peer not found via DHT, cache, or Hub"
+                "message": str(e)
             }
-
         except Exception as e:
             logger.error("DHT connection error for %s: %s", node_id, e, exc_info=True)
             return {
@@ -6766,15 +5559,15 @@ Respond in JSON format:
             # Check if this is a Dpc_agent conversation (chat_provider from frontend)
             # Note: agent_manager is on the DpcAgentProvider, not CoreService
             dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            # The manager is stored as _manager on DpcAgentProvider
-            agent_manager = getattr(dpc_agent_provider, '_manager', None) if dpc_agent_provider else None
+            # Extract agent_id from conversation_id (e.g. "agent_001") for per-agent manager lookup
+            _vision_agent_id = conversation_id if (conversation_id and conversation_id.startswith("agent_")) else None
+            agent_manager = None
 
             if chat_provider == 'dpc_agent' and dpc_agent_provider:
-                # Ensure agent is initialized
-                if not agent_manager:
-                    logger.info("Initializing DPC Agent for vision query...")
-                    await dpc_agent_provider._ensure_manager()
-                    agent_manager = getattr(dpc_agent_provider, '_manager', None)
+                # Use _ensure_manager which handles both per-agent and singleton cases,
+                # and avoids starting a duplicate Telegram bridge for the same token.
+                logger.info("Initializing DPC Agent for vision query...")
+                agent_manager = await dpc_agent_provider._ensure_manager(agent_id=_vision_agent_id)
 
                 if agent_manager:
                     # Route to DPC Agent for vision analysis
@@ -7340,197 +6133,52 @@ Respond in JSON format:
                 logger.error("Error notifying %s of name change: %s", peer_id, e, exc_info=True)
 
     async def _on_proposal_received_from_peer(self, proposal):
-        """Callback when knowledge proposal received from peer.
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_proposal_received_from_peer(proposal)
 
-        Broadcasts proposal to UI so user can review and vote.
+    def _get_agent_telegram_bridge(self, conversation_id: str):
+        """Delegated to KnowledgeService."""
+        return self.knowledge_service._get_agent_telegram_bridge(conversation_id)
 
-        Args:
-            proposal: The knowledge commit proposal from peer
-        """
-        logger.info("Broadcasting peer proposal to UI: %s (topic: %s)",
-                    proposal.proposal_id, proposal.topic)
-        await self.local_api.broadcast_event(
-            "knowledge_commit_proposed",
-            proposal.to_dict()
-        )
+    async def _on_vote_received(self, vote) -> None:
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_vote_received(vote)
+
+    async def _on_commit_approved(self, commit) -> None:
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_approved(commit)
+
+    async def _on_commit_rejected(self, proposal, votes: Dict[str, Any]) -> None:
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_rejected(proposal, votes)
 
     async def _on_commit_applied(self, commit):
-        """Callback called after a knowledge commit is applied
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_applied(commit)
 
-        This reloads the local context in p2p_manager and notifies peers.
+    async def _on_commit_revision_needed(self, proposal, votes: Dict[str, Any]) -> None:
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_revision_needed(proposal, votes)
 
-        Args:
-            commit: The KnowledgeCommit that was applied
-        """
-        try:
-            logger.info("Commit Applied - reloading local context after commit %s", commit.commit_id)
-
-            # Clear conversation monitor buffer for this conversation (v0.15.1 fix)
-            # Buffer is now cleared only after all peers approve, not when proposal is generated
-            if commit.conversation_id:
-                monitor = self._get_or_create_conversation_monitor(commit.conversation_id)
-                if monitor.message_buffer:
-                    logger.info("Clearing buffer for %s after commit approval", commit.conversation_id)
-                    monitor.message_buffer = []
-                    monitor.knowledge_score = 0.0
-
-            # Reload context from disk
-            context = self.pcm_core.load_context()
-
-            # Update in P2PManager so context requests return latest data
-            if hasattr(self, 'p2p_manager') and self.p2p_manager:
-                self.p2p_manager.local_context = context
-                logger.info("Updated p2p_manager.local_context with new knowledge")
-
-            # Compute new context hash
-            new_context_hash = self._compute_context_hash()
-
-            # Broadcast CONTEXT_UPDATED to all connected peers
-            await self._broadcast_context_updated_to_peers(new_context_hash)
-
-            # Also emit event to UI
-            await self.local_api.broadcast_event("personal_context_updated", {
-                "message": f"Knowledge commit applied: {commit.topic}",
-                "context_hash": new_context_hash
-            })
-
-            # For private conversations (agent, ai_chat, local_ai, telegram), reset the
-            # conversation after commit so the context window counter clears in the UI,
-            # allowing the user to start a fresh session.
-            conv_id = commit.conversation_id
-            if conv_id and (
-                conv_id == "local_ai"
-                or conv_id.startswith("ai_")
-                or conv_id.startswith("agent_")
-                or conv_id.startswith("telegram-")
-            ):
-                logger.info("Resetting private conversation %s after knowledge commit applied", conv_id)
-                await self.local_api.broadcast_event("conversation_reset", {"conversation_id": conv_id})
-
-        except Exception as e:
-            logger.error("Error in _on_commit_applied: %s", e, exc_info=True)
-            import traceback
-            traceback.print_exc()
+    async def _agent_auto_revise_proposal(self, agent_mgr, proposal, change_requests: list) -> None:
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._agent_auto_revise_proposal(agent_mgr, proposal, change_requests)
 
     async def _on_commit_signed(self, commit):
-        """Sign the commit with our private key and broadcast COMMIT_SIGNED to participants.
-
-        Called by ConsensusManager after _apply_commit succeeds.  Every participating
-        node broadcasts their own RSA-PSS signature so peers can accumulate multi-party
-        attestations in the markdown frontmatter.
-        """
-        try:
-            from dpc_protocol.commit_integrity import CommitSigner
-            from cryptography.hazmat.primitives import serialization as _ser
-
-            key_path = DPC_HOME_DIR / NODE_KEY
-            if not key_path.exists():
-                logger.debug("_on_commit_signed: key file not found, skipping")
-                return
-
-            with open(key_path, 'rb') as f:
-                private_key = _ser.load_pem_private_key(f.read(), password=None)
-
-            signer = CommitSigner(self.p2p_manager.node_id, private_key)
-            signature_b64 = signer.sign_commit(commit.commit_hash)
-
-            payload = {
-                "commit_id": commit.commit_id,
-                "commit_hash": commit.commit_hash,
-                "node_id": self.p2p_manager.node_id,
-                "signature": signature_b64
-            }
-
-            # Broadcast to all participants (excluding self — we already applied locally)
-            participants = commit.participants or []
-            for peer_id in participants:
-                if peer_id == self.p2p_manager.node_id:
-                    continue
-                try:
-                    await self.p2p_manager.send_message_to_peer(
-                        peer_id, {"command": "COMMIT_SIGNED", "payload": payload}
-                    )
-                    logger.debug("Sent COMMIT_SIGNED to %s for commit %s", peer_id[:20], commit.commit_id[:12])
-                except Exception as e:
-                    logger.debug("Could not send COMMIT_SIGNED to %s: %s", peer_id[:20], e)
-
-        except Exception as e:
-            logger.error("Error in _on_commit_signed: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_signed(commit)
 
     async def _on_commit_ack(self, commit):
-        """Broadcast COMMIT_ACK to all participants confirming this node applied the commit.
-
-        Called by ConsensusManager after _apply_commit succeeds. Enables peers to track
-        convergence: once all expected participants have ACKed, the commit is fully
-        confirmed across the group. Non-ACKing nodes can be retransmitted via
-        APPLY_KNOWLEDGE_COMMIT (future: with a timeout trigger).
-        """
-        try:
-            participants = commit.participants or []
-            payload = {
-                "commit_id": commit.commit_id,
-                "node_id": self.p2p_manager.node_id,
-                "participants": participants
-            }
-
-            for peer_id in participants:
-                if peer_id == self.p2p_manager.node_id:
-                    continue
-                try:
-                    await self.p2p_manager.send_message_to_peer(
-                        peer_id, {"command": "COMMIT_ACK", "payload": payload}
-                    )
-                    logger.debug("Sent COMMIT_ACK to %s for commit %s", peer_id[:20], commit.commit_id[:12])
-                except Exception as e:
-                    logger.debug("Could not send COMMIT_ACK to %s: %s", peer_id[:20], e)
-
-        except Exception as e:
-            logger.error("Error in _on_commit_ack: %s", e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_ack(commit)
 
     async def _on_commit_apply_failed(self, commit, error_msg: str):
-        """Callback called when _apply_commit fails to write to disk.
-
-        Surfaces the error to the UI so the user knows the commit was not persisted
-        on this node, even though peers voted to approve it.
-        """
-        logger.error(
-            "Failed to apply knowledge commit %s: %s",
-            getattr(commit, 'commit_id', '?'), error_msg
-        )
-        await self.local_api.broadcast_event("knowledge_commit_apply_failed", {
-            "topic": getattr(commit, 'topic', 'unknown'),
-            "commit_id": getattr(commit, 'commit_id', None),
-            "error": error_msg
-        })
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._on_commit_apply_failed(commit, error_msg)
 
     async def _broadcast_context_updated_to_peers(self, context_hash: str):
-        """
-        Phase 7: Broadcast CONTEXT_UPDATED to all connected peers.
-        Notifies peers that personal context has changed so they can invalidate their cache.
-
-        Args:
-            context_hash: New hash of the updated context
-        """
-        connected_peers = list(self.p2p_manager.peers.keys())
-        if not connected_peers:
-            logger.debug("No connected peers to notify of context update")
-            return
-
-        logger.info("Broadcasting CONTEXT_UPDATED to %d peer(s)", len(connected_peers))
-        for peer_id in connected_peers:
-            try:
-                # Send CONTEXT_UPDATED message
-                message = {
-                    "command": "CONTEXT_UPDATED",
-                    "payload": {
-                        "node_id": self.p2p_manager.node_id,
-                        "context_hash": context_hash
-                    }
-                }
-                await self.p2p_manager.send_message_to_peer(peer_id, message)
-                logger.debug("Notified %s of context update", peer_id[:20])
-            except Exception as e:
-                logger.error("Error notifying %s of context update: %s", peer_id[:20], e, exc_info=True)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._broadcast_context_updated_to_peers(context_hash)
 
     async def _notify_peers_of_provider_changes(self):
         """
@@ -7597,30 +6245,8 @@ Respond in JSON format:
                 logger.error("Error notifying %s of provider changes: %s", peer_id, e, exc_info=True)
 
     async def _broadcast_commit_result(self, result_payload: dict, participants: List[str]):
-        """Broadcast KNOWLEDGE_COMMIT_RESULT to all participants
-
-        Args:
-            result_payload: Complete voting result data (status, vote_tally, votes, etc.)
-            participants: List of participant node_ids who should receive the notification
-        """
-        message = {
-            "command": "KNOWLEDGE_COMMIT_RESULT",
-            "payload": result_payload
-        }
-
-        # Send to all participants (who are currently connected)
-        for node_id in participants:
-            if node_id in self.p2p_manager.peers:
-                try:
-                    await self.p2p_manager.send_message_to_peer(node_id, message)
-                    logger.info("Sent KNOWLEDGE_COMMIT_RESULT to %s", node_id[:20])
-                except Exception as e:
-                    logger.error("Failed to send result to %s: %s", node_id[:20], e, exc_info=True)
-            else:
-                logger.debug("Participant %s not connected, skipping result broadcast", node_id[:20])
-
-        # Also emit to local UI
-        await self.local_api.broadcast_event("knowledge_commit_result", result_payload)
+        """Delegated to KnowledgeService."""
+        await self.knowledge_service._broadcast_commit_result(result_payload, participants)
 
     async def _on_session_proposal_received(self, payload: dict):
         """Callback when new session proposal received from peer.
@@ -7692,7 +6318,61 @@ Respond in JSON format:
         """
         return await self.context_coordinator.request_device_context(peer_id)
 
-    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 60.0) -> str:
+    async def search_peer_skills(
+        self,
+        peer_id: str,
+        tags: Optional[List[str]] = None,
+        query: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Search a connected peer's shareable skill catalog.
+
+        WebSocket command: {"command": "search_peer_skills", "peer_id": "...", "tags": [...], "query": "..."}
+
+        Returns {"status": "success", "skills": [...]} or {"status": "error", "message": "..."}
+        """
+        try:
+            skills = await self.skill_coordinator.search_peer_skills(
+                peer_id, tags=tags, query=query
+            )
+            return {"status": "success", "peer_id": peer_id, "skills": skills}
+        except Exception as e:
+            logger.error("search_peer_skills error: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def request_skill_from_peer(
+        self,
+        peer_id: str,
+        skill_name: str,
+    ) -> Dict[str, Any]:
+        """
+        Request and save a specific skill from a connected peer.
+
+        WebSocket command: {"command": "request_skill_from_peer", "peer_id": "...", "skill_name": "..."}
+
+        Firewall `accept_peer_skills` must be True.
+        Returns {"status": "success"|"error", "message": "..."}
+        """
+        try:
+            content = await self.skill_coordinator.request_skill_from_peer(peer_id, skill_name)
+            if content is None:
+                return {
+                    "status": "error",
+                    "message": f"Could not retrieve skill '{skill_name}' from {peer_id} (timeout, not found, or firewall blocked)",
+                }
+            status_msg = await self.skill_coordinator.save_received_skill(
+                peer_id, skill_name, content
+            )
+            success = status_msg.startswith("✓")
+            return {
+                "status": "success" if success else "error",
+                "message": status_msg,
+            }
+        except Exception as e:
+            logger.error("request_skill_from_peer error: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def _request_inference_from_peer(self, peer_id: str, prompt: str, model: str = None, provider: str = None, images: list = None, timeout: float = 240.0) -> str:
         """
         Request remote inference from a specific peer.
         Uses async request-response pattern with Future.
@@ -7703,7 +6383,7 @@ Respond in JSON format:
             model: Optional model name to use
             provider: Optional provider alias to use
             images: Optional list of image dicts for vision queries (Phase 2: Remote Vision)
-            timeout: Timeout in seconds (default 60s for inference)
+            timeout: Timeout in seconds (default 240s for inference)
 
         Returns:
             The inference result as a string
@@ -7899,17 +6579,68 @@ Respond in JSON format:
             await dpc_agent_provider._ensure_manager(agent_id=conversation_id)
             agent_manager = dpc_agent_provider.get_manager(conversation_id)
 
+            # Reset chain depth on new user message (prevents stale depth from prior exchanges)
+            self._cc_ark_chain_depth = 0
+
+            # Check if message is @CC-only (no @agent) — route to real Claude Code
+            import re
+            _mentions = {m.lower() for m in re.findall(r'@(\w+)\b', prompt or '', re.IGNORECASE)}
+            cc_name_lower = self.get_cc_display_name().lower()
+            _agent_id = self._get_default_agent_id()
+            agent_name_lower = self._get_agent_display_name(_agent_id).lower()
+            agent_mentioned = agent_name_lower in _mentions or _agent_id in _mentions
+            if cc_name_lower in _mentions and not agent_mentioned:
+                # Save user message to agent history
+                monitor = agent_manager._get_or_create_agent_monitor(conversation_id)
+                from dpc_client_core.dpc_agent.utils import utc_now_iso
+                node_id = getattr(self.p2p_manager, "node_id", "local-user")
+                monitor.add_message(
+                    role="user",
+                    content=prompt,
+                    timestamp=utc_now_iso(),
+                    sender_node_id=node_id,
+                    sender_name=self.p2p_manager.get_display_name() or "User",
+                )
+                monitor.save_history()
+
+                # Broadcast @CC mention event (picked up by dpc-agent-chat MCP server)
+                await self._check_agent_cc_mention(
+                    conversation_id, prompt, "", agent_manager
+                )
+
+                # Clear the UI loading state (CC will respond later via agent_chat_message)
+                await self.local_api.send_response_to_all(
+                    command_id=command_id,
+                    command="execute_ai_query",
+                    status="OK",
+                    payload={
+                        "content": "",
+                        "provider": "cc_pending",
+                        "model": "claude-code",
+                        "compute_host": "local",
+                        "tokens_used": 0,
+                        "token_limit": 128000,
+                        "history_tokens": 0,
+                        "context_estimated": 0,
+                    }
+                )
+                logger.info("@CC-only mention in %s — broadcast to MCP bridge (real CC)", conversation_id)
+                return
+
             # Process message through agent (agent manager handles its own prompt assembly)
             response = await agent_manager.process_message(
                 message=prompt,
                 conversation_id=conversation_id,
                 include_context=include_context,
-                agent_llm_provider=agent_llm_provider or conversation_id
+                agent_llm_provider=agent_llm_provider or conversation_id,
+                sender_name=self.p2p_manager.get_display_name() or "User",
             )
 
-            # Get actual model and provider from agent's last usage
-            # The agent stores metadata after each query in agent._last_usage
-            agent = agent_manager.agent
+            # Get actual model and provider from agent's last usage.
+            # process_message() may use a per-provider agent (stored in _agents[alias])
+            # rather than the default self._agent, so we must resolve the same instance.
+            _used_provider_alias = agent_llm_provider or conversation_id
+            agent = agent_manager._get_or_create_agent_for_provider(_used_provider_alias) if _used_provider_alias else agent_manager.agent
             model_name = "dpc_agent"
             provider_name = agent_llm_provider or "dpc_agent"
 
@@ -7933,7 +6664,8 @@ Respond in JSON format:
 
             # Get token usage from the agent monitor (set during process_message)
             session_state = agent_manager.get_session_state(conversation_id)
-            tokens_used = session_state.get("tokens_used", 0)
+            # "history_tokens" is the canonical key (renamed from "tokens_used" in agent_manager)
+            tokens_used = session_state.get("history_tokens", session_state.get("tokens_used", 0))
             token_limit = session_state.get("tokens_limit", 128000)
 
             # Token warning — mirror the same threshold check as local AI chat
@@ -7944,7 +6676,9 @@ Respond in JSON format:
                     "conversation_id": conversation_id,
                     "tokens_used": monitor.current_token_count,
                     "token_limit": token_limit,
-                    "usage_percent": usage_percent
+                    "usage_percent": usage_percent,
+                    "history_tokens": session_state.get("history_tokens", 0),
+                    "context_estimated": session_state.get("context_estimated", 0),
                 })
                 logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
                                conversation_id, usage_percent * 100,
@@ -7970,12 +6704,20 @@ Respond in JSON format:
                     "compute_host": "local",
                     "tokens_used": tokens_used,
                     "token_limit": token_limit,
+                    "history_tokens": session_state.get("history_tokens", 0),
+                    "context_estimated": session_state.get("context_estimated", 0),
                     "thinking": thinking_text,
                     "thinking_tokens": thinking_tokens,
                 }
             )
 
             logger.info("Agent query completed for conversation %s", conversation_id)
+
+            # Detect @CC mentions in user prompt or agent response and broadcast
+            # event for the real Claude Code to pick up via MCP bridge
+            await self._check_agent_cc_mention(
+                conversation_id, prompt, response, agent_manager
+            )
 
         except Exception as e:
             logger.error("Agent query failed for %s: %s", conversation_id, e, exc_info=True)
@@ -7985,6 +6727,262 @@ Respond in JSON format:
                 status="ERROR",
                 payload={"message": str(e)}
             )
+
+    async def _check_agent_cc_mention(
+        self, conversation_id: str, user_prompt: str, agent_response: str,
+        agent_manager
+    ) -> None:
+        """Detect @CC mentions in agent chat and broadcast event for Claude Code."""
+        import re
+        cc_name = self.get_cc_display_name().lower()
+        user_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', user_prompt or '', re.IGNORECASE)}
+        agent_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', agent_response or '', re.IGNORECASE)}
+
+        if cc_name not in user_mentions and cc_name not in agent_mentions:
+            return
+
+        # Determine who triggered the mention
+        if cc_name in user_mentions:
+            trigger_text = user_prompt
+            trigger_sender = "User"
+        else:
+            trigger_text = agent_response
+            trigger_sender = conversation_id
+
+        # Get full recent history including thinking + streaming_raw
+        monitor = agent_manager._agent_monitors.get(conversation_id)
+        recent_messages = []
+        if monitor:
+            for msg in monitor.message_history[-10:]:
+                entry = {
+                    "role": msg.get("role", "unknown"),
+                    "content": msg.get("content", ""),
+                    "sender_name": msg.get("sender_name", ""),
+                    "timestamp": msg.get("timestamp", ""),
+                }
+                # Include full agent internals for CC visibility
+                if msg.get("thinking"):
+                    entry["thinking"] = msg["thinking"]
+                if msg.get("streaming_raw"):
+                    entry["streaming_raw"] = msg["streaming_raw"]
+                recent_messages.append(entry)
+
+        logger.info(
+            "Agent chat @CC mention detected in %s by %s",
+            conversation_id, trigger_sender,
+        )
+        await self.local_api.broadcast_event("cc_agent_mention", {
+            "conversation_id": conversation_id,
+            "trigger_text": trigger_text,
+            "trigger_sender": trigger_sender,
+            "recent_history": recent_messages,
+        })
+
+    async def send_cc_agent_response(self, conversation_id: str, text: str, _skip_broadcast: bool = False, **kwargs) -> dict:
+        """Inject CC's response into an agent conversation.
+
+        Called by CC (Claude Code) after reading agent chat history and
+        formulating a response. The message appears as a user message
+        with the configured CC display name so the agent can see it in conversation context.
+
+        Args:
+            conversation_id: Agent conversation ID (e.g. 'agent_001')
+            text: CC's response text
+            _skip_broadcast: If True, skip agent_chat_message broadcast
+                (used when caller already delivers content via execute_ai_query response)
+        """
+        try:
+            from dpc_client_core.dpc_agent.utils import utc_now_iso
+            import uuid
+
+            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+            if not dpc_agent_provider:
+                return {"status": "error", "message": "DpcAgentProvider not configured"}
+
+            manager = dpc_agent_provider.get_manager(conversation_id)
+            if not manager:
+                return {"status": "error", "message": f"No agent manager for {conversation_id}"}
+
+            monitor = manager._agent_monitors.get(conversation_id)
+            if not monitor:
+                monitor = manager._get_or_create_agent_monitor(conversation_id)
+
+            timestamp = utc_now_iso()
+            message_id = str(uuid.uuid4())
+
+            cc_name = self.get_cc_display_name()
+
+            # Guard against duplicate CC messages (e.g. concurrent paths)
+            if monitor.message_history:
+                last = monitor.message_history[-1]
+                if last.get("sender_node_id") == "cc" and last.get("content") == text:
+                    logger.warning("Skipping duplicate CC message in %s", conversation_id)
+                    return {"status": "success", "message_id": message_id, "deduplicated": True}
+
+            # Add CC's response to conversation history
+            monitor.add_message(
+                role="user",
+                content=text,
+                timestamp=timestamp,
+                sender_node_id="cc",
+                sender_name=cc_name,
+            )
+            monitor.save_history()
+
+            # Update token stats so UI counter reflects CC messages (#4)
+            cc_tokens = len(text) // 4  # rough estimate
+            old_estimate = getattr(monitor, '_last_context_estimated', 0)
+            if old_estimate:
+                monitor._last_context_estimated = old_estimate + cc_tokens
+            token_stats = manager.get_session_state(conversation_id)
+
+            # Reset chain depth — each CC message starts a fresh chain allowance
+            self._cc_ark_chain_depth = 0
+
+            # Broadcast to UI so message appears in chat (skip when caller
+            # already delivers content via execute_ai_query response)
+            if not _skip_broadcast:
+                await self.local_api.broadcast_event("agent_chat_message", {
+                    "conversation_id": conversation_id,
+                    "message_id": message_id,
+                    "role": "user",
+                    "content": text,
+                    "sender_name": cc_name,
+                    "sender_node_id": "cc",
+                    "timestamp": timestamp,
+                    "context_estimated": token_stats.get("context_estimated", 0),
+                    "history_tokens": token_stats.get("history_tokens", 0),
+                    "tokens_limit": token_stats.get("tokens_limit", 128000),
+                })
+
+            logger.info("CC response injected into %s (%d chars)", conversation_id, len(text))
+
+            # If the triggering @CC message came from Telegram, also send CC response there
+            try:
+                if monitor.message_history and self.telegram_manager:
+                    # Check last few messages for Telegram source
+                    for msg in reversed(monitor.message_history[-5:]):
+                        if msg.get("sender_node_id") == "cc":
+                            continue  # Skip CC's own messages
+                        sender_name = msg.get("sender_name", "")
+                        if "(Telegram)" in sender_name:
+                            # Find linked Telegram chat_id from agent bridge
+                            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
+                            if dpc_agent_provider and conversation_id in getattr(dpc_agent_provider, '_managers', {}):
+                                bridge = getattr(dpc_agent_provider._managers[conversation_id], '_telegram_bridge', None)
+                                if bridge and bridge.allowed_chat_ids:
+                                    chat_id = bridge.allowed_chat_ids[0]
+                                    # Use the agent's own bot (dpc_agent_bot), not telegram_manager's bot
+                                    bot = getattr(bridge, '_bot', None)
+                                    if bot:
+                                        await bot.send_message(chat_id=chat_id, text=f"CC: {text}")
+                                    else:
+                                        await self.telegram_manager.send_message(chat_id, f"CC: {text}")
+                                    logger.info("CC response also sent to Telegram chat %s via agent bot", chat_id)
+                            break
+            except Exception as e:
+                logger.warning("Failed to send CC response to Telegram: %s", e)
+
+            # If CC's response mentions @agent (by name or ID), trigger agent to respond (subject to chain depth)
+            import re
+            cc_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text or '', re.IGNORECASE)}
+            _chain_agent_id = self._get_default_agent_id()
+            agent_name = self._get_agent_display_name(_chain_agent_id).lower()
+            if agent_name in cc_mentions or _chain_agent_id in cc_mentions:
+                chain_depth = getattr(self, '_cc_ark_chain_depth', 0)
+                if chain_depth < 5:
+                    self._cc_ark_chain_depth = chain_depth + 1
+                    logger.info("CC mentioned @%s in %s (chain depth %d) — triggering agent response",
+                                agent_name, conversation_id, chain_depth + 1)
+                    asyncio.ensure_future(self._invoke_agent_in_agent_chat(conversation_id, text, manager))
+                else:
+                    logger.info("CC mentioned @%s in %s but chain depth limit reached (%d), skipping",
+                                agent_name, conversation_id, chain_depth)
+
+            return {"status": "success", "message_id": message_id}
+
+        except Exception as e:
+            logger.error("Failed to inject CC response: %s", e, exc_info=True)
+            return {"status": "error", "message": str(e)}
+
+    async def _invoke_agent_in_agent_chat(
+        self, conversation_id: str, cc_text: str, agent_manager
+    ) -> None:
+        """Invoke agent in agent chat after CC mentions @agent.
+
+        Uses a short directive instead of CC's full text to avoid
+        duplicating CC's message in history (already saved by send_cc_agent_response).
+        """
+        try:
+            cc_name = self.get_cc_display_name()
+            # CC's message is already saved in history by send_cc_agent_response.
+            # Pass _skip_history=True so this trigger prompt is NOT saved to history.json.
+            response = await agent_manager.process_message(
+                message=cc_text,
+                conversation_id=conversation_id,
+                sender_name=cc_name,
+                _skip_history=True,
+            )
+            if response:
+                logger.info("Ark responded to CC's @Ark mention in %s (%d chars)",
+                            conversation_id, len(response))
+
+                # Extract thinking/streaming_raw from monitor history (reliable source)
+                thinking_text = None
+                streaming_raw = None
+                monitor = agent_manager._agent_monitors.get(conversation_id)
+                if monitor and monitor.message_history:
+                    last_msg = monitor.message_history[-1]
+                    if last_msg.get("role") == "assistant":
+                        thinking_text = last_msg.get("thinking")
+                        streaming_raw = last_msg.get("streaming_raw")
+
+                # Broadcast Ark's response to UI so it appears immediately
+                from dpc_client_core.dpc_agent.utils import utc_now_iso
+                import uuid
+                agent_name = self._get_agent_display_name(conversation_id)
+                await self.local_api.broadcast_event("agent_chat_message", {
+                    "conversation_id": conversation_id,
+                    "message_id": str(uuid.uuid4()),
+                    "role": "assistant",
+                    "content": response,
+                    "sender_name": agent_name,
+                    "timestamp": utc_now_iso(),
+                    "thinking": thinking_text,
+                    "streaming_raw": streaming_raw,
+                })
+
+                # Clear the streaming/progress indicator in the UI
+                await self.local_api.broadcast_event("agent_progress_clear", {
+                    "conversation_id": conversation_id,
+                })
+
+                # ARCH-10: forward chain response to Telegram if the conversation
+                # is currently Telegram-active (last NON-CC user message came from
+                # Telegram bot). CC bridge relay messages are skipped — they're CC's
+                # automated reaction to a real user, not the user's own input.
+                # UI-originated chains stay in UI only — see Mike's intent in S39.
+                last_user_source = None
+                if monitor and monitor.message_history:
+                    for msg in reversed(monitor.message_history):
+                        if msg.get("role") != "user":
+                            continue
+                        if msg.get("sender_node_id") == "cc":
+                            continue
+                        last_user_source = msg.get("source")
+                        break
+                if last_user_source == "telegram":
+                    bridge = self._get_telegram_bridge_for_conversation(conversation_id)
+                    if bridge:
+                        try:
+                            await bridge.send_chain_response(response)
+                        except Exception as bridge_err:
+                            logger.warning(
+                                "Failed to forward chain response to Telegram for %s: %s",
+                                conversation_id, bridge_err,
+                            )
+        except Exception as e:
+            logger.error("Ark response to CC's @Ark mention failed: %s", e, exc_info=True)
 
     async def execute_ai_query(self, command_id: str, prompt: str, context_ids: list = None, compute_host: str = None, model: str = None, provider: str = None, include_context: bool = True, ai_scope: str = None, instruction_set_name: str = None, agent_llm_provider: str = None, **kwargs):
         """
@@ -8249,6 +7247,14 @@ Respond in JSON format:
                 # Using update_token_count(tokens_used) would add prompt+response tokens cumulatively, causing exponential growth
                 monitor.set_token_count(result["prompt_tokens"])
 
+                # Compute breakdown for three-metric token display:
+                # - context_estimated = full assembled prompt (system + contexts + history)
+                # - history_tokens = rough estimate of conversation text only (chars ÷ 4)
+                _context_estimated = result["prompt_tokens"]
+                _history_tokens = sum(
+                    len(msg.get("content", "")) for msg in message_history
+                ) // 4
+
                 # Check if we should warn about approaching limit
                 if monitor.should_suggest_extraction():
                     # Use the current model's max tokens (not the monitor's cached value)
@@ -8260,7 +7266,9 @@ Respond in JSON format:
                         "conversation_id": conversation_id,
                         "tokens_used": monitor.current_token_count,
                         "token_limit": current_limit,
-                        "usage_percent": current_usage_percent
+                        "usage_percent": current_usage_percent,
+                        "history_tokens": _history_tokens,
+                        "context_estimated": _context_estimated,
                     })
                     logger.warning("Token Warning - %s: %.1f%% of context window used (%d/%d tokens)",
                                  conversation_id, current_usage_percent * 100,
@@ -8270,6 +7278,8 @@ Respond in JSON format:
                 response_payload["tokens_used"] = monitor.current_token_count  # Cumulative conversation tokens
                 response_payload["token_limit"] = result.get("model_max_tokens", 0)
                 response_payload["this_query_tokens"] = result["tokens_used"]  # Per-query tokens (for debugging)
+                response_payload["history_tokens"] = _history_tokens
+                response_payload["context_estimated"] = _context_estimated
 
         except Exception as e:
             logger.error("Error during inference: %s", e, exc_info=True)
@@ -8331,7 +7341,7 @@ Respond in JSON format:
                            len(monitor.message_buffer), monitor.knowledge_score)
 
                 # Only handle automatic proposals if auto-detection is enabled
-                if self.auto_knowledge_detection_enabled:
+                if self.knowledge_service.auto_knowledge_detection_enabled:
                     # If proposal generated, broadcast to UI
                     if proposal:
                         logger.info("Auto-detect - knowledge proposal generated for %s chat", conversation_id)
@@ -8355,7 +7365,7 @@ Respond in JSON format:
             except Exception as e:
                 logger.error("Error in local AI conversation monitoring: %s", e, exc_info=True)
                 # Only broadcast extraction failure if auto-detection was enabled
-                if self.auto_knowledge_detection_enabled:
+                if self.knowledge_service.auto_knowledge_detection_enabled:
                     await self.local_api.broadcast_event(
                         "knowledge_extraction_failed",
                         {
@@ -8409,6 +7419,60 @@ Respond in JSON format:
         context_json = json.dumps(context_dict, sort_keys=True)
         return hashlib.sha256(context_json.encode('utf-8')).hexdigest()
 
+    # --- Dynamic Agent/CC Name Resolution (#18) ---
+
+    def _get_default_agent_id(self) -> str:
+        """Get the first available agent ID from DpcAgentProvider at runtime.
+
+        Returns the first key in DpcAgentProvider._managers dict,
+        falling back to 'agent_001' for backwards compatibility.
+        """
+        try:
+            dpc_provider = self.llm_manager.providers.get("dpc_agent")
+            if dpc_provider and hasattr(dpc_provider, '_managers') and dpc_provider._managers:
+                return next(iter(dpc_provider._managers))
+        except Exception:
+            pass
+        return "agent_001"
+
+    def _get_agent_display_name(self, agent_id: str = None) -> str:
+        """Get agent's display name from its config.json.
+
+        Args:
+            agent_id: Agent ID to look up. If None, uses default agent.
+
+        Returns:
+            Display name from config, or agent_id as fallback.
+        """
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        try:
+            config_path = Path.home() / ".dpc" / "agents" / agent_id / "config.json"
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                return config.get("name", agent_id)
+        except Exception:
+            pass
+        return agent_id
+
+    def get_cc_display_name(self) -> str:
+        """Read CC display name from config.ini [agent_chat] section.
+        Sync for internal use. For WebSocket API, use get_cc_config().
+        """
+        return self.settings.get("agent_chat", "cc_display_name", fallback="CC")
+
+    async def get_cc_config(self) -> Dict[str, Any]:
+        """Get CC display name (async API endpoint for UI)."""
+        return {"status": "success", "cc_display_name": self.get_cc_display_name()}
+
+    async def set_cc_display_name(self, name: str) -> Dict[str, Any]:
+        """Update CC display name in config.ini."""
+        if not name or not name.strip():
+            return {"status": "error", "message": "CC display name cannot be empty"}
+        self.settings.set("agent_chat", "cc_display_name", name.strip())
+        return {"status": "success", "cc_display_name": name.strip()}
+
     # --- DPC Agent Management Methods ---
 
     async def create_agent(
@@ -8419,673 +7483,123 @@ Respond in JSON format:
         instruction_set_name: str = "general",
         budget_usd: float = 50.0,
         max_rounds: int = 200,
+        compute_host: str = "",  # Optional remote peer node_id for LLM inference
     ) -> Dict[str, Any]:
-        """
-        Create a new DPC Agent with isolated storage.
-
-        Args:
-            name: Human-readable agent name
-            provider_alias: AI provider to use (from providers.json)
-            profile_name: Permission profile name (defaults to agent_id for per-agent profiles)
-            instruction_set_name: Instruction set for the agent
-            budget_usd: Budget limit in USD
-            max_rounds: Maximum LLM rounds per task
-
-        Returns:
-            Dict with status and agent info
-        """
-        from .dpc_agent.utils import (
-            generate_agent_id,
-            create_agent_storage,
-            AgentRegistry,
-            migrate_legacy_agent,
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        return await self.agent_service.create_agent(
+            name=name,
+            provider_alias=provider_alias,
+            profile_name=profile_name,
+            instruction_set_name=instruction_set_name,
+            budget_usd=budget_usd,
+            max_rounds=max_rounds,
+            compute_host=compute_host,
         )
 
-        try:
-            # Perform migration if needed (legacy ~/.dpc/agent/ -> ~/.dpc/agents/default/)
-            migrate_legacy_agent()
-
-            # Generate unique agent ID with name slug
-            agent_id = generate_agent_id(name)
-
-            # Use agent_id as profile name for per-agent profiles
-            actual_profile_name = profile_name if profile_name else agent_id
-
-            # Create agent storage and config
-            config = create_agent_storage(
-                agent_id=agent_id,
-                name=name,
-                provider_alias=provider_alias,
-                profile_name=actual_profile_name,
-                instruction_set_name=instruction_set_name,
-                budget_usd=budget_usd,
-                max_rounds=max_rounds,
-            )
-
-            # Create per-agent profile in firewall (copies from dpc_agent defaults)
-            self.firewall.create_agent_profile(actual_profile_name, copy_from_global=True)
-
-            # Broadcast event to UI
-            await self.local_api.broadcast_event("agent_created", {
-                "agent_id": agent_id,
-                "name": name,
-                "provider_alias": provider_alias,
-                "profile_name": actual_profile_name,
-            })
-
-            return {
-                "status": "success",
-                "agent_id": agent_id,
-                "config": config,
-            }
-
-        except Exception as e:
-            logger.error("Error creating agent: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e),
-            }
-
     async def list_agents(self) -> Dict[str, Any]:
-        """
-        List all registered DPC Agents.
-
-        Returns:
-            Dict with status and list of agents
-        """
-        from .dpc_agent.utils import AgentRegistry, migrate_legacy_agent
-
-        try:
-            # Ensure migration has occurred
-            migrate_legacy_agent()
-
-            registry = AgentRegistry()
-            agents = registry.list_agents()
-
-            return {
-                "status": "success",
-                "agents": agents,
-            }
-
-        except Exception as e:
-            logger.error("Error listing agents: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e),
-            }
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        return await self.agent_service.list_agents()
 
     async def get_agent_config(self, agent_id: str) -> Dict[str, Any]:
-        """
-        Get configuration for a specific agent.
-
-        Args:
-            agent_id: The agent ID to get config for
-
-        Returns:
-            Dict with status and agent config
-        """
-        from .dpc_agent.utils import load_agent_config, AgentRegistry
-
-        try:
-            registry = AgentRegistry()
-
-            # Check if agent exists in registry
-            agent_meta = registry.get_agent(agent_id)
-            if not agent_meta:
-                return {
-                    "status": "error",
-                    "message": f"Agent not found: {agent_id}",
-                }
-
-            # Load full config from agent's config.json
-            config = load_agent_config(agent_id)
-
-            return {
-                "status": "success",
-                "config": config,
-                "metadata": agent_meta,
-            }
-
-        except Exception as e:
-            logger.error("Error getting agent config: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e),
-            }
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        return await self.agent_service.get_agent_config(agent_id)
 
     async def update_agent_config(
         self,
         agent_id: str,
         updates: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """
-        Update configuration for a specific agent.
-
-        Args:
-            agent_id: The agent ID to update
-            updates: Fields to update in the config
-
-        Returns:
-            Dict with status and updated config
-        """
-        from .dpc_agent.utils import load_agent_config, save_agent_config, AgentRegistry
-
-        try:
-            registry = AgentRegistry()
-
-            # Check if agent exists
-            if not registry.get_agent(agent_id):
-                return {
-                    "status": "error",
-                    "message": f"Agent not found: {agent_id}",
-                }
-
-            # Load existing config
-            config = load_agent_config(agent_id)
-
-            # Apply updates
-            config.update(updates)
-            config["updated_at"] = self._get_iso_timestamp()
-
-            # Save updated config
-            save_agent_config(agent_id, config)
-
-            # Update registry if name/provider/profile changed
-            registry_updates = {}
-            if "name" in updates:
-                registry_updates["name"] = updates["name"]
-            if "provider_alias" in updates:
-                registry_updates["provider_alias"] = updates["provider_alias"]
-            if "profile_name" in updates:
-                registry_updates["profile_name"] = updates["profile_name"]
-            if registry_updates:
-                registry.update_agent(agent_id, registry_updates)
-
-            # Broadcast event to UI
-            await self.local_api.broadcast_event("agent_updated", {
-                "agent_id": agent_id,
-                "updates": updates,
-            })
-
-            return {
-                "status": "success",
-                "config": config,
-            }
-
-        except Exception as e:
-            logger.error("Error updating agent config: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e),
-            }
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        return await self.agent_service.update_agent_config(agent_id, updates)
 
     async def delete_agent(self, agent_id: str) -> Dict[str, Any]:
-        """
-        Delete a DPC Agent and its storage.
-
-        Args:
-            agent_id: The agent ID to delete
-
-        Returns:
-            Dict with status
-        """
-        from .dpc_agent.utils import delete_agent_storage, AgentRegistry
-
-        try:
-            # Don't allow deleting default agent
-            if agent_id == "default":
-                return {
-                    "status": "error",
-                    "message": "Cannot delete default agent",
-                }
-
-            registry = AgentRegistry()
-
-            # Check if agent exists
-            if not registry.get_agent(agent_id):
-                return {
-                    "status": "error",
-                    "message": f"Agent not found: {agent_id}",
-                }
-
-            # Delete storage and unregister
-            success = delete_agent_storage(agent_id)
-
-            if success:
-                # Broadcast event to UI
-                await self.local_api.broadcast_event("agent_deleted", {
-                    "agent_id": agent_id,
-                })
-
-                return {
-                    "status": "success",
-                    "message": f"Agent {agent_id} deleted",
-                }
-            else:
-                return {
-                    "status": "error",
-                    "message": f"Failed to delete agent storage",
-                }
-
-        except Exception as e:
-            logger.error("Error deleting agent: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e),
-            }
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        return await self.agent_service.delete_agent(agent_id)
 
     async def list_agent_profiles(self) -> Dict[str, Any]:
-        """
-        List available agent permission profiles.
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        return await self.agent_service.list_agent_profiles()
 
-        Returns:
-            Dict with status and list of profile names
+    async def get_agent_permissions(self, agent_id: str = "agent_001") -> Dict[str, Any]:
+        """Get agent permissions summary for UI transparency.
+
+        Returns all access paths, tools, and capabilities so the user can see
+        exactly what the agent has access to.
         """
+        if not self.firewall:
+            return {"status": "error", "message": "Firewall not initialized"}
         try:
-            profiles = self.firewall.list_agent_profiles() if hasattr(self.firewall, "list_agent_profiles") else ["default"]
-
-            return {
-                "status": "success",
-                "profiles": profiles,
-            }
-
+            summary = self.firewall.get_agent_permissions_summary(agent_id)
+            return {"status": "ok", **summary}
         except Exception as e:
-            logger.error("Error listing agent profiles: %s", e, exc_info=True)
-            return {
-                "status": "error",
-                "message": str(e),
-            }
+            return {"status": "error", "message": str(e)}
 
     # --- Agent Task Board Methods (v0.20.0) ---
 
-    async def get_agent_tasks(self, agent_id: str = "agent_001") -> Dict[str, Any]:
-        """Get agent task history for the Task Board panel.
+    async def get_agent_tasks(self, agent_id: str = None) -> Dict[str, Any]:
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        return await self.agent_service.get_agent_tasks(agent_id)
 
-        Reads:
-        - state/task_queue.json for pending/scheduled tasks
-        - task_results/*.json for completed tasks (primary source)
-        - logs/events.jsonl for legacy completed/failed entries without a result file
+    async def get_agent_task_result(self, agent_id: str = None, task_id: str = "") -> Dict[str, Any]:
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        return await self.agent_service.get_agent_task_result(agent_id, task_id)
 
-        Returns:
-            Dict with running, scheduled, completed, failed task lists
-        """
-        import json
-        from pathlib import Path
-        from datetime import datetime, timezone
-
-        try:
-            from .dpc_agent.utils import get_agent_root
-            agent_root = get_agent_root(agent_id)
-
-            running: list = []
-            scheduled: list = []
-            completed: list = []
-            failed: list = []
-
-            # --- Pending/scheduled tasks from queue file ---
-            queue_file = agent_root / "state" / "task_queue.json"
-            if queue_file.exists():
-                try:
-                    queue_data = json.loads(queue_file.read_text(encoding="utf-8"))
-                    for t in queue_data.get("tasks", []):
-                        entry = {
-                            "id": t.get("id", ""),
-                            "type": t.get("task_type", "chat"),
-                            "preview": (t.get("data", {}) or {}).get("message", "")[:120],
-                            "status": t.get("status", "pending"),
-                            "started_at": t.get("started_at"),
-                            "completed_at": t.get("completed_at"),
-                            "scheduled_at": t.get("scheduled_at"),
-                            "result_preview": None,
-                        }
-                        if t.get("status") == "running":
-                            running.append(entry)
-                        elif t.get("status") == "pending":
-                            scheduled.append(entry)
-                except Exception as e:
-                    logger.warning("Failed to parse task queue: %s", e)
-
-            # --- Completed/failed from task_results/ (primary source) ---
-            results_dir = agent_root / "task_results"
-            seen_task_ids: set = set()
-            if results_dir.exists():
-                try:
-                    result_files = sorted(
-                        results_dir.glob("*.json"),
-                        key=lambda p: p.stat().st_mtime,
-                        reverse=True,
-                    )
-                    for rf in result_files:
-                        try:
-                            data = json.loads(rf.read_text(encoding="utf-8"))
-                            tid = data.get("task_id", rf.stem)
-                            seen_task_ids.add(tid)
-                            completed.append({
-                                "id": tid,
-                                "type": data.get("task_type", "chat"),
-                                "preview": (data.get("prompt") or "")[:120],
-                                "status": "completed",
-                                "started_at": data.get("started_at"),
-                                "completed_at": data.get("completed_at"),
-                                "scheduled_at": None,
-                                "result_preview": (data.get("response") or "")[:200],
-                                "has_full_result": True,
-                            })
-                        except Exception:
-                            continue
-                except Exception as e:
-                    logger.warning("Failed to read task_results dir: %s", e)
-
-            # --- Legacy fallback: events.jsonl for entries without a result file ---
-            events_file = agent_root / "logs" / "events.jsonl"
-            if events_file.exists():
-                try:
-                    lines = events_file.read_text(encoding="utf-8").splitlines()
-                    pending_start = None
-                    for line in lines:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            ev = json.loads(line)
-                        except Exception:
-                            continue
-                        ev_type = ev.get("type", "")
-                        if ev_type == "task_start":
-                            pending_start = ev
-                        elif ev_type == "task_complete" and pending_start:
-                            tid = ev.get("task_id", "")
-                            if tid not in seen_task_ids:
-                                # Legacy entry — no result file exists
-                                completed.append({
-                                    "id": tid,
-                                    "type": "chat",
-                                    "preview": pending_start.get("text_preview", "")[:120],
-                                    "status": "completed",
-                                    "started_at": pending_start.get("ts"),
-                                    "completed_at": ev.get("ts"),
-                                    "scheduled_at": None,
-                                    "result_preview": (ev.get("response_preview") or "")[:200],
-                                    "has_full_result": False,
-                                })
-                            pending_start = None
-                        elif ev_type == "task_failed" and pending_start:
-                            tid = ev.get("task_id", "")
-                            if tid not in seen_task_ids:
-                                failed.append({
-                                    "id": tid,
-                                    "type": "chat",
-                                    "preview": pending_start.get("text_preview", "")[:120],
-                                    "status": "failed",
-                                    "started_at": pending_start.get("ts"),
-                                    "completed_at": ev.get("ts"),
-                                    "scheduled_at": None,
-                                    "result_preview": None,
-                                    "has_full_result": False,
-                                })
-                            pending_start = None
-                except Exception as e:
-                    logger.warning("Failed to parse events log: %s", e)
-
-            # Sort completed by completed_at descending
-            def _sort_key(e: dict) -> str:
-                return e.get("completed_at") or e.get("started_at") or ""
-            completed.sort(key=_sort_key, reverse=True)
-
-            return {
-                "status": "success",
-                "agent_id": agent_id,
-                "running": running,
-                "scheduled": scheduled,
-                "completed": completed[:50],
-                "failed": failed,
-                "total_completed": len(completed),
-            }
-
-        except Exception as e:
-            logger.error("Error in get_agent_tasks: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
-
-    async def get_agent_task_result(self, agent_id: str = "agent_001", task_id: str = "") -> Dict[str, Any]:
-        """Get full result for a specific task from task_results/{task_id}.json."""
-        import json
-        try:
-            from .dpc_agent.utils import get_agent_root
-            agent_root = get_agent_root(agent_id)
-            result_file = agent_root / "task_results" / f"{task_id}.json"
-            if not result_file.exists():
-                return {"status": "error", "message": f"No result file for task {task_id}"}
-            data = json.loads(result_file.read_text(encoding="utf-8"))
-            return {"status": "success", **data}
-        except Exception as e:
-            logger.error("Error in get_agent_task_result: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
-
-    async def get_agent_learning(self, agent_id: str = "agent_001") -> Dict[str, Any]:
-        """Get agent learning progress from knowledge/llm_learning_schedule.md.
-
-        Parses the '## Progress Tracking' section with standardized format:
-            ### Task 1.1: Title
-            Status: in_progress
-            Last Activity: 2026-03-03
-            Session Summary: ...
-            Next Step: ...
-
-        Returns stalled status if in_progress and Last Activity > 3 days ago.
-
-        Returns:
-            Dict with phases, streak_days, last_session
-        """
-        from pathlib import Path
-        from datetime import datetime, timezone, timedelta
-
-        try:
-            from .dpc_agent.utils import get_agent_root
-            agent_root = get_agent_root(agent_id)
-
-            learning_file = agent_root / "knowledge" / "llm_learning_schedule.md"
-            if not learning_file.exists():
-                return {
-                    "status": "error",
-                    "message": f"Learning file not found: {learning_file}",
-                }
-
-            content = learning_file.read_text(encoding="utf-8")
-
-            # --- Parse Progress Tracking section ---
-            tracking_start = None
-            for i, line in enumerate(content.splitlines()):
-                if line.strip().startswith("## Progress Tracking"):
-                    tracking_start = i + 1
-                    break
-
-            if tracking_start is None:
-                return {
-                    "status": "error",
-                    "message": "No '## Progress Tracking' section found in learning file.",
-                }
-
-            lines = content.splitlines()
-            # Collect tracking section until next ## heading
-            tracking_lines = []
-            for line in lines[tracking_start:]:
-                if line.startswith("## ") and tracking_lines:
-                    break
-                tracking_lines.append(line)
-
-            tracking_text = "\n".join(tracking_lines)
-
-            # Split by ### Task headings
-            import re
-            task_blocks = re.split(r'\n(?=### )', tracking_text.strip())
-
-            tasks_raw = []
-            for block in task_blocks:
-                block = block.strip()
-                if not block.startswith("###"):
-                    continue
-                first_line = block.splitlines()[0]
-                # Extract task id and title e.g. "### Task 1.1: Matrix Multiplication"
-                m = re.match(r'^### Task\s+(\d+\.\d+):\s+(.+)$', first_line.strip())
-                if not m:
-                    continue
-                task_num = m.group(1)
-                task_title = m.group(2).strip()
-
-                # Parse key-value fields
-                fields: Dict[str, str] = {}
-                for line in block.splitlines()[1:]:
-                    if ": " in line:
-                        key, _, val = line.partition(": ")
-                        fields[key.strip()] = val.strip()
-
-                status_raw = fields.get("Status", "pending").lower().strip()
-                last_activity_str = fields.get("Last Activity", fields.get("Completed", ""))
-                started_str = fields.get("Started", "")
-                completed_str = fields.get("Completed", "")
-
-                # Parse last_activity date
-                last_activity_date = None
-                for date_str in [last_activity_str, completed_str, started_str]:
-                    if date_str:
-                        try:
-                            last_activity_date = datetime.strptime(date_str[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
-                            break
-                        except ValueError:
-                            pass
-
-                # Stalled detection
-                days_stalled = None
-                status = status_raw
-                if status == "in_progress" and last_activity_date:
-                    now = datetime.now(timezone.utc)
-                    days_since = (now - last_activity_date).days
-                    if days_since > 3:
-                        status = "stalled"
-                        days_stalled = days_since
-
-                tasks_raw.append({
-                    "id": f"Task {task_num}",
-                    "title": task_title,
-                    "status": status,
-                    "started_at": started_str or None,
-                    "completed_at": completed_str or None,
-                    "last_activity": last_activity_str or None,
-                    "days_stalled": days_stalled,
-                    "session_summary": fields.get("Session Summary") or None,
-                    "next_step": fields.get("Next Step") or None,
-                })
-
-            # --- Group tasks into phases by major number ---
-            phase_map: Dict[str, list] = {}
-            for task in tasks_raw:
-                major = task["id"].split(".")[0].replace("Task ", "")
-                phase_key = f"Phase {major}"
-                if phase_key not in phase_map:
-                    phase_map[phase_key] = []
-                phase_map[phase_key].append(task)
-
-            phases = [{"title": k, "tasks": v} for k, v in sorted(phase_map.items())]
-
-            # --- Compute last_session and streak ---
-            all_dates = []
-            for task in tasks_raw:
-                for date_str in [task.get("last_activity"), task.get("completed_at"), task.get("started_at")]:
-                    if date_str:
-                        try:
-                            all_dates.append(datetime.strptime(date_str[:10], "%Y-%m-%d"))
-                        except ValueError:
-                            pass
-
-            last_session_str = None
-            streak_days = 0
-            if all_dates:
-                last_session_dt = max(all_dates)
-                last_session_str = last_session_dt.strftime("%Y-%m-%d")
-                now_local = datetime.now()
-                days_since = (now_local.date() - last_session_dt.date()).days
-                streak_days = 1 if days_since <= 1 else 0
-
-            return {
-                "status": "success",
-                "agent_id": agent_id,
-                "phases": phases,
-                "streak_days": streak_days,
-                "last_session": last_session_str,
-            }
-
-        except Exception as e:
-            logger.error("Error in get_agent_learning: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
+    async def get_agent_learning(self, agent_id: str = None) -> Dict[str, Any]:
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        return await self.agent_service.get_agent_learning(agent_id)
 
     async def schedule_agent_task(
         self,
-        agent_id: str = "agent_001",
+        agent_id: str = None,
         task_type: str = "chat",
         data: Dict[str, Any] = None,
         priority: str = "NORMAL",
         delay_seconds: int = 0,
     ) -> Dict[str, Any]:
-        """Schedule an agent task from the Task Board UI.
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        return await self.agent_service.schedule_agent_task(
+            agent_id=agent_id,
+            task_type=task_type,
+            data=data,
+            priority=priority,
+            delay_seconds=delay_seconds,
+        )
 
-        Returns:
-            Dict with task_id and scheduled_at
-        """
-        from datetime import datetime, timezone, timedelta
-
-        try:
-            from .dpc_agent.task_queue import TaskPriority
-
-            dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
-            if not dpc_agent_provider:
-                return {"status": "error", "message": "DPC Agent provider not available"}
-
-            # Get or create agent manager for this agent_id
-            if agent_id not in dpc_agent_provider._managers:
-                return {"status": "error", "message": f"Agent '{agent_id}' not running. Open an agent chat first."}
-
-            agent_manager = dpc_agent_provider._managers[agent_id]
-            await agent_manager.ensure_started()
-
-            if not agent_manager._agent:
-                return {"status": "error", "message": "Agent not initialized"}
-
-            # Resolve priority enum
-            try:
-                prio = TaskPriority[priority.upper()]
-            except KeyError:
-                prio = TaskPriority.NORMAL
-
-            # Compute scheduled_at
-            scheduled_at = None
-            if delay_seconds and delay_seconds > 0:
-                scheduled_at = datetime.now(timezone.utc) + timedelta(seconds=delay_seconds)
-
-            task = agent_manager._agent.schedule_task(
-                task_type=task_type,
-                data=data or {},
-                priority=prio,
-                delay_seconds=delay_seconds if delay_seconds > 0 else 0,
-            )
-
-            return {
-                "status": "success",
-                "task_id": task.id,
-                "task_type": task_type,
-                "scheduled_at": task.scheduled_at,
-            }
-
-        except Exception as e:
-            logger.error("Error in schedule_agent_task: %s", e, exc_info=True)
-            return {"status": "error", "message": str(e)}
-
-    def _get_iso_timestamp(self) -> str:
-        """Get current timestamp in ISO format."""
-        from datetime import datetime, timezone
-        from datetime import datetime, timezone
-        return datetime.now(timezone.utc).isoformat()
-
-    # --- Hub Methods ---
+    async def cancel_agent_task(self, agent_id: str = None, task_id: str = "") -> Dict[str, Any]:
+        """Delegates to AgentService."""
+        if not self.agent_service:
+            return {"status": "error", "message": "Agent service not available"}
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+        return await self.agent_service.cancel_agent_task(agent_id, task_id)
 
     # --- Hub Methods ---
 

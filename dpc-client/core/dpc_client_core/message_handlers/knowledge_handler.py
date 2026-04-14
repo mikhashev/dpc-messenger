@@ -7,6 +7,11 @@ from . import MessageHandler
 class ContextUpdatedHandler(MessageHandler):
     """Handles CONTEXT_UPDATED messages (peer notifying of context changes)."""
 
+    def __init__(self, service):
+        super().__init__(service)
+        # Deduplicate UI broadcasts: only emit peer_context_updated when hash actually changes
+        self._last_broadcast_hash: Dict[str, str] = {}
+
     @property
     def command_name(self) -> str:
         return "CONTEXT_UPDATED"
@@ -38,11 +43,20 @@ class ContextUpdatedHandler(MessageHandler):
                 monitor.conversation_id
             )
 
-        # Broadcast event to UI so "Updated" badge appears
-        await self.service.local_api.broadcast_event("peer_context_updated", {
-            "node_id": sender_node_id,
-            "context_hash": context_hash
-        })
+        # Broadcast event to UI so "Updated" badge appears, but deduplicate:
+        # if we already broadcast this exact hash for this peer, skip to avoid flooding
+        # (can happen with leaked connections, reconnects, or relay fanout)
+        if context_hash != self._last_broadcast_hash.get(sender_node_id):
+            self._last_broadcast_hash[sender_node_id] = context_hash
+            await self.service.local_api.broadcast_event("peer_context_updated", {
+                "node_id": sender_node_id,
+                "context_hash": context_hash
+            })
+        else:
+            self.logger.debug(
+                "Skipping duplicate peer_context_updated broadcast for %s (same hash)",
+                sender_node_id[:20]
+            )
 
         return None
 
@@ -66,6 +80,18 @@ class ProposeKnowledgeCommitHandler(MessageHandler):
             payload: Contains commit proposal data
         """
         await self.service.consensus_manager.handle_proposal_message(sender_node_id, payload)
+
+        # Relay to group members that can't reach the proposer directly (star topology)
+        conversation_id = payload.get("conversation_id", "")
+        if conversation_id.startswith("group-"):
+            proposal_id = payload.get("proposal_id", "")
+            dedup_key = f"kc:{proposal_id}"
+            if dedup_key not in self.service._processed_message_ids:
+                self.service._processed_message_ids.add(dedup_key)
+                await self._relay_to_group(
+                    "PROPOSE_KNOWLEDGE_COMMIT", payload, sender_node_id, conversation_id
+                )
+
         return None
 
 
@@ -88,6 +114,19 @@ class VoteKnowledgeCommitHandler(MessageHandler):
             payload: Contains vote data (commit_id, vote)
         """
         await self.service.consensus_manager.handle_vote_message(sender_node_id, payload)
+
+        # Relay to group members that can't reach the voter directly (star topology)
+        proposal_id = payload.get("proposal_id", "")
+        session = self.service.consensus_manager.sessions.get(proposal_id)
+        conversation_id = session.proposal.conversation_id if session else ""
+        if conversation_id and conversation_id.startswith("group-"):
+            dedup_key = f"kv:{proposal_id}:{sender_node_id}"
+            if dedup_key not in self.service._processed_message_ids:
+                self.service._processed_message_ids.add(dedup_key)
+                await self._relay_to_group(
+                    "VOTE_KNOWLEDGE_COMMIT", payload, sender_node_id, conversation_id
+                )
+
         return None
 
 
@@ -126,6 +165,16 @@ class KnowledgeCommitResultHandler(MessageHandler):
 
         # Broadcast event to UI
         await self.service.local_api.broadcast_event("knowledge_commit_result", payload)
+
+        # Relay to group members that can't reach the result sender directly (star topology)
+        conversation_id = session.proposal.conversation_id if session else ""
+        if conversation_id and conversation_id.startswith("group-"):
+            dedup_key = f"kr:{proposal_id}"
+            if dedup_key not in self.service._processed_message_ids:
+                self.service._processed_message_ids.add(dedup_key)
+                await self._relay_to_group(
+                    "KNOWLEDGE_COMMIT_RESULT", payload, sender_node_id, conversation_id
+                )
 
         return None
 
@@ -171,6 +220,17 @@ class CommitSignedHandler(MessageHandler):
                 signer_node_id[:20], commit_id[:12]
             )
 
+        # Relay to group members — find group via active sessions (sender may be a participant)
+        dedup_key = f"cs:{commit_id}:{signer_node_id}"
+        if dedup_key not in self.service._processed_message_ids:
+            self.service._processed_message_ids.add(dedup_key)
+            for sess in self.service.consensus_manager.sessions.values():
+                conv_id = getattr(sess.proposal, 'conversation_id', '')
+                if (conv_id and conv_id.startswith("group-")
+                        and sender_node_id in getattr(sess.proposal, 'participants', [])):
+                    await self._relay_to_group("COMMIT_SIGNED", payload, sender_node_id, conv_id)
+                    break
+
         return None
 
 
@@ -205,6 +265,25 @@ class CommitAckHandler(MessageHandler):
             return None
 
         self.service.consensus_manager.record_commit_ack(commit_id, ack_node_id, participants)
+
+        # Relay to other participants the sender can't reach directly
+        dedup_key = f"ca:{commit_id}:{ack_node_id}"
+        if dedup_key not in self.service._processed_message_ids:
+            self.service._processed_message_ids.add(dedup_key)
+            if participants:
+                relay_msg = {"command": "COMMIT_ACK", "payload": payload}
+                for p_id in participants:
+                    if p_id == self.service.p2p_manager.node_id:
+                        continue
+                    if p_id == sender_node_id:
+                        continue
+                    if p_id in self.service.p2p_manager.peers:
+                        try:
+                            await self.service.p2p_manager.send_message_to_peer(p_id, relay_msg)
+                            self.logger.debug("Relayed COMMIT_ACK to %s", p_id[:20])
+                        except Exception as e:
+                            self.logger.error("Failed to relay COMMIT_ACK to %s: %s", p_id[:20], e)
+
         return None
 
 

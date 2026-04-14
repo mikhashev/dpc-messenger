@@ -1,0 +1,40 @@
+# Cross-platform line ending normalization
+
+# Shell scripts MUST be LF (Linux + macOS compatibility)
+*.sh text eol=lf
+
+# Python, TypeScript, Svelte (LF preferred)
+*.py text eol=lf
+*.ts text eol=lf
+*.svelte text eol=lf
+*.jsx text eol=lf
+*.tsx text eol=lf
+
+# Config files
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.toml text eol=lf
+*.txt text eol=lf
+
+# Windows-specific files can be CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files (all platforms)
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

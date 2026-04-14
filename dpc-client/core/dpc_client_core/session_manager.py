@@ -248,24 +248,39 @@ class NewSessionProposalManager:
             }
         }
 
-        # v0.20.0 FIX: Use conversation_id directly for both peer chats and group chats
-        # Previously, this code extracted a single peer_node_id which was wrong for groups
-        # (would pick one random member instead of the group conversation)
+        # The proposal.conversation_id is the peer's node_id from the INITIATOR's perspective.
+        # For the approver, the local chat is stored under the INITIATOR's node_id, not their own.
+        # Example: Ubuntu proposes with conversation_id = Windows's node_id.
+        #   - Ubuntu (initiator): clears chatHistories["windows-id"] ✅
+        #   - Windows (approver): must clear chatHistories["ubuntu-id"], NOT chatHistories["windows-id"]
+        # Group chats: conversation_id is a group_id — same on all sides, no translation needed.
         conversation_id = proposal.conversation_id
 
-        # If approved: clear local history (for all participants)
-        if is_approved:
-            self.logger.info("Proposal approved, clearing local conversation history for %s", conversation_id[:20] if conversation_id else "unknown")
-            monitor = self.core_service._get_or_create_conversation_monitor(conversation_id)
-            monitor.reset_conversation()
+        is_group = not conversation_id.startswith("dpc-node-")
+        if is_group:
+            local_conversation_id = conversation_id
+        else:
+            # P2P chat: approver's local key = initiator's node_id
+            if session.is_initiator:
+                local_conversation_id = conversation_id
+            else:
+                local_conversation_id = proposal.initiator_node_id
 
-        # Broadcast result to all participants
+        # If approved: clear local history
+        if is_approved:
+            self.logger.info("Proposal approved, clearing local conversation history for %s", local_conversation_id[:20] if local_conversation_id else "unknown")
+            monitor = self.core_service._get_or_create_conversation_monitor(local_conversation_id)
+            _firewall = getattr(self.core_service, "firewall", None)
+            _preserve = getattr(_firewall, "history_preserve_on_reset", True) if _firewall else True
+            _max = getattr(_firewall, "history_max_archived_sessions", 40) if _firewall else 40
+            monitor.reset_conversation(preserve=_preserve, max_sessions=_max)
+
+        # Broadcast result to all participants (use original conversation_id so initiator can look it up)
         if self.on_result_broadcast:
             await self.on_result_broadcast(result_payload, list(proposal.participants))
 
-        # Emit event to UI for initiator
-        # v0.20.0 FIX: Include conversation_id (not just sender_node_id) for proper frontend handling
-        ui_payload = {**result_payload, "conversation_id": conversation_id}
+        # Emit event to UI with the LOCAL conversation_id so frontend clears the right chat
+        ui_payload = {**result_payload, "conversation_id": local_conversation_id}
         await self.core_service.local_api.broadcast_event(
             "new_session_result",
             ui_payload

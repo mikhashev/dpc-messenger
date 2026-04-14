@@ -112,9 +112,8 @@ class IPv4DirectStrategy(ConnectionStrategy):
                     addr_type, node_id[:20], ip, port
                 )
 
-                # Use existing P2P manager's connect_to_peer method
                 connection = await asyncio.wait_for(
-                    orchestrator.p2p_manager.connect_to_peer(ip, port, node_id),
+                    orchestrator.p2p_manager.connect_directly(ip, port, node_id),
                     timeout=self.timeout
                 )
 

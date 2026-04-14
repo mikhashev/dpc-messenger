@@ -29,19 +29,18 @@ async def _check_internet_connectivity() -> bool:
         ("208.67.222.222", 53)   # OpenDNS
     ]
 
+    loop = asyncio.get_running_loop()
     for host, port in test_hosts:
+        sock = None
         try:
             # Quick TCP connection test (timeout 2s)
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.setblocking(False)
 
-            # Use async connect
-            loop = asyncio.get_event_loop()
             await asyncio.wait_for(
                 loop.sock_connect(sock, (host, port)),
-                timeout=2.0
+                timeout=2.0,
             )
-            sock.close()
 
             logger.info("Internet connectivity confirmed via %s", host)
             return True
@@ -49,6 +48,12 @@ async def _check_internet_connectivity() -> bool:
         except Exception as e:
             logger.debug("Connectivity check failed for %s:%d: %s", host, port, e)
             continue
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
 
     logger.warning("No internet connectivity detected (tried %s)",
                   ", ".join(f"{h}:{p}" for h, p in test_hosts))
@@ -81,7 +86,7 @@ async def _resolve_stun_address(stun_url: str) -> tuple[str, int]:
         port = 3478  # Default STUN port
 
     # Async DNS resolution with timeout (Windows-safe)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     try:
         addr_info = await asyncio.wait_for(
             loop.getaddrinfo(hostname, port, family=socket.AF_INET,
@@ -104,9 +109,66 @@ async def _resolve_stun_address(stun_url: str) -> tuple[str, int]:
         raise
 
 
+def _parse_stun_response(data: bytes, transaction_id: bytes, host: str, port: int) -> Optional[str]:
+    """
+    Parse a raw STUN binding response and return the mapped external IP, or None.
+
+    Extracted from _stun_binding_request so it can be tested independently.
+    """
+    magic_cookie = b'\x21\x12\xa4\x42'
+
+    if len(data) < 20:
+        logger.debug("STUN response too short from %s:%d", host, port)
+        return None
+
+    if data[0:2] != b'\x01\x01':
+        logger.debug("Invalid STUN response type from %s:%d", host, port)
+        return None
+
+    response_transaction_id = data[8:20]
+    if response_transaction_id != transaction_id:
+        logger.warning("Transaction ID mismatch from %s:%d", host, port)
+        return None
+
+    offset = 20
+    while offset < len(data):
+        if offset + 4 > len(data):
+            break
+
+        attr_type = int.from_bytes(data[offset:offset+2], 'big')
+        attr_length = int.from_bytes(data[offset+2:offset+4], 'big')
+
+        if offset + 4 + attr_length > len(data):
+            break
+
+        # XOR-MAPPED-ADDRESS (0x0020) - preferred
+        # MAPPED-ADDRESS (0x0001) - fallback
+        if attr_type in (0x0020, 0x0001):
+            attr_data = data[offset+4:offset+4+attr_length]
+
+            if len(attr_data) >= 8:
+                if attr_type == 0x0020:  # XOR-MAPPED-ADDRESS
+                    ip_bytes = attr_data[4:8]
+                    ip_xor = bytes(ip_bytes[i] ^ magic_cookie[i] for i in range(4))
+                    return '.'.join(str(b) for b in ip_xor)
+                else:  # MAPPED-ADDRESS
+                    ip_bytes = attr_data[4:8]
+                    return '.'.join(str(b) for b in ip_bytes)
+
+        attr_length_padded = (attr_length + 3) & ~3
+        offset += 4 + attr_length_padded
+
+    logger.debug("No IP address attribute found in STUN response from %s:%d", host, port)
+    return None
+
+
 async def _stun_binding_request(host: str, port: int, timeout: float, transaction_id: bytes) -> Optional[str]:
     """
     Perform a STUN binding request to discover external IP (fully async).
+
+    Uses asyncio.create_datagram_endpoint() instead of raw sock_sendto/sock_recv
+    so that it works correctly on Windows ProactorEventLoop as well as
+    Unix SelectorEventLoop.
 
     Args:
         host: STUN server IP address (already resolved)
@@ -117,86 +179,50 @@ async def _stun_binding_request(host: str, port: int, timeout: float, transactio
     Returns:
         External IP address or None
     """
-    sock = None
+    # STUN binding request message (RFC 5389)
+    stun_request = (
+        b'\x00\x01'          # Message Type: Binding Request
+        b'\x00\x00'          # Message Length: 0 (no attributes)
+        b'\x21\x12\xa4\x42'  # Magic Cookie
+        + transaction_id     # Transaction ID (12 bytes)
+    )
+
+    loop = asyncio.get_running_loop()
+    result_future: asyncio.Future[bytes] = loop.create_future()
+
+    class _STUNProtocol(asyncio.DatagramProtocol):
+        def __init__(self) -> None:
+            self.transport: Optional[asyncio.DatagramTransport] = None
+
+        def connection_made(self, transport: asyncio.DatagramTransport) -> None:  # type: ignore[override]
+            self.transport = transport
+            transport.sendto(stun_request)
+
+        def datagram_received(self, data: bytes, addr: tuple) -> None:
+            if not result_future.done():
+                result_future.set_result(data)
+
+        def error_received(self, exc: Exception) -> None:
+            if not result_future.done():
+                result_future.set_exception(exc)
+
+        def connection_lost(self, exc: Optional[Exception]) -> None:
+            if not result_future.done():
+                result_future.cancel()
+
+    transport = None
     try:
-        # Create UDP socket (non-blocking)
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.setblocking(False)
-
-        # STUN binding request message
-        # Format: [Message Type (2 bytes)] [Message Length (2 bytes)] [Magic Cookie (4 bytes)] [Transaction ID (12 bytes)]
-        message_type = b'\x00\x01'  # Binding Request
-        message_length = b'\x00\x00'  # No attributes
-        magic_cookie = b'\x21\x12\xa4\x42'  # RFC 5389 magic cookie
-
-        stun_request = message_type + message_length + magic_cookie + transaction_id
-
-        # Send request (non-blocking)
-        loop = asyncio.get_event_loop()
-        await loop.sock_sendto(sock, stun_request, (host, port))
-
-        # Receive response with timeout (non-blocking)
-        data = await asyncio.wait_for(
-            loop.sock_recv(sock, 1024),
-            timeout=timeout
+        transport, _ = await loop.create_datagram_endpoint(
+            _STUNProtocol,
+            remote_addr=(host, port),
         )
 
-        # Parse STUN response
-        if len(data) < 20:
-            logger.debug("STUN response too short from %s:%d", host, port)
-            return None
+        data = await asyncio.wait_for(
+            asyncio.shield(result_future),
+            timeout=timeout,
+        )
 
-        # Check if it's a binding response (0x0101)
-        if data[0:2] != b'\x01\x01':
-            logger.debug("Invalid STUN response type from %s:%d", host, port)
-            return None
-
-        # Verify transaction ID matches
-        response_transaction_id = data[8:20]
-        if response_transaction_id != transaction_id:
-            logger.warning("Transaction ID mismatch from %s:%d", host, port)
-            return None
-
-        # Parse attributes
-        # Skip header (20 bytes) and look for MAPPED-ADDRESS or XOR-MAPPED-ADDRESS
-        offset = 20
-        while offset < len(data):
-            if offset + 4 > len(data):
-                break
-
-            attr_type = int.from_bytes(data[offset:offset+2], 'big')
-            attr_length = int.from_bytes(data[offset+2:offset+4], 'big')
-
-            if offset + 4 + attr_length > len(data):
-                break
-
-            # XOR-MAPPED-ADDRESS (0x0020) - preferred
-            # MAPPED-ADDRESS (0x0001) - fallback
-            if attr_type in (0x0020, 0x0001):
-                attr_data = data[offset+4:offset+4+attr_length]
-
-                if len(attr_data) >= 8:
-                    # Skip reserved byte and family byte
-                    # Port is at bytes 2-3, IP is at bytes 4-7
-                    if attr_type == 0x0020:  # XOR-MAPPED-ADDRESS
-                        # XOR the IP with magic cookie
-                        ip_bytes = attr_data[4:8]
-
-                        # XOR each byte
-                        ip_xor = bytes(ip_bytes[i] ^ magic_cookie[i] for i in range(4))
-                        external_ip = '.'.join(str(b) for b in ip_xor)
-                    else:  # MAPPED-ADDRESS
-                        ip_bytes = attr_data[4:8]
-                        external_ip = '.'.join(str(b) for b in ip_bytes)
-
-                    return external_ip
-
-            # Move to next attribute (attribute length + padding to 4-byte boundary)
-            attr_length_padded = (attr_length + 3) & ~3
-            offset += 4 + attr_length_padded
-
-        logger.debug("No IP address attribute found in STUN response from %s:%d", host, port)
-        return None
+        return _parse_stun_response(data, transaction_id, host, port)
 
     except asyncio.TimeoutError:
         logger.debug("STUN request timeout for %s:%d", host, port)
@@ -205,8 +231,10 @@ async def _stun_binding_request(host: str, port: int, timeout: float, transactio
         logger.debug("STUN error for %s:%d: %s", host, port, e)
         return None
     finally:
-        if sock:
-            sock.close()
+        if transport and not transport.is_closing():
+            transport.close()
+        if not result_future.done():
+            result_future.cancel()
 
 
 async def discover_external_ip(stun_servers: list[str], timeout: float = 3.0, retry_count: int = 3) -> Optional[str]:
