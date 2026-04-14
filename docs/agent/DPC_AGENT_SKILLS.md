@@ -1,6 +1,6 @@
 # DPC Agent — Memento-Skills System
 
-**v0.20.0+** — Implemented in `dpc_agent/skill_store.py`, `skill_reflection.py`, `tools/skills.py`
+Implemented in `dpc_agent/skill_store.py`, `skill_reflection.py`, `tools/skills.py`.
 
 This document answers the agent's own questions about how it learns and evolves in the Memento-Skills style. The agent can read this file directly.
 
@@ -21,11 +21,11 @@ Example: tool = `search_web`; skill = "when researching a technical topic: searc
 
 ---
 
-## What Is Implemented (v0.20.0)
+## What Is Implemented
 
-### Phase 1 — Skills directory + 5 starter skills ✅
+### Phase 1 — Skills directory + starter skills ✅
 - `~/.dpc/agents/{id}/skills/` created on agent startup
-- 5 skills bootstrapped automatically: `skill-creator`, `code-analysis`, `knowledge-extraction`, `p2p-research`, `web-research`
+- Starter skills bootstrapped from the code repo (see `dpc_agent/skill_store.py`); the default set currently includes `skill-creator`, `code-analysis`, `knowledge-extraction`, `p2p-research`, `web-research` and additional skills — names shown are illustrative examples, the exact set is defined in code
 - Each skill is a `SKILL.md` file with YAML frontmatter + markdown instructions
 
 ### Phase 2 — Skill router (Read phase) ✅
@@ -123,7 +123,7 @@ The agent picks the best match by reading descriptions, then calls:
 
 The tool returns the full `SKILL.md` body. The agent reads it and follows the strategy using its other tools.
 
-**No embeddings needed** — description-based routing works for ~200+ skills.
+**No embeddings needed** — description-based routing scales to many skills without embeddings.
 
 ---
 
@@ -204,7 +204,7 @@ The agent can read this file directly:
 │   ├── scratchpad.md
 │   ├── identity.md
 │   └── knowledge/
-├── skills/                        # NEW (v0.20.0)
+├── skills/                        # Memento-Skills
 │   ├── _stats.json                # performance tracking
 │   ├── skill-creator/
 │   │   └── SKILL.md

@@ -6,7 +6,7 @@ This guide explains how to configure, test, and use the embedded autonomous AI a
 
 The embedded agent is a self-modifying AI agent adapted from the [Ouroboros project](https://github.com/razzant/ouroboros), integrated directly into DPC Messenger's codebase. It provides:
 
-- **60+ Tools**: File operations, web search, memory management, git, task scheduling, evolution control, skill execution
+- **Tools**: File operations, web search, memory management, git, task scheduling, evolution control, skill execution
 - **Background Consciousness**: Proactive thinking between tasks (optional)
 - **Persistent Memory**: Scratchpad, identity, and knowledge base
 - **Self-Modification**: Can modify files within its sandbox (`~/.dpc/agent/`)
@@ -470,7 +470,7 @@ All agent data is stored in `~/.dpc/agents/{agent_id}/`:
 │   ├── knowledge/                 # Knowledge base
 │   │   ├── _index.md             # Topic index
 │   │   └── [topic].md            # Topic files
-│   ├── skills/                    # Memento-Skills (v0.20.0+)
+│   ├── skills/                    # Memento-Skills
 │   │   ├── _stats.json           # Per-skill performance tracking
 │   │   ├── skill-creator/SKILL.md
 │   │   ├── code-analysis/SKILL.md
@@ -1107,7 +1107,7 @@ await service.reset_agent_to_global(agent_id="agent_abc123")
 
 ## Memento-Skills System
 
-The agent implements a Memento-Skills style Read-Write Reflective Learning loop (v0.20.0+):
+The agent implements a Memento-Skills style Read-Write Reflective Learning loop:
 
 - **Skills** are markdown strategy files that teach the agent *how to combine tools* for a class of tasks
 - **Read phase**: before each task, the agent sees all skill descriptions and calls `execute_skill()` to load the relevant strategy
