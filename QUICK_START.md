@@ -179,6 +179,16 @@ Other folders (`knowledge/`, `conversations/`, `agents/`, `logs/`) are created a
 
 ---
 
+## Next steps
+
+Once the app is running and you can chat, the embedded AI agent is
+probably what you want to explore next — skills, Telegram bridging,
+and connecting Claude Code to the same conversation all live there:
+
+**[Read the agent guide → `docs/agent/DPC_AGENT_GUIDE.md`](./docs/agent/DPC_AGENT_GUIDE.md)**
+
+---
+
 <div align="center">
 
 **[Back to README](./README.md)** | **[Documentation](./docs/)**
