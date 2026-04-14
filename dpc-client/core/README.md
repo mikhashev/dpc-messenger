@@ -1,21 +1,14 @@
-# DPC Client Core
+# dpc-client/core
 
-Python backend service for the D-PC Messenger desktop client.
+Python backend service for the D-PC Messenger desktop client — runs on
+the user's machine, manages P2P connections, AI providers, the local
+WebSocket API for the UI, and the embedded autonomous agent.
 
-## Overview
+**License:** GPL v3 — see [`../../LICENSE.md`](../../LICENSE.md)
 
-This package provides the core backend functionality for D-PC Messenger, including:
+---
 
-- **P2P Connection Management** - 6-tier connection fallback hierarchy (IPv6, IPv4, WebRTC, UDP hole punching, volunteer relays, gossip)
-- **DHT Peer Discovery** - Kademlia-based distributed hash table for serverless peer discovery
-- **Federation Hub Client** - OAuth authentication and WebRTC signaling (optional)
-- **LLM Integration** - Multi-provider AI support (Ollama, OpenAI, Anthropic, Z.AI)
-- **Context Firewall** - Privacy-first access control for personal context sharing
-- **WebSocket API** - Local API server for frontend communication (port 9999)
-- **Device Context Collection** - Automatic hardware/software detection
-- **DPC Agent** - Embedded autonomous AI agent with tools, memory, and evolution capabilities
-
-## Installation
+## Install
 
 ```bash
 poetry install
@@ -24,154 +17,103 @@ poetry install
 poetry install -E mlx
 ```
 
-## Usage
+Python 3.12+.
 
-Run the backend service:
+## Run
 
 ```bash
 poetry run python run_service.py
 ```
 
-## Testing
+Listens on `127.0.0.1:9999` (WebSocket API for the UI) and, by default,
+`0.0.0.0:8888` (direct P2P TLS).
+
+## Test
 
 ```bash
 poetry run pytest
-poetry run pytest --cov=dpc_client_core  # With coverage
+poetry run pytest --cov=dpc_client_core
 ```
+
+---
+
+## What's in it
+
+### Entry point + orchestration
+
+| File | Purpose |
+|------|---------|
+| [`run_service.py`](run_service.py) | Process entrypoint |
+| [`dpc_client_core/service.py`](dpc_client_core/service.py) | `CoreService` — lifecycle, component wiring |
+| [`dpc_client_core/local_api.py`](dpc_client_core/local_api.py) | WebSocket API for the UI |
+| [`dpc_client_core/message_router.py`](dpc_client_core/message_router.py) | Dispatcher for incoming P2P messages |
+| [`dpc_client_core/message_handlers/`](dpc_client_core/message_handlers/) | One handler per DPTP command (text, files, voice, knowledge commits, gossip, relay, session, etc.) |
+
+### Connections (6-tier fallback)
+
+| File | Purpose |
+|------|---------|
+| [`dpc_client_core/coordinators/connection_orchestrator.py`](dpc_client_core/coordinators/connection_orchestrator.py) | Tries IPv6 → IPv4 → Hub WebRTC → UDP hole punch → volunteer relay → gossip |
+| [`dpc_client_core/p2p_manager.py`](dpc_client_core/p2p_manager.py) | Direct TLS transport |
+| [`dpc_client_core/webrtc_peer.py`](dpc_client_core/webrtc_peer.py) | WebRTC peer (aiortc) |
+| [`dpc_client_core/dht/`](dpc_client_core/dht/) | Kademlia DHT for serverless peer discovery |
+| [`dpc_client_core/managers/hole_punch_manager.py`](dpc_client_core/managers/hole_punch_manager.py) | UDP hole punching (DTLS) |
+| [`dpc_client_core/managers/relay_manager.py`](dpc_client_core/managers/relay_manager.py) | Volunteer relay discovery + routing |
+| [`dpc_client_core/managers/gossip_manager.py`](dpc_client_core/managers/gossip_manager.py) | Epidemic store-and-forward |
+
+### AI, context, firewall
+
+| File | Purpose |
+|------|---------|
+| [`dpc_client_core/llm_manager.py`](dpc_client_core/llm_manager.py) | Provider registry (Ollama, OpenAI, Anthropic, Z.AI, Gemini, GigaChat, GitHub Models, local Whisper) |
+| [`dpc_client_core/providers/`](dpc_client_core/providers/) | Per-provider implementations |
+| [`dpc_client_core/firewall.py`](dpc_client_core/firewall.py) | Context access control (the single gate between agent/peer requests and personal data) |
+| [`dpc_client_core/conversation_monitor.py`](dpc_client_core/conversation_monitor.py) | Knowledge-commit proposal pipeline |
+| [`dpc_client_core/consensus_manager.py`](dpc_client_core/consensus_manager.py) | Multi-party voting with devil's advocate |
+
+### Embedded agent (`dpc_client_core/dpc_agent/`)
+
+Autonomous agent with tool calling, per-agent memory, scheduled tasks,
+background consciousness, and an evolution sandbox. Tools are
+registered in `dpc_agent/tools/` (core, browser, git, review, skills,
+archive, messaging) and the runtime list is available inside the agent
+via `list_my_tools`.
+
+For the full agent guide (identity files, skills, scheduling,
+evolution, Telegram linking): [`../../docs/DPC_AGENT_GUIDE.md`](../../docs/DPC_AGENT_GUIDE.md).
+
+### Federation Hub client (optional)
+
+| File | Purpose |
+|------|---------|
+| [`dpc_client_core/hub_client.py`](dpc_client_core/hub_client.py) | OAuth + WebRTC signaling against `dpc-hub` |
+
+### Caches
+
+`context_cache.py`, `peer_cache.py`, `token_cache.py` — in-memory +
+on-disk caches for personal context, known peers, and OAuth tokens.
+
+---
 
 ## Configuration
 
-Configuration files stored in `~/.dpc/`:
-- `config.ini` - Client settings
-- `providers.json` - AI provider credentials
-- `privacy_rules.json` - Context firewall rules
-- `personal.json` - Personal context data
-- `device_context.json` - Auto-collected device information
+All client configuration lives in `~/.dpc/`:
 
-See [../../docs/CONFIGURATION.md](../../docs/CONFIGURATION.md) for complete configuration reference.
+- `config.ini` — service settings
+- `providers.json` — AI provider credentials
+- `privacy_rules.json` — context firewall rules (editable in the UI)
+- `personal.json` — personal context
+- `device_context.json` — auto-collected hardware/software info
+- `node.key` / `node.crt` / `node.id` — identity (from `dpc-protocol`)
+- `agents/{agent_id}/` — per-agent state (memory, skills, scheduled tasks)
 
-## Architecture
+Full reference: [`../../docs/CONFIGURATION.md`](../../docs/CONFIGURATION.md).
 
-Entry point: [run_service.py](run_service.py)
+---
 
-Key components:
+## Related
 
-### Core Service & Routing
-- [service.py](dpc_client_core/service.py) - CoreService orchestrator
-- [message_router.py](dpc_client_core/message_router.py) - P2P command dispatcher
-- [message_handlers/](dpc_client_core/message_handlers/) - Command-specific handlers (12+ handlers)
-
-### Connection Management
-- [connection_orchestrator.py](dpc_client_core/coordinators/connection_orchestrator.py) - 6-tier fallback coordinator (v0.10.0+)
-- [p2p_manager.py](dpc_client_core/p2p_manager.py) - Low-level P2P connections (TLS + WebRTC)
-- [webrtc_peer.py](dpc_client_core/webrtc_peer.py) - WebRTC peer wrapper
-- [connection_status.py](dpc_client_core/connection_status.py) - Connection state tracking
-
-### Decentralized Infrastructure
-- [dht/manager.py](dpc_client_core/dht/manager.py) - DHT peer discovery (v0.10.0+)
-- [hole_punch_manager.py](dpc_client_core/managers/hole_punch_manager.py) - UDP hole punching (v0.10.0+)
-- [relay_manager.py](dpc_client_core/managers/relay_manager.py) - Volunteer relay management (v0.10.0+)
-- [gossip_manager.py](dpc_client_core/managers/gossip_manager.py) - Gossip store-and-forward (v0.10.0+)
-
-### AI & Context
-- [llm_manager.py](dpc_client_core/llm_manager.py) - AI provider integration
-- [consensus_manager.py](dpc_client_core/consensus_manager.py) - Knowledge voting with devil's advocate
-- [conversation_monitor.py](dpc_client_core/conversation_monitor.py) - Background knowledge extraction
-- [firewall.py](dpc_client_core/firewall.py) - Context access control
-
-### DPC Agent (v0.15.0+)
-
-Embedded autonomous AI agent with tool calling, memory, and self-modification capabilities.
-
-**Core Agent Package** (`dpc_client_core/dpc_agent/`):
-- [agent.py](dpc_client_core/dpc_agent/agent.py) - Main DpcAgent class with tool execution loop
-- [loop.py](dpc_client_core/dpc_agent/loop.py) - Agent execution loop with multi-round tool calls
-- [memory.py](dpc_client_core/dpc_agent/memory.py) - Memory system (identity.md, scratchpad.md, knowledge/)
-- [context.py](dpc_client_core/dpc_agent/context.py) - Context assembly for LLM prompts
-- [llm_adapter.py](dpc_client_core/dpc_agent/llm_adapter.py) - LLM provider integration
-
-**Advanced Features**:
-- [consciousness.py](dpc_client_core/dpc_agent/consciousness.py) - Background self-reflection mode
-- [evolution.py](dpc_client_core/dpc_agent/evolution.py) - Self-modification within sandbox
-- [task_queue.py](dpc_client_core/dpc_agent/task_queue.py) - Background task scheduling
-- [budget.py](dpc_client_core/dpc_agent/budget.py) - Subscription-aware rate limiting
-- [events.py](dpc_client_core/dpc_agent/events.py) - Event emission for notifications
-
-**Tools** (`dpc_client_core/dpc_agent/tools/`):
-- [core.py](dpc_client_core/dpc_agent/tools/core.py) - 20+ core tools (repo_read, repo_write_commit, browse_page, etc.)
-- [browser.py](dpc_client_core/dpc_agent/tools/browser.py) - Web browsing and search tools
-- [git.py](dpc_client_core/dpc_agent/tools/git.py) - Git operations (repo_commit, repo_status, etc.)
-- [review.py](dpc_client_core/dpc_agent/tools/review.py) - Multi-model self-review tools
-- [registry.py](dpc_client_core/dpc_agent/tools/registry.py) - Tool registration and discovery
-
-**Agent Managers** (`dpc_client_core/managers/`):
-- [agent_manager.py](dpc_client_core/managers/agent_manager.py) - DpcAgentManager for CoreService integration
-- [agent_telegram_bridge.py](dpc_client_core/managers/agent_telegram_bridge.py) - Two-way Telegram communication
-
-### Caching & Offline
-- [context_cache.py](dpc_client_core/context_cache.py) - In-memory context cache
-- [peer_cache.py](dpc_client_core/peer_cache.py) - Known peers cache
-- [token_cache.py](dpc_client_core/token_cache.py) - OAuth token cache
-
-### Federation (Optional)
-- [hub_client.py](dpc_client_core/hub_client.py) - Federation Hub communication
-- [local_api.py](dpc_client_core/local_api.py) - WebSocket API for UI
-
-## DPC Agent Features
-
-The embedded agent provides autonomous AI capabilities:
-
-### Tool System (37+ tools)
-- **File Operations**: `repo_read`, `repo_list`, `repo_write_commit`, `drive_read`, `drive_list`
-- **Memory**: `update_scratchpad`, `update_identity`, `knowledge_read`, `knowledge_list`, `knowledge_write`
-- **Web**: `browse_page`, `search_web`, `fetch_url`
-- **Git**: `repo_status`, `repo_diff`, `repo_commit`, `repo_log`
-- **Self-Review**: `self_review`, `compare_approaches`, `get_second_opinion`
-- **Communication**: `chat_history`, `send_notification`
-- **Evolution**: `schedule_task`, `get_task_status`, `pause_evolution`, `resume_evolution`
-
-### Event System
-Real-time event emission for notifications:
-- `TASK_STARTED`, `TASK_COMPLETED`, `TASK_FAILED`
-- `EVOLUTION_CYCLE_COMPLETED`, `CODE_MODIFIED`
-- `BUDGET_WARNING`, `RATE_LIMIT_HIT`
-
-### Telegram Integration
-- Two-way communication via `agent_telegram_bridge.py`
-- Commands: `/start`, `/help`, `/status`
-- Event notifications with configurable filters
-- Rate limiting (20 events/min, 3s cooldown)
-
-### Evolution Mode
-Self-modification within sandbox boundaries:
-- **CAN modify**: `~/.dpc/agent/` (memory, tools, config)
-- **CANNOT modify**: DPC Messenger codebase, `personal.json`, `config.ini`
-- Auto-apply or manual approval modes
-- Configurable evolution interval (default: 60 minutes)
-
-### Configuration (`~/.dpc/config.ini`)
-```ini
-[dpc_agent]
-enabled = true
-background_consciousness = true
-budget_usd = 50
-max_rounds = 200
-context_window = 128000
-enable_task_queue = true
-evolution_enabled = true
-evolution_interval_minutes = 60
-evolution_auto_apply = false
-billing_model = subscription
-
-[dpc_agent_telegram]
-enabled = true
-bot_token = YOUR_BOT_TOKEN
-allowed_chat_ids = ["123456789"]
-event_filter = task_started,task_completed,task_failed,evolution_cycle_completed,code_modified
-```
-
-See [../../docs/DPC_AGENT_GUIDE.md](../../docs/DPC_AGENT_GUIDE.md) for complete usage guide.
-
-## License
-
-GPL v3 - See [../../LICENSE.md](../../LICENSE.md)
+- [`../../README.md`](../../README.md) — project overview
+- [`../../docs/DPC_AGENT_GUIDE.md`](../../docs/DPC_AGENT_GUIDE.md) — agent usage and tools
+- [`../../docs/CONFIGURATION.md`](../../docs/CONFIGURATION.md) — configuration reference
+- [`../../specs/dptp_v1.md`](../../specs/dptp_v1.md) — wire protocol spec
