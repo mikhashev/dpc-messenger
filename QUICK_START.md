@@ -159,7 +159,7 @@ npm run tauri dev
 
 A desktop window will open — that's the app. 
 
-Your private data is stored in `~/.dpc/`. See [What gets created](#whats-in-dpc) below for details.
+Your private data is stored in `~/.dpc/`. 
 ---
 
 ## What's in `.dpc`?
@@ -179,13 +179,69 @@ Other folders (`knowledge/`, `conversations/`, `agents/`, `logs/`) are created a
 
 ---
 
+## Configure an AI provider
+
+The agent needs an AI model to think with. Configure at least one
+provider before creating an agent — otherwise the model dropdown in
+the next step will be empty.
+
+![AI Providers configuration](./docs/screenshots/ai_providers_configuration.png)
+
+1. In the sidebar, click **AI Providers**.
+2. Pick a provider type from the dropdown:
+   - **Ollama** — local models, no API key needed. Install
+     [Ollama](https://ollama.com) first, then pull a model
+     (e.g. `ollama pull llama3`).
+   - **Anthropic** — Claude models. Needs an Anthropic API key.
+   - **Z.AI** — GLM models. Needs a Z.AI API key.
+   - other cloud providers, each needs its own key.
+3. Fill the fields that appear (model name, API key, base URL as
+   applicable) and save.
+4. The provider shows up in the list and becomes available as a
+   model choice when you create an agent.
+
+You can add several providers and pick between them per agent later.
+
+---
+
+## Create your first AI agent
+
+With at least one provider configured, add an agent to chat with.
+The agent lives in the same window as your regular chats — you
+create it once and it stays in the sidebar.
+
+![Create New Agent dialog](./docs/screenshots/create_new_agent.png)
+
+1. In the **Chats** panel on the left, click **+ Agent**.
+2. In the dialog that opens:
+   - **Chat Type:** leave as *DPC Agent (Autonomous AI with tools)*.
+   - **Agent Name:** anything you like (e.g. *Ark*, *Helper*).
+   - **AI Model (LLM):** pick one of the providers you configured
+     in the previous step.
+   - **Permission Profile:** *default* is fine for a first run. The
+     agent can read files, search the web, and update its own
+     memory, but cannot write to your files or take destructive
+     actions. See [Agent reference](./docs/agent/DPC_AGENT_GUIDE.md)
+     for per-tool control.
+3. Click **Create Chat**.
+4. The new agent appears in the sidebar. Click it to open the chat
+   and send a first message — you should get a reply within a few
+   seconds.
+
+That's it. You now have a private AI agent running locally on your
+machine, with the Firewall deciding what it can and cannot see.
+
+---
+
 ## Next steps
 
-Once the app is running and you can chat, the embedded AI agent is
-probably what you want to explore next — skills, Telegram bridging,
-and connecting Claude Code to the same conversation all live there:
+Once your agent is answering, these guides go deeper on what it can
+do:
 
-**[Read the agent guide → `docs/agent/DPC_AGENT_GUIDE.md`](./docs/agent/DPC_AGENT_GUIDE.md)**
+- **[Agent reference → `docs/agent/DPC_AGENT_GUIDE.md`](./docs/agent/DPC_AGENT_GUIDE.md)** — tools, profiles, storage, troubleshooting
+- **[Skills → `docs/agent/DPC_AGENT_SKILLS.md`](./docs/agent/DPC_AGENT_SKILLS.md)** — teach the agent multi-step strategies
+- **[Telegram → `docs/agent/DPC_AGENT_TELEGRAM.md`](./docs/agent/DPC_AGENT_TELEGRAM.md)** — talk to your agent from Telegram
+- **[Claude Code → `docs/agent/CC_INTEGRATION_GUIDE.md`](./docs/agent/CC_INTEGRATION_GUIDE.md)** — connect Claude Code as a second participant in the same chat
 
 ---
 
