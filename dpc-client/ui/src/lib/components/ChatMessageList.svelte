@@ -95,7 +95,7 @@
 
 <div class="chat-window" bind:this={chatWindowElement}>
   {#if messages.length > 0}
-    {#each messages as msg (msg.id)}
+    {#each messages as msg, i (msg.id)}
       <div class="message" class:user={msg.sender === 'user'} class:system={msg.sender === 'system'} class:error={msg.isError}>
         <div class="message-header">
           <strong>
@@ -120,7 +120,7 @@
               {/if}
             {/if}
           </strong>
-          <span class="timestamp">{new Date(msg.timestamp).toLocaleTimeString()}</span>
+          <span class="timestamp"><span class="msg-index">#{i}</span> {new Date(msg.timestamp).toLocaleTimeString()}</span>
         </div>
         <!-- Thinking block (v1.4+): Display AI reasoning before main response -->
         {#if isAiSender(msg.sender) && msg.thinking}
@@ -320,6 +320,14 @@
   .timestamp {
     color: #999;
     font-size: 0.75rem;
+  }
+
+  .msg-index {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.7rem;
+    color: #aaa;
+    margin-right: 0.25rem;
+    user-select: all;
   }
 
   .message p {
