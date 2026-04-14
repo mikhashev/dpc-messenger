@@ -1,36 +1,61 @@
 # DPC Agent Telegram Integration
 
-## ⚠️ DEPRECATION NOTICE
-
-**The `[dpc_agent_telegram]` system is DEPRECATED as of v0.15.0 and will be REMOVED in v0.20.0.**
-
-### What's Deprecated?
-
-The **old system** using `[dpc_agent_telegram]` config section in `~/.dpc/config.ini`:
-- ❌ Separate bot just for agent events
-- ❌ One bridge for ALL agents
-- ❌ Requires managing two Telegram bots
-- ❌ Global configuration for all agents
-
-### What's New?
-
-The **new system** using **per-agent Telegram linking**:
-- ✅ Uses main `[telegram]` bot (same bot for P2P + agents)
-- ✅ Per-agent configuration in `agent's config.json`
-- ✅ Each agent can have separate Telegram chat
-- ✅ Simpler: one bot instead of two
-- ✅ Granular control: enable/disable per agent
-
-### Migration Timeline
-
-- **v0.15.0** (current): Deprecation warning added
-- **v0.20.0** (future): Old system will be **REMOVED**
+Two Telegram integration systems coexist in the DPC client. Both are
+functional. The **current system** (per-agent linking) is recommended for
+new agents; the **legacy system** (`[dpc_agent_telegram]` INI section) is
+still supported and used by existing deployments.
 
 ---
 
-## Quick Migration Guide
+## Two Systems — Overview
 
-### Before (Old System - DEPRECATED)
+### Current System — Per-Agent Linking
+
+Each agent links itself to a Telegram chat through fields in its own
+`config.json`. Uses the main `[telegram]` bot (same bot as P2P messaging),
+so one bot token covers everything.
+
+Configured in `~/.dpc/agents/{agent_id}/config.json`:
+
+- `telegram_enabled` (bool)
+- `telegram_chat_id` (string)
+- `telegram_linked_at` (ISO timestamp)
+
+Full setup: see [Per-Agent Telegram Linking](#per-agent-telegram-linking-current-system) below.
+
+### Legacy System — Global `[dpc_agent_telegram]` INI Section
+
+One dedicated bot shared across all agents, configured globally in
+`~/.dpc/config.ini` under `[dpc_agent_telegram]`. Pre-dates per-agent
+linking.
+
+Still functional — the client reads the INI section if present, and an
+agent with no per-agent Telegram fields falls back to the global config
+with a deprecation warning in the log.
+
+**Code touchpoints** (for reviewers working in this area):
+
+| File | Role |
+|------|------|
+| `dpc-client/core/dpc_client_core/settings.py` | `get_dpc_agent_telegram_*` accessors read the INI section |
+| `dpc-client/core/dpc_client_core/telegram_service.py` | Entrypoint for legacy-to-per-agent migration |
+| `dpc-client/core/dpc_client_core/dpc_agent/utils.py` | `migrate_global_dpc_agent_telegram_config()` — copies INI values into the default agent's `config.json` |
+| `dpc-client/core/dpc_client_core/managers/agent_manager.py` | Fallback: agents without per-agent fields read the global config and emit a deprecation warning |
+| `dpc-client/core/dpc_client_core/managers/agent_telegram_bridge.py` | Bridge that forwards agent events to Telegram |
+
+There is no planned removal date. To move an existing deployment off the
+legacy system: migrate the INI config into an agent's `config.json`
+(manually, or via the helper in `dpc_agent/utils.py`), then delete the
+`[dpc_agent_telegram]` section.
+
+---
+
+## Migrating From the Legacy System
+
+If you have an existing `[dpc_agent_telegram]` block, this is the
+mechanical translation.
+
+### Before (legacy)
 
 ```ini
 # ~/.dpc/config.ini
@@ -41,9 +66,10 @@ allowed_chat_ids = ["123456789"]
 event_filter = task_completed,task_failed,evolution_cycle_completed,code_modified,agent_message
 ```
 
-### After (New System - RECOMMENDED)
+### After (current)
 
-**Step 1:** Ensure main Telegram bot is configured in `~/.dpc/config.ini`:
+**Step 1** — ensure the main Telegram bot is configured in `~/.dpc/config.ini`:
+
 ```ini
 [telegram]
 enabled = true
@@ -51,7 +77,8 @@ bot_token = YOUR_BOT_TOKEN_HERE
 allowed_chat_ids = ["123456789", "987654321"]
 ```
 
-**Step 2:** Link each agent individually in its `config.json`:
+**Step 2** — link each agent individually in its `config.json`:
+
 ```json
 // ~/.dpc/agents/default/config.json
 {
@@ -63,7 +90,7 @@ allowed_chat_ids = ["123456789", "987654321"]
 }
 ```
 
-**Step 3:** Remove old `[dpc_agent_telegram]` section from `~/.dpc/config.ini`
+**Step 3** — remove the old `[dpc_agent_telegram]` section from `~/.dpc/config.ini`.
 
 ---
 
@@ -276,10 +303,10 @@ allowed_chat_ids = ["123456789", "987654321"]
 
 Now each agent responds to messages from its linked Telegram chat!
 
-### Comparison: Old vs New System
+### Comparison: Legacy vs Current System
 
-| Feature | Old System | New System |
-|---------|-----------|-----------|
+| Feature | Legacy System | Current System |
+|---------|---------------|----------------|
 | **Config location** | `config.ini` (global) | `agents/{id}/config.json` (per-agent) |
 | **Bot** | Separate bot | Main bot (shared with P2P) |
 | **Scope** | All agents | Per-agent |
@@ -288,7 +315,7 @@ Now each agent responds to messages from its linked Telegram chat!
 | **Voice messages** | ✅ Yes | ✅ Yes |
 | **Agent-initiated messages** | ✅ Yes | ✅ Yes |
 | **Multiple chats** | ❌ One for all agents | ✅ Each agent can have own chat |
-| **Status** | ⚠️ Deprecated | ✅ Recommended |
+| **Status** | Functional, no planned removal | Recommended for new agents |
 
 ## Related Documentation
 
