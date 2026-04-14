@@ -1378,7 +1378,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
     def add_message(self, role: str, content: str, attachments: Optional[List[Dict[str, Any]]] = None,
                     timestamp: Optional[str] = None, sender_node_id: Optional[str] = None,
                     sender_name: Optional[str] = None, message_id: Optional[str] = None,
-                    thinking: Optional[str] = None, streaming_raw: Optional[str] = None):
+                    thinking: Optional[str] = None, streaming_raw: Optional[str] = None,
+                    source: Optional[str] = None):
         """Add a message to the conversation history
 
         Args:
@@ -1416,6 +1417,8 @@ PARTICIPANTS' CULTURAL CONTEXTS:
             message_dict["thinking"] = thinking
         if streaming_raw:
             message_dict["streaming_raw"] = streaming_raw
+        if source:
+            message_dict["source"] = source
 
         # Track message ID for deduplication (v0.20.0)
         self.message_ids.add(message_id)

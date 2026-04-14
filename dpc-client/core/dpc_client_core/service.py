@@ -6956,6 +6956,31 @@ class CoreService:
                 await self.local_api.broadcast_event("agent_progress_clear", {
                     "conversation_id": conversation_id,
                 })
+
+                # ARCH-10: forward chain response to Telegram if the conversation
+                # is currently Telegram-active (last NON-CC user message came from
+                # Telegram bot). CC bridge relay messages are skipped — they're CC's
+                # automated reaction to a real user, not the user's own input.
+                # UI-originated chains stay in UI only — see Mike's intent in S39.
+                last_user_source = None
+                if monitor and monitor.message_history:
+                    for msg in reversed(monitor.message_history):
+                        if msg.get("role") != "user":
+                            continue
+                        if msg.get("sender_node_id") == "cc":
+                            continue
+                        last_user_source = msg.get("source")
+                        break
+                if last_user_source == "telegram":
+                    bridge = self._get_telegram_bridge_for_conversation(conversation_id)
+                    if bridge:
+                        try:
+                            await bridge.send_chain_response(response)
+                        except Exception as bridge_err:
+                            logger.warning(
+                                "Failed to forward chain response to Telegram for %s: %s",
+                                conversation_id, bridge_err,
+                            )
         except Exception as e:
             logger.error("Ark response to CC's @Ark mention failed: %s", e, exc_info=True)
 

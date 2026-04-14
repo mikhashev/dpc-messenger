@@ -764,6 +764,7 @@ Send a voice message and it will be transcribed and processed\\.
                         timestamp=utc_now_iso(),
                         sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
                         sender_name=sender_name,
+                        source="telegram",
                     )
                     monitor.save_history()
                     # Broadcast cc_agent_mention for CC's MCP bridge
@@ -789,6 +790,7 @@ Send a voice message and it will be transcribed and processed\\.
                     timestamp=utc_now_iso(),
                     sender_node_id=getattr(self._agent_manager.service.p2p_manager, "node_id", "telegram"),
                     sender_name=sender_name,
+                    source="telegram",
                 )
                 monitor.save_history()
                 await self._broadcast_history_to_ui(conversation_id)
@@ -1248,6 +1250,22 @@ Send a voice message and it will be transcribed and processed\\.
         self._event_times["global"] = [t for t in self._event_times["global"] if t > minute_ago]
 
         return True
+
+    async def send_chain_response(self, text: str) -> None:
+        """Forward a chain-triggered agent response to the linked Telegram chat.
+
+        Used by service.py `_invoke_agent_in_agent_chat()` when the last user
+        message in the conversation came from Telegram (origin tracking).
+        Without this, chain-triggered responses only reach the UI broadcast
+        and never the Telegram chat that originated the session.
+        """
+        if not self._enabled or not self._bot:
+            log.warning("Chain response not delivered to Telegram (bridge disabled)")
+            return
+        if not self.allowed_chat_ids:
+            return
+        chat_id = self.allowed_chat_ids[0]
+        await self._send_message(chat_id, escape_markdown(text))
 
     async def _send_message(self, chat_id: str, text: str) -> None:
         """
