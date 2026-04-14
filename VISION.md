@@ -51,7 +51,7 @@ All managed through a UI editor with hot-reload. Changes apply instantly.
 
 In February 2025, inspired by Andrej Karpathy's insights on LLM architecture, one prompt — an idea about giving LLMs long-term memory between sessions — became [personal-context-manager](https://github.com/mikhashev/personal-context-manager). A way to carry context across AI conversations.
 
-Six months of experimentation followed: a browser extension called ContextClip, context optimization research, AI-assisted game development that revealed GPU inequality, a self-reflection framework for AI, publications on Habr and ORCID, consulting projects. Each experiment exposed a limitation of the personal-context-only approach.
+Eight months of experimentation followed: a browser extension called ContextClip, context optimization research, AI-assisted game development that revealed GPU inequality, a self-reflection framework for AI, publications on Habr and ORCID, consulting projects. Each experiment exposed a limitation of the personal-context-only approach.
 
 In November 2025, the three fundamental constraints converged into a single architecture: file-based context doesn't scale for teams (P2P context sharing), chat is garbage (Knowledge Commits), GPU inequality blocks access (Compute Sharing). [dpc-messenger](https://github.com/mikhashev/dpc-messenger) was born.
 
