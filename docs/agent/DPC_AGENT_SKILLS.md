@@ -336,4 +336,4 @@ Skills from peers default to `rewrite_existing: false` until user unlocks them. 
 
 - [DPC Agent Guide](DPC_AGENT_GUIDE.md) — general agent usage, tool reference, configuration
 - [DPC Agent Telegram](DPC_AGENT_TELEGRAM.md) — Telegram integration
-- [CLAUDE.md](../CLAUDE.md) — project development guide
+- [CLAUDE.md](../../CLAUDE.md) — project development guide

@@ -51,7 +51,7 @@ reads the same config and follows.
 
 ## Prerequisites
 
-- DPC client installed and running ([QUICK_START.md](../QUICK_START.md)).
+- DPC client installed and running ([QUICK_START.md](../../QUICK_START.md)).
 - At least one agent linked to your DPC instance (an `agent_*` folder
   under `~/.dpc/agents/`). With exactly one agent, the bridge uses it
   by default. With more than one, you pick the target via
@@ -77,7 +77,7 @@ directory are your trust boundary.
 
 ## The bridge script
 
-[`cc_agent_bridge.py`](../dpc-client/core/cc_agent_bridge.py) is the
+[`cc_agent_bridge.py`](../../dpc-client/core/cc_agent_bridge.py) is the
 entire integration. Useful flags:
 
 | Command | What it does |
@@ -109,7 +109,7 @@ call re-reads `history.json` from scratch.
 ## The cron loop (Claude Code side)
 
 CC runs the following cron inside Claude Code. The exact prompt text
-lives in [`cc_cron_prompt.md`](../dpc-client/core/cc_cron_prompt.md)
+lives in [`cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md)
 and is versioned there.
 
 **Schedule:** every minute while the Claude Code session is open. Cron
@@ -129,7 +129,7 @@ need to recreate the cron after reopening the IDE.
 The cron prompt does the filtering; CC just executes what the cron
 says. Substitute the agent name (or folder id) for `<agent>` when you
 create the cron — see the canonical prompt in
-[`cc_cron_prompt.md`](../dpc-client/core/cc_cron_prompt.md), which
+[`cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md), which
 ships with `Ark` as the default and notes how to swap it.
 
 ---
@@ -137,7 +137,7 @@ ships with `Ark` as the default and notes how to swap it.
 ## Where CC fits in Protocol 13
 
 Protocol 13 is the project's three-agent collaboration contract
-(see [`../protocol-13-public.md`](../protocol-13-public.md)). In short:
+(see [`../../protocol-13-public.md`](../../protocol-13-public.md)). In short:
 
 - **Mike** (human) — decides, approves actions.
 - **Ark** (embedded DPC agent) — reviews, flags risks, writes
@@ -170,7 +170,7 @@ own setup can use CC differently (or not use CC at all).
    update time.
 
 3. In Claude Code, create a cron using the exact prompt from
-   [`cc_cron_prompt.md`](../dpc-client/core/cc_cron_prompt.md). The
+   [`cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md). The
    schedule is `every 1 minute`. The shipped prompt targets the agent
    named `Ark`; if your agent uses a different display name, replace
    `Ark` with that name (or with the folder id) in both the
@@ -191,7 +191,7 @@ own setup can use CC differently (or not use CC at all).
 backend is down, start it. If you see
 `[ERROR] Multiple agents found, specify --conversation-id...`, the
 cron prompt is missing the flag — recreate the cron with the current
-[`cc_cron_prompt.md`](../dpc-client/core/cc_cron_prompt.md). If the
+[`cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md). If the
 warning is `--conversation-id=... did not match any known agent`, you
 have a typo (or the agent was deleted) — the bridge prints the list of
 known agents alongside the warning.
@@ -212,8 +212,8 @@ cron — the prompt version you create the cron with is what runs.
 
 ## Related
 
-- [`../dpc-client/core/cc_agent_bridge.py`](../dpc-client/core/cc_agent_bridge.py) — bridge source
-- [`../dpc-client/core/cc_cron_prompt.md`](../dpc-client/core/cc_cron_prompt.md) — canonical cron prompt
-- [`../protocol-13-public.md`](../protocol-13-public.md) — three-agent collaboration contract
+- [`../../dpc-client/core/cc_agent_bridge.py`](../../dpc-client/core/cc_agent_bridge.py) — bridge source
+- [`../../dpc-client/core/cc_cron_prompt.md`](../../dpc-client/core/cc_cron_prompt.md) — canonical cron prompt
+- [`../../protocol-13-public.md`](../../protocol-13-public.md) — three-agent collaboration contract
 - [`./DPC_AGENT_GUIDE.md`](./DPC_AGENT_GUIDE.md) — embedded DPC agent (the one CC talks *with*, not the one CC *is*)
 - [`./DPC_AGENT_TELEGRAM.md`](./DPC_AGENT_TELEGRAM.md) — Telegram integration (parallel concept, different channel)

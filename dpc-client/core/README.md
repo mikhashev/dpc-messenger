@@ -80,7 +80,7 @@ archive, messaging) and the runtime list is available inside the agent
 via `list_my_tools`.
 
 For the full agent guide (identity files, skills, scheduling,
-evolution, Telegram linking): [`../../docs/DPC_AGENT_GUIDE.md`](../../docs/DPC_AGENT_GUIDE.md).
+evolution, Telegram linking): [`../../docs/agent/DPC_AGENT_GUIDE.md`](../../docs/DPC_AGENT_GUIDE.md).
 
 ### Federation Hub client (optional)
 
@@ -114,6 +114,6 @@ Full reference: [`../../docs/CONFIGURATION.md`](../../docs/CONFIGURATION.md).
 ## Related
 
 - [`../../README.md`](../../README.md) — project overview
-- [`../../docs/DPC_AGENT_GUIDE.md`](../../docs/DPC_AGENT_GUIDE.md) — agent usage and tools
+- [`../../docs/agent/DPC_AGENT_GUIDE.md`](../../docs/DPC_AGENT_GUIDE.md) — agent usage and tools
 - [`../../docs/CONFIGURATION.md`](../../docs/CONFIGURATION.md) — configuration reference
 - [`../../specs/dptp_v1.md`](../../specs/dptp_v1.md) — wire protocol spec

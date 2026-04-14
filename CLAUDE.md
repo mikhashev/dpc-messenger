@@ -360,7 +360,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `dpc_agent/budget.py` - Token/compute budget enforcement
 - `dpc_agent/skill_store.py` - Dynamic skill registry and versioning
 - `dpc_agent/tools/` - Agent tool implementations (shell, editor, browser, etc.)
-- See [docs/DPC_AGENT_GUIDE.md](docs/DPC_AGENT_GUIDE.md) for usage
+- See [docs/agent/DPC_AGENT_GUIDE.md](docs/agent/DPC_AGENT_GUIDE.md) for usage
 
 **Knowledge & Consensus System (v0.9.0+):**
 - `consensus_manager.py` - Multi-party knowledge voting
@@ -1233,8 +1233,8 @@ poetry run pytest tests/test_turn_connectivity.py
 - `docs/LOGGING.md` - Logging system configuration and troubleshooting
 - `docs/DEVICE_CONTEXT_SPEC.md` - Device context schema and special instructions specification
 - `docs/GITHUB_AUTH_SETUP.md` - GitHub OAuth setup and testing
-- `docs/DPC_AGENT_GUIDE.md` - Embedded autonomous AI agent testing and usage guide
-- `docs/DPC_AGENT_TELEGRAM.md` - Agent Telegram integration for two-way messaging
+- `docs/agent/DPC_AGENT_GUIDE.md` - Embedded autonomous AI agent testing and usage guide
+- `docs/agent/DPC_AGENT_TELEGRAM.md` - Agent Telegram integration for two-way messaging
 - `specs/dptp_v1.md` - DPTP (D-PC Transfer Protocol) formal specification
 - `specs/hub_api_v1.md` - Hub API specification
 - `dpc-protocol/README.md` - Protocol library documentation and usage examples

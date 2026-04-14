@@ -320,6 +320,6 @@ Now each agent responds to messages from its linked Telegram chat!
 ## Related Documentation
 
 - [DPC Agent Guide](DPC_AGENT_GUIDE.md) - General agent usage
-- [Telegram Setup Guide](TELEGRAM_SETUP.md) - Main Telegram bot configuration
-- [Configuration](CONFIGURATION.md) - Full configuration reference
-- [CLAUDE.md](../CLAUDE.md) - Project development guide
+- [Telegram Setup Guide](../TELEGRAM_SETUP.md) - Main Telegram bot configuration
+- [Configuration](../CONFIGURATION.md) - Full configuration reference
+- [CLAUDE.md](../../CLAUDE.md) - Project development guide

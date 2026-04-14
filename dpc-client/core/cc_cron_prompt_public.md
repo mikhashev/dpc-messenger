@@ -55,7 +55,7 @@ wherever you have `cc_agent_bridge.py` available).
 
 - [`cc_agent_bridge.py`](./cc_agent_bridge.py) — the bridge script
   invoked by the prompt
-- [`../../docs/CC_INTEGRATION_GUIDE.md`](../../docs/CC_INTEGRATION_GUIDE.md) —
+- [`../../docs/agent/CC_INTEGRATION_GUIDE.md`](../../docs/agent/CC_INTEGRATION_GUIDE.md) —
   full integration guide (setup, authentication, troubleshooting)
 - [`cc_cron_prompt.md`](./cc_cron_prompt.md) — internal variant with
   Protocol 13 references, for reference

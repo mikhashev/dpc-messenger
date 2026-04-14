@@ -82,7 +82,7 @@ Frontend tests (where they exist) live in `ui/` — run `npm test` there.
 |----------|-----|
 | How do I install and start using it as a user? | [`../QUICK_START.md`](../QUICK_START.md) |
 | What goes in `~/.dpc/`? | [`../docs/CONFIGURATION.md`](../docs/CONFIGURATION.md) |
-| How does the embedded agent work? | [`../docs/DPC_AGENT_GUIDE.md`](../docs/DPC_AGENT_GUIDE.md) |
+| How does the embedded agent work? | [`../docs/agent/DPC_AGENT_GUIDE.md`](../docs/agent/DPC_AGENT_GUIDE.md) |
 | How do I deploy with a Federation Hub? | [`../docs/WEBRTC_SETUP_GUIDE.md`](../docs/WEBRTC_SETUP_GUIDE.md) |
 | How does the knowledge commit system work? | [`../docs/KNOWLEDGE_ARCHITECTURE.md`](../docs/KNOWLEDGE_ARCHITECTURE.md) |
 | What's in the Python backend package? | [`core/README.md`](core/README.md) |
