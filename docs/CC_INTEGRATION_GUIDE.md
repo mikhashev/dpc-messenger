@@ -43,6 +43,10 @@ respond to `@CC` mentions, and stay quiet otherwise.
 └──────────────┘                           └──────────────┘
 ```
 
+Port `9999` is the default for the local API server; override it via
+`[api] port` in `~/.dpc/config.ini` if you need to move it. The bridge
+reads the same config and follows.
+
 ---
 
 ## Prerequisites
