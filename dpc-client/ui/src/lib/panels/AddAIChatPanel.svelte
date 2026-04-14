@@ -405,7 +405,7 @@
       tabindex="-1"
       onclick={(e) => e.stopPropagation()}
     >
-      <h2 id="modal-title">Add New AI Chat</h2>
+      <h2 id="modal-title">Create New AI Agent with Chat</h2>
       <p>Select an AI provider for the new chat:</p>
 
       {#if $nodeStatus?.peer_info && $nodeStatus.peer_info.length > 0}
