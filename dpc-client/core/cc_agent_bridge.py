@@ -84,10 +84,15 @@ _last_messages = []
 # READ — history.json (with mtime tracking to avoid race conditions)
 # ─────────────────────────────────────────────────────────────
 
-def read_history(last_n: int = 0) -> list:
-    """Read messages from history.json. Always reads fresh from disk."""
+def read_history(last_n: int = 0, conversation_id: str = None) -> list:
+    """Read messages from history.json. Always reads fresh from disk.
+
+    Pass conversation_id to read a specific agent's chat; when omitted,
+    the bridge falls back to the first agent alphabetically under
+    ~/.dpc/agents/ (see _get_default_conversation_id).
+    """
     global _last_mtime, _last_messages
-    history_path = _get_history_path()
+    history_path = _get_history_path(conversation_id)
     if not history_path.exists():
         _last_messages = []
         return []
@@ -130,7 +135,7 @@ def get_new_messages(messages: list, last_count: int) -> list:
     return []
 
 
-def check_backend_status() -> dict:
+def check_backend_status(conversation_id: str = None) -> dict:
     """Check if DPC backend is running by verifying history.json freshness.
     Does NOT connect to WebSocket (raw TCP connect causes handshake errors in backend logs).
     """
@@ -138,7 +143,7 @@ def check_backend_status() -> dict:
     port = int(config.get("api", "port", fallback="9999"))
     status = {"backend": False, "port": port}
     # Check if history.json exists
-    hp = _get_history_path()
+    hp = _get_history_path(conversation_id)
     status["history_exists"] = hp.exists()
     if hp.exists():
         age_seconds = time.time() - hp.stat().st_mtime
@@ -332,18 +337,18 @@ def format_message(i: int, msg: dict, show_thinking: bool = False, show_tools: b
 # POLL — main loop
 # ─────────────────────────────────────────────────────────────
 
-def poll(show_thinking: bool = False, show_tools: bool = False):
+def poll(show_thinking: bool = False, show_tools: bool = False, conversation_id: str = None):
     """Poll loop: watch for new messages and @CC mentions."""
-    messages = read_history()
+    messages = read_history(conversation_id=conversation_id)
     last_count = len(messages)
     print(f"[CC Bridge] Started. History: {last_count} msgs. Poll every {POLL_INTERVAL}s.")
-    print(f"[CC Bridge] Path: {_get_history_path()}")
+    print(f"[CC Bridge] Path: {_get_history_path(conversation_id)}")
     print(f"[CC Bridge] Ctrl+C to stop.\n")
 
     try:
         while True:
             time.sleep(POLL_INTERVAL)
-            messages = read_history()
+            messages = read_history(conversation_id=conversation_id)
             current_count = len(messages)
 
             if current_count > last_count:
@@ -381,10 +386,14 @@ def main():
     parser.add_argument("--status", action="store_true", help="Check backend/frontend status")
     parser.add_argument("--check", type=int, metavar="SINCE", help="Scan full content for @CC mentions since message index")
     parser.add_argument("--full", action="store_true", help="Show full message content without truncation")
+    parser.add_argument("--conversation-id", type=str, default=None,
+                        help="Target a specific agent chat (e.g. agent_001). "
+                             "Default: first agent alphabetically under ~/.dpc/agents/.")
     args = parser.parse_args()
+    conv_id = args.conversation_id
 
     if args.status:
-        status = check_backend_status()
+        status = check_backend_status(conv_id)
         print(f"Backend (port {status['port']}): {'UP' if status['backend'] else 'DOWN'}")
         print(f"History: {'exists' if status.get('history_exists') else 'missing'}", end="")
         if 'history_age_seconds' in status:
@@ -394,14 +403,14 @@ def main():
         return
 
     if args.send:
-        send_response_sync(args.send)
+        send_response_sync(args.send, conversation_id=conv_id)
         return
 
     if args.check is not None:
         # Force fresh read — bypass any mtime cache
         global _last_mtime
         _last_mtime = 0.0
-        messages = read_history()
+        messages = read_history(conversation_id=conv_id)
         count = len(messages)
         print(f"TOTAL: {count}")
         mentions = find_mentions(messages, since_index=args.check)
@@ -420,7 +429,7 @@ def main():
             print("NO_MENTIONS")
         return
 
-    messages = read_history()
+    messages = read_history(conversation_id=conv_id)
     print(f"[CC Bridge] {len(messages)} messages in history.json\n")
 
     if args.analyze:
@@ -443,7 +452,7 @@ def main():
             print(format_message(i, msg, args.thinking, args.tools, args.full))
         return
 
-    poll(show_thinking=args.thinking, show_tools=args.tools)
+    poll(show_thinking=args.thinking, show_tools=args.tools, conversation_id=conv_id)
 
 
 if __name__ == "__main__":
