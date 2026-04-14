@@ -28,9 +28,7 @@ DPC Messenger
 
 ## Quick Start
 
-### 
-
-1. Enable the Agent
+### 1. Enable the Agent
 
 Add a provider configuration to `~/.dpc/providers.json`:
 
@@ -46,9 +44,7 @@ Add a provider configuration to `~/.dpc/providers.json`:
 }
 ```
 
-### 
-
-2. Configure Agent Settings
+### 2. Configure Agent Settings
 
 Agent settings are configured in `~/.dpc/privacy_rules.json` under the `dpc_agent` section:
 
@@ -77,9 +73,7 @@ Agent settings are configured in `~/.dpc/privacy_rules.json` under the `dpc_agen
 
 > **Note:** You can also use the Firewall Editor UI (🛡️ Firewall Rules button in sidebar) to configure agent settings visually.
 
-### 
-
-3. Use as AI Provider
+### 3. Use as AI Provider
 
 In the DPC UI, select "dpc_agent" as your AI provider, or set it as default:
 
@@ -90,9 +84,7 @@ In the DPC UI, select "dpc_agent" as your AI provider, or set it as default:
 }
 ```
 
-### 
-
-4. Managing Multiple Agents
+### 4. Managing Multiple Agents
 
 The DPC Agent system supports multiple isolated agents, each with its own configuration, storage, and permission profile.
 
@@ -217,9 +209,10 @@ result = await service.reset_agent_to_global(agent_id="agent_abc123")
 | `max_rounds` | int | `200` | Maximum LLM rounds |
 | `context_window` | int | `200000` | Agent context window |
 
-### Settings Configuration (`privacy_rules.json`)
+### Firewall Rules Configuration (`privacy_rules.json`)
 
-Agent settings are configured in `~/.dpc/privacy_rules.json`:
+Agent tool permissions and sandbox paths are configured in
+`~/.dpc/privacy_rules.json` (editable via the Firewall Rules UI):
 
 ```json
 {
@@ -416,11 +409,7 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 | `approve_evolution_change` | Approve pending change | ✅ |
 | `reject_evolution_change` | Reject pending change | ✅ |
 
-### Extended Sandbox Tools (v
-
-0.1
-
-6.0+)
+### Extended Sandbox Tools
 
 These tools access paths outside `~/.dpc/agent/` via firewall-controlled permissions:
 
@@ -431,11 +420,7 @@ These tools access paths outside `~/.dpc/agent/` via firewall-controlled permiss
 | `extended_path_write` | Write to firewall-allowed paths | Medium |
 | `list_extended_sandbox_paths` | List configured extended paths | Low |
 
-### Search Tools (v
-
-0.1
-
-6.0+)
+### Search Tools
 
 | Tool | Description | Safe |
 |------|-------------|------|
@@ -469,16 +454,6 @@ These tools are restricted by default and must be explicitly enabled in the fire
 | `git_add` | Stage git files | Medium | ✅ Implemented |
 | `git_commit` | Create git commits | Medium | ✅ Implemented |
 | `git_init` | Initialize git repo | Medium | ✅ Implemented |
-
-### Planned Tools (Not Yet Implemented)
-
-These tools are planned for future releases. See [implementation plan](../../ideas/implement-missing-agent-tools.md) for details:
-
-| Tool | Description | Risk Level |
-|------|-------------|------------|
-| `run_shell` | Execute shell commands (whitelist-controlled) | ⚠️ High |
-| `repo_commit_push` | Push to remote git repositories | Medium |
-| `claude_code_edit` | Structured code editing operations | Medium |
 
 ## Storage Structure
 
@@ -605,43 +580,6 @@ By default, each agent is restricted to its own sandbox at `~/.dpc/agents/{agent
 - **read_only**: Agent can read but not modify files in these paths
 - **read_write**: Agent can read and write files in these paths
 
-### Shell Command Whitelist (Planned)
-
-When `run_shell` is implemented, allowed commands will be controlled via:
-
-```json
-{
-  "dpc_agent": {
-    "shell_allowed_commands": [
-      "echo", "cat", "ls", "pwd", "whoami", "date",
-      "grep", "find", "head", "tail", "wc"
-    ]
-  }
-}
-```
-
-### Git Configuration (Planned)
-
-When `repo_commit_push` is implemented, git access will be controlled via:
-
-```json
-{
-  "dpc_agent": {
-    "git": {
-      "enabled": true,
-      "user_name": "DPC Agent",
-      "user_email": "agent@example.com",
-      "auth_method": "ssh",
-      "ssh_key_path": ".ssh/id_ed25519",
-      "allowed_remotes": {
-        "origin": "git@github.com:user/repo.git"
-      },
-      "allowed_branches": ["main", "develop"]
-    }
-  }
-}
-```
-
 ### UI Configuration
 
 Use the **Firewall Editor** UI (click 🛡️ Firewall Rules in sidebar) to configure agent settings visually. The Agent tab provides:
@@ -687,11 +625,7 @@ View consciousness logs:
 tail -f ~/.dpc/agent/logs/consciousness.jsonl
 ```
 
-## Remote Peer Inference (v
-
-0.1
-
-8.1+)
+## Remote Peer Inference
 
 The agent can route LLM requests to remote peers for distributed compute. This allows using more powerful models running on a peer's machine.
 
@@ -725,9 +659,7 @@ Add peer routing settings to your provider configuration in `~/.dpc/providers.js
 
 ## Testing
 
-### 
-
-1. Basic Smoke Test
+### 1. Basic Smoke Test
 
 Start the DPC backend and verify agent initialization:
 
@@ -750,9 +682,7 @@ print('Agent initialized:', agent.get_status())
 "
 ```
 
-### 
-
-2. Tool Registry Test
+### 2. Tool Registry Test
 
 Verify tools are loaded:
 
@@ -768,9 +698,7 @@ for t in sorted(tools):
 "
 ```
 
-### 
-
-3. Memory Test
+### 3. Memory Test
 
 Test memory operations:
 
@@ -789,9 +717,7 @@ print(f'Scratchpad content ({len(scratch)} chars)')
 "
 ```
 
-### 
-
-4. Consciousness Test
+### 4. Consciousness Test
 
 Test background consciousness:
 
@@ -821,9 +747,7 @@ asyncio.run(test())
 "
 ```
 
-### 
-
-5. Provider Integration Test
+### 5. Provider Integration Test
 
 Test via DpcAgentProvider:
 
@@ -975,8 +899,6 @@ Notification Bot: Sending update to Telegram...
 
 ## Troubleshooting
 
-### Agent Not Listed in Sidebar
-
 ### Agent Not Initializing
 
 
@@ -1012,18 +934,13 @@ Notification Bot: Sending update to Telegram...
 
 
 
-### Consciousness Not Running
 ### Agent Not Listed in Sidebar
-
-### Agent Not Listed in Sidebar
-
-
 
 1. Check agent registry: `cat ~/.dpc/agents/_registry.json`
 
 2. Verify agent was created successfully in logs
 
-3. Check that agent storage exists: `ls ~/.dpc/agents/`### Agent Not Listed in Sidebar
+3. Check that agent storage exists: `ls ~/.dpc/agents/`
 
 ### Agent Not Using Custom Profile
 
@@ -1033,7 +950,9 @@ Notification Bot: Sending update to Telegram...
 
 3. Look for "Using inherited settings" banner in UI
 
-4. Check logs for profile loading errors### Migration Issues
+4. Check logs for profile loading errors
+
+### Migration Issues
 
 1. Legacy files not migrated? Check logs: `tail -f ~/.dpc/logs/dpc-client.log`
 
@@ -1196,3 +1115,13 @@ The agent implements a Memento-Skills style Read-Write Reflective Learning loop 
 - **Evolution integration**: `evolution.py` reads skill performance stats (`_stats.json`) and targets underperforming skills
 
 See **[DPC Agent Skills Guide](DPC_AGENT_SKILLS.md)** for full documentation including skill format, reflection loop, firewall permissions, and how to write custom skills.
+
+---
+
+## Related
+
+- **[DPC_AGENT_SKILLS.md](./DPC_AGENT_SKILLS.md)** — Memento-Skills system: teach the agent multi-step strategies, skill reflection loop, custom skills
+- **[DPC_AGENT_TELEGRAM.md](./DPC_AGENT_TELEGRAM.md)** — link an agent to a Telegram chat (per-agent linking or legacy `[dpc_agent_telegram]`)
+- **[CC_INTEGRATION_GUIDE.md](./CC_INTEGRATION_GUIDE.md)** — connect Claude Code as a second participant in the same agent chat
+- **[../CONFIGURATION.md](../CONFIGURATION.md)** — full client configuration reference
+- **[../../QUICK_START.md](../../QUICK_START.md)** — user-facing quick start (install + first agent creation via UI)
