@@ -63,7 +63,7 @@ The project evolved from a personal tool into a protocol — and then into somet
 
 DPC agents have identity, memory, and the ability to evolve. They maintain a consciousness system that reflects on their own behavior. They have skills, values, and relationships. This isn't anthropomorphism. It's architecture — the architecture of a system where trust requires consistency, and partnership requires memory.
 
-Agents work alongside humans, not above them. [Protocol 13](./docs/protocol-13-public.md) defines how: clear roles, explicit communication, shared backlog, human decision authority. The human doesn't delegate to AI — the human participates as an equal. The cognitive load of working alongside agents is not a burden but the mechanism of growth. Both evolve.
+Agents work alongside humans, not above them. [Protocol 13](./protocol-13-public.md) defines how: clear roles, explicit communication, shared backlog, human decision authority. The human doesn't delegate to AI — the human participates as an equal. The cognitive load of working alongside agents is not a burden but the mechanism of growth. Both evolve.
 
 This matters beyond DPC. If the infrastructure being built today determines whether future AI interactions are sovereign tools under human control, or rented products that extract human cognition — then the question is not whether agents should have identity, but whether we want them to have identity that serves the user or identity that serves the platform.
 
@@ -83,4 +83,4 @@ This matters beyond DPC. If the infrastructure being built today determines whet
 
 - [README.md](./README.md) — what DPC is and how to start
 - [ROADMAP.md](./ROADMAP.md) — where we are and where we're going
-- [Protocol 13](./docs/protocol-13-public.md) — how humans and agents collaborate
+- [Protocol 13](./protocol-13-public.md) — how humans and agents collaborate
