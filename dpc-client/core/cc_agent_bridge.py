@@ -41,19 +41,68 @@ def _read_config():
     return config
 
 
-def _get_default_conversation_id() -> str:
-    """Get the first agent ID from ~/.dpc/agents/, fallback to 'agent_001'.
+def _list_agents() -> list:
+    """Return [(folder_id, display_name), ...] from ~/.dpc/agents/*/config.json.
 
-    Note: Uses filesystem scan (sorted) because this runs as a standalone
-    script without access to DpcAgentProvider._managers (runtime source).
-    Both approaches return the first agent; in practice they match.
+    Sorted by folder id. Skips folders without a readable config.json.
     """
+    agents = []
     agents_dir = DPC_HOME / "agents"
-    if agents_dir.exists():
-        for d in sorted(agents_dir.iterdir()):
-            if d.is_dir() and (d / "config.json").exists():
-                return d.name
-    return "agent_001"
+    if not agents_dir.exists():
+        return agents
+    for d in sorted(agents_dir.iterdir()):
+        config_path = d / "config.json"
+        if not (d.is_dir() and config_path.exists()):
+            continue
+        try:
+            with open(config_path, encoding="utf-8") as f:
+                cfg = json.load(f)
+            name = cfg.get("name") or d.name
+            agents.append((d.name, name))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return agents
+
+
+def _format_agent_listing(agents: list) -> str:
+    """Format an agent list for an error message."""
+    return "\n".join(f"  {name}  (folder: {fid})" for fid, name in agents)
+
+
+def _resolve_conversation_id(value: str) -> str:
+    """Resolve a user-supplied --conversation-id to an agent folder id.
+
+    Accepts either the agent's display name (`config.json:name`) or the
+    folder id directly. If `value` matches a known agent name, return that
+    agent's folder id. Otherwise return `value` unchanged so the caller can
+    treat it as a raw folder name (e.g. for non-agent conversations).
+    """
+    if not value:
+        return value
+    for folder_id, name in _list_agents():
+        if name == value:
+            return folder_id
+    return value
+
+
+def _get_default_conversation_id() -> str:
+    """Pick the only agent if exactly one exists. Raise otherwise.
+
+    No magic fallback — if there are zero or multiple agents the caller
+    must pick explicitly via --conversation-id.
+    """
+    agents = _list_agents()
+    if not agents:
+        raise FileNotFoundError(
+            "No agents found in ~/.dpc/agents/. "
+            "Specify --conversation-id NAME-OR-FOLDER explicitly."
+        )
+    if len(agents) > 1:
+        raise ValueError(
+            "Multiple agents found, specify --conversation-id NAME-OR-FOLDER:\n"
+            + _format_agent_listing(agents)
+        )
+    return agents[0][0]
 
 
 def _get_cc_display_name() -> str:
@@ -387,10 +436,23 @@ def main():
     parser.add_argument("--check", type=int, metavar="SINCE", help="Scan full content for @CC mentions since message index")
     parser.add_argument("--full", action="store_true", help="Show full message content without truncation")
     parser.add_argument("--conversation-id", type=str, default=None,
-                        help="Target a specific agent chat (e.g. agent_001). "
-                             "Default: first agent alphabetically under ~/.dpc/agents/.")
+                        help="Target a specific agent chat by display name "
+                             "(e.g. 'Ark') or folder id (e.g. 'agent_001'). "
+                             "If omitted, the bridge uses the only agent when "
+                             "exactly one exists; with multiple agents you "
+                             "must specify which one.")
     args = parser.parse_args()
-    conv_id = args.conversation_id
+    conv_id = _resolve_conversation_id(args.conversation_id) if args.conversation_id else None
+
+    # If no --conversation-id, eagerly resolve the default so we surface a
+    # clean error (single bridge call, single message) instead of letting
+    # the traceback bubble up from deep inside read_history()/check_status().
+    if conv_id is None:
+        try:
+            conv_id = _get_default_conversation_id()
+        except (FileNotFoundError, ValueError) as e:
+            print(f"[ERROR] {e}", file=sys.stderr)
+            sys.exit(2)
 
     if args.status:
         status = check_backend_status(conv_id)
