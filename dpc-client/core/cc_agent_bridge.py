@@ -444,6 +444,20 @@ def main():
     args = parser.parse_args()
     conv_id = _resolve_conversation_id(args.conversation_id) if args.conversation_id else None
 
+    # If --conversation-id was supplied but resolved to itself, the value
+    # matched neither a display name nor any known agent folder. Warn the
+    # user (don't exit — a non-agent conversation id is also legal here).
+    if args.conversation_id and conv_id == args.conversation_id:
+        known = _list_agents()
+        if not any(fid == conv_id for fid, _ in known):
+            print(
+                f"[WARN] --conversation-id={conv_id!r} did not match any known agent.",
+                file=sys.stderr,
+            )
+            if known:
+                print("Known agents:", file=sys.stderr)
+                print(_format_agent_listing(known), file=sys.stderr)
+
     # If no --conversation-id, eagerly resolve the default so we surface a
     # clean error (single bridge call, single message) instead of letting
     # the traceback bubble up from deep inside read_history()/check_status().
