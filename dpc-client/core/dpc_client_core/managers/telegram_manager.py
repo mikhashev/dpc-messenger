@@ -219,6 +219,10 @@ class TelegramBotManager:
                 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
                 from telegram.error import InvalidToken, NetworkError, Conflict
 
+                # Suppress verbose stacktraces for transient PTB network errors (LOW-1).
+                from ._telegram_logging import install_telegram_log_filter
+                install_telegram_log_filter()
+
                 # Build bot application
                 self.application = (
                     Application.builder()
