@@ -1516,6 +1516,7 @@ def list_extended_sandbox_paths(ctx: ToolContext) -> str:
 # Search Tools (v0.16.0+)
 # ---------------------------------------------------------------------------
 
+import os
 import re
 import subprocess
 
@@ -1543,9 +1544,10 @@ def search_files(ctx: ToolContext, pattern: str, path: str = "", max_results: in
 
     try:
         # Determine search directory
-        if path and (path.startswith("/") or path.startswith("C:") or path.startswith("~")):
+        normalized = os.path.expanduser(path) if path.startswith("~") else path
+        if normalized and os.path.isabs(normalized):
             # Absolute path - check extended sandbox
-            search_dir = ctx.validate_extended_path(path, require_write=False)
+            search_dir = ctx.validate_extended_path(normalized, require_write=False)
         else:
             # Relative path - use sandbox
             search_dir = ctx.repo_path(path) if path else ctx.agent_root
@@ -1669,9 +1671,10 @@ def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines
     """
     try:
         # Determine file path
-        if file_path.startswith("/") or file_path.startswith("C:") or file_path.startswith("~"):
+        normalized = os.path.expanduser(file_path) if file_path.startswith("~") else file_path
+        if os.path.isabs(normalized):
             # Absolute path - check extended sandbox
-            full_path = ctx.validate_extended_path(file_path, require_write=False)
+            full_path = ctx.validate_extended_path(normalized, require_write=False)
         else:
             # Relative path - use sandbox
             full_path = ctx.repo_path(file_path)
