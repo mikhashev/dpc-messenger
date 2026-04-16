@@ -219,13 +219,14 @@
     ensureHistorySettings();
   }
 
-  // Initialize history object if missing
+  // Initialize history object if missing.
+  // ARCH-19: max_archived_sessions = 0 means unlimited (keep all archives).
   function ensureHistorySettings() {
     if (!editSettings) return;
     if (!editSettings.history) {
       editSettings.history = {
         preserve_on_reset: true,
-        max_archived_sessions: 40,
+        max_archived_sessions: 0,
       };
     }
   }
@@ -290,11 +291,15 @@
     }
   }
 
-  // Derived: near-limit warning threshold
-  $: archiveNearLimit = archiveInfo ? archiveInfo.count >= Math.floor(archiveInfo.max_sessions * 0.8) : false;
+  // Derived: near-limit warning threshold.
+  // ARCH-19: max_sessions === 0 means unlimited — no limit to approach.
+  $: archiveNearLimit = archiveInfo && archiveInfo.max_sessions > 0
+    ? archiveInfo.count >= Math.floor(archiveInfo.max_sessions * 0.8)
+    : false;
   $: archivePercent = archiveInfo && archiveInfo.max_sessions > 0
     ? Math.round((archiveInfo.count / archiveInfo.max_sessions) * 100)
     : 0;
+  $: archiveUnlimited = archiveInfo ? archiveInfo.max_sessions === 0 : false;
 </script>
 
 {#if displaySettings}
@@ -665,15 +670,20 @@
                 <input
                   type="number"
                   id="agent-history-max"
-                  min="1"
-                  max="200"
+                  min="0"
                   bind:value={editSettings.history.max_archived_sessions}
                   style="width: 70px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
                 />
               {:else}
-                <span class="value">{displaySettings.history?.max_archived_sessions ?? 40}</span>
+                <span class="value">
+                  {#if (displaySettings.history?.max_archived_sessions ?? 0) === 0}
+                    Unlimited
+                  {:else}
+                    {displaySettings.history?.max_archived_sessions}
+                  {/if}
+                </span>
               {/if}
-              <span class="help-text-small" style="margin-left: 0.5rem;">Oldest archives are pruned automatically (1–200)</span>
+              <span class="help-text-small" style="margin-left: 0.5rem;">0 = unlimited (keep all archives); any positive value caps retention</span>
             </div>
 
             {#if archiveInfo && !editMode}
@@ -682,18 +692,24 @@
                 <div class="archive-count-row">
                   <span>Archived sessions:</span>
                   <strong style="color: {archiveNearLimit ? 'var(--warning, #f59e0b)' : 'var(--text-primary)'}">
-                    {archiveInfo.count}/{archiveInfo.max_sessions}
-                    {#if archiveNearLimit} &nbsp;⚠ approaching limit{/if}
+                    {#if archiveUnlimited}
+                      {archiveInfo.count} &nbsp;(unlimited retention)
+                    {:else}
+                      {archiveInfo.count}/{archiveInfo.max_sessions}
+                      {#if archiveNearLimit} &nbsp;⚠ approaching limit{/if}
+                    {/if}
                   </strong>
                 </div>
 
-                <!-- Progress bar -->
-                <div class="archive-progress-track" title="{archivePercent}% of limit used">
-                  <div
-                    class="archive-progress-fill"
-                    style="width: {Math.min(archivePercent, 100)}%; background: {archiveNearLimit ? 'var(--warning, #f59e0b)' : 'var(--primary, #2196F3)'};"
-                  ></div>
-                </div>
+                {#if !archiveUnlimited}
+                  <!-- Progress bar (hidden when retention is unlimited) -->
+                  <div class="archive-progress-track" title="{archivePercent}% of limit used">
+                    <div
+                      class="archive-progress-fill"
+                      style="width: {Math.min(archivePercent, 100)}%; background: {archiveNearLimit ? 'var(--warning, #f59e0b)' : 'var(--primary, #2196F3)'};"
+                    ></div>
+                  </div>
+                {/if}
 
                 {#if clearArchiveMessage}
                   <p class="help-text-small" style="margin-top: 0.25rem; color: var(--text-secondary);">{clearArchiveMessage}</p>

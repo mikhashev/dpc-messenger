@@ -3914,13 +3914,14 @@ class CoreService:
             import json as _json
             from pathlib import Path
             archive_dir = Path.home() / ".dpc" / "conversations" / conversation_id / "archive"
-            # S25 Batch 1.1: honour per-agent profile override, not just global firewall setting
-            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 40) if self.firewall else 40
+            # S25 Batch 1.1: honour per-agent profile override, not just global firewall setting.
+            # ARCH-19: max_sessions = 0 means unlimited (keep all archives).
+            max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0) if self.firewall else 0
             if self.firewall:
                 profile = self.firewall.rules.get("agent_profiles", {}).get(conversation_id, {})
                 hist = profile.get("history", {}) if profile else {}
                 if "max_archived_sessions" in hist:
-                    max_sessions = max(1, min(200, int(hist["max_archived_sessions"])))
+                    max_sessions = max(0, int(hist["max_archived_sessions"]))
 
             if not archive_dir.exists():
                 return {

@@ -124,7 +124,7 @@
       if (result.status === 'success') {
         archiveInfo = {
           count: result.count ?? 0,
-          max_sessions: result.max_sessions ?? 10,
+          max_sessions: result.max_sessions ?? 0,
           archive_path: result.archive_path ?? '',
           sessions: result.sessions ?? [],
         };

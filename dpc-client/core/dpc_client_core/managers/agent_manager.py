@@ -921,8 +921,9 @@ class DpcAgentManager:
             preserve, max_sessions = self._get_history_settings()
             archive_count = monitor.reset_conversation(preserve=preserve, max_sessions=max_sessions)
             log.info(f"Reset conversation: {conversation_id} (preserve={preserve}, archives={archive_count})")
-            # Broadcast warning if archive is approaching the retention limit (≥80%)
-            if preserve and archive_count >= int(max_sessions * 0.8):
+            # Broadcast warning if archive is approaching the retention limit (≥80%).
+            # When max_sessions is 0 (unlimited), no limit to approach — skip warning.
+            if preserve and max_sessions > 0 and archive_count >= int(max_sessions * 0.8):
                 import asyncio
                 local_api = getattr(self.service, "local_api", None)
                 if local_api:
@@ -936,11 +937,14 @@ class DpcAgentManager:
         return False
 
     def _get_history_settings(self) -> tuple:
-        """Return (preserve_on_reset, max_archived_sessions) from firewall config."""
+        """Return (preserve_on_reset, max_archived_sessions) from firewall config.
+
+        max_archived_sessions: 0 = unlimited (keep all archives), >0 = cap.
+        """
         if not self.firewall:
-            return True, 40
+            return True, 0
         preserve = getattr(self.firewall, "history_preserve_on_reset", True)
-        max_sessions = getattr(self.firewall, "history_max_archived_sessions", 40)
+        max_sessions = getattr(self.firewall, "history_max_archived_sessions", 0)
         # Per-agent profile override
         if self.agent_id:
             profile = self.firewall.rules.get("agent_profiles", {}).get(self.agent_id, {})
@@ -949,7 +953,7 @@ class DpcAgentManager:
                 if "preserve_on_reset" in hist:
                     preserve = hist["preserve_on_reset"]
                 if "max_archived_sessions" in hist:
-                    max_sessions = max(1, min(200, int(hist["max_archived_sessions"])))
+                    max_sessions = max(0, int(hist["max_archived_sessions"]))
         return preserve, max_sessions
 
     def _emit_progress(
