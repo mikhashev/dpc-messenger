@@ -241,6 +241,105 @@ def read_session_detail(
         return json.dumps({"error": f"Failed to read archive: {e}"})
 
 
+def search_session_archives(
+    ctx: ToolContext,
+    query: str,
+    scope: str = "content",
+    last_n: int = 20,
+    offset: int = 0,
+    snippet_chars: int = 100,
+) -> str:
+    """
+    Search across all archived sessions for messages matching a substring query.
+
+    Case-insensitive substring match on `content` (default), `thinking`, or
+    `both` scope. Returns matched messages with filename, message_index,
+    snippet (±snippet_chars around first match), timestamp, and which scope
+    field matched. Use read_session_detail(filename, offset=message_index)
+    to follow up on specific matches.
+
+    Args:
+        ctx: Tool context
+        query: Substring to search for (case-insensitive, min 2 chars)
+        scope: "content" (default), "thinking", or "both"
+        last_n: Maximum matches to return per call (1-50, default 20)
+        offset: Skip first N matches across all archives (default 0)
+        snippet_chars: Context window around match (default 100, min 20)
+
+    Returns:
+        JSON string with matches list + total_matches + offset
+    """
+    query = (query or "").strip()
+    if len(query) < 2:
+        return json.dumps({
+            "error": "Query must be at least 2 characters",
+            "matches": [],
+        })
+
+    scope = scope if scope in ("content", "thinking", "both") else "content"
+    last_n = min(max(1, last_n), 50)
+    offset = max(0, offset)
+    snippet_chars = max(20, snippet_chars)
+
+    archive_dir = _get_archive_dir(ctx)
+    if not archive_dir.exists():
+        return json.dumps({"error": "No archive directory found", "matches": []})
+
+    archive_files = sorted(archive_dir.rglob("*_session.json"))
+    if not archive_files:
+        return json.dumps({"error": "No archived sessions found", "matches": []})
+
+    query_lower = query.lower()
+    fields = ("content", "thinking") if scope == "both" else (scope,)
+    all_matches: List[Dict[str, Any]] = []
+
+    for archive_path in archive_files:
+        try:
+            with open(archive_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        messages = data.get("messages", [])
+        for msg_idx, m in enumerate(messages):
+            for field in fields:
+                text = m.get(field, "") or ""
+                if not text:
+                    continue
+                hit = text.lower().find(query_lower)
+                if hit < 0:
+                    continue
+                start = max(0, hit - snippet_chars)
+                end = min(len(text), hit + len(query) + snippet_chars)
+                snippet = text[start:end]
+                if start > 0:
+                    snippet = "..." + snippet
+                if end < len(text):
+                    snippet = snippet + "..."
+                all_matches.append({
+                    "filename": archive_path.name,
+                    "message_index": msg_idx,
+                    "scope_matched": field,
+                    "role": m.get("role", ""),
+                    "sender_name": m.get("sender_name", ""),
+                    "timestamp": m.get("timestamp", ""),
+                    "snippet": snippet,
+                })
+                break  # one hit per message is enough
+
+    total_matches = len(all_matches)
+    page = all_matches[offset:offset + last_n]
+
+    return json.dumps({
+        "query": query,
+        "scope": scope,
+        "total_matches": total_matches,
+        "offset": offset,
+        "showing": len(page),
+        "matches": page,
+    }, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # Tool Registry Export
 # ---------------------------------------------------------------------------
@@ -340,5 +439,56 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=read_session_detail,
             timeout_sec=30,
+        ),
+        ToolEntry(
+            name="search_session_archives",
+            schema={
+                "name": "search_session_archives",
+                "description": (
+                    "Search across all archived sessions for messages matching a "
+                    "substring query. Case-insensitive. Returns snippets with "
+                    "filename + message_index so you can follow up via "
+                    "read_session_detail(filename, offset=message_index). "
+                    "Use this when looking for when/where a topic was discussed "
+                    "across many sessions."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Substring to search for (case-insensitive, min 2 chars)",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["content", "thinking", "both"],
+                            "description": (
+                                "Which message field to search. 'content' (default) "
+                                "is the visible message text; 'thinking' is the "
+                                "reasoning trace; 'both' searches both fields."
+                            ),
+                            "default": "content",
+                        },
+                        "last_n": {
+                            "type": "integer",
+                            "description": "Maximum matches to return per call (1-50, default 20)",
+                            "default": 20,
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Skip first N matches across all archives (default 0, for pagination)",
+                            "default": 0,
+                        },
+                        "snippet_chars": {
+                            "type": "integer",
+                            "description": "Context window around each match in chars (default 100, min 20)",
+                            "default": 100,
+                        },
+                    },
+                    "required": ["query"]
+                }
+            },
+            handler=search_session_archives,
+            timeout_sec=60,
         ),
     ]
