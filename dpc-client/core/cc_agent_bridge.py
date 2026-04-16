@@ -432,6 +432,13 @@ def main():
     parser.add_argument("--mentions", action="store_true", help="Show @CC mentions")
     parser.add_argument("--analyze", action="store_true", help="Ark behavioral analysis")
     parser.add_argument("--send", type=str, help="Send CC response text")
+    parser.add_argument("--send-file", type=str, metavar="PATH",
+                        dest="send_file",
+                        help="Send CC response text read from a UTF-8 file. "
+                             "Prefer this over --send when the message contains "
+                             "backticks, code blocks, or other shell-special "
+                             "characters — file I/O avoids bash command "
+                             "substitution (rule #44 class).")
     parser.add_argument("--status", action="store_true", help="Check backend/frontend status")
     parser.add_argument("--check", type=int, metavar="SINCE", help="Scan full content for @CC mentions since message index")
     parser.add_argument("--full", action="store_true", help="Show full message content without truncation")
@@ -480,6 +487,16 @@ def main():
 
     if args.send:
         send_response_sync(args.send, conversation_id=conv_id)
+        return
+
+    if args.send_file:
+        try:
+            text = Path(args.send_file).read_text(encoding="utf-8")
+        except OSError as e:
+            print(f"[ERROR] Cannot read --send-file at {args.send_file}: {e}",
+                  file=sys.stderr)
+            sys.exit(1)
+        send_response_sync(text, conversation_id=conv_id)
         return
 
     if args.check is not None:
