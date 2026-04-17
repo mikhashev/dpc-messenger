@@ -158,7 +158,7 @@
   }
 
   // Ensure sandbox_extensions has extended access fields when entering edit mode
-  $: if (editMode && editSettings) { ensureSandboxExtensions(); }
+  $: if (editMode && editSettings) { ensureSandboxExtensions(); ensureMemorySettings(); }
 
   // Helper to remove a path
   function removePath(type: 'read_only' | 'read_write', index: number) {
