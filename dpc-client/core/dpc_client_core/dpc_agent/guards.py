@@ -1,19 +1,9 @@
-"""GuardMiddleware implementations for the agent loop (ADR-007 Step 2).
+"""GuardMiddleware implementations for the agent loop (ADR-007).
 
-Extracts the five existing inline guards in :mod:`loop.py` as
-:class:`GuardMiddleware` subclasses. Behaviour is preserved 1:1 with
-the current implementation; the goal is to have these guards ready
-to register via :class:`HookRegistry` once :mod:`loop.py` is refactored
-in Step 3.
-
-Until Step 3 lands, nothing imports this module — the inline checks in
-``loop.py`` remain the source of truth for runtime behaviour. These
-classes are tested independently and plugged in atomically.
-
-Default values for each guard live in its ``__init__`` signature and
-mirror the equivalent constants currently defined at the top of
-``loop.py::_process_agent_loop``. The code signatures are the source of
-truth; this module does not re-state them in prose.
+Five guards that used to live as inline if/elif blocks in
+``loop.py::_process_agent_loop``. Each one owns its own state and
+exposes a ``stop_message()`` that the loop reads via
+:attr:`HookRegistry.last_triggered` after :meth:`HookRegistry.fire`.
 """
 
 from __future__ import annotations
@@ -27,23 +17,11 @@ from .hooks import GuardMiddleware, HookAction, HookContext
 log = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# 1. Round limit
-# --------------------------------------------------------------------------- #
-
-
 class RoundLimitGuard(GuardMiddleware):
     """Stop the loop after a fixed number of LLM rounds.
 
-    Fires in ``between_rounds`` — by the time this guard sees the context,
-    the current ``round_idx`` has already been incremented by the loop, so
-    ``round_idx > max_rounds`` means "this round would exceed the cap, do
-    not run it". Stateless.
-
-    Operator note: uses strict ``>`` (round indices start at 1 and count
-    rounds executed; ``max_rounds`` is inclusive, round number
-    ``max_rounds`` itself is allowed). Mirrors the inline ``round_idx >
-    max_rounds`` check in ``loop.py::_process_agent_loop``.
+    Uses strict ``>``: round indices are 1-based counts of rounds
+    executed, so ``max_rounds`` itself is the last allowed round.
     """
 
     def __init__(self, max_rounds: int = 200) -> None:
@@ -66,18 +44,11 @@ class RoundLimitGuard(GuardMiddleware):
         )
 
 
-# --------------------------------------------------------------------------- #
-# 2. Tool-calls-per-turn limit
-# --------------------------------------------------------------------------- #
-
-
 class ToolLimitGuard(GuardMiddleware):
     """Stop if the LLM emits too many tool calls in a single turn.
 
-    A burst of many tool calls in one response indicates the model has
-    fanned out and will not converge on a text answer. Fires in
-    ``after_llm_call`` after the loop has set ``tool_calls_this_turn``.
-    Stateless.
+    A burst this large in one response means the model has fanned out
+    and will not converge on a text answer.
     """
 
     def __init__(self, max_per_turn: int = 25) -> None:
@@ -104,28 +75,16 @@ class ToolLimitGuard(GuardMiddleware):
         )
 
 
-# --------------------------------------------------------------------------- #
-# 3. Research limit (consecutive tool-only rounds)
-# --------------------------------------------------------------------------- #
-
-
 class ResearchLimitGuard(GuardMiddleware):
-    """Force a final answer if the agent researches without producing text.
+    """Force a final answer after too many consecutive tool-only rounds.
 
-    Mirrors the current ``_consecutive_tool_only`` counter in ``loop.py``:
-    reset on any round that produced text content, increment on a round
-    that emitted only tool calls. Per ADR-007 §Example, the counter lives
-    on the middleware instance, not on :class:`HookContext` — this keeps
-    state local and avoids leaky abstraction.
+    Counter lives on the instance (per ADR-007: guard-specific state
+    does not leak into :class:`HookContext`). Reset on any round that
+    produced text, increment on a round that emitted only tool calls.
+    Rounds with neither text nor tool calls are empty and ignored.
 
-    Fires in ``after_llm_call`` after the loop has set
-    ``last_response_has_text`` and ``tool_calls_this_turn``.
-
-    Operator note: uses non-strict ``>=`` (the counter tracks number of
-    rounds that contributed; ``max_consecutive`` is exclusive — the
-    Nth consecutive tool-only round triggers the stop, not the
-    following one). Mirrors the ``_consecutive_tool_only`` counter check
-    in ``loop.py::_process_agent_loop``.
+    Uses non-strict ``>=``: the counter is incremented before the check,
+    so the Nth consecutive tool-only round triggers the stop.
     """
 
     def __init__(self, max_consecutive: int = 15) -> None:
@@ -137,8 +96,6 @@ class ResearchLimitGuard(GuardMiddleware):
             self._counter = 0
         elif ctx.tool_calls_this_turn > 0:
             self._counter += 1
-        # Rounds with no text AND no tool calls are ignored — they
-        # indicate an empty response, not research.
 
         if self._counter >= self._max:
             log.warning(
@@ -158,23 +115,14 @@ class ResearchLimitGuard(GuardMiddleware):
         )
 
 
-# --------------------------------------------------------------------------- #
-# 4. Loop guard (duplicate tool calls)
-# --------------------------------------------------------------------------- #
-
-
 class LoopGuard(GuardMiddleware):
     """Stop if a single (tool, args) fingerprint repeats too many times.
 
-    Matches the current ``_tool_call_counts`` dict in ``loop.py``: every
-    (tool_name, JSON-sorted args) pair gets a session-scoped counter;
-    when any counter reaches ``max_duplicate_calls`` the agent is stuck.
-
-    Fires in ``after_llm_call`` — at this point the loop has populated
-    ``ctx.state.recent_tool_args`` with the current turn's tool calls,
-    each dict shaped as ``{"name": str, "args": dict}``. The guard
-    updates its internal fingerprint counters with the new calls and
-    returns STOP_LOOP if any exceeds the threshold.
+    Session-scoped counter per ``name::json_sorted_args`` fingerprint.
+    When any fingerprint hits the cap the agent is stuck in a repeat
+    loop. Tool-call dicts are shaped ``{"name": str, "args": dict}``;
+    ``args`` may arrive as a JSON string from some providers and is
+    normalised before fingerprinting.
     """
 
     def __init__(self, max_duplicate_calls: int = 5) -> None:
@@ -184,7 +132,6 @@ class LoopGuard(GuardMiddleware):
 
     @staticmethod
     def _fingerprint(call: dict) -> str:
-        """Stable ``name::args_json`` key for a single tool call dict."""
         name = call.get("name", "?")
         raw_args = call.get("args", {})
         if isinstance(raw_args, str):
@@ -227,19 +174,11 @@ class LoopGuard(GuardMiddleware):
         )
 
 
-# --------------------------------------------------------------------------- #
-# 5. Budget limit
-# --------------------------------------------------------------------------- #
-
-
 class BudgetLimitGuard(GuardMiddleware):
-    """Stop if accumulated task cost crosses a fraction of the budget.
+    """Stop when accumulated cost crosses a fraction of the budget.
 
-    Matches the current ``budget_remaining_usd`` + ``max_fraction``
-    threshold check in ``loop.py::_process_agent_loop``. A ``None`` or
-    non-positive ``budget_remaining_usd`` disables the guard entirely.
-    Fires in ``between_rounds`` so the check runs after tool execution
-    of the just-finished round, before the next LLM call.
+    ``budget_remaining_usd`` of ``None`` or non-positive disables the
+    guard — not every task carries a budget.
     """
 
     def __init__(
