@@ -257,6 +257,19 @@ class DpcAgentManager:
             await self._agent.start_task_processor()
             log.info("Task processor started")
 
+        # Initialize memory system (ADR-010)
+        try:
+            from dpc_client_core.dpc_agent.memory_config import get_memory_config
+            from dpc_client_core.dpc_agent.model_download import notify_download_needed
+            mem_cfg = get_memory_config(self.config)
+            if mem_cfg.enabled:
+                notification = notify_download_needed(mem_cfg.embedding_model)
+                if notification.get("needed"):
+                    log.info("Memory: embedding model not yet downloaded (%s)", mem_cfg.embedding_model)
+                log.info("Memory system initialized (model=%s, active_recall=%s)", mem_cfg.embedding_model, mem_cfg.active_recall)
+        except Exception as e:
+            log.warning("Memory system init skipped: %s", e)
+
         # Initialize Telegram bridge for agent notifications
         await self._start_telegram_bridge()
 

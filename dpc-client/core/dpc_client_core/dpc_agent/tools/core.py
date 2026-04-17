@@ -658,6 +658,49 @@ def knowledge_read(ctx: ToolContext, topic: str) -> str:
         return f"⚠️ Error reading knowledge: {e}"
 
 
+def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
+    """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
+    try:
+        from ..hybrid_search import reciprocal_rank_fusion, SearchResult
+        from ..bm25_index import BM25Index
+        from ..faiss_index import FaissIndex
+        from ..memory import EmbeddingProvider
+        import numpy as np
+
+        knowledge_dir = ctx.agent_root / "knowledge"
+        index_dir = ctx.agent_root / "state" / "memory_index"
+
+        faiss_idx = FaissIndex(index_dir)
+        bm25_idx = BM25Index(index_dir)
+
+        faiss_results = []
+        if faiss_idx.load():
+            try:
+                provider = EmbeddingProvider()
+                qvec = np.array(provider.embed(query), dtype=np.float32)
+                faiss_results = faiss_idx.search(qvec, top_k)
+                provider.unload()
+            except Exception:
+                pass
+
+        bm25_results = []
+        if bm25_idx.load():
+            bm25_results = bm25_idx.search(query, top_k)
+
+        if not faiss_results and not bm25_results:
+            return "No memory index found. Run full index rebuild first."
+
+        merged = reciprocal_rank_fusion(faiss_results, bm25_results)
+        lines = [f"Found {len(merged)} results for '{query}':\n"]
+        for i, r in enumerate(merged[:top_k]):
+            meta = r.chunk_meta
+            lines.append(f"{i+1}. [{meta.get('source_layer','L5')}] {meta.get('source_file','?')} (score: {r.score:.4f})")
+        return "\n".join(lines)
+
+    except Exception as e:
+        return f"⚠️ Memory search error: {e}"
+
+
 def knowledge_write(
     ctx: ToolContext,
     topic: str,
@@ -2424,6 +2467,33 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=search_in_file,
+            timeout_sec=30,
+        ),
+
+        # Memory search (ADR-010)
+        ToolEntry(
+            name="memory_search",
+            schema={
+                "name": "memory_search",
+                "description": "Search across knowledge base and memory using hybrid BM25 + semantic search",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query"
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "description": "Max results to return",
+                            "default": 5,
+                            "maximum": 20
+                        }
+                    },
+                    "required": ["query"]
+                }
+            },
+            handler=memory_search,
             timeout_sec=30,
         ),
     ]
