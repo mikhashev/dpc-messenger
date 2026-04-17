@@ -1,21 +1,8 @@
-"""Integration tests for hooks + guards infrastructure (ADR-007 Step 3a).
+"""Integration tests for hooks + guards (ADR-007 Step 3a).
 
-These tests exercise the five :class:`GuardMiddleware` subclasses in
-:mod:`dpc_client_core.dpc_agent.guards` against the :class:`HookContext`
-/ :class:`LoopState` contract from :mod:`dpc_client_core.dpc_agent.hooks`.
-
-Scope:
-- Each guard is exercised for below-threshold, at-threshold, and
-  over-threshold conditions.
-- Guard state transitions (counter reset on text for ResearchLimitGuard,
-  independent fingerprint counters for LoopGuard) are covered.
-- Registry end-to-end: register multiple guards, verify lifecycle
-  dispatch and STOP_LOOP propagation.
-- Observer error tier: exceptions from ObserverMiddleware are
-  swallowed; exceptions from GuardMiddleware propagate.
-
-These tests lock behaviour against the current inline checks in
-``loop.py`` so the Step 3 refactor can be verified as no-op.
+Lock the five GuardMiddleware subclasses + HookRegistry against the
+current inline-guard behaviour in ``loop.py``; the Step 3 refactor
+must leave these passing unchanged.
 """
 
 from __future__ import annotations
@@ -39,13 +26,7 @@ from dpc_client_core.dpc_agent.guards import (
 )
 
 
-# --------------------------------------------------------------------------- #
-# Fixtures
-# --------------------------------------------------------------------------- #
-
-
 def make_ctx(round_idx: int = 1, **state_overrides) -> HookContext:
-    """Build a HookContext with a fresh LoopState and optional overrides."""
     ctx = HookContext(
         agent_id="test-agent",
         task_id="test-task",
@@ -57,11 +38,6 @@ def make_ctx(round_idx: int = 1, **state_overrides) -> HookContext:
     return ctx
 
 
-# --------------------------------------------------------------------------- #
-# RoundLimitGuard
-# --------------------------------------------------------------------------- #
-
-
 class TestRoundLimitGuard:
     @pytest.mark.asyncio
     async def test_below_max_allows(self):
@@ -70,7 +46,7 @@ class TestRoundLimitGuard:
 
     @pytest.mark.asyncio
     async def test_at_max_allows(self):
-        # Strict > means the max-th round is still allowed.
+        # Strict `>`: the max-th round is still allowed.
         g = RoundLimitGuard(max_rounds=5)
         assert await g.between_rounds(make_ctx(round_idx=5)) is None
 
@@ -81,11 +57,6 @@ class TestRoundLimitGuard:
             await g.between_rounds(make_ctx(round_idx=6))
             == HookAction.STOP_LOOP
         )
-
-
-# --------------------------------------------------------------------------- #
-# ToolLimitGuard
-# --------------------------------------------------------------------------- #
 
 
 class TestToolLimitGuard:
@@ -108,11 +79,6 @@ class TestToolLimitGuard:
         )
 
 
-# --------------------------------------------------------------------------- #
-# ResearchLimitGuard
-# --------------------------------------------------------------------------- #
-
-
 class TestResearchLimitGuard:
     @pytest.mark.asyncio
     async def test_increments_on_tool_only_rounds(self):
@@ -120,9 +86,7 @@ class TestResearchLimitGuard:
         ctx = make_ctx(last_response_has_text=False, tool_calls_this_turn=1)
         assert await g.after_llm_call(ctx) is None  # counter=1
         assert await g.after_llm_call(ctx) is None  # counter=2
-        assert (
-            await g.after_llm_call(ctx) == HookAction.STOP_LOOP
-        )  # counter=3 triggers
+        assert await g.after_llm_call(ctx) == HookAction.STOP_LOOP  # counter=3
 
     @pytest.mark.asyncio
     async def test_resets_on_text(self):
@@ -132,23 +96,17 @@ class TestResearchLimitGuard:
 
         await g.after_llm_call(tool_ctx)  # counter=1
         await g.after_llm_call(tool_ctx)  # counter=2
-        await g.after_llm_call(text_ctx)  # counter=0
-        # Now two more tool-only rounds must not fire (counter reset)
+        await g.after_llm_call(text_ctx)  # counter=0 (reset)
         assert await g.after_llm_call(tool_ctx) is None  # counter=1
         assert await g.after_llm_call(tool_ctx) is None  # counter=2
 
     @pytest.mark.asyncio
     async def test_empty_round_ignored(self):
-        # No text, no tool calls -> counter unchanged (round is empty, not research)
+        # No text, no tool calls — counter unchanged (empty, not research).
         g = ResearchLimitGuard(max_consecutive=2)
         empty_ctx = make_ctx(last_response_has_text=False, tool_calls_this_turn=0)
         for _ in range(5):
             assert await g.after_llm_call(empty_ctx) is None
-
-
-# --------------------------------------------------------------------------- #
-# LoopGuard
-# --------------------------------------------------------------------------- #
 
 
 class TestLoopGuard:
@@ -159,9 +117,7 @@ class TestLoopGuard:
         ctx = make_ctx(recent_tool_args=[call])
         assert await g.after_llm_call(ctx) is None  # count=1
         assert await g.after_llm_call(ctx) is None  # count=2
-        assert (
-            await g.after_llm_call(ctx) == HookAction.STOP_LOOP
-        )  # count=3
+        assert await g.after_llm_call(ctx) == HookAction.STOP_LOOP  # count=3
 
     @pytest.mark.asyncio
     async def test_different_fingerprints_independent(self):
@@ -169,14 +125,14 @@ class TestLoopGuard:
         ctx_a = make_ctx(recent_tool_args=[{"name": "search", "args": {"q": "a"}}])
         ctx_b = make_ctx(recent_tool_args=[{"name": "search", "args": {"q": "b"}}])
 
-        assert await g.after_llm_call(ctx_a) is None  # a count=1
-        assert await g.after_llm_call(ctx_b) is None  # b count=1
-        assert await g.after_llm_call(ctx_a) == HookAction.STOP_LOOP  # a count=2
+        assert await g.after_llm_call(ctx_a) is None  # a=1
+        assert await g.after_llm_call(ctx_b) is None  # b=1
+        assert await g.after_llm_call(ctx_a) == HookAction.STOP_LOOP  # a=2
 
     @pytest.mark.asyncio
     async def test_json_string_args_parsed(self):
-        # loop.py can deliver args as a JSON string when the provider gives
-        # raw LLM output — the fingerprint must normalise both to the same key.
+        # Providers sometimes deliver args as a JSON string; fingerprint
+        # must normalise them to the same key as a dict.
         g = LoopGuard(max_duplicate_calls=2)
         dict_call = {"name": "tool", "args": {"x": 1}}
         str_call = {"name": "tool", "args": '{"x": 1}'}
@@ -188,16 +144,10 @@ class TestLoopGuard:
 
     @pytest.mark.asyncio
     async def test_non_dict_call_skipped(self):
-        # Defensive: if recent_tool_args gets polluted with non-dicts,
-        # the guard skips them without raising.
+        # Defensive: non-dict entries in recent_tool_args are skipped.
         g = LoopGuard(max_duplicate_calls=2)
         ctx = make_ctx(recent_tool_args=["not-a-dict", 42, None])
         assert await g.after_llm_call(ctx) is None
-
-
-# --------------------------------------------------------------------------- #
-# BudgetLimitGuard
-# --------------------------------------------------------------------------- #
 
 
 class TestBudgetLimitGuard:
@@ -217,19 +167,13 @@ class TestBudgetLimitGuard:
     @pytest.mark.asyncio
     async def test_none_budget_is_noop(self):
         g = BudgetLimitGuard(budget_remaining_usd=None)
-        # Even a huge cost shouldn't fire when budget tracking is off.
         assert await g.between_rounds(make_ctx(accumulated_cost_usd=1000.0)) is None
 
     @pytest.mark.asyncio
     async def test_zero_budget_is_noop(self):
-        # Non-positive budget treated same as None — disabled.
+        # Non-positive budget is treated the same as None — disabled.
         g = BudgetLimitGuard(budget_remaining_usd=0.0, max_fraction=0.5)
         assert await g.between_rounds(make_ctx(accumulated_cost_usd=0.1)) is None
-
-
-# --------------------------------------------------------------------------- #
-# Registry integration
-# --------------------------------------------------------------------------- #
 
 
 class TestRegistryIntegration:
@@ -250,14 +194,11 @@ class TestRegistryIntegration:
 
     @pytest.mark.asyncio
     async def test_first_guard_to_stop_wins(self):
-        # Register two guards that both fire; the one registered first
-        # should short-circuit the chain.
         reg = HookRegistry()
         reg.register(RoundLimitGuard(max_rounds=0))   # always fires
         reg.register(ToolLimitGuard(max_per_turn=0))  # also would fire
 
         ctx = make_ctx(round_idx=1, tool_calls_this_turn=1)
-        # between_rounds: only the round guard has a handler, fires STOP_LOOP
         assert (
             await reg.fire(HookLifecycle.BETWEEN_ROUNDS, ctx) == HookAction.STOP_LOOP
         )
@@ -272,13 +213,11 @@ class TestRegistryIntegration:
         reg.register(NoisyObserver())
         reg.register(RoundLimitGuard(max_rounds=5))
 
-        # The observer raises, but the guard still executes and returns None.
         ctx = make_ctx(round_idx=3)
         assert await reg.fire(HookLifecycle.BETWEEN_ROUNDS, ctx) is None
 
     @pytest.mark.asyncio
     async def test_guard_error_propagates(self):
-        # Symmetric contract: guard exceptions are not swallowed.
         class AngryGuard(RoundLimitGuard):
             async def between_rounds(self, ctx):
                 raise ValueError("guard boom")
