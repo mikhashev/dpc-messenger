@@ -942,6 +942,15 @@ If no improvements are warranted: {{"proposals": []}}
 
                     await self.run_evolution_cycle()
 
+                    # Memory consolidation Tier 1 (ADR-010, WIRE-5)
+                    try:
+                        from .consolidation import tier1_consolidate
+                        knowledge_dir = self.agent_root / "knowledge"
+                        if knowledge_dir.is_dir():
+                            tier1_consolidate(knowledge_dir)
+                    except Exception as e:
+                        log.debug("Memory consolidation skipped: %s", e)
+
                     # Wait for next cycle
                     try:
                         await asyncio.wait_for(

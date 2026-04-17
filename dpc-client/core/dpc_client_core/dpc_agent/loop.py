@@ -487,6 +487,12 @@ async def run_llm_loop(
     hooks.register(LoopGuard())
     hooks.register(BudgetLimitGuard(budget_remaining_usd=budget_remaining_usd))
 
+    try:
+        from .memory_observer import ExtractionObserver
+        hooks.register(ExtractionObserver())
+    except ImportError:
+        pass
+
     ctx = HookContext(
         agent_id="",
         task_id=task_id,
