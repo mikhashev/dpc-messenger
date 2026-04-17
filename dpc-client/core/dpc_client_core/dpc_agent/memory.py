@@ -177,6 +177,58 @@ def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
     return content
 
 
+# ---------------------------------------------------------------------------
+# Embedding Provider (ADR-010, MEM-3.1)
+# ---------------------------------------------------------------------------
+
+class EmbeddingProvider:
+    """Lazy-loading embedding provider using sentence-transformers."""
+
+    def __init__(self, model_name: str = "intfloat/multilingual-e5-small",
+                 device: Optional[str] = None, max_tokens: int = 512):
+        self.model_name = model_name
+        self.max_tokens = max_tokens
+        self._device = device
+        self._model = None
+
+    @property
+    def device(self) -> str:
+        if self._device:
+            return self._device
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "cuda"
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                return "mps"
+        except ImportError:
+            pass
+        return "cpu"
+
+    def _load_model(self):
+        if self._model is None:
+            from sentence_transformers import SentenceTransformer
+            self._model = SentenceTransformer(self.model_name, device=self.device)
+            log.info("Loaded embedding model %s on %s", self.model_name, self.device)
+
+    def embed(self, text: str) -> List[float]:
+        self._load_model()
+        return self._model.encode(text, normalize_embeddings=True).tolist()
+
+    def embed_batch(self, texts: List[str]) -> List[List[float]]:
+        self._load_model()
+        return self._model.encode(texts, normalize_embeddings=True).tolist()
+
+    @property
+    def dimensions(self) -> int:
+        self._load_model()
+        return self._model.get_sentence_embedding_dimension()
+
+    def unload(self):
+        self._model = None
+        log.info("Unloaded embedding model %s", self.model_name)
+
+
 class Memory:
     """
     Agent memory management - stored in ~/.dpc/agent/memory/.

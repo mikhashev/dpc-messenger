@@ -1,10 +1,12 @@
-"""Tests for _meta.json Access Registry (ADR-010, MEM-1.1 + MEM-1.2 + MEM-2.1)."""
+"""Tests for _meta.json Access Registry + Embedding Provider (ADR-010)."""
 
 import json
 import pathlib
 from datetime import datetime, timezone, timedelta
+from unittest.mock import patch, MagicMock
 
 from dpc_client_core.dpc_agent.memory import (
+    EmbeddingProvider,
     FileMeta,
     backfill_meta,
     generate_smart_index,
@@ -140,3 +142,50 @@ def test_update_access_triggers_index_refresh(tmp_path):
     assert (tmp_path / "_index.md").exists()
     index_text = (tmp_path / "_index.md").read_text(encoding="utf-8")
     assert "Topic" in index_text
+
+
+# --- MEM-3.1: EmbeddingProvider tests ---
+
+
+def test_embedding_provider_defaults():
+    p = EmbeddingProvider()
+    assert p.model_name == "intfloat/multilingual-e5-small"
+    assert p.max_tokens == 512
+    assert p._model is None
+
+
+def test_embedding_provider_custom_config():
+    p = EmbeddingProvider(model_name="custom/model", device="cpu", max_tokens=256)
+    assert p.model_name == "custom/model"
+    assert p.device == "cpu"
+    assert p.max_tokens == 256
+
+
+def test_embedding_provider_embed_returns_list():
+    import numpy as np
+    mock_model = MagicMock()
+    mock_model.encode.return_value = np.array([0.1, 0.2, 0.3])
+    p = EmbeddingProvider()
+    p._model = mock_model
+    result = p.embed("test text")
+    assert isinstance(result, list)
+    assert len(result) == 3
+    mock_model.encode.assert_called_once_with("test text", normalize_embeddings=True)
+
+
+def test_embedding_provider_embed_batch():
+    import numpy as np
+    mock_model = MagicMock()
+    mock_model.encode.return_value = np.array([[0.1, 0.2], [0.3, 0.4]])
+    p = EmbeddingProvider()
+    p._model = mock_model
+    result = p.embed_batch(["a", "b"])
+    assert len(result) == 2
+    assert len(result[0]) == 2
+
+
+def test_embedding_provider_unload():
+    p = EmbeddingProvider()
+    p._model = MagicMock()
+    p.unload()
+    assert p._model is None
