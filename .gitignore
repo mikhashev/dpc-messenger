@@ -2,6 +2,7 @@
 
 # 0. Internal AI/team docs (not for public repo)
 CLAUDE.md
+tasks/
 docs/REFACTORING_GUIDELINES_FOR_CLAUDE_CODE.md
 archive/
 
