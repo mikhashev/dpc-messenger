@@ -10,17 +10,10 @@ Until Step 3 lands, nothing imports this module — the inline checks in
 ``loop.py`` remain the source of truth for runtime behaviour. These
 classes are tested independently and plugged in atomically.
 
-Defaults match the constants in the current ``loop.py``:
-
-======================  ========
-Constant                Default
-======================  ========
-DEFAULT_MAX_ROUNDS      200
-MAX_TOOL_CALLS_PER_TURN 25
-MAX_CONSEC_TOOL_ONLY    15
-MAX_DUPLICATE_CALLS     5
-BUDGET_FRACTION         0.5
-======================  ========
+Default values for each guard live in its ``__init__`` signature and
+mirror the equivalent constants currently defined at the top of
+``loop.py::_process_agent_loop``. The code signatures are the source of
+truth; this module does not re-state them in prose.
 """
 
 from __future__ import annotations
@@ -49,7 +42,8 @@ class RoundLimitGuard(GuardMiddleware):
 
     Operator note: uses strict ``>`` (round indices start at 1 and count
     rounds executed; ``max_rounds`` is inclusive, round number
-    ``max_rounds`` itself is allowed). Mirrors ``loop.py:450``.
+    ``max_rounds`` itself is allowed). Mirrors the inline ``round_idx >
+    max_rounds`` check in ``loop.py::_process_agent_loop``.
     """
 
     def __init__(self, max_rounds: int = 200) -> None:
@@ -74,7 +68,7 @@ class RoundLimitGuard(GuardMiddleware):
 class ToolLimitGuard(GuardMiddleware):
     """Stop if the LLM emits too many tool calls in a single turn.
 
-    A burst of 25+ tool calls in one response indicates the model has
+    A burst of many tool calls in one response indicates the model has
     fanned out and will not converge on a text answer. Fires in
     ``after_llm_call`` after the loop has set ``tool_calls_this_turn``.
     Stateless.
@@ -114,7 +108,8 @@ class ResearchLimitGuard(GuardMiddleware):
     Operator note: uses non-strict ``>=`` (the counter tracks number of
     rounds that contributed; ``max_consecutive`` is exclusive — the
     Nth consecutive tool-only round triggers the stop, not the
-    following one). Mirrors ``loop.py:598``.
+    following one). Mirrors the ``_consecutive_tool_only`` counter check
+    in ``loop.py::_process_agent_loop``.
     """
 
     def __init__(self, max_consecutive: int = 15) -> None:
@@ -203,11 +198,11 @@ class LoopGuard(GuardMiddleware):
 class BudgetLimitGuard(GuardMiddleware):
     """Stop if accumulated task cost crosses a fraction of the budget.
 
-    Matches the current ``budget_remaining_usd`` + 50% threshold check in
-    ``loop.py``. A ``None`` or non-positive ``budget_remaining_usd``
-    disables the guard entirely. Fires in ``between_rounds`` so the
-    check runs after tool execution of the just-finished round, before
-    the next LLM call.
+    Matches the current ``budget_remaining_usd`` + ``max_fraction``
+    threshold check in ``loop.py::_process_agent_loop``. A ``None`` or
+    non-positive ``budget_remaining_usd`` disables the guard entirely.
+    Fires in ``between_rounds`` so the check runs after tool execution
+    of the just-finished round, before the next LLM call.
     """
 
     def __init__(
