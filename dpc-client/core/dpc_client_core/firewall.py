@@ -1679,6 +1679,8 @@ class ContextFirewall:
                                 'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
                                 # Self-introspection tools
                                 'list_my_tools', 'list_my_skills',
+                                # Memory search (ADR-010)
+                                'memory_search',
                                 # Legacy aliases (S31 migration — accepted but mapped to read_file/write_file)
                                 'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
                                 'extended_path_read', 'extended_path_write',
@@ -1798,6 +1800,8 @@ class ContextFirewall:
                                         'list_local_agents', 'list_agent_skills', 'import_skill_from_agent',
                                         # Self-introspection tools
                                         'list_my_tools', 'list_my_skills',
+                                        # Memory search (ADR-010)
+                                        'memory_search',
                                         # Legacy aliases (S31 migration)
                                         'repo_read', 'repo_write_commit', 'drive_read', 'drive_write',
                                         'extended_path_read', 'extended_path_write',
