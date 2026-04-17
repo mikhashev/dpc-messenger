@@ -266,6 +266,9 @@ class DpcAgentManager:
                 notification = notify_download_needed(mem_cfg.embedding_model)
                 if notification.get("needed"):
                     log.info("Memory: embedding model not yet downloaded (%s)", mem_cfg.embedding_model)
+                    # MEM-3.9: notify UI about pending model download
+                    if hasattr(self.service, 'broadcast_event'):
+                        self.service.broadcast_event("memory_model_download_needed", notification)
                 # First-use full rebuild (MEM-3.7 spec)
                 import asyncio
                 agent_root = self._agent.agent_root if self._agent else None
