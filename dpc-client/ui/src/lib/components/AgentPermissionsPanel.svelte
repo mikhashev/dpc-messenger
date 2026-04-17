@@ -167,6 +167,18 @@
     editSettings = editSettings;  // Trigger reactivity
   }
 
+  // Initialize memory object if missing
+  function ensureMemorySettings() {
+    if (!editSettings) return;
+    if (!editSettings.memory) {
+      editSettings.memory = {
+        enabled: false,
+        embedding_model: 'intfloat/multilingual-e5-small',
+        active_recall: true,
+      };
+    }
+  }
+
   // Initialize evolution object if missing
   function ensureEvolutionSettings() {
     if (!editSettings) return;
@@ -443,6 +455,54 @@
       </div>
 
       {#if !isGlobal}
+        <!-- Memory Settings Section (ADR-010) -->
+        <div class="subsection">
+          <h4>Memory Settings</h4>
+          <p class="help-text-small">Configure agent memory system (hybrid search, Active Recall)</p>
+
+          <div class="setting-item">
+            <label>
+              {#if editMode && editSettings?.memory}
+                <input
+                  type="checkbox"
+                  id="agent-memory-enabled"
+                  bind:checked={editSettings.memory.enabled}
+                />
+              {:else}
+                <input
+                  type="checkbox"
+                  id="agent-memory-enabled-display"
+                  checked={displaySettings.memory?.enabled || false}
+                  disabled
+                />
+              {/if}
+              <span>Enable Memory System</span>
+            </label>
+            <p class="help-text-small">Enables embedding-based knowledge search and Active Recall hints</p>
+          </div>
+
+          <div class="setting-item">
+            <label>
+              {#if editMode && editSettings?.memory}
+                <input
+                  type="checkbox"
+                  id="agent-memory-active-recall"
+                  bind:checked={editSettings.memory.active_recall}
+                />
+              {:else}
+                <input
+                  type="checkbox"
+                  id="agent-memory-active-recall-display"
+                  checked={displaySettings.memory?.active_recall || false}
+                  disabled
+                />
+              {/if}
+              <span>Active Recall</span>
+            </label>
+            <p class="help-text-small">Inject relevant memory hints into agent context automatically</p>
+          </div>
+        </div>
+
         <!-- Evolution Settings Section (per-agent) -->
         <div class="subsection">
           <h4>Evolution Settings</h4>
@@ -515,7 +575,7 @@
             <button
               type="button"
               class="add-path-btn"
-              on:click={ensureEvolutionSettings}
+              on:click={() => { ensureEvolutionSettings(); ensureMemorySettings(); }}
               style="display: none;"
             >Initialize Evolution</button>
           {/if}
