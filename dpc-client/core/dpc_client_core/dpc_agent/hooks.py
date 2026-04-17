@@ -1,30 +1,8 @@
-"""Hooks & middleware infrastructure for the agent loop.
+"""Hooks & middleware infrastructure for the agent loop (ADR-007).
 
-Implements ADR-007: per-process middleware chain with two tiers.
-
-- Observer hooks: lifecycle callbacks (logging, metrics, notifications).
-  Errors caught and logged, never abort the loop.
-- Guard middleware: policy enforcement (e.g., round limits, budget caps).
-  Can signal STOP_LOOP. Errors propagate.
-
-This module is standalone: it defines the types and registry, but does NOT
-wire itself into loop.py. Integration is done in a later migration step
-(see ADR-007 §Migration Plan).
-
-Usage outline::
-
-    hooks = HookRegistry()
-    hooks.register(RoundLimitMiddleware(max_rounds=200))  # defined elsewhere
-    hooks.register(MyObserver())                          # defined elsewhere
-
-    ctx = HookContext(
-        agent_id=..., task_id=..., session_id=..., round_idx=0,
-    )
-    # loop.py updates ctx.state BEFORE firing
-    ctx.state.last_response_has_text = True
-    action = await hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx)
-    if action == HookAction.STOP_LOOP:
-        break
+Two tiers: observer hooks for side effects (errors caught and logged)
+and guard middleware for policy enforcement (errors propagate, may
+STOP_LOOP). One registry per ``DpcAgent.process()`` call.
 """
 
 from __future__ import annotations
@@ -37,20 +15,11 @@ from typing import Optional
 log = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# Enums
-# --------------------------------------------------------------------------- #
-
-
 class HookAction(Enum):
     """Return value of a hook handler.
 
-    CONTINUE: proceed normally (same as returning None).
-    STOP_LOOP: terminate the agent loop at the next checkpoint.
-
-    Phase 0 deliberately ships only these two values. REDIRECT and RETRY are
-    anticipated for Phase 2+ hooks (skill recommendation, evolution proposals)
-    and will require different checkpoint semantics. Deferred, not excluded.
+    REDIRECT and RETRY are anticipated for Phase 2+ hooks and will need
+    different checkpoint semantics — deferred, not excluded.
     """
 
     CONTINUE = auto()
@@ -60,10 +29,9 @@ class HookAction(Enum):
 class HookLifecycle(Enum):
     """Lifecycle points at which hooks may fire.
 
-    Using a string-valued enum lets the registry dispatch by method name
-    (``getattr(mw, lifecycle.value)``) while still catching typos at the
-    call site (``HookLifecycle.BEFORE_LLM_CAL`` is an AttributeError, not a
-    silent no-op).
+    String values let the registry dispatch via ``getattr(mw,
+    lifecycle.value)`` while still raising AttributeError on typos at
+    the call site instead of silently no-oping.
     """
 
     BEFORE_LLM_CALL = "before_llm_call"
@@ -73,46 +41,27 @@ class HookLifecycle(Enum):
     BETWEEN_ROUNDS = "between_rounds"
 
 
-# --------------------------------------------------------------------------- #
-# Context and state
-# --------------------------------------------------------------------------- #
-
-
 @dataclass
 class LoopState:
-    """Typed state exposed by ``loop.py`` to middleware.
+    """Typed state the loop exposes to middleware.
 
-    **Ownership:** ``loop.py`` OWNS these fields. Middleware only READS them.
-
-    **Mutation contract:** the loop MUST update the relevant fields BEFORE
-    calling ``HookRegistry.fire()``. If the state is stale at fire time,
-    guard decisions will be incorrect. Middleware that needs mutable
-    counters or sliding windows stores them in its own instance
-    attributes, not here.
-
-    Fields are deliberately minimal for Phase 0. Add fields only when a
-    specific guard or observer needs them — do not let this grow into a
-    generic dict.
+    Mutation contract: the loop OWNS these fields and updates them
+    BEFORE calling ``HookRegistry.fire()``; middleware only reads them.
+    Stale values at fire time produce wrong guard decisions. Middleware
+    that needs mutable counters keeps them on the instance, not here.
     """
 
     last_response_has_text: bool = False
     tool_calls_this_turn: int = 0
     consecutive_tool_only_rounds: int = 0
     accumulated_cost_usd: float = 0.0
-    # Last N tool-call argument dicts, oldest first. LoopGuard compares
-    # consecutive entries to detect repeated identical tool invocations.
+    #: Last N tool-call argument dicts, oldest first.
     recent_tool_args: list[dict] = field(default_factory=list)
 
 
 @dataclass
 class HookContext:
-    """Identity + typed state passed to every hook handler.
-
-    Identity fields (``agent_id``, ``task_id``, ``session_id``,
-    ``round_idx``) are written by the loop and should be treated as
-    read-only by middleware. ``state`` follows the mutation contract
-    described on :class:`LoopState`.
-    """
+    """Identity + typed state passed to every hook handler."""
 
     agent_id: str
     task_id: str
@@ -120,7 +69,6 @@ class HookContext:
     round_idx: int
     state: LoopState = field(default_factory=LoopState)
 
-    # Convenience accessors — shorthand for the most frequently read fields.
     @property
     def last_response_has_text(self) -> bool:
         return self.state.last_response_has_text
@@ -142,20 +90,8 @@ class HookContext:
         return self.state.recent_tool_args
 
 
-# --------------------------------------------------------------------------- #
-# Base middleware classes
-# --------------------------------------------------------------------------- #
-
-
 class BaseMiddleware:
-    """Base class for hook handlers.
-
-    Subclasses override the lifecycle methods they care about. Any method
-    not overridden returns ``None`` (equivalent to ``HookAction.CONTINUE``).
-
-    Subclass choice determines error handling — see :class:`GuardMiddleware`
-    and :class:`ObserverMiddleware`.
-    """
+    """Base class for hook handlers. Subclasses override what they need."""
 
     async def before_llm_call(self, ctx: HookContext) -> Optional[HookAction]:
         return None
@@ -173,79 +109,41 @@ class BaseMiddleware:
         return None
 
     def stop_message(self) -> Optional[str]:
-        """Optional stop-reason text shown to the user when this middleware
-        returns :attr:`HookAction.STOP_LOOP`.
+        """User-facing reason shown when this middleware returns STOP_LOOP.
 
-        Override in subclasses that need to explain the stop to the user
-        (e.g. ``RoundLimitGuard`` returning ``"[ROUND_LIMIT] ..."``).
-        Returning ``None`` means "no message" — the loop falls back to a
-        generic reason. The message is synchronous and stateless; it may
-        read from ``self`` but should not do I/O.
+        Synchronous and pure — called after ``fire()``, may read ``self``
+        but must not do I/O. Return ``None`` to let the loop fall back
+        to a generic reason.
         """
         return None
 
 
 class GuardMiddleware(BaseMiddleware):
-    """Policy-enforcement middleware.
-
-    Guards express hard rules (round limits, budget caps, loop detection).
-    Exceptions raised by a guard handler **propagate** — the registry does
-    not swallow them. Guards may return :attr:`HookAction.STOP_LOOP` to
-    terminate the agent loop at the current checkpoint.
-    """
+    """Policy-enforcement middleware. Exceptions propagate."""
 
 
 class ObserverMiddleware(BaseMiddleware):
-    """Observation / side-effect middleware.
-
-    Observers record events (logs, metrics, notifications) without
-    influencing control flow. Exceptions raised by an observer handler
-    are caught and logged at DEBUG level; the loop continues unaffected.
-
-    Observers SHOULD NOT return :attr:`HookAction.STOP_LOOP`. If they do,
-    the registry still honours the signal, but doing so blurs the
-    observer/guard distinction. Prefer a guard for hard stops.
-    """
-
-
-# --------------------------------------------------------------------------- #
-# Registry
-# --------------------------------------------------------------------------- #
+    """Side-effect middleware (logs, metrics). Exceptions caught and
+    logged at DEBUG. Should not return STOP_LOOP — prefer a guard."""
 
 
 class HookRegistry:
     """Per-process middleware chain.
 
-    A fresh registry is instantiated for every ``DpcAgent.process()`` call.
-    This scopes middleware state to the task: there is no cross-session
-    memory and no need for locks on the registry itself. Middleware that
-    requires cross-session state must implement its own persistence.
-
-    Registration order determines dispatch order: the first middleware
-    whose handler returns :attr:`HookAction.STOP_LOOP` wins and subsequent
-    middleware in the chain is skipped for that lifecycle event. This
-    applies uniformly across tiers — a guard and an observer are dispatched
-    in registration order, so if an observer is registered before a guard
-    it can stop the loop before the guard even sees the event. Typical
-    usage registers guards first and observers after, but the registry
-    does not enforce that.
+    Fresh registry per ``DpcAgent.process()`` — no cross-session memory,
+    no locks. Registration order is dispatch order; the first middleware
+    to return STOP_LOOP wins and short-circuits the chain, regardless of
+    tier. Convention is guards first, observers after, but the registry
+    does not enforce it.
     """
 
     def __init__(self) -> None:
         self._middleware: list[BaseMiddleware] = []
-        #: The middleware instance that most recently returned STOP_LOOP.
-        #: ``loop.py`` reads this after ``fire()`` to ask the guard for its
-        #: stop-reason message. Reset to ``None`` at the start of every
-        #: ``fire()`` call, so the value reflects only the current lifecycle
-        #: event, not history across events.
+        #: Middleware that most recently returned STOP_LOOP (or None).
+        #: Reset per ``fire()`` call; consumers call its ``stop_message()``.
         self.last_triggered: Optional[BaseMiddleware] = None
 
     def register(self, mw: BaseMiddleware) -> None:
-        """Append a middleware instance to the chain.
-
-        Duplicates are permitted but usually a bug — the registry does
-        not deduplicate.
-        """
         self._middleware.append(mw)
 
     def __len__(self) -> int:
@@ -254,12 +152,7 @@ class HookRegistry:
     async def fire(
         self, lifecycle: HookLifecycle, ctx: HookContext
     ) -> Optional[HookAction]:
-        """Dispatch a lifecycle event to every registered middleware.
-
-        Returns the first :attr:`HookAction.STOP_LOOP` encountered, or
-        ``None`` if no middleware requested a stop. Guard exceptions
-        propagate; observer exceptions are caught and logged.
-        """
+        """Dispatch a lifecycle event. Returns the first STOP_LOOP or None."""
         self.last_triggered = None
         method_name = lifecycle.value
         for mw in self._middleware:
