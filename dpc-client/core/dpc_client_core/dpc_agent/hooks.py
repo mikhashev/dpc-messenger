@@ -172,6 +172,18 @@ class BaseMiddleware:
     async def between_rounds(self, ctx: HookContext) -> Optional[HookAction]:
         return None
 
+    def stop_message(self) -> Optional[str]:
+        """Optional stop-reason text shown to the user when this middleware
+        returns :attr:`HookAction.STOP_LOOP`.
+
+        Override in subclasses that need to explain the stop to the user
+        (e.g. ``RoundLimitGuard`` returning ``"[ROUND_LIMIT] ..."``).
+        Returning ``None`` means "no message" — the loop falls back to a
+        generic reason. The message is synchronous and stateless; it may
+        read from ``self`` but should not do I/O.
+        """
+        return None
+
 
 class GuardMiddleware(BaseMiddleware):
     """Policy-enforcement middleware.
@@ -221,6 +233,12 @@ class HookRegistry:
 
     def __init__(self) -> None:
         self._middleware: list[BaseMiddleware] = []
+        #: The middleware instance that most recently returned STOP_LOOP.
+        #: ``loop.py`` reads this after ``fire()`` to ask the guard for its
+        #: stop-reason message. Reset to ``None`` at the start of every
+        #: ``fire()`` call, so the value reflects only the current lifecycle
+        #: event, not history across events.
+        self.last_triggered: Optional[BaseMiddleware] = None
 
     def register(self, mw: BaseMiddleware) -> None:
         """Append a middleware instance to the chain.
@@ -242,6 +260,7 @@ class HookRegistry:
         ``None`` if no middleware requested a stop. Guard exceptions
         propagate; observer exceptions are caught and logged.
         """
+        self.last_triggered = None
         method_name = lifecycle.value
         for mw in self._middleware:
             handler = getattr(mw, method_name, None)
@@ -260,6 +279,7 @@ class HookRegistry:
                 )
                 continue
             if result == HookAction.STOP_LOOP:
+                self.last_triggered = mw
                 return result
         return None
 
