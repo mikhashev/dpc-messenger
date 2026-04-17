@@ -139,3 +139,6 @@ protocol-13.md
 # cc_agent_bridge.py).
 cc_cron_prompt.md
 cc-out.md
+
+# 21. P13 draft artefacts (internal team review before joint edit into protocol-13.md)
+p13-*-draft.md
