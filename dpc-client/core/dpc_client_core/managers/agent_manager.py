@@ -266,6 +266,31 @@ class DpcAgentManager:
                 notification = notify_download_needed(mem_cfg.embedding_model)
                 if notification.get("needed"):
                     log.info("Memory: embedding model not yet downloaded (%s)", mem_cfg.embedding_model)
+                # First-use full rebuild (MEM-3.7 spec)
+                import asyncio
+                agent_root = self._agent.agent_root if self._agent else None
+                if agent_root:
+                    index_dir = agent_root / "state" / "memory_index"
+                    if not (index_dir / "index_meta.json").exists():
+                        async def _background_rebuild():
+                            try:
+                                from dpc_client_core.dpc_agent.memory import EmbeddingProvider
+                                from dpc_client_core.dpc_agent.faiss_index import FaissIndex
+                                from dpc_client_core.dpc_agent.bm25_index import BM25Index
+                                from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
+                                provider = EmbeddingProvider(model_name=mem_cfg.embedding_model)
+                                faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
+                                bm25_idx = BM25Index(index_dir)
+                                knowledge_dir = agent_root / "knowledge"
+                                count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
+                                faiss_idx.save()
+                                bm25_idx.save()
+                                provider.unload()
+                                log.info("Memory index built: %d chunks from knowledge/", count)
+                            except Exception as e:
+                                log.warning("Background memory rebuild failed: %s", e)
+                        asyncio.get_event_loop().create_task(_background_rebuild())
+                        log.info("Memory: first-use index rebuild started in background")
                 log.info("Memory system initialized (model=%s, active_recall=%s)", mem_cfg.embedding_model, mem_cfg.active_recall)
         except Exception as e:
             log.warning("Memory system init skipped: %s", e)
