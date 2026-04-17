@@ -213,6 +213,7 @@ CORE_TOOL_NAMES = {
     "chat_history",
     # Knowledge
     "knowledge_read", "knowledge_write", "knowledge_list",
+    "memory_search",
     # DPC integration
     "get_dpc_context",
     # Browser tools (safe, read-only)
