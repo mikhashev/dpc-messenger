@@ -261,7 +261,8 @@ class DpcAgentManager:
         try:
             from dpc_client_core.dpc_agent.memory_config import get_memory_config
             from dpc_client_core.dpc_agent.model_download import notify_download_needed
-            mem_cfg = get_memory_config(self.config)
+            _profile = self.firewall.get_agent_profile_settings(self.agent_id) if (self.firewall and self.agent_id) else {}
+            mem_cfg = get_memory_config(_profile or self.config)
             if mem_cfg.enabled:
                 notification = notify_download_needed(mem_cfg.embedding_model)
                 if notification.get("needed"):
