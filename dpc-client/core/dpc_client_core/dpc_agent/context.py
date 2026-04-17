@@ -307,6 +307,22 @@ def build_llm_messages(
         if kb_index.strip():
             semi_stable_parts.append("## Knowledge base\n\n" + clip_text(kb_index, 50000))
 
+    # Active Recall hints (ADR-010, WIRE-2)
+    if conversation_history:
+        _last_user_msg = ""
+        for _h in reversed(conversation_history):
+            if _h.get("role") == "user" and _h.get("content"):
+                _last_user_msg = _h["content"]
+                break
+        if _last_user_msg:
+            try:
+                from .active_recall import get_recall_block
+                _recall = get_recall_block([], context_usage_ratio=0.0)
+                if _recall:
+                    semi_stable_parts.append(_recall)
+            except Exception:
+                pass
+
     # Tools & capabilities (generated from firewall — transparency)
     capabilities_section = _build_capabilities_section(
         agent_root, allowed_tools, all_tools, sandbox_read_only, sandbox_read_write,
