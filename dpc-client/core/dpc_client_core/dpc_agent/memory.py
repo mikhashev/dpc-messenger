@@ -50,10 +50,34 @@ def _meta_path_for(knowledge_file: pathlib.Path) -> pathlib.Path:
     return knowledge_file.parent / "_meta.json"
 
 
+_BACKFILL_SKIP = {"_meta.json", "_index.md"}
+
+
+def backfill_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
+    """Scan knowledge dir and create _meta.json entries for all files."""
+    data: Dict[str, dict] = {}
+    if not knowledge_dir.is_dir():
+        return data
+    for f in sorted(knowledge_dir.iterdir()):
+        if not f.is_file() or f.name in _BACKFILL_SKIP:
+            continue
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")[:200]
+        except OSError:
+            content = ""
+        tags = [t for t in f.stem.replace("_", "-").split("-") if len(t) > 2]
+        meta = FileMeta(summary=content.strip(), tags=tags, source_layer="L5")
+        data[f.name] = asdict(meta)
+    if data:
+        write_all_meta(knowledge_dir, data)
+        log.info("Backfilled _meta.json with %d entries", len(data))
+    return data
+
+
 def read_all_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
     meta_path = knowledge_dir / "_meta.json"
     if not meta_path.exists():
-        return {}
+        return backfill_meta(knowledge_dir)
     try:
         return json.loads(meta_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
