@@ -28,6 +28,14 @@ from .utils import (
 )
 from .context import compact_tool_history
 from .llm_adapter import DpcLlmAdapter
+from .hooks import HookContext, HookLifecycle, HookRegistry, LoopState
+from .guards import (
+    BudgetLimitGuard,
+    LoopGuard,
+    ResearchLimitGuard,
+    RoundLimitGuard,
+    ToolLimitGuard,
+)
 
 if TYPE_CHECKING:
     from .tools.registry import ToolRegistry
@@ -377,6 +385,43 @@ async def _execute_with_timeout(
         gc.collect()
 
 
+async def _finalize_after_guard_stop(
+    hooks: HookRegistry,
+    messages: List[Dict[str, Any]],
+    llm: DpcLlmAdapter,
+    on_stream_chunk: Optional[Callable[[str, str], None]],
+    conversation_id: Optional[str],
+    accumulated_usage: Dict[str, Any],
+    llm_trace: Dict[str, Any],
+    fallback_reason: str,
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """Shared "guard fired → graceful termination" sequence.
+
+    When any guard returns ``HookAction.STOP_LOOP``, the loop asks the
+    triggering middleware for a user-facing reason string, injects it as
+    a system message, and does one more LLM call without tools so the
+    model can produce a clean final answer. If that call fails the
+    fallback_reason (or the stop message) is returned instead.
+    """
+    mw = hooks.last_triggered
+    stop_msg = mw.stop_message() if mw is not None else None
+    if stop_msg:
+        log.warning("Guard %s stopped loop: %s", mw.__class__.__name__, stop_msg)
+        messages.append({"role": "system", "content": stop_msg})
+    try:
+        final_msg, _ = await llm.chat(
+            messages,
+            tools=None,
+            on_stream_chunk=on_stream_chunk,
+            conversation_id=conversation_id,
+        )
+        if final_msg and final_msg.get("content"):
+            return final_msg["content"], accumulated_usage, llm_trace
+    except Exception:
+        log.warning("Failed to get final response after guard stop", exc_info=True)
+    return stop_msg or fallback_reason, accumulated_usage, llm_trace
+
+
 async def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: "ToolRegistry",
@@ -431,37 +476,38 @@ async def run_llm_loop(
     # The whitelist check inside schemas() still enforces per-agent authorization.
     tool_schemas = tools.schemas(core_only=False, include_restricted=True)
 
-    # Deduplication: track (tool_name, args_hash) → call count.
-    # If the same call is repeated MAX_DUPLICATE_CALLS times without new information,
-    # break the loop to prevent infinite repetition.
-    MAX_DUPLICATE_CALLS = 5
-    MAX_TOOL_CALLS_PER_TURN = 25  # Hard cap: if LLM emits more than this in one shot, it's looping
-    MAX_CONSECUTIVE_TOOL_ONLY_ROUNDS = 15  # Force final answer after this many rounds without text
-    _tool_call_counts: Dict[str, int] = {}
-    _consecutive_tool_only = 0  # Rounds with tool calls but no text content
     _pre_tool_content: list = []  # Accumulate content from tool-call rounds (lost otherwise)
+
+    # Hooks & middleware infrastructure (ADR-007). One registry per
+    # run_llm_loop call — guard state is scoped to the task.
+    hooks = HookRegistry()
+    hooks.register(RoundLimitGuard(max_rounds=max_rounds))
+    hooks.register(ToolLimitGuard())
+    hooks.register(ResearchLimitGuard())
+    hooks.register(LoopGuard())
+    hooks.register(BudgetLimitGuard(budget_remaining_usd=budget_remaining_usd))
+
+    ctx = HookContext(
+        agent_id="",
+        task_id=task_id,
+        session_id=conversation_id or "",
+        round_idx=0,
+        state=LoopState(),
+    )
 
     round_idx = 0
     try:
         while True:
             round_idx += 1
+            ctx.round_idx = round_idx
 
-            # Hard limit on rounds
-            if round_idx > max_rounds:
-                finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({max_rounds}). Consider breaking into smaller tasks."
-                messages.append({"role": "system", "content": f"[ROUND_LIMIT] {finish_reason}"})
-                try:
-                    final_msg, _ = await llm.chat(
-                        messages,
-                        tools=tool_schemas,
-                        on_stream_chunk=on_stream_chunk,
-                        conversation_id=conversation_id,
-                    )
-                    if final_msg.get("content"):
-                        return final_msg["content"], accumulated_usage, llm_trace
-                except Exception:
-                    log.warning("Failed to get final response after round limit", exc_info=True)
-                return finish_reason, accumulated_usage, llm_trace
+            # RoundLimitGuard + BudgetLimitGuard checkpoint.
+            if await hooks.fire(HookLifecycle.BETWEEN_ROUNDS, ctx) is not None:
+                return await _finalize_after_guard_stop(
+                    hooks, messages, llm, on_stream_chunk, conversation_id,
+                    accumulated_usage, llm_trace,
+                    fallback_reason=f"⚠️ Task exceeded MAX_ROUNDS ({max_rounds}).",
+                )
 
             # Compact old tool history when needed
             if round_idx > 8:
@@ -501,35 +547,6 @@ async def run_llm_loop(
             log.debug(f"LLM response: tool_calls={len(tool_calls)}, content_len={len(content) if content else 0}")
             if tool_calls:
                 log.info(f"Processing {len(tool_calls)} tool call(s)")
-                if len(tool_calls) > MAX_TOOL_CALLS_PER_TURN:
-                    log.warning(
-                        "LLM generated %d tool calls in one turn (limit: %d) — injecting stop signal",
-                        len(tool_calls), MAX_TOOL_CALLS_PER_TURN,
-                    )
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            f"[TOOL_LIMIT] You generated {len(tool_calls)} tool calls in a single turn, "
-                            f"which exceeds the limit of {MAX_TOOL_CALLS_PER_TURN}. "
-                            "Stop calling tools. Summarise what you know and give your final answer now."
-                        ),
-                    })
-                    try:
-                        final_msg, _ = await llm.chat(
-                            messages,
-                            tools=None,
-                            on_stream_chunk=on_stream_chunk,
-                            conversation_id=conversation_id,
-                        )
-                        if final_msg and final_msg.get("content"):
-                            return final_msg["content"], accumulated_usage, llm_trace
-                    except Exception:
-                        log.warning("Failed to get response after tool-call-per-turn limit", exc_info=True)
-                    return (
-                        f"⚠️ Agent generated too many tool calls ({len(tool_calls)}) in one turn and was stopped.",
-                        accumulated_usage,
-                        llm_trace,
-                    )
             elif content and "tool_call" in content.lower():
                 # Native tool calling returned no tool_use blocks but the content contains
                 # text-format ```tool_call``` blocks — model fell back to text format.
@@ -546,6 +563,26 @@ async def run_llm_loop(
                         log.warning(f"No tool_calls parsed but 'tool_call' found in content: {content[:200]!r}")
                 else:
                     log.warning(f"No tool_calls parsed but 'tool_call' found in content: {content[:200]!r}")
+
+            # Update LoopState for guards — mutation contract: update BEFORE fire().
+            ctx.state.last_response_has_text = bool(content and content.strip())
+            ctx.state.tool_calls_this_turn = len(tool_calls)
+            ctx.state.accumulated_cost_usd = accumulated_usage.get("cost", 0.0)
+            ctx.state.recent_tool_args = [
+                {
+                    "name": tc["function"]["name"],
+                    "args": tc["function"].get("arguments", {}),
+                }
+                for tc in tool_calls
+            ]
+
+            # AFTER_LLM_CALL: ToolLimit / ResearchLimit / LoopGuard checkpoint.
+            if await hooks.fire(HookLifecycle.AFTER_LLM_CALL, ctx) is not None:
+                return await _finalize_after_guard_stop(
+                    hooks, messages, llm, on_stream_chunk, conversation_id,
+                    accumulated_usage, llm_trace,
+                    fallback_reason="⚠️ Agent loop stopped by guard.",
+                )
 
             # No tool calls — final response or empty-response retry
             if not tool_calls:
@@ -585,96 +622,11 @@ async def run_llm_loop(
                 emit_progress(thinking.strip(), None, round_idx)
                 llm_trace["assistant_notes"].append(thinking.strip()[:320])
                 _pre_tool_content.append(thinking.strip())  # Save for final response
-                _consecutive_tool_only = 0  # Has text — reset counter
             elif tool_calls:
                 # Native tool calling returns no text preamble — emit tool names so the
                 # UI shows activity rather than a silent "Thinking..." placeholder.
                 names = ", ".join(tc["function"]["name"] for tc in tool_calls)
                 emit_progress(f"→ {names}", None, round_idx)
-                _consecutive_tool_only += 1  # Tool-only round — increment
-
-            # Guard: too many consecutive tool-only rounds without producing text.
-            # The agent is doing deep research but never summarizing — force a final answer.
-            if _consecutive_tool_only >= MAX_CONSECUTIVE_TOOL_ONLY_ROUNDS:
-                log.warning(
-                    "Agent spent %d consecutive rounds on tool calls without text — forcing final answer",
-                    _consecutive_tool_only,
-                )
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        f"[RESEARCH_LIMIT] You have spent {_consecutive_tool_only} consecutive rounds "
-                        "calling tools without providing any text response to the user. "
-                        "Stop researching. Summarise your findings and give your answer now."
-                    ),
-                })
-                try:
-                    final_msg, _ = await llm.chat(
-                        messages,
-                        tools=None,
-                        on_stream_chunk=on_stream_chunk,
-                        conversation_id=conversation_id,
-                    )
-                    if final_msg and final_msg.get("content"):
-                        return final_msg["content"], accumulated_usage, llm_trace
-                except Exception:
-                    log.warning("Failed to get response after research limit", exc_info=True)
-                return (
-                    f"⚠️ Agent spent {_consecutive_tool_only} rounds researching without answering. "
-                    "Please rephrase your question or ask for a specific aspect.",
-                    accumulated_usage,
-                    llm_trace,
-                )
-
-            # Check for duplicate tool calls before executing.
-            # If the same (tool, args) fingerprint has appeared MAX_DUPLICATE_CALLS
-            # times the model is stuck in a loop — inject a stop signal.
-            stuck_tools = []
-            for tc in tool_calls:
-                try:
-                    raw_args = tc["function"].get("arguments", {})
-                    if isinstance(raw_args, str):
-                        try:
-                            raw_args = json.loads(raw_args)
-                        except Exception:
-                            pass
-                    args_key = json.dumps(raw_args, sort_keys=True) if isinstance(raw_args, dict) else str(raw_args)
-                    fingerprint = f"{tc['function']['name']}::{args_key}"
-                    _tool_call_counts[fingerprint] = _tool_call_counts.get(fingerprint, 0) + 1
-                    if _tool_call_counts[fingerprint] >= MAX_DUPLICATE_CALLS:
-                        stuck_tools.append(tc["function"]["name"])
-                except Exception:
-                    pass
-
-            if stuck_tools:
-                dedup_names = ", ".join(sorted(set(stuck_tools)))
-                log.warning(
-                    "Duplicate tool call limit reached for: %s — injecting stop signal", dedup_names
-                )
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        f"[LOOP_GUARD] You have called the following tool(s) with identical arguments "
-                        f"{MAX_DUPLICATE_CALLS} or more times without new information: {dedup_names}. "
-                        "Stop repeating these calls. Summarise what you know so far and give your final answer now."
-                    )
-                })
-                try:
-                    final_msg, _ = await llm.chat(
-                        messages,
-                        tools=None,
-                        on_stream_chunk=on_stream_chunk,
-                        conversation_id=conversation_id,
-                    )
-                    if final_msg and final_msg.get("content"):
-                        return final_msg["content"], accumulated_usage, llm_trace
-                except Exception:
-                    log.warning("Failed to get response after loop guard", exc_info=True)
-                return (
-                    f"⚠️ Agent loop stopped: repeated calls to {dedup_names} without progress.",
-                    accumulated_usage,
-                    llm_trace,
-                )
 
             # Execute tool calls
             for tc in tool_calls:
@@ -724,24 +676,9 @@ async def run_llm_loop(
                     round_idx,
                 )
 
-            # --- Budget guard ---
-            if budget_remaining_usd is not None:
-                task_cost = accumulated_usage.get("cost", 0)
-                if budget_remaining_usd > 0 and task_cost > budget_remaining_usd * 0.5:
-                    finish_reason = f"Task spent ${task_cost:.3f} (>50% of budget ${budget_remaining_usd:.2f})."
-                    messages.append({"role": "system", "content": f"[BUDGET_LIMIT] {finish_reason} Give your final response now."})
-                    try:
-                        final_msg, _ = await llm.chat(
-                            messages,
-                            tools=None,
-                            on_stream_chunk=on_stream_chunk,
-                            conversation_id=conversation_id,
-                        )
-                        if final_msg.get("content"):
-                            return final_msg["content"], accumulated_usage, llm_trace
-                    except Exception:
-                        log.warning("Failed to get final response after budget limit", exc_info=True)
-                    return finish_reason, accumulated_usage, llm_trace
+            # BudgetLimitGuard fires via BETWEEN_ROUNDS at the top of the
+            # next iteration; ctx.state.accumulated_cost_usd has been kept
+            # current after the LLM call above.
 
     except Exception as e:
         log.error(f"Loop error: {e}", exc_info=True)
