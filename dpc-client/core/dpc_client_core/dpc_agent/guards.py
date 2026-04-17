@@ -59,6 +59,12 @@ class RoundLimitGuard(GuardMiddleware):
             return HookAction.STOP_LOOP
         return None
 
+    def stop_message(self) -> str:
+        return (
+            f"[ROUND_LIMIT] Task exceeded MAX_ROUNDS ({self._max_rounds}). "
+            "Consider breaking into smaller tasks."
+        )
+
 
 # --------------------------------------------------------------------------- #
 # 2. Tool-calls-per-turn limit
@@ -76,8 +82,10 @@ class ToolLimitGuard(GuardMiddleware):
 
     def __init__(self, max_per_turn: int = 25) -> None:
         self._max_per_turn = max_per_turn
+        self._last_count = 0
 
     async def after_llm_call(self, ctx: HookContext) -> Optional[HookAction]:
+        self._last_count = ctx.tool_calls_this_turn
         if ctx.tool_calls_this_turn > self._max_per_turn:
             log.warning(
                 "ToolLimitGuard: %d tool calls in one turn exceeded max=%d",
@@ -86,6 +94,14 @@ class ToolLimitGuard(GuardMiddleware):
             )
             return HookAction.STOP_LOOP
         return None
+
+    def stop_message(self) -> str:
+        return (
+            f"[TOOL_LIMIT] You generated {self._last_count} tool calls in a "
+            f"single turn, which exceeds the limit of {self._max_per_turn}. "
+            "Stop calling tools. Summarise what you know and give your "
+            "final answer now."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -133,6 +149,14 @@ class ResearchLimitGuard(GuardMiddleware):
             return HookAction.STOP_LOOP
         return None
 
+    def stop_message(self) -> str:
+        return (
+            f"[RESEARCH_LIMIT] You have spent {self._counter} consecutive "
+            "rounds calling tools without providing any text response to "
+            "the user. Stop researching. Summarise your findings and give "
+            "your answer now."
+        )
+
 
 # --------------------------------------------------------------------------- #
 # 4. Loop guard (duplicate tool calls)
@@ -156,6 +180,7 @@ class LoopGuard(GuardMiddleware):
     def __init__(self, max_duplicate_calls: int = 5) -> None:
         self._max = max_duplicate_calls
         self._counts: dict[str, int] = {}
+        self._last_stuck: list[str] = []
 
     @staticmethod
     def _fingerprint(call: dict) -> str:
@@ -186,8 +211,20 @@ class LoopGuard(GuardMiddleware):
                     self._counts[key],
                     self._max,
                 )
+                name = call.get("name", "?")
+                if name not in self._last_stuck:
+                    self._last_stuck.append(name)
                 return HookAction.STOP_LOOP
         return None
+
+    def stop_message(self) -> str:
+        dedup = ", ".join(sorted(set(self._last_stuck))) or "?"
+        return (
+            f"[LOOP_GUARD] You have called the following tool(s) with "
+            f"identical arguments {self._max} or more times without new "
+            f"information: {dedup}. Stop repeating these calls. "
+            "Summarise what you know so far and give your final answer now."
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -212,10 +249,12 @@ class BudgetLimitGuard(GuardMiddleware):
     ) -> None:
         self._budget = budget_remaining_usd
         self._max_fraction = max_fraction
+        self._last_cost = 0.0
 
     async def between_rounds(self, ctx: HookContext) -> Optional[HookAction]:
         if self._budget is None or self._budget <= 0:
             return None
+        self._last_cost = ctx.accumulated_cost_usd
         threshold = self._budget * self._max_fraction
         if ctx.accumulated_cost_usd > threshold:
             log.warning(
@@ -226,6 +265,13 @@ class BudgetLimitGuard(GuardMiddleware):
             )
             return HookAction.STOP_LOOP
         return None
+
+    def stop_message(self) -> str:
+        return (
+            f"[BUDGET_LIMIT] Task spent ${self._last_cost:.3f} (>"
+            f"{self._max_fraction * 100:.0f}% of budget "
+            f"${self._budget:.2f}). Give your final response now."
+        )
 
 
 __all__ = [
