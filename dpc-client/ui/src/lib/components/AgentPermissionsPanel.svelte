@@ -57,6 +57,7 @@
         { key: 'knowledge_read', label: 'Read Knowledge', desc: 'Read knowledge base' },
         { key: 'knowledge_write', label: 'Write Knowledge', desc: 'Write to knowledge base' },
         { key: 'knowledge_list', label: 'List Knowledge', desc: 'List knowledge topics' },
+        { key: 'memory_search', label: 'Memory Search', desc: 'Search knowledge using hybrid BM25 + semantic search' },
         { key: 'get_task_board', label: 'Progress Board', desc: 'Read task history and learning progress from the shared Agent Progress Board' },
         { key: 'execute_skill', label: 'Execute Skill', desc: 'Load and follow skill strategies (Memento-Skills router — Read phase)' },
         { key: 'list_local_agents', label: 'List Local Agents', desc: 'List all agents registered on this device (read-only)' },
