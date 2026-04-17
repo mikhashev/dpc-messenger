@@ -646,6 +646,12 @@ def knowledge_read(ctx: ToolContext, topic: str) -> str:
         if not topic_path.exists():
             return f"⚠️ Topic not found: {topic}"
 
+        from ..memory import update_access
+        try:
+            update_access(topic_path.parent, topic_path.name)
+        except Exception:
+            pass
+
         return topic_path.read_text(encoding="utf-8")
 
     except Exception as e:

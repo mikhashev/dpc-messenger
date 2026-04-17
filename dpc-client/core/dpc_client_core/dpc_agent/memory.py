@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
 from .utils import (
@@ -27,6 +28,61 @@ from .utils import (
 )
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# _meta.json — Access Registry (ADR-010, Component 1)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class FileMeta:
+    last_accessed: str = ""
+    access_count: int = 0
+    last_verified: str = ""
+    tags: List[str] = field(default_factory=list)
+    summary: str = ""
+    source_layer: str = "L5"
+    project: str = ""
+    stale: bool = False
+
+
+def _meta_path_for(knowledge_file: pathlib.Path) -> pathlib.Path:
+    return knowledge_file.parent / "_meta.json"
+
+
+def read_all_meta(knowledge_dir: pathlib.Path) -> Dict[str, dict]:
+    meta_path = knowledge_dir / "_meta.json"
+    if not meta_path.exists():
+        return {}
+    try:
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        log.warning("Corrupt _meta.json, returning empty")
+        return {}
+
+
+def write_all_meta(knowledge_dir: pathlib.Path, data: Dict[str, dict]) -> None:
+    meta_path = knowledge_dir / "_meta.json"
+    meta_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def read_file_meta(knowledge_dir: pathlib.Path, filename: str) -> FileMeta:
+    all_meta = read_all_meta(knowledge_dir)
+    entry = all_meta.get(filename, {})
+    return FileMeta(**{k: v for k, v in entry.items() if k in FileMeta.__dataclass_fields__})
+
+
+def write_file_meta(knowledge_dir: pathlib.Path, filename: str, meta: FileMeta) -> None:
+    all_meta = read_all_meta(knowledge_dir)
+    all_meta[filename] = asdict(meta)
+    write_all_meta(knowledge_dir, all_meta)
+
+
+def update_access(knowledge_dir: pathlib.Path, filename: str) -> None:
+    meta = read_file_meta(knowledge_dir, filename)
+    meta.last_accessed = utc_now_iso()
+    meta.access_count += 1
+    write_file_meta(knowledge_dir, filename, meta)
 
 
 class Memory:
