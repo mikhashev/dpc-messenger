@@ -688,25 +688,7 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
             bm25_results = bm25_idx.search(query, top_k)
 
         if not faiss_results and not bm25_results:
-            # Lazy rebuild on first use
-            try:
-                from ..indexing_pipeline import full_rebuild
-                from ..memory_config import MemoryConfig
-                provider = EmbeddingProvider()
-                faiss_idx = FaissIndex(index_dir, model_name=provider.model_name, dimensions=provider.dimensions)
-                bm25_idx = BM25Index(index_dir)
-                count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx)
-                if count > 0:
-                    faiss_idx.save()
-                    bm25_idx.save()
-                    qvec = np.array(provider.embed(query), dtype=np.float32)
-                    faiss_results = faiss_idx.search(qvec, top_k)
-                    bm25_results = bm25_idx.search(query, top_k)
-                provider.unload()
-                if not faiss_results and not bm25_results:
-                    return f"Index built ({count} chunks) but no results for '{query}'."
-            except Exception as e:
-                return f"No index found. Auto-rebuild failed: {e}"
+            return "No memory index yet. Index builds automatically at startup when memory is enabled. Try again after restart."
 
         merged = reciprocal_rank_fusion(faiss_results, bm25_results)
         lines = [f"Found {len(merged)} results for '{query}':\n"]
