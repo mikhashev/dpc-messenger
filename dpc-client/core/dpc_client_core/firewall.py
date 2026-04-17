@@ -554,6 +554,9 @@ class ContextFirewall:
         for tool_name, global_enabled in self.dpc_agent_tools.items():
             if bool(profile_tools.get(tool_name, global_enabled)):
                 allowed.add(tool_name)
+        for tool_name, enabled in profile_tools.items():
+            if not tool_name.startswith('_') and bool(enabled):
+                allowed.add(tool_name)
 
         # Per-profile overrides mirroring get_allowed_agent_tools()
         personal_access = profile.get('personal_context_access', self.dpc_agent_personal_context_access)
