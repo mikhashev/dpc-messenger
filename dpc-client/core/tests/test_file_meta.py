@@ -1,11 +1,13 @@
-"""Tests for _meta.json Access Registry (ADR-010, MEM-1.1 + MEM-1.2)."""
+"""Tests for _meta.json Access Registry (ADR-010, MEM-1.1 + MEM-1.2 + MEM-2.1)."""
 
 import json
 import pathlib
+from datetime import datetime, timezone, timedelta
 
 from dpc_client_core.dpc_agent.memory import (
     FileMeta,
     backfill_meta,
+    generate_smart_index,
     read_all_meta,
     write_all_meta,
     read_file_meta,
@@ -102,3 +104,39 @@ def test_read_all_meta_triggers_backfill(tmp_path):
     data = read_all_meta(tmp_path)
     assert "topic.md" in data
     assert (tmp_path / "_meta.json").exists()
+
+
+# --- MEM-2.1: smart _index.md tests ---
+
+
+def test_generate_smart_index_sections(tmp_path):
+    now = datetime.now(timezone.utc)
+    data = {
+        "today.md": {"last_accessed": now.isoformat(), "summary": "Fresh topic"},
+        "recent.md": {"last_accessed": (now - timedelta(days=3)).isoformat(), "summary": "Recent topic"},
+        "old.md": {"last_accessed": (now - timedelta(days=15)).isoformat(), "summary": "Old topic"},
+        "stale.md": {"last_accessed": (now - timedelta(days=45)).isoformat(), "summary": "Stale topic"},
+    }
+    (tmp_path / "_meta.json").write_text(json.dumps(data), encoding="utf-8")
+    content = generate_smart_index(tmp_path)
+    assert "## Active (today)" in content
+    assert "## Recent (7 days)" in content
+    assert "## Reference" in content
+    assert "## Stale (30+ days)" in content
+    assert "Fresh topic" in content
+    assert "stale, last: 45 days" in content
+    assert (tmp_path / "_index.md").exists()
+
+
+def test_generate_smart_index_empty(tmp_path):
+    content = generate_smart_index(tmp_path)
+    assert content == ""
+
+
+def test_update_access_triggers_index_refresh(tmp_path):
+    (tmp_path / "topic.md").write_text("content", encoding="utf-8")
+    write_file_meta(tmp_path, "topic.md", FileMeta(summary="test"))
+    update_access(tmp_path, "topic.md")
+    assert (tmp_path / "_index.md").exists()
+    index_text = (tmp_path / "_index.md").read_text(encoding="utf-8")
+    assert "Topic" in index_text

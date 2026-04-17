@@ -107,6 +107,74 @@ def update_access(knowledge_dir: pathlib.Path, filename: str) -> None:
     meta.last_accessed = utc_now_iso()
     meta.access_count += 1
     write_file_meta(knowledge_dir, filename, meta)
+    try:
+        generate_smart_index(knowledge_dir)
+    except Exception:
+        pass
+
+
+def generate_smart_index(knowledge_dir: pathlib.Path) -> str:
+    """Generate _index.md with Active/Recent/Reference/Stale sections from _meta.json."""
+    from datetime import datetime, timezone
+
+    all_meta = read_all_meta(knowledge_dir)
+    if not all_meta:
+        return ""
+
+    now = datetime.now(timezone.utc)
+    active, recent, reference, stale = [], [], [], []
+
+    for fname, entry in all_meta.items():
+        ts = entry.get("last_accessed", "")
+        summary = entry.get("summary", "")[:80]
+        title = fname.replace(".md", "").replace("_", " ").replace("-", " ").title()
+        if not ts:
+            reference.append((fname, title, summary, ""))
+            continue
+        try:
+            accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            days = (now - accessed).days
+        except (ValueError, TypeError):
+            reference.append((fname, title, summary, ""))
+            continue
+        line_data = (fname, title, summary, ts)
+        if days == 0:
+            active.append(line_data)
+        elif days <= 7:
+            recent.append(line_data)
+        elif days > 30:
+            stale.append(line_data)
+        else:
+            reference.append(line_data)
+
+    lines = ["# Knowledge Index", ""]
+    for section, items, show_summary in [
+        ("Active (today)", active, True),
+        ("Recent (7 days)", recent, True),
+        ("Reference", reference, True),
+        ("Stale (30+ days)", stale, False),
+    ]:
+        if not items:
+            continue
+        lines.append(f"## {section}")
+        for fname, title, summary, ts in items:
+            if show_summary and summary:
+                lines.append(f"- **{title}** — {summary}")
+            elif not show_summary and ts:
+                try:
+                    accessed = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    days = (now - accessed).days
+                    lines.append(f"- {title} (stale, last: {days} days)")
+                except (ValueError, TypeError):
+                    lines.append(f"- {title}")
+            else:
+                lines.append(f"- {title}")
+        lines.append("")
+
+    content = "\n".join(lines)
+    index_path = knowledge_dir / "_index.md"
+    index_path.write_text(content, encoding="utf-8")
+    return content
 
 
 class Memory:
