@@ -44,8 +44,12 @@ class RoundLimitGuard(GuardMiddleware):
 
     Fires in ``between_rounds`` — by the time this guard sees the context,
     the current ``round_idx`` has already been incremented by the loop, so
-    ``round_idx >= max_rounds`` means "this round would exceed the cap, do
+    ``round_idx > max_rounds`` means "this round would exceed the cap, do
     not run it". Stateless.
+
+    Operator note: uses strict ``>`` (round indices start at 1 and count
+    rounds executed; ``max_rounds`` is inclusive, round number
+    ``max_rounds`` itself is allowed). Mirrors ``loop.py:450``.
     """
 
     def __init__(self, max_rounds: int = 200) -> None:
@@ -106,6 +110,11 @@ class ResearchLimitGuard(GuardMiddleware):
 
     Fires in ``after_llm_call`` after the loop has set
     ``last_response_has_text`` and ``tool_calls_this_turn``.
+
+    Operator note: uses non-strict ``>=`` (the counter tracks number of
+    rounds that contributed; ``max_consecutive`` is exclusive — the
+    Nth consecutive tool-only round triggers the stop, not the
+    following one). Mirrors ``loop.py:598``.
     """
 
     def __init__(self, max_consecutive: int = 15) -> None:
