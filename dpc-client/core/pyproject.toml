@@ -39,6 +39,7 @@ mlx-whisper = { version = ">=0.2.0", optional = true, markers = "sys_platform ==
 dpc-protocol = { path = "../../dpc-protocol", develop = true }
 sentence-transformers = "^5.4.1"
 faiss-cpu = { version = ">=1.13", python = ">=3.12,<3.15" }
+bm25s = "^0.3.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.4.2,<9.0.0"

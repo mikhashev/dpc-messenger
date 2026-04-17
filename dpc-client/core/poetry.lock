@@ -289,6 +289,33 @@ files = [
 ]
 
 [[package]]
+name = "bm25s"
+version = "0.3.3"
+description = "An ultra-fast implementation of BM25 based on sparse matrices."
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "bm25s-0.3.3-py3-none-any.whl", hash = "sha256:03941f4e2a3610cbbaefa614c22d0e164a53c1e3201a4330cba45081260fd934"},
+    {file = "bm25s-0.3.3.tar.gz", hash = "sha256:c2567435da193ea8bf8801c471ae972cfc8f4415002f2e024f4c55d0fbc0f12f"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[package.extras]
+cli = ["rich"]
+core = ["PyStemmer", "numba", "orjson", "tqdm"]
+dev = ["black"]
+evaluation = ["pytrec_eval"]
+full = ["PyStemmer", "PyStemmer", "black", "huggingface_hub", "jax[cpu]", "mcp", "numba", "orjson", "pytrec_eval", "rich", "scipy", "tqdm"]
+hf = ["huggingface_hub"]
+indexing = ["scipy"]
+mcp = ["mcp"]
+selection = ["jax[cpu]"]
+stem = ["PyStemmer"]
+
+[[package]]
 name = "certifi"
 version = "2025.10.5"
 description = "Python package for providing Mozilla's CA Bundle."
@@ -3876,4 +3903,4 @@ mlx = ["mlx", "mlx-whisper"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.12,<4"
-content-hash = "48a783c93bf31880cf43f33b07fd6be16436edde4d9e587e9b3bec222619ecf7"
+content-hash = "845506be2ff33c3301258ae374baf8cf617bd8aa0ff7f19292174ac5962a2b8b"
