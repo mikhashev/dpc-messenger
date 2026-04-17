@@ -99,7 +99,9 @@ class LoopState:
     tool_calls_this_turn: int = 0
     consecutive_tool_only_rounds: int = 0
     accumulated_cost_usd: float = 0.0
-    recent_tool_args: list = field(default_factory=list)
+    # Last N tool-call argument dicts, oldest first. LoopGuard compares
+    # consecutive entries to detect repeated identical tool invocations.
+    recent_tool_args: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -209,7 +211,12 @@ class HookRegistry:
 
     Registration order determines dispatch order: the first middleware
     whose handler returns :attr:`HookAction.STOP_LOOP` wins and subsequent
-    middleware in the chain is skipped for that lifecycle event.
+    middleware in the chain is skipped for that lifecycle event. This
+    applies uniformly across tiers — a guard and an observer are dispatched
+    in registration order, so if an observer is registered before a guard
+    it can stop the loop before the guard even sees the event. Typical
+    usage registers guards first and observers after, but the registry
+    does not enforce that.
     """
 
     def __init__(self) -> None:
