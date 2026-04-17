@@ -1,10 +1,11 @@
 # ADR-007: Hooks & Middleware Infrastructure (Phase 0)
 
-**Status:** Proposed
-**Date:** 2026-04-10
+**Status:** Accepted (2026-04-17)
+**Date:** 2026-04-10 (Proposed) → 2026-04-17 (Accepted)
 **Authors:** Ark (design), CC (research)
 **Scope:** Phase 0 — Agent Maturity Track enabler
 **External Review:** Hope, J.A.R.V.I.S. (2026-04-10)
+**Implementation status:** Step 1 (`hooks.py`) implemented in `bdaeb03` + `df1e2ba`; Steps 2–4 pending.
 
 ---
 
