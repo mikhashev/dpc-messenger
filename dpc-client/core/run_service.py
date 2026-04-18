@@ -141,7 +141,18 @@ def dependency_setup():
     import hashlib
     import json
 
-    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+    # Find workspace root by walking up to uv.lock
+    current = Path(__file__).resolve().parent
+    workspace_root = None
+    while current != current.parent:
+        if (current / "uv.lock").exists() or (current / "pyproject.toml").exists() and (current / "dpc-client").exists():
+            workspace_root = current
+            break
+        current = current.parent
+    if not workspace_root:
+        return
+
+    env_path = workspace_root / ".env"
     context_path = Path.home() / ".dpc" / "device_context.json"
 
     if not context_path.exists():
