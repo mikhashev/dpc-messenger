@@ -80,10 +80,10 @@ logs/
 .mypy_cache/
 .ruff_cache/
 
-# 10. Poetry / Pipenv / PDM Lock Files
+# 10. uv / Lock Files
 # We DO commit our lock files, so we ensure they are NOT ignored.
 # The '!' prefix negates a pattern.
-!poetry.lock
+!uv.lock
 # !pdm.lock
 # !Pipfile.lock
 

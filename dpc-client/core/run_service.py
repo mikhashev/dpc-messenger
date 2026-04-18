@@ -136,67 +136,60 @@ def setup_logging(settings):
         logging.getLogger(ws_logger).setLevel(logging.WARNING)
 
 
-def check_gpu_support():
-    """
-    Check GPU availability and PyTorch CUDA support.
-    Shows a one-time message if NVIDIA GPU is detected but PyTorch lacks CUDA.
-    """
-    # Flag file to prevent showing the message every startup
-    flag_file = Path.home() / ".dpc" / ".gpu_check_done"
-    if flag_file.exists():
-        return  # Already shown before
+def dependency_setup():
+    """Generate .env with UV_EXTRA_INDEX_URL based on device_context.json (ADR-012)."""
+    import hashlib
+    import json
+
+    env_path = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+    context_path = Path.home() / ".dpc" / "device_context.json"
+
+    if not context_path.exists():
+        return
 
     try:
-        # Detect NVIDIA GPU
-        nvidia_gpu = None
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            if result.returncode == 0:
-                nvidia_gpu = result.stdout.strip()
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+        context_bytes = context_path.read_bytes()
+        context_hash = hashlib.sha256(context_bytes).hexdigest()[:12]
 
-        # Check PyTorch CUDA support
-        pytorch_has_cuda = False
-        try:
-            import torch
-            pytorch_has_cuda = torch.cuda.is_available()
-        except ImportError:
-            pass
+        if env_path.exists():
+            first_line = env_path.read_text(encoding="utf-8").split("\n", 1)[0]
+            if f"device_context_hash: {context_hash}" in first_line:
+                return  # .env is current
 
-        # Show message only if GPU detected but PyTorch lacks CUDA
-        if nvidia_gpu and not pytorch_has_cuda:
-            print("\n" + "=" * 70)
-            print("⚠️  NVIDIA GPU Detected - PyTorch CUDA Support Not Found")
-            print("=" * 70)
-            print(f"\n🎮 Detected GPU: {nvidia_gpu}")
-            print("\n💡 Your NVIDIA GPU can accelerate Whisper transcription by 10-20x!")
-            print("   However, PyTorch was installed without CUDA support.")
-            print("\n📋 To enable GPU acceleration, run:")
-            print("   poetry run python setup_gpu_support.py")
-            print("\n   Or manually install:")
-            print("   poetry run pip install --upgrade torch torchvision --index-url https://download.pytorch.org/whl/cu124")
-            print("\n   This is optional - CPU-only transcription will still work (slower).")
-            print("=" * 70 + "\n")
+        context = json.loads(context_bytes)
+        gpu = context.get("hardware", {}).get("gpu", {})
+        gpu_type = gpu.get("type", "")
+        cuda_version = gpu.get("cuda_version", "")
 
-            # Create flag file so we don't show this again
-            flag_file.parent.mkdir(parents=True, exist_ok=True)
-            flag_file.touch()
+        index_url = None
+        if gpu_type == "nvidia" and cuda_version:
+            major, minor = map(int, cuda_version.split(".")[:2])
+            if major == 11:
+                index_url = "https://download.pytorch.org/whl/cu118"
+            elif major == 12 and minor < 4:
+                index_url = "https://download.pytorch.org/whl/cu121"
+            elif major >= 12:
+                index_url = "https://download.pytorch.org/whl/cu124"
+        elif gpu_type == "amd":
+            index_url = "https://download.pytorch.org/whl/rocm6.2"
+
+        lines = [f"# device_context_hash: {context_hash}"]
+        if index_url:
+            lines.append(f"UV_EXTRA_INDEX_URL={index_url}")
+        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        if index_url:
+            print(f"\n[DPC] GPU detected ({gpu_type}). .env updated with {index_url}")
+            print("[DPC] Run 'uv sync' to install GPU-accelerated torch.\n")
 
     except Exception:
-        # Silently fail - don't break startup if GPU check fails
         pass
 
 
 async def main():
     """Main entrypoint to start and run the Core Service."""
-    # Check GPU support before starting service (one-time warning)
-    check_gpu_support()
+    # Generate .env with GPU-specific torch index if needed (ADR-012)
+    dependency_setup()
 
     service = CoreService()
 
