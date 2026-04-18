@@ -54,8 +54,6 @@
         { key: 'update_identity', label: 'Update Identity', desc: 'Update agent identity' },
         { key: 'deduplicate_identity', label: 'Deduplicate Identity', desc: 'Clean up duplicate sections in identity' },
         { key: 'chat_history', label: 'Chat History', desc: 'Access chat history' },
-        { key: 'knowledge_read', label: 'Read Knowledge', desc: 'Read knowledge base' },
-        { key: 'knowledge_write', label: 'Write Knowledge', desc: 'Write to knowledge base' },
         { key: 'knowledge_list', label: 'List Knowledge', desc: 'List knowledge topics' },
         { key: 'memory_search', label: 'Memory Search', desc: 'Search knowledge using hybrid BM25 + semantic search' },
         { key: 'get_task_board', label: 'Progress Board', desc: 'Read task history and learning progress from the shared Agent Progress Board' },

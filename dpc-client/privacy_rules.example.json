@@ -171,7 +171,7 @@
     "enabled": true,
     "personal_context_access": true,
     "device_context_access": true,
-    "knowledge_access": "read_only",
+    "human_knowledge_access": true,
     "tools": {
       "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
       "repo_read": true,
@@ -183,8 +183,6 @@
       "update_scratchpad": true,
       "update_identity": true,
       "chat_history": true,
-      "knowledge_read": true,
-      "knowledge_write": false,
       "knowledge_list": true,
       "get_dpc_context": true,
       "web_search": true,
