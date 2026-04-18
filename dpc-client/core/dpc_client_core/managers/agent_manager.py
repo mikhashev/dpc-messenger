@@ -287,10 +287,22 @@ class DpcAgentManager:
                                 bm25_idx = BM25Index(index_dir)
                                 knowledge_dir = agent_root / "knowledge"
                                 count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
+                                # L6: index human knowledge if firewall allows
+                                l6_count = 0
+                                if self.firewall and self.firewall.can_agent_access_context('knowledge'):
+                                    from pathlib import Path
+                                    import os
+                                    l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
+                                    if l6_dir.is_dir():
+                                        from dpc_client_core.dpc_agent.indexing_pipeline import index_single_file
+                                        for f in sorted(l6_dir.iterdir()):
+                                            if f.suffix == ".md" and f.is_file():
+                                                l6_count += index_single_file(f, provider, faiss_idx, bm25_idx, source_layer="L6")
+                                        log.info("L6 human knowledge indexed: %d chunks from %s", l6_count, l6_dir)
                                 faiss_idx.save()
                                 bm25_idx.save()
                                 provider.unload()
-                                log.info("Memory index built: %d chunks from knowledge/", count)
+                                log.info("Memory index built: %d chunks (L5: %d, L6: %d)", count + l6_count, count, l6_count)
                             except Exception as e:
                                 log.warning("Background memory rebuild failed: %s", e)
                         asyncio.get_event_loop().create_task(_background_rebuild())
