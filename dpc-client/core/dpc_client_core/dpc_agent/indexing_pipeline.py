@@ -52,7 +52,8 @@ def index_single_file(
     chunk_metas = [
         {"source_file": c.source_file, "chunk_index": c.chunk_index,
          "char_start": c.char_start, "char_end": c.char_end,
-         "source_layer": source_layer}
+         "source_layer": source_layer,
+         "text": c.text[:200]}
         for c in chunks
     ]
 
@@ -99,6 +100,7 @@ def full_rebuild(
                 "source_file": c.source_file, "chunk_index": c.chunk_index,
                 "char_start": c.char_start, "char_end": c.char_end,
                 "source_layer": meta.source_layer,
+                "text": c.text[:200],
             })
 
     if not all_chunks:

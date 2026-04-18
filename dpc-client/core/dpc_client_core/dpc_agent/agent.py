@@ -124,6 +124,9 @@ class DpcAgent:
             firewall_profile=firewall_profile,
         )
 
+        from .memory import EmbeddingProvider
+        self._embedding_provider = EmbeddingProvider(local_files_only=True)
+
         # Task queue for background execution
         self.queue = TaskQueue(self.agent_root)
         self._queue_enabled = self.config.enable_task_queue
@@ -251,6 +254,7 @@ class DpcAgent:
             all_tools=all_tools_map,
             sandbox_read_only=sandbox_ro,
             sandbox_read_write=sandbox_rw,
+            embedding_provider=self._embedding_provider,
         )
 
         # Store cap_info for agent_manager to include in next request's session_state

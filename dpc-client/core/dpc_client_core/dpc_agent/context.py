@@ -260,6 +260,7 @@ def build_llm_messages(
     all_tools: Optional[Dict[str, bool]] = None,
     sandbox_read_only: Optional[List[str]] = None,
     sandbox_read_write: Optional[List[str]] = None,
+    embedding_provider: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Build the full LLM message context for a task.
@@ -317,11 +318,40 @@ def build_llm_messages(
         if _last_user_msg:
             try:
                 from .active_recall import get_recall_block
-                _recall = get_recall_block([], context_usage_ratio=0.0)
+                from .hybrid_search import reciprocal_rank_fusion
+                from .bm25_index import BM25Index
+                from .faiss_index import FaissIndex
+                from .memory import EmbeddingProvider
+                import numpy as _np
+
+                _index_dir = agent_root / "state" / "memory_index"
+                _faiss_idx = FaissIndex(_index_dir)
+                _bm25_idx = BM25Index(_index_dir)
+
+                _faiss_results = []
+                if _faiss_idx.load():
+                    if embedding_provider is None:
+                        embedding_provider = EmbeddingProvider(local_files_only=True)
+                    _qvec = _np.array(embedding_provider.embed(_last_user_msg), dtype=_np.float32)
+                    _faiss_results = _faiss_idx.search(_qvec, 5)
+                    log.debug("Active Recall FAISS: %d results", len(_faiss_results))
+
+                _bm25_results = []
+                if _bm25_idx.load():
+                    _bm25_results = _bm25_idx.search(_last_user_msg, 5)
+                    log.debug("Active Recall BM25: %d results", len(_bm25_results))
+
+                _results = reciprocal_rank_fusion(_faiss_results, _bm25_results)
+                _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
+                _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio)
                 if _recall:
+                    log.info("Active Recall injected %d hints (mode=%s)",
+                             len(_results), "full" if _ctx_ratio < 0.5 else "hints")
                     semi_stable_parts.append(_recall)
+                else:
+                    log.debug("Active Recall: no results matched query")
             except Exception:
-                pass
+                log.warning("Active Recall failed", exc_info=True)
 
     # Tools & capabilities (generated from firewall — transparency)
     capabilities_section = _build_capabilities_section(

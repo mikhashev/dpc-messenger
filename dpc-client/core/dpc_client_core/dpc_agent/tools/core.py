@@ -676,12 +676,11 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
         faiss_results = []
         if faiss_idx.load():
             try:
-                provider = EmbeddingProvider()
+                provider = EmbeddingProvider(local_files_only=True)
                 qvec = np.array(provider.embed(query), dtype=np.float32)
                 faiss_results = faiss_idx.search(qvec, top_k)
-                provider.unload()
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("FAISS search failed: %s", e)
 
         bm25_results = []
         if bm25_idx.load():
@@ -2494,6 +2493,6 @@ def get_tools() -> List[ToolEntry]:
                 }
             },
             handler=memory_search,
-            timeout_sec=30,
+            timeout_sec=60,
         ),
     ]

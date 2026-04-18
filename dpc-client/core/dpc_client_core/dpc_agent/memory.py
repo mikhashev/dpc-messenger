@@ -185,10 +185,12 @@ class EmbeddingProvider:
     """Lazy-loading embedding provider using sentence-transformers."""
 
     def __init__(self, model_name: str = "intfloat/multilingual-e5-small",
-                 device: Optional[str] = None, max_tokens: int = 512):
+                 device: Optional[str] = None, max_tokens: int = 512,
+                 local_files_only: bool = False):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self._device = device
+        self._local_files_only = local_files_only
         self._model = None
 
     @property
@@ -208,8 +210,12 @@ class EmbeddingProvider:
     def _load_model(self):
         if self._model is None:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer(self.model_name, device=self.device)
-            log.info("Loaded embedding model %s on %s", self.model_name, self.device)
+            kwargs = {"device": self.device}
+            if self._local_files_only:
+                kwargs["local_files_only"] = True
+            self._model = SentenceTransformer(self.model_name, **kwargs)
+            log.info("Loaded embedding model %s on %s (local_only=%s)",
+                     self.model_name, self.device, self._local_files_only)
 
     def embed(self, text: str) -> List[float]:
         self._load_model()
@@ -405,7 +411,8 @@ class Memory:
     def save_knowledge(self, topic: str, content: str) -> None:
         """Save knowledge base content for a topic."""
         write_text(self.knowledge_path(topic), content)
-        self._update_knowledge_index()
+        kb_dir = self.agent_root / "knowledge"
+        generate_smart_index(kb_dir)
 
     def list_knowledge_topics(self) -> List[str]:
         """List all knowledge base topics."""
