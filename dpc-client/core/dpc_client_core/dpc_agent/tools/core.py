@@ -257,6 +257,25 @@ def repo_delete(ctx: ToolContext, path: str, recursive: bool = False) -> str:
         else:
             size = target.stat().st_size
             target.unlink()
+            # Remove from FAISS/BM25 index if knowledge file
+            if path.startswith("knowledge/") and not path.endswith("_index.md"):
+                try:
+                    from ..faiss_index import FaissIndex
+                    from ..bm25_index import BM25Index
+                    index_dir = ctx.agent_root / "state" / "memory_index"
+                    if index_dir.exists():
+                        faiss_idx = FaissIndex(index_dir)
+                        bm25_idx = BM25Index(index_dir)
+                        source_file = Path(path).name
+                        if faiss_idx.load():
+                            faiss_idx.remove_by_source(source_file)
+                            faiss_idx.save()
+                        if bm25_idx.load():
+                            bm25_idx.remove_by_source(source_file)
+                            bm25_idx.save()
+                        log.info("Removed %s from FAISS+BM25 index", source_file)
+                except Exception as e:
+                    log.warning("Index cleanup failed for %s: %s", path, e)
             return f"✓ Deleted '{path}' ({size} bytes)"
 
     except PermissionError as e:

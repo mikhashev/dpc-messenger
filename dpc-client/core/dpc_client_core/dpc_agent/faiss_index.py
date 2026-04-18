@@ -67,6 +67,25 @@ class FaissIndex:
                 results.append((self._chunks[idx], float(score)))
         return results
 
+    def remove_by_source(self, source_file: str) -> int:
+        """Remove all chunks from a specific source file and rebuild index."""
+        if self._index is None or not self._chunks:
+            return 0
+        keep = [(i, c) for i, c in enumerate(self._chunks) if c.get("source_file") != source_file]
+        removed = len(self._chunks) - len(keep)
+        if removed == 0:
+            return 0
+        import faiss
+        new_index = faiss.IndexFlatIP(self._header.dimensions)
+        if keep:
+            vectors = np.vstack([self._index.reconstruct(i).reshape(1, -1) for i, _ in keep])
+            new_index.add(vectors)
+        self._index = new_index
+        self._chunks = [c for _, c in keep]
+        self._header.chunk_count = self._index.ntotal
+        log.info("Removed %d chunks for %s, %d remaining", removed, source_file, self._header.chunk_count)
+        return removed
+
     def save(self) -> None:
         self.index_dir.mkdir(parents=True, exist_ok=True)
         if self._index is not None:

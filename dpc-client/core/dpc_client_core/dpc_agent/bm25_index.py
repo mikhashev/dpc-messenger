@@ -74,6 +74,29 @@ class BM25Index:
                 out.append((self._chunk_metas[idx], float(score)))
         return out
 
+    def remove_by_source(self, source_file: str) -> int:
+        """Remove all documents from a specific source file and rebuild."""
+        if not self._chunk_metas:
+            return 0
+        keep_texts = []
+        keep_metas = []
+        removed = 0
+        for meta in self._chunk_metas:
+            if meta.get("source_file") == source_file:
+                removed += 1
+            else:
+                keep_texts.append(meta.get("text", ""))
+                keep_metas.append(meta)
+        if removed == 0:
+            return 0
+        if keep_texts:
+            self.build(keep_texts, keep_metas)
+        else:
+            self._retriever = None
+            self._chunk_metas = []
+        log.info("Removed %d BM25 docs for %s, %d remaining", removed, source_file, len(self._chunk_metas))
+        return removed
+
     def save(self) -> None:
         if self.index_dir is None or self._retriever is None:
             return
