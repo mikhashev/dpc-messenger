@@ -281,7 +281,7 @@ ice_servers = [
 **From Windows client:**
 ```bash
 cd dpc-client/core
-poetry run python test_turn.py
+uv run python test_turn.py
 ```
 
 **Expected output:**

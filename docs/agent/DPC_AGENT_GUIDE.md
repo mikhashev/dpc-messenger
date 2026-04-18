@@ -665,7 +665,7 @@ Start the DPC backend and verify agent initialization:
 
 ```bash
 cd dpc-client/core
-poetry run python -c "
+uv run python -c "
 from dpc_client_core.dpc_agent import DpcAgent, AgentConfig
 from dpc_client_core.llm_manager import LLMManager
 
@@ -687,7 +687,7 @@ print('Agent initialized:', agent.get_status())
 Verify tools are loaded:
 
 ```bash
-poetry run python -c "
+uv run python -c "
 from dpc_client_core.dpc_agent.tools import ToolRegistry
 
 registry = ToolRegistry()
@@ -703,7 +703,7 @@ for t in sorted(tools):
 Test memory operations:
 
 ```bash
-poetry run python -c "
+uv run python -c "
 from dpc_client_core.dpc_agent import Memory
 
 memory = Memory()
@@ -722,7 +722,7 @@ print(f'Scratchpad content ({len(scratch)} chars)')
 Test background consciousness:
 
 ```bash
-poetry run python -c "
+uv run python -c "
 import asyncio
 from dpc_client_core.dpc_agent import DpcAgent, AgentConfig, BackgroundConsciousness
 from dpc_client_core.llm_manager import LLMManager
@@ -752,7 +752,7 @@ asyncio.run(test())
 Test via DpcAgentProvider:
 
 ```bash
-poetry run python -c "
+uv run python -c "
 import asyncio
 from dpc_client_core.llm_manager import LLMManager
 

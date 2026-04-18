@@ -11,10 +11,10 @@ WebSocket API for the UI, and the embedded autonomous agent.
 ## Install
 
 ```bash
-poetry install
+uv sync
 
 # Optional: GPU-accelerated Whisper transcription (Apple Silicon only)
-poetry install -E mlx
+uv sync --extra mlx
 ```
 
 Python 3.12+.
@@ -22,7 +22,7 @@ Python 3.12+.
 ## Run
 
 ```bash
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 Listens on `127.0.0.1:9999` (WebSocket API for the UI) and, by default,
@@ -31,8 +31,8 @@ Listens on `127.0.0.1:9999` (WebSocket API for the UI) and, by default,
 ## Test
 
 ```bash
-poetry run pytest
-poetry run pytest --cov=dpc_client_core
+uv run pytest
+uv run pytest --cov=dpc_client_core
 ```
 
 ---

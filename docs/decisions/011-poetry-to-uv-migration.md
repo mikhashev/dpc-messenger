@@ -1,6 +1,6 @@
 # ADR-011: Poetry to uv Migration
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-04-18
 **Authors:** CC (research + draft), Ark (review), Mike (direction)
 **Session:** S51
@@ -103,12 +103,54 @@ members = ["dpc-client/core", "dpc-hub", "dpc-protocol"]
 
 ## Scope
 
-- 3 pyproject.toml conversions
-- 3 lock file regenerations
-- 32 documentation files updated
-- `setup_gpu_support.py` deleted
-- `check_gpu_support()` simplified
-- `.gitignore` updated (uv.lock replaces poetry.lock)
+- 3 pyproject.toml conversions — DONE (8b719a5)
+- 3 lock file regenerations — DONE (8b719a5)
+- `setup_gpu_support.py` deleted — DONE (ada3f9b)
+- `check_gpu_support()` replaced by `dependency_setup()` — DONE (ada3f9b)
+- `.gitignore` updated — DONE (ada3f9b)
+- Documentation update — Phase 2 below
+
+### Phase 2: Documentation Update
+
+**Mechanical replace** (`poetry install` → `uv sync`, `poetry run` → `uv run`):
+
+| File | Refs |
+|------|------|
+| CLAUDE.md | ~34 |
+| QUICK_START.md | ~6 |
+| README.md | ~5 |
+| dpc-client/core/README.md | ~4 |
+| dpc-hub/README.md | ~8 |
+| dpc-protocol/README.md | ~3 |
+| docs/GITHUB_AUTH_SETUP.md | ~6 |
+| docs/LOGGING.md | ~4 |
+| docs/REMOTE_INFERENCE.md | ~3 |
+| docs/SERVER_CONFIGURATION.md | ~1 |
+| docs/TELEGRAM_SETUP.md | ~3 |
+| docs/TURN_SETUP.md | ~4 |
+| docs/CONFIGURATION.md | ~1 |
+| docs/HUB_TURN_INTEGRATION.md | ~1 |
+| docs/agent/CC_INTEGRATION_GUIDE.md | ~4 |
+| docs/agent/DPC_AGENT_GUIDE.md | ~5 |
+| docs/agent/DPC_AGENT_TELEGRAM.md | ~1 |
+
+**Manual rework** (not just find-replace):
+
+| File | Reason |
+|------|--------|
+| docs/MACOS_BUILD.md | Poetry install instructions → uv install |
+| docs/WEBRTC_SETUP_GUIDE.md | Dockerfile with `pip install poetry` → uv |
+| docs/DEVICE_CONTEXT_SPEC.md | `"poetry > pip"` preference → `"uv > pip"` |
+
+**Archive (low priority, historical):**
+
+| File | Refs |
+|------|------|
+| docs/archive/RELEASE_NOTES_V0_10_0.md | 3 |
+| docs/archive/RELEASE_NOTES_V0_10_1.md | 2 |
+| docs/archive/REMOTE_AI_PROVIDER_SELECTION.md | 1 |
+
+Total: 23 files, ~80+ changes.
 
 ## References
 

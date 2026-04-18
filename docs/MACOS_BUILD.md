@@ -41,13 +41,13 @@ Complete guide for building D-PC Messenger as a distributable macOS application.
    # Or download from https://nodejs.org/
    ```
 
-5. **Python 3.12+** and **Poetry**
+5. **Python 3.12+** and **uv**
    ```bash
    # Using Homebrew
    brew install python@3.12
 
-   # Install Poetry
-   curl -sSL https://install.python-poetry.org | python3 -
+   # Install uv
+   curl -LsSf https://astral.sh/uv/install.sh | sh
    ```
 
 6. **PyInstaller** (for bundling Python backend)
@@ -61,7 +61,7 @@ Complete guide for building D-PC Messenger as a distributable macOS application.
 xcode-select -p         # Should show: /Library/Developer/CommandLineTools
 rustc --version         # Should show: rustc 1.x.x
 node --version          # Should show: v18.x.x or higher
-poetry --version        # Should show: Poetry 1.x.x
+uv --version            # Should show: uv 0.x.x
 pyinstaller --version   # Should show: 6.x.x or higher
 ```
 
@@ -80,8 +80,8 @@ npm run tauri build
 **Output:** `src-tauri/target/release/bundle/dmg/dpc-messenger_0.1.0_x64.dmg`
 
 **Limitation:** Users must manually:
-1. Install Python and Poetry
-2. Run `poetry run python run_service.py` in `dpc-client/core/`
+1. Install Python and uv
+2. Run `uv run python run_service.py` in `dpc-client/core/`
 3. Then launch the app
 
 **Not recommended for distribution.**
@@ -98,7 +98,7 @@ This creates a standalone app with the Python backend included.
 cd dpc-client/core
 
 # Install dependencies
-poetry install
+uv sync
 
 # Create standalone executable
 pyinstaller --onefile run_service.py \
@@ -587,7 +587,7 @@ echo "Building D-PC Messenger for macOS..."
 # Step 1: Build Python backend
 echo "Step 1/3: Building Python backend..."
 cd ../core
-poetry install
+uv sync
 pyinstaller --onefile run_service.py \
   --name dpc-backend \
   --hidden-import dpc_client_core \

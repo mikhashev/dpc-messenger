@@ -30,8 +30,8 @@ Two processes. Open two terminals.
 
 ```bash
 cd dpc-client/core
-poetry install
-poetry run python run_service.py
+uv sync
+uv run python run_service.py
 ```
 
 On first run the backend creates identity + config files under `~/.dpc/`
@@ -68,8 +68,8 @@ Artifacts land in `ui/src-tauri/target/release/` (plus
 
 ```bash
 cd dpc-client/core
-poetry run pytest
-poetry run pytest --cov=dpc_client_core
+uv run pytest
+uv run pytest --cov=dpc_client_core
 ```
 
 Frontend tests (where they exist) live in `ui/` — run `npm test` there.

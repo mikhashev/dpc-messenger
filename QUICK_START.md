@@ -19,7 +19,7 @@ Pick your operating system:
 
 ```powershell
 winget install Python.Python.3.12
-pip install poetry
+pip install uv
 winget install OpenJS.NodeJS.LTS
 ```
 
@@ -32,7 +32,7 @@ git clone https://github.com/mikhashev/dpc-messenger.git
 cd dpc-messenger
 
 cd dpc-client/core
-poetry install
+uv sync
 
 cd ../ui
 npm install
@@ -46,7 +46,7 @@ Open **two terminals:**
 
 ```powershell
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 **Terminal 2 — Frontend:**
@@ -68,7 +68,7 @@ Your private data is stored in `C:\Users\<YourName>\.dpc\`. See [What gets creat
 
 ```bash
 brew install python@3.12
-pip3 install poetry
+pip3 install uv
 brew install node
 brew install rustup && rustup-init
 ```
@@ -80,7 +80,7 @@ git clone https://github.com/mikhashev/dpc-messenger.git
 cd dpc-messenger
 
 cd dpc-client/core
-poetry install
+uv sync
 
 cd ../ui
 npm install
@@ -94,7 +94,7 @@ Open **two terminals:**
 
 ```bash
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 **Terminal 2 — Frontend:**
@@ -116,7 +116,7 @@ Your private data is stored in `~/.dpc/`. See [What gets created](#whats-in-dpc)
 
 ```bash
 sudo apt install python3.12 python3.12-venv
-pip3 install poetry
+pip3 install uv
 sudo apt install nodejs npm
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ```
@@ -133,7 +133,7 @@ git clone https://github.com/mikhashev/dpc-messenger.git
 cd dpc-messenger
 
 cd dpc-client/core
-poetry install
+uv sync
 
 cd ../ui
 npm install
@@ -147,7 +147,7 @@ Open **two terminals:**
 
 ```bash
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 **Terminal 2 — Frontend:**

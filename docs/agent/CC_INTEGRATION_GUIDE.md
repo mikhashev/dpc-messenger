@@ -155,15 +155,15 @@ own setup can use CC differently (or not use CC at all).
 
    ```bash
    cd dpc-client/core
-   poetry install
-   poetry run python run_service.py
+   uv sync
+   uv run python run_service.py
    ```
 
 2. Verify the bridge can reach the backend:
 
    ```bash
    cd dpc-client/core
-   poetry run python cc_agent_bridge.py --status
+   uv run python cc_agent_bridge.py --status
    ```
 
    You should see `Backend: UP` and a fresh `history.json`
@@ -198,7 +198,7 @@ known agents alongside the warning.
 
 **`websockets not installed`.** You are running the bridge in a
 different virtualenv than the one with `dpc-client/core` deps. Use
-`poetry run python cc_agent_bridge.py ...` from `dpc-client/core/`.
+`uv run python cc_agent_bridge.py ...` from `dpc-client/core/`.
 
 **Auth rejected.** The token in `~/.dpc/.ws_token` is regenerated on
 every backend start. If the bridge was last run against a previous

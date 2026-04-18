@@ -177,7 +177,7 @@ Edit the agent's `config.json`:
 
 ```bash
 cd dpc-client/core
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 ### Configuration Options

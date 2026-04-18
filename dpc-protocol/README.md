@@ -31,7 +31,7 @@ the source of truth for the protocol; this library implements it.
 
 ```bash
 cd dpc-protocol
-poetry install
+uv sync
 ```
 
 Both `dpc-client` and `dpc-hub` depend on this package via a local
@@ -40,7 +40,7 @@ path in their `pyproject.toml`.
 ### As a standalone dependency
 
 ```bash
-poetry add dpc-protocol
+uv add dpc-protocol
 # or
 pip install dpc-protocol
 ```
@@ -77,7 +77,7 @@ localhost pipe for tests.
 ## Tests
 
 ```bash
-poetry run pytest
+uv run pytest
 ```
 
 Current test coverage is intentionally narrow — integration tests

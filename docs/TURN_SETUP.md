@@ -96,7 +96,7 @@ Choose one method above and set your credentials.
 
 ```bash
 cd dpc-client/core
-poetry run python tests/test_turn.py
+uv run python tests/test_turn.py
 ```
 
 **Expected output if credentials are configured:**
@@ -180,7 +180,7 @@ nc -vzu global.relay.metered.ca 80  # macOS/Linux
 cd dpc-client/core
 # Stop the service (Ctrl+C)
 # Start again
-poetry run python run_service.py
+uv run python run_service.py
 ```
 
 You should see:
@@ -206,12 +206,12 @@ After configuring credentials:
 
 1. **Test TURN connectivity:**
    ```bash
-   poetry run python tests/test_turn.py
+   uv run python tests/test_turn.py
    ```
 
 2. **Start the client:**
    ```bash
-   poetry run python run_service.py
+   uv run python run_service.py
    ```
 
 3. **Connect via WebRTC:**

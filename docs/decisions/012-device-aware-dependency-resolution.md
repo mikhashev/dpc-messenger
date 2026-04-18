@@ -1,6 +1,6 @@
 # ADR-012: Device-Aware Dependency Resolution
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-04-18
 **Authors:** CC (draft), Ark (architecture proposal), Mike (direction + original idea)
 **Session:** S51
