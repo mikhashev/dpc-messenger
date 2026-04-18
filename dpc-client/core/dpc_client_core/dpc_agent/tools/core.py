@@ -193,20 +193,21 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
             _update_knowledge_index(ctx, Path(path).stem)
             # Incremental reindex for Active Recall (MEM-3.7)
             try:
-                from ..indexing_pipeline import index_single_file
-                from ..memory import EmbeddingProvider
-                from ..faiss_index import FaissIndex
-                from ..bm25_index import BM25Index
-                index_dir = ctx.agent_root / "state" / "memory_index"
-                if index_dir.exists():
-                    faiss_idx = FaissIndex(index_dir)
-                    bm25_idx = BM25Index(index_dir)
-                    if faiss_idx.load():
-                        provider = EmbeddingProvider(local_files_only=True)
-                        index_single_file(file_path, provider, faiss_idx, bm25_idx, source_layer="L5")
-                        faiss_idx.save()
-                        bm25_idx.save()
-                        log.info("Incremental reindex: added %s to FAISS+BM25", file_path.name)
+                agent = getattr(ctx, '_agent', None)
+                provider = getattr(agent, '_embedding_provider', None) if agent else None
+                if provider:
+                    from ..indexing_pipeline import index_single_file
+                    from ..faiss_index import FaissIndex
+                    from ..bm25_index import BM25Index
+                    index_dir = ctx.agent_root / "state" / "memory_index"
+                    if index_dir.exists():
+                        faiss_idx = FaissIndex(index_dir)
+                        bm25_idx = BM25Index(index_dir)
+                        if faiss_idx.load():
+                            index_single_file(file_path, provider, faiss_idx, bm25_idx, source_layer="L5")
+                            faiss_idx.save()
+                            bm25_idx.save()
+                            log.info("Incremental reindex: added %s to FAISS+BM25", file_path.name)
             except Exception as e:
                 log.warning("Incremental reindex failed for %s: %s", path, e)
 
