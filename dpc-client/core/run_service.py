@@ -141,7 +141,7 @@ def dependency_setup():
     import hashlib
     import json
 
-    env_path = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
     context_path = Path.home() / ".dpc" / "device_context.json"
 
     if not context_path.exists():
