@@ -158,7 +158,7 @@ def dependency_setup():
 
 async def main():
     """Main entrypoint to start and run the Core Service."""
-    # Generate .env with GPU-specific torch index if needed (ADR-012)
+    # GPU status check (ADR-012)
     dependency_setup()
 
     service = CoreService()
