@@ -238,7 +238,7 @@ class DpcAgentManager:
             agent_root=self.agent_root,
             firewall=self.firewall,           # Firewall controls tool access
             firewall_profile=self.agent_id,  # Per-agent profile key for per-agent permissions
-            service=self.service,             # For tools that need service access (e.g. knowledge_write firewall)
+            service=self.service,             # For tools that need firewall access
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
 

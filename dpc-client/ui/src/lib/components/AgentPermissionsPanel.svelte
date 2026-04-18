@@ -441,16 +441,14 @@
         </div>
 
         <div class="setting-item">
-          <span><strong>Knowledge Access:</strong></span>
-          {#if editMode && editSettings}
-            <select bind:value={editSettings.knowledge_access}>
-              <option value="none">None</option>
-              <option value="read_only">Read Only</option>
-              <option value="read_write">Read & Write</option>
-            </select>
-          {:else}
-            <span class="value">{displaySettings.knowledge_access}</span>
-          {/if}
+          <label>
+            {#if editMode && editSettings}
+              <input type="checkbox" bind:checked={editSettings.human_knowledge_access} />
+            {:else}
+              <input type="checkbox" checked={displaySettings.human_knowledge_access} disabled />
+            {/if}
+            <span>Human Knowledge Access</span>
+          </label>
         </div>
       </div>
 

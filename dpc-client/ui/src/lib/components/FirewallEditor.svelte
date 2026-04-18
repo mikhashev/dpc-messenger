@@ -34,7 +34,7 @@
       enabled: boolean;
       personal_context_access: boolean;
       device_context_access: boolean;
-      knowledge_access: 'none' | 'read_only' | 'read_write';
+      human_knowledge_access: boolean;
       tools: {
         [key: string]: boolean | undefined;
       };
@@ -59,7 +59,7 @@
       enabled: boolean;
       personal_context_access: boolean;
       device_context_access: boolean;
-      knowledge_access: 'none' | 'read_only' | 'read_write';
+      human_knowledge_access: boolean;
       tools?: {
         [key: string]: boolean | undefined;
       };
@@ -285,7 +285,7 @@
           enabled: true,
           personal_context_access: true,
           device_context_access: true,
-          knowledge_access: 'read_only',
+          human_knowledge_access: true,
           tools: {
             read_file: true,
             write_file: false,
@@ -605,7 +605,7 @@
       enabled: true,
       personal_context_access: true,
       device_context_access: true,
-      knowledge_access: 'read_only',
+      human_knowledge_access: true,
       tools: {
         read_file: true,
         write_file: false,
@@ -618,7 +618,7 @@
       enabled: true,
       personal_context_access: defaultSettings.personal_context_access,
       device_context_access: defaultSettings.device_context_access,
-      knowledge_access: defaultSettings.knowledge_access || 'read_only',
+      human_knowledge_access: defaultSettings.human_knowledge_access ?? true,
       tools: { ...(defaultSettings.tools || {}) },
       sandbox_extensions: {
         read_only: [],
@@ -704,7 +704,7 @@
         enabled: true,
         personal_context_access: true,
         device_context_access: true,
-        knowledge_access: 'read_only',
+        human_knowledge_access: true,
         tools: { read_file: true, write_file: false, repo_list: true, update_scratchpad: true, browse_page: true, search_web: true },
       })
     );

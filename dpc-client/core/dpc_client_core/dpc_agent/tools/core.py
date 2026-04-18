@@ -191,6 +191,24 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
         # Regenerate _index.md if writing to knowledge/ dir (sandbox only)
         if not os.path.isabs(path) and path.startswith("knowledge/") and not path.endswith("_index.md"):
             _update_knowledge_index(ctx, Path(path).stem)
+            # Incremental reindex for Active Recall (MEM-3.7)
+            try:
+                from ..indexing_pipeline import index_single_file
+                from ..memory import EmbeddingProvider
+                from ..faiss_index import FaissIndex
+                from ..bm25_index import BM25Index
+                index_dir = ctx.agent_root / "state" / "memory_index"
+                if index_dir.exists():
+                    faiss_idx = FaissIndex(index_dir)
+                    bm25_idx = BM25Index(index_dir)
+                    if faiss_idx.load():
+                        provider = EmbeddingProvider(local_files_only=True)
+                        index_single_file(file_path, provider, faiss_idx, bm25_idx, source_layer="L5")
+                        faiss_idx.save()
+                        bm25_idx.save()
+                        log.info("Incremental reindex: added %s to FAISS+BM25", file_path.name)
+            except Exception as e:
+                log.warning("Incremental reindex failed for %s: %s", path, e)
 
         return f"✓ Wrote {len(content):,} chars to {path}"
 
@@ -629,35 +647,6 @@ def chat_history(ctx: ToolContext, limit: int = 0, offset: int = -1, include_int
 # Knowledge Tools
 # ---------------------------------------------------------------------------
 
-def knowledge_read(ctx: ToolContext, topic: str) -> str:
-    """
-    Read a knowledge base topic.
-
-    Args:
-        ctx: Tool context
-        topic: Topic name
-
-    Returns:
-        Topic content
-    """
-    try:
-        topic_path = ctx.knowledge_path(topic)
-
-        if not topic_path.exists():
-            return f"⚠️ Topic not found: {topic}"
-
-        from ..memory import update_access
-        try:
-            update_access(topic_path.parent, topic_path.name)
-        except Exception:
-            pass
-
-        return topic_path.read_text(encoding="utf-8")
-
-    except Exception as e:
-        return f"⚠️ Error reading knowledge: {e}"
-
-
 def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
     """Search across knowledge base using hybrid BM25 + semantic search (ADR-010)."""
     try:
@@ -698,77 +687,6 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
 
     except Exception as e:
         return f"⚠️ Memory search error: {e}"
-
-
-def knowledge_write(
-    ctx: ToolContext,
-    topic: str,
-    content: str,
-    commit_message: Optional[str] = None,
-) -> str:
-    """
-    Write or update a knowledge base topic with firewall check.
-
-    Args:
-        ctx: Tool context
-        topic: Topic name
-        content: Topic content (markdown)
-        commit_message: Conventional commit message for this change
-            (e.g. 'docs(knowledge): add TurboQuant complexity analysis').
-            Defaults to 'docs(knowledge): update {topic}'.
-
-    Returns:
-        Result message
-    """
-    try:
-        # Check firewall for write access
-        if ctx.dpc_service and hasattr(ctx.dpc_service, 'firewall'):
-            firewall = ctx.dpc_service.firewall
-            if not getattr(firewall, 'can_agent_write_knowledge', lambda: True)():
-                return "⚠️ Knowledge write access is disabled via firewall rules (knowledge_access must be 'read_write')"
-
-        topic_path = ctx.knowledge_path(topic)
-        topic_path.parent.mkdir(parents=True, exist_ok=True)
-
-        # Add timestamp
-        full_content = f"""# {topic.title()}
-
-Last updated: {datetime.now(timezone.utc).isoformat()}
-
-{content}
-"""
-        topic_path.write_text(full_content, encoding="utf-8")
-
-        # Update index
-        _update_knowledge_index(ctx, topic)
-
-        # Incremental reindex for Active Recall (MEM-3.7)
-        try:
-            from ..indexing_pipeline import index_single_file
-            from ..memory import EmbeddingProvider
-            from ..faiss_index import FaissIndex
-            from ..bm25_index import BM25Index
-            index_dir = ctx.agent_root / "state" / "memory_index"
-            if index_dir.exists():
-                faiss_idx = FaissIndex(index_dir)
-                bm25_idx = BM25Index(index_dir)
-                if faiss_idx.load():
-                    provider = EmbeddingProvider(local_files_only=True)
-                    index_single_file(topic_path, provider, faiss_idx, bm25_idx, source_layer="L5")
-                    faiss_idx.save()
-                    bm25_idx.save()
-                    log.info("Incremental reindex: added %s to FAISS+BM25", topic_path.name)
-        except Exception as e:
-            log.warning("Incremental reindex failed for %s: %s", topic, e)
-
-        # Auto-commit knowledge changes (best-effort)
-        msg = commit_message or f"docs(knowledge): update {topic}"
-        auto_commit_agent_change(ctx.agent_root, msg)
-
-        return f"✓ Wrote knowledge topic '{topic}' ({len(content)} chars)"
-
-    except Exception as e:
-        return f"⚠️ Error writing knowledge: {e}"
 
 
 def knowledge_list(ctx: ToolContext) -> str:
@@ -2045,64 +1963,7 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=10,
         ),
 
-        # Knowledge tools
-        ToolEntry(
-            name="knowledge_read",
-            schema={
-                "name": "knowledge_read",
-                "description": "Read a knowledge base topic",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "topic": {
-                            "type": "string",
-                            "description": "Topic name"
-                        }
-                    },
-                    "required": ["topic"]
-                }
-            },
-            handler=knowledge_read,
-            timeout_sec=10,
-        ),
-
-        ToolEntry(
-            name="knowledge_write",
-            schema={
-                "name": "knowledge_write",
-                "description": (
-                    "Write or update a knowledge base topic. "
-                    "Provide commit_message in Conventional Commits format to describe what you learned "
-                    "(e.g. 'docs(knowledge): add TurboQuant complexity analysis with benchmarks'). "
-                    "You own this commit message — make it meaningful."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "topic": {
-                            "type": "string",
-                            "description": "Topic name"
-                        },
-                        "content": {
-                            "type": "string",
-                            "description": "Topic content (markdown)"
-                        },
-                        "commit_message": {
-                            "type": "string",
-                            "description": (
-                                "Conventional Commits message for this change: type(scope): description. "
-                                "E.g. 'docs(knowledge): add TurboQuant complexity analysis'. "
-                                "Omit to use the default."
-                            )
-                        }
-                    },
-                    "required": ["topic", "content"]
-                }
-            },
-            handler=knowledge_write,
-            timeout_sec=10,
-        ),
-
+        # Knowledge tools (knowledge_read/knowledge_write removed — use read_file/write_file)
         ToolEntry(
             name="knowledge_list",
             schema={

@@ -1,6 +1,6 @@
 """Incremental indexing pipeline (ADR-010, MEM-3.7).
 
-Triggers: knowledge_write(), approved commit, Extended Paths mtime change.
+Triggers: write_file(knowledge/), approved commit (L6), Extended Paths mtime change.
 Embed + index one file per event. Full rebuild if cache empty/corrupted.
 """
 

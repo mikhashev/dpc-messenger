@@ -102,7 +102,7 @@ class ContextFirewall:
         self.dpc_agent_enabled = dpc_agent.get('enabled', True)
         self.dpc_agent_personal_context_access = dpc_agent.get('personal_context_access', True)
         self.dpc_agent_device_context_access = dpc_agent.get('device_context_access', True)
-        self.dpc_agent_knowledge_access = dpc_agent.get('knowledge_access', 'read_only')
+        self.dpc_agent_human_knowledge_access = dpc_agent.get('human_knowledge_access', True)
 
         # All available tools with their default values.
         # True = enabled by default, False = disabled by default (security).
@@ -125,8 +125,6 @@ class ContextFirewall:
             'chat_history': True,
             'deduplicate_identity': True,
             # Knowledge
-            'knowledge_read': True,
-            'knowledge_write': False,  # Controlled by knowledge_access
             'knowledge_list': True,
             'get_task_board': True,  # Read task history + learning progress
             # Memento-Skills tools (v0.20.0+)
@@ -247,7 +245,7 @@ class ContextFirewall:
                      self.dpc_agent_enabled,
                      self.dpc_agent_personal_context_access,
                      self.dpc_agent_device_context_access,
-                     self.dpc_agent_knowledge_access,
+                     self.dpc_agent_human_knowledge_access,
                      len([t for t in self.dpc_agent_tools.values() if t]),
                      len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths),
                      self.evolution_enabled,
@@ -384,21 +382,11 @@ class ContextFirewall:
                 profile_name, 'device_context_access',
                 default=self.dpc_agent_device_context_access))
         elif context_type == 'knowledge':
-            ka = self._get_profile_or_global(
-                profile_name, 'knowledge_access',
-                default=self.dpc_agent_knowledge_access)
-            return ka != 'none'
+            return bool(self._get_profile_or_global(
+                profile_name, 'human_knowledge_access',
+                default=self.dpc_agent_human_knowledge_access))
 
         return False
-
-    def can_agent_write_knowledge(self, profile_name: Optional[str] = None) -> bool:
-        """Check if the agent can write to knowledge base."""
-        if not self.dpc_agent_enabled:
-            return False
-        ka = self._get_profile_or_global(
-            profile_name, 'knowledge_access',
-            default=self.dpc_agent_knowledge_access)
-        return ka == 'read_write'
 
     def get_agent_skill_permission(self, operation: str,
                                     profile_name: Optional[str] = None) -> bool:
@@ -445,10 +433,6 @@ class ContextFirewall:
         # Override: get_dpc_context requires personal_context_access
         if not self.dpc_agent_personal_context_access:
             allowed.discard('get_dpc_context')
-
-        # Override: knowledge_write requires read_write access
-        if self.dpc_agent_knowledge_access != 'read_write':
-            allowed.discard('knowledge_write')
 
         # Override: import_skill_from_agent requires accept_peer_skills
         if not self.get_agent_skill_permission('accept_peer_skills'):
@@ -519,7 +503,7 @@ class ContextFirewall:
             "capabilities": {
                 "personal_context_access": self.dpc_agent_personal_context_access,
                 "device_context_access": self.dpc_agent_device_context_access,
-                "knowledge_access": self.dpc_agent_knowledge_access,
+                "human_knowledge_access": self.dpc_agent_human_knowledge_access,
                 "evolution_enabled": self.evolution_enabled,
                 "consciousness_enabled": self.consciousness_enabled,
             },
@@ -531,7 +515,7 @@ class ContextFirewall:
         Get allowed tools for a specific agent profile.
 
         Uses global dpc_agent tools as the baseline, then applies per-profile overrides.
-        Also enforces per-profile knowledge_access, personal_context_access, and skills
+        Also enforces per-profile human_knowledge_access, personal_context_access, and skills
         overrides (same logic as get_allowed_agent_tools() but scoped to the profile).
 
         Args:
@@ -562,10 +546,6 @@ class ContextFirewall:
         personal_access = profile.get('personal_context_access', self.dpc_agent_personal_context_access)
         if not personal_access:
             allowed.discard('get_dpc_context')
-
-        knowledge_access = profile.get('knowledge_access', self.dpc_agent_knowledge_access)
-        if knowledge_access != 'read_write':
-            allowed.discard('knowledge_write')
 
         profile_skills = profile.get('skills', {})
         accept_peer = profile_skills.get(
@@ -606,7 +586,7 @@ class ContextFirewall:
                 'enabled': True,
                 'personal_context_access': True,
                 'device_context_access': True,
-                'knowledge_access': 'read_only',
+                'human_knowledge_access': True,
                 'tools': {
                     'read_file': True,
                     'write_file': False,
@@ -755,7 +735,7 @@ class ContextFirewall:
                     "enabled": True,
                     "personal_context_access": True,
                     "device_context_access": True,
-                    "knowledge_access": "read_only",
+                    "human_knowledge_access": True,
                     "evolution": {
                         "_comment": "Evolution settings - autonomous self-modification within sandbox",
                         "enabled": False,
@@ -772,8 +752,6 @@ class ContextFirewall:
                         "update_scratchpad": True,
                         "update_identity": True,
                         "chat_history": True,
-                        "knowledge_read": True,
-                        "knowledge_write": False,
                         "knowledge_list": True,
                         "get_task_board": True,
                         "get_dpc_context": True,
@@ -1628,10 +1606,8 @@ class ContextFirewall:
                     if 'device_context_access' in dpc_agent and not isinstance(dpc_agent['device_context_access'], bool):
                         errors.append("'dpc_agent.device_context_access' must be a boolean")
 
-                    if 'knowledge_access' in dpc_agent:
-                        valid_access = ['none', 'read_only', 'read_write']
-                        if dpc_agent['knowledge_access'] not in valid_access:
-                            errors.append(f"'dpc_agent.knowledge_access' must be one of: {valid_access}")
+                    if 'human_knowledge_access' in dpc_agent and not isinstance(dpc_agent['human_knowledge_access'], bool):
+                        errors.append("'dpc_agent.human_knowledge_access' must be a boolean")
 
                     if 'tools' in dpc_agent:
                         tools = dpc_agent['tools']
@@ -1646,7 +1622,7 @@ class ContextFirewall:
                                 # Memory/identity
                                 'update_scratchpad', 'update_identity', 'chat_history',
                                 # Knowledge
-                                'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                'knowledge_list',
                                 'get_task_board',
                                 # DPC integration
                                 'get_dpc_context',
@@ -1764,10 +1740,8 @@ class ContextFirewall:
                                 errors.append(f"'agent_profiles.{profile_name}.personal_context_access' must be a boolean")
                             if 'device_context_access' in profile_config and not isinstance(profile_config['device_context_access'], bool):
                                 errors.append(f"'agent_profiles.{profile_name}.device_context_access' must be a boolean")
-                            if 'knowledge_access' in profile_config:
-                                valid_access = ['none', 'read_only', 'read_write']
-                                if profile_config['knowledge_access'] not in valid_access:
-                                    errors.append(f"'agent_profiles.{profile_name}.knowledge_access' must be one of: {valid_access}")
+                            if 'human_knowledge_access' in profile_config and not isinstance(profile_config['human_knowledge_access'], bool):
+                                errors.append(f"'agent_profiles.{profile_name}.human_knowledge_access' must be a boolean")
                             # Validate tools
                             if 'tools' in profile_config:
                                 tools = profile_config['tools']
@@ -1779,7 +1753,7 @@ class ContextFirewall:
                                         'read_file', 'write_file', 'repo_list', 'repo_delete',
                                         'drive_list',
                                         'update_scratchpad', 'update_identity', 'chat_history',
-                                        'knowledge_read', 'knowledge_write', 'knowledge_list',
+                                        'knowledge_list',
                                         'get_task_board',
                                         'get_dpc_context',
                                         'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',

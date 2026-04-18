@@ -306,7 +306,7 @@ description: >
   'remember this strategy', 'improve how I handle X', or when the same multi-step
   approach recurs across tasks of the same type. Creates structured SKILL.md files
   that persist strategies for future use. Do NOT use for storing facts or knowledge
-  — use knowledge_write for that.
+  — use write_file("knowledge/topic.md", content) for that.
 provenance:
   source: bootstrapped
   created_at: {now}
@@ -382,7 +382,7 @@ metadata:
 
 ## When NOT to Use
 
-- Storing facts or information from a conversation → use `knowledge_write` instead
+- Storing facts or information from a conversation → use `write_file("knowledge/topic.md", content)` instead
 - Quick one-off tasks that won't recur
 - Writing code or application files (this skill creates skill strategies only)
 
@@ -518,9 +518,9 @@ sharing:
 metadata:
   execution_mode: knowledge
   required_tools:
-    - knowledge_write
+    - write_file
+    - read_file
     - knowledge_list
-    - knowledge_read
   required_permissions: []
   agent_profiles:
     - default
@@ -533,7 +533,7 @@ metadata:
 ## Strategy
 
 1. **Identify what's worth keeping**: Is this a decision, insight, lesson learned, or fact useful later?
-2. **Check existing knowledge**: Use `knowledge_list` to see existing topics. Use `knowledge_read(topic)` if a related topic exists.
+2. **Check existing knowledge**: Use `knowledge_list` to see existing topics. Use `read_file("knowledge/topic.md")` if a related topic exists.
 3. **Choose a topic name**: Kebab-case, descriptive (e.g. `authentication-design`, `gpu-requirements`)
 4. **Structure the content** (markdown format):
    - Summary: 1-3 sentence overview
@@ -541,7 +541,7 @@ metadata:
    - Context: why this was decided / what problem it solves
    - Examples: concrete examples if applicable
 5. **If topic exists**: Merge new information — don't overwrite, build on it.
-6. **Write**: Use `knowledge_write(topic, content)` to save.
+6. **Write**: Use `write_file("knowledge/topic.md", content)` to save.
 
 ## When to Use
 
@@ -564,14 +564,14 @@ Extracting an architecture decision:
 User: "We decided to use SQLite for the knowledge base because..."
 1. knowledge_list() → check if "knowledge-storage-architecture" exists
 2. Structure: Summary + Decision + Rationale + Alternatives Considered
-3. knowledge_write("knowledge-storage-architecture", structured_content)
+3. write_file("knowledge/knowledge-storage-architecture.md", structured_content)
 ```
 
 ## Common Failures
 
 - **Too granular**: One fact per commit is too fine — group related facts into a topic
 - **No context**: "We use X" without "because Y" loses the rationale
-- **Overwriting**: Always check knowledge_read first, then merge
+- **Overwriting**: Always check read_file("knowledge/topic.md") first, then merge
 - **Wrong topic name**: Too generic ("notes") or too specific ("meeting-2026-03-24")
 
 ## Update History
