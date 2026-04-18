@@ -13,6 +13,7 @@ venv/
 env/
 __pypackages__/
 node_modules/
+poetry.lock
 
 # 2. Secrets & User-Specific Configuration
 # NEVER commit sensitive information.

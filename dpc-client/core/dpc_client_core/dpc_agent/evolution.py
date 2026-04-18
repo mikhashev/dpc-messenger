@@ -98,7 +98,7 @@ class EvolutionManager:
     ALLOWED_PATHS = {
         "memory/identity.md",
         "memory/scratchpad.md",
-        "memory/knowledge/",
+        "knowledge/",
         "config/agent.json",
         "skills/",  # Skill strategies (SKILL.md files under skills/*/SKILL.md)
     }
@@ -504,7 +504,7 @@ class EvolutionManager:
         else:
             skill_section = (
                 "No skills are underperforming right now. "
-                "Consider memory/identity.md or memory/knowledge/ improvements only."
+                "Consider memory/identity.md or knowledge/ improvements only."
             )
 
         # Build consciousness insights section
@@ -553,7 +553,7 @@ class EvolutionManager:
 ## Sandbox — ONLY these paths are allowed:
 - skills/{{name}}/SKILL.md  (append only — fix underperforming skills)
 - memory/identity.md        (append only — add new self-understanding)
-- memory/knowledge/{{topic}}.md  (append — add new knowledge)
+- knowledge/{{topic}}.md  (append — add new knowledge)
 
 ## Rules
 1. Prefer skill improvements when underperforming skills exist — they have measurable impact

@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from .llm_adapter import DpcLlmAdapter
 from .tools.registry import ToolRegistry, ToolContext
-from .memory import Memory
+from .memory import Memory, generate_smart_index
 from .skill_store import SkillStore
 from .skill_reflection import SkillReflector, REFLECTION_ROUNDS_THRESHOLD
 from .context import build_llm_messages
@@ -113,7 +113,7 @@ class DpcAgent:
         self.llm = DpcLlmAdapter(llm_manager, provider_alias=provider_alias, compute_host=compute_host)
         self.tools = ToolRegistry(agent_root=self.agent_root)
         self.memory = Memory(agent_root=self.agent_root)
-        self.memory._update_knowledge_index()  # Regenerate _index.md on startup
+        generate_smart_index(self.agent_root / "knowledge")
         self.memory.cleanup_old_task_results(max_age_days=30)  # TTL cleanup
         self.skill_store = SkillStore(agent_root=self.agent_root)
         self.skill_store.ensure_starter_skills()  # bootstrap for existing agents on first run
