@@ -137,63 +137,22 @@ def setup_logging(settings):
 
 
 def dependency_setup():
-    """Generate .env with UV_EXTRA_INDEX_URL based on device_context.json (ADR-012)."""
-    import hashlib
-    import json
-
-    # Find workspace root by walking up to uv.lock
-    current = Path(__file__).resolve().parent
-    workspace_root = None
-    while current != current.parent:
-        if (current / "uv.lock").exists() or (current / "pyproject.toml").exists() and (current / "dpc-client").exists():
-            workspace_root = current
-            break
-        current = current.parent
-    if not workspace_root:
-        return
-
-    env_path = workspace_root / ".env"
-    context_path = Path.home() / ".dpc" / "device_context.json"
-
-    if not context_path.exists():
-        return
-
+    """Check GPU status and warn if torch lacks CUDA support (ADR-012)."""
     try:
-        context_bytes = context_path.read_bytes()
-        context_hash = hashlib.sha256(context_bytes).hexdigest()[:12]
-
-        if env_path.exists():
-            first_line = env_path.read_text(encoding="utf-8").split("\n", 1)[0]
-            if f"device_context_hash: {context_hash}" in first_line:
-                return  # .env is current
-
-        context = json.loads(context_bytes)
-        gpu = context.get("hardware", {}).get("gpu", {})
-        gpu_type = gpu.get("type", "")
-        cuda_version = gpu.get("cuda_version", "")
-
-        index_url = None
-        if gpu_type == "nvidia" and cuda_version:
-            major, minor = map(int, cuda_version.split(".")[:2])
-            if major == 11:
-                index_url = "https://download.pytorch.org/whl/cu118"
-            elif major == 12 and minor < 4:
-                index_url = "https://download.pytorch.org/whl/cu121"
-            elif major >= 12:
-                index_url = "https://download.pytorch.org/whl/cu124"
-        elif gpu_type == "amd":
-            index_url = "https://download.pytorch.org/whl/rocm6.2"
-
-        lines = [f"# device_context_hash: {context_hash}"]
-        if index_url:
-            lines.append(f"UV_EXTRA_INDEX_URL={index_url}")
-        env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-        if index_url:
-            print(f"\n[DPC] GPU detected ({gpu_type}). .env updated with {index_url}")
-            print("[DPC] Run 'uv sync' to install GPU-accelerated torch.\n")
-
-    except Exception:
+        import torch
+        if not torch.cuda.is_available():
+            try:
+                result = subprocess.run(
+                    ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode == 0:
+                    gpu_name = result.stdout.strip()
+                    print(f"\n[DPC] NVIDIA GPU detected ({gpu_name}) but torch lacks CUDA.")
+                    print("[DPC] Check pyproject.toml [tool.uv.sources] torch index, then run 'uv sync'.\n")
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+    except ImportError:
         pass
 
 
