@@ -282,7 +282,7 @@ class DpcAgentManager:
                                 from dpc_client_core.dpc_agent.faiss_index import FaissIndex
                                 from dpc_client_core.dpc_agent.bm25_index import BM25Index
                                 from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
-                                provider = EmbeddingProvider(model_name=mem_cfg.embedding_model)
+                                provider = self._agent._embedding_provider if self._agent else EmbeddingProvider(model_name=mem_cfg.embedding_model)
                                 faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
                                 bm25_idx = BM25Index(index_dir)
                                 knowledge_dir = agent_root / "knowledge"
@@ -301,7 +301,6 @@ class DpcAgentManager:
                                         log.info("L6 human knowledge indexed: %d chunks from %s", l6_count, l6_dir)
                                 faiss_idx.save()
                                 bm25_idx.save()
-                                provider.unload()
                                 log.info("Memory index built: %d chunks (L5: %d, L6: %d)", count + l6_count, count, l6_count)
                             except Exception as e:
                                 log.warning("Background memory rebuild failed: %s", e)
