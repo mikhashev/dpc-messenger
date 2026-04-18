@@ -1668,7 +1668,7 @@ class ContextFirewall:
                                 if tool_name.startswith('_'):
                                     continue  # Skip comments
                                 if tool_name not in valid_tools:
-                                    errors.append(f"Unknown tool in dpc_agent.tools: '{tool_name}'")
+                                    logger.warning("Unknown tool in dpc_agent.tools: '%s' (ignored — may be from older config)", tool_name)
                                 if not isinstance(tool_enabled, bool):
                                     errors.append(f"'dpc_agent.tools.{tool_name}' must be a boolean")
 
@@ -1787,7 +1787,7 @@ class ContextFirewall:
                                         if tool_name.startswith('_'):
                                             continue  # Skip comments
                                         if tool_name not in valid_tools:
-                                            errors.append(f"Unknown tool in agent_profiles.{profile_name}.tools: '{tool_name}'")
+                                            logger.warning("Unknown tool in agent_profiles.%s.tools: '%s' (ignored)", profile_name, tool_name)
                                         if not isinstance(tool_enabled, bool):
                                             errors.append(f"'agent_profiles.{profile_name}.tools.{tool_name}' must be a boolean")
 
