@@ -1248,14 +1248,6 @@
     text-overflow: ellipsis;
   }
 
-  select {
-    padding: 0.25rem 0.5rem;
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    background: var(--bg-secondary);
-    color: var(--text-primary);
-  }
-
   /* Session History archive status */
   .archive-status {
     background: var(--bg-primary);
