@@ -136,7 +136,7 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 - **Chain depth increase** — 3 → 5-6 for complex multi-agent discussions (P13 external review)
 - **Schedule System** — daily autonomous Ark sessions with autonomy rules
 - **Agent Starter Pack** — skills bundle for open source first-run experience
-- **Tool registry ↔ Firewall sync** — 7 tools invisible in UI, 17 without classification (ARCH-1)
+- **Tool registry ↔ Firewall sync** — legacy knowledge tools removed (S55), remaining: invisible/unclassified tools audit (ARCH-1 partial)
 
 ### Success Metrics
 
