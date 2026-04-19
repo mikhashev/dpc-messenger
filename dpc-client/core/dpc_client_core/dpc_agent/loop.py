@@ -574,6 +574,9 @@ async def run_llm_loop(
             ctx.state.last_response_has_text = bool(content and content.strip())
             ctx.state.tool_calls_this_turn = len(tool_calls)
             ctx.state.accumulated_cost_usd = accumulated_usage.get("cost", 0.0)
+            ctx.state.last_assistant_text = content or ""
+            ctx.state.tool_calls_this_round = len(tool_calls)
+            ctx.state.current_round = ctx.round_idx
             ctx.state.recent_tool_args = [
                 {
                     "name": tc["function"]["name"],

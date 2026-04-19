@@ -57,6 +57,12 @@ class LoopState:
     accumulated_cost_usd: float = 0.0
     #: Last N tool-call argument dicts, oldest first.
     recent_tool_args: list[dict] = field(default_factory=list)
+    #: Full text of the last assistant response (for extraction triggers).
+    last_assistant_text: str = ""
+    #: Number of tool calls in the current round (alias for observer compat).
+    tool_calls_this_round: int = 0
+    #: Current round index (alias for observer compat).
+    current_round: int = 0
 
 
 @dataclass
@@ -88,6 +94,18 @@ class HookContext:
     @property
     def recent_tool_args(self) -> list:
         return self.state.recent_tool_args
+
+    @property
+    def last_assistant_text(self) -> str:
+        return self.state.last_assistant_text
+
+    @property
+    def tool_calls_this_round(self) -> int:
+        return self.state.tool_calls_this_round
+
+    @property
+    def current_round(self) -> int:
+        return self.state.current_round
 
 
 class BaseMiddleware:
