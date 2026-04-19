@@ -290,9 +290,30 @@ class TelegramBotManager:
                     )
                     logger.info(f"Telegram bot started (webhook mode on port {self.webhook_port})")
                 else:
-                    # Polling mode (development)
-                    await self.application.initialize()
-                    await self.application.start()
+                    # Polling mode (development) — retry on network errors
+                    _max_retries = 3
+                    _base_delay = 5
+                    for _attempt in range(_max_retries):
+                        try:
+                            await self.application.initialize()
+                            await self.application.start()
+                            break
+                        except NetworkError as e:
+                            if _attempt < _max_retries - 1:
+                                _delay = _base_delay * (2 ** _attempt)
+                                logger.warning(
+                                    "Telegram startup attempt %d/%d failed (%s), "
+                                    "retrying in %ds...",
+                                    _attempt + 1, _max_retries, e, _delay,
+                                )
+                                await asyncio.sleep(_delay)
+                                self.application = (
+                                    Application.builder()
+                                    .token(self.bot_token)
+                                    .build()
+                                )
+                            else:
+                                raise
 
                     # Stop bot immediately when a Conflict error is detected (another instance running)
                     async def _conflict_error_handler(update, context):
