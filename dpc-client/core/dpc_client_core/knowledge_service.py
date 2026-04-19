@@ -779,10 +779,9 @@ Respond in JSON format:
         """Notify the UI that consensus was reached and the commit was approved."""
         try:
             # Store result for agent store-and-poll (get_proposal_result tool)
-            safe_topic = "".join(
-                c if c.isalnum() or c in "_-" else "_"
-                for c in (commit.topic or "knowledge")
-            )[:50].strip() or "knowledge"
+            from dpc_protocol.markdown_manager import MarkdownKnowledgeManager
+            _mkm = MarkdownKnowledgeManager()
+            safe_topic = _mkm.sanitize_filename(commit.topic or "knowledge")
             markdown_file = f"knowledge/{safe_topic}_{commit.commit_id}.md"
             self.pending_results[commit.proposal_id] = {
                 "status": "approved",
@@ -815,7 +814,7 @@ Respond in JSON format:
             if firewall and not firewall.can_agent_access_context('knowledge'):
                 logger.info("MEM-3.7: L6 reindex skipped (human_knowledge_access disabled)")
             else:
-                commit_path = self.dpc_home_dir / "knowledge" / f"{safe_topic}_{commit.commit_id}.md"
+                commit_path = self.dpc_home_dir / markdown_file
                 if commit_path.exists():
                     dpc_agent_provider = self.llm_manager.providers.get("dpc_agent")
                     if dpc_agent_provider and hasattr(dpc_agent_provider, '_managers'):

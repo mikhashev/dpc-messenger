@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+import threading
 from dataclasses import dataclass, field, asdict
 from typing import Any, Dict, List, Optional
 
@@ -192,6 +193,7 @@ class EmbeddingProvider:
         self._device = device
         self._local_files_only = local_files_only
         self._model = None
+        self._load_lock = threading.Lock()
 
     @property
     def device(self) -> str:
@@ -208,7 +210,11 @@ class EmbeddingProvider:
         return "cpu"
 
     def _load_model(self):
-        if self._model is None:
+        if self._model is not None:
+            return
+        with self._load_lock:
+            if self._model is not None:
+                return
             from sentence_transformers import SentenceTransformer
             kwargs = {"device": self.device}
             if self._local_files_only:
