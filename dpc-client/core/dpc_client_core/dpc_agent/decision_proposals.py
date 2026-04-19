@@ -11,9 +11,12 @@ import json
 import logging
 import pathlib
 from dataclasses import dataclass, field, asdict
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 from .utils import utc_now_iso
+
+if TYPE_CHECKING:
+    from .llm_adapter import DpcLlmAdapter
 
 log = logging.getLogger(__name__)
 
@@ -110,3 +113,100 @@ def approve_proposal(
     proposal.status = "APPROVED"
     log.info("Approved %d decision entries to journal", count)
     return count
+
+
+EXTRACTION_PROMPT = """\
+You are a decision extractor. Analyze the conversation below and extract \
+concrete decisions, conclusions, or commitments that were made.
+
+Return a JSON array of objects. Each object must have exactly these fields:
+- "topic": short label (3-8 words)
+- "decision": what was decided (1-2 sentences)
+- "rationale": why it was decided (1 sentence, or empty string)
+- "participants": list of participant names mentioned
+
+Rules:
+- Extract only DECISIONS (agreed actions, chosen approaches, confirmed facts).
+- Skip questions, speculations, and unresolved discussions.
+- Maximum 5 entries. If more exist, keep the most significant ones.
+- Return [] if no clear decisions were made.
+- Return ONLY the JSON array, no markdown fencing, no commentary.
+
+Conversation:
+{conversation}
+"""
+
+MAX_PROPOSALS_PER_SESSION = 5
+
+
+async def extract_decisions(
+    llm: "DpcLlmAdapter",
+    conversation_messages: List[Dict[str, Any]],
+    trigger_events: List[dict],
+    agent_root: pathlib.Path,
+    session_id: str = "",
+) -> Optional[DecisionProposal]:
+    """Extract decisions from conversation via LLM and save as DRAFT proposal.
+
+    Called asynchronously after the agent loop completes.
+    Non-blocking — errors are caught and logged.
+    """
+    if not trigger_events:
+        return None
+
+    proposals_path = agent_root / "state" / "decision_proposals.jsonl"
+    existing = load_proposals(proposals_path)
+    session_count = sum(
+        1 for p in existing
+        if p.status == "DRAFT"
+    )
+    if session_count >= MAX_PROPOSALS_PER_SESSION:
+        log.debug("Session proposal limit reached (%d), skipping extraction",
+                   MAX_PROPOSALS_PER_SESSION)
+        return None
+
+    last_n = conversation_messages[-20:]
+    conv_text = "\n".join(
+        f"[{m.get('role', '?')}] {(m.get('content') or '')[:500]}"
+        for m in last_n
+        if m.get("role") in ("user", "assistant") and m.get("content")
+    )
+    if not conv_text.strip():
+        return None
+
+    prompt = EXTRACTION_PROMPT.format(conversation=conv_text)
+
+    try:
+        response, _ = await llm.chat(
+            messages=[{"role": "user", "content": prompt}],
+            tools=None,
+            max_tokens=1500,
+            background=True,
+        )
+        raw = (response or {}).get("content", "")
+        if not raw or not raw.strip():
+            return None
+
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0]
+
+        entries = json.loads(raw)
+        if not isinstance(entries, list) or not entries:
+            return None
+
+        trigger_reasons = []
+        for te in trigger_events:
+            trigger_reasons.extend(te.get("reasons", []))
+        trigger_reasons = list(set(trigger_reasons))
+
+        proposal = create_proposal(entries, trigger_reasons, session_id)
+        save_proposal(proposal, proposals_path)
+        log.info("Extracted %d decision entries from conversation", len(entries))
+        return proposal
+
+    except (json.JSONDecodeError, TypeError) as e:
+        log.debug("Decision extraction parse error: %s", e)
+    except Exception as e:
+        log.warning("Decision extraction failed: %s", e)
+    return None
