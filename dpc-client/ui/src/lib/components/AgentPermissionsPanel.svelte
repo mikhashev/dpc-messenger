@@ -610,7 +610,8 @@
               {/if}
               <span>Enable Consciousness</span>
             </label>
-            <p class="help-text-small">Agent reflects and plans between conversations (uses up to 10% of budget)</p>
+            <p class="help-text-small">Agent reflects, plans, and maintains memory quality between conversations (uses up to 10% of budget)</p>
+            <p class="help-text-small" style="color: #d32f2f; margin-top: 0.25rem;">⚠ When disabled: knowledge deduplication stops, decay accuracy reduced, evolution feedback limited</p>
           </div>
 
           {#if (editMode ? editSettings?.consciousness?.enabled : displaySettings.consciousness?.enabled)}
@@ -644,7 +645,9 @@
           {#if !editMode}
             <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
               <strong>Consciousness</strong> enables the agent to think autonomously between user messages —
-              self-reflection, planning, memory consolidation. Budget-capped at 10% of agent budget.
+              self-reflection, planning, memory consolidation, and knowledge quality maintenance.
+              Budget-capped at 10% of agent budget.
+              <span style="color: #d32f2f;">When disabled: deduplication stops, knowledge decay loses one signal source, evolution feedback is reduced.</span>
             </div>
           {/if}
         </div>
