@@ -145,15 +145,21 @@ def _dedup_entries(
     """Remove entries whose topics already exist in prior proposals.
 
     Returns (unique_entries, suppressed_count).
-    Uses proposal-level topic set matching to catch both individual
-    duplicate entries and fully duplicated proposal batches.
+    Uses both proposal-level checksum (catches fully duplicated batches)
+    and entry-level topic matching (catches individual duplicate entries).
     """
-    existing_topics: set = set()
+    new_topics = frozenset(e.get("topic", "").lower().strip() for e in new_entries)
+    for p in existing_proposals:
+        existing_topics = frozenset(e.topic.lower().strip() for e in p.entries)
+        if new_topics == existing_topics:
+            return [], len(new_entries)
+
+    existing_all_topics: set = set()
     for p in existing_proposals:
         for e in p.entries:
-            existing_topics.add(e.topic.lower().strip())
+            existing_all_topics.add(e.topic.lower().strip())
 
-    unique = [e for e in new_entries if e.get("topic", "").lower().strip() not in existing_topics]
+    unique = [e for e in new_entries if e.get("topic", "").lower().strip() not in existing_all_topics]
     return unique, len(new_entries) - len(unique)
 
 

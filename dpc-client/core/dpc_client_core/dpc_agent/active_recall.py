@@ -85,7 +85,7 @@ def _log_knowledge_access(
     access_path = agent_root / "state" / "knowledge_access.jsonl"
     access_path.parent.mkdir(parents=True, exist_ok=True)
     files = [r.chunk_meta.get("source_file", "unknown") for r in results]
-    entry = {"ts": utc_now_iso(), "mode": mode, "files": files}
+    entry = {"ts": utc_now_iso(), "mode": mode, "files": files, "useful": None}
     try:
         with open(access_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")

@@ -435,7 +435,8 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
 
         # Dedup: skip if last thought has same type and similar observation within 1h
         if structured and self._is_duplicate_thought(agent_root, thought_type, structured):
-            log.info(f"Consciousness: skipped duplicate {thought_type} thought (same observation <1h)")
+            self._increment_suppressed_count(agent_root)
+            log.info(f"Consciousness: skipped duplicate {thought_type} thought (suppressed_count incremented)")
             return
 
         if structured:
@@ -520,6 +521,24 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
             return (common / max_len) > 0.8
         except Exception:
             return False
+
+    @staticmethod
+    def _increment_suppressed_count(agent_root) -> None:
+        """Increment suppressed_count on the last consciousness log entry."""
+        try:
+            log_path = agent_root / "logs" / "consciousness.jsonl"
+            if not log_path.exists():
+                return
+            lines = log_path.read_text(encoding="utf-8").strip().split("\n")
+            if not lines or not lines[-1].strip():
+                return
+            import json
+            last = json.loads(lines[-1])
+            last["suppressed_count"] = last.get("suppressed_count", 0) + 1
+            lines[-1] = json.dumps(last, ensure_ascii=False)
+            log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:
+            pass
 
     @staticmethod
     def _parse_structured_response(response: str) -> Optional[dict]:
