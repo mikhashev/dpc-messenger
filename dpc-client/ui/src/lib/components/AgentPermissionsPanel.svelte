@@ -890,6 +890,22 @@
                         bind:value={editSettings.sandbox_extensions.read_only[i]}
                         placeholder="C:\Users\you\Documents\notes"
                       />
+                      <label class="index-toggle" title="Index this path for agent memory search">
+                        <input
+                          type="checkbox"
+                          checked={(editSettings.sandbox_extensions.indexed_paths || []).includes(editSettings.sandbox_extensions.read_only[i])}
+                          on:change={(e) => {
+                            if (!editSettings.sandbox_extensions.indexed_paths) editSettings.sandbox_extensions.indexed_paths = [];
+                            const p = editSettings.sandbox_extensions.read_only[i];
+                            if (e.target.checked) {
+                              if (!editSettings.sandbox_extensions.indexed_paths.includes(p)) editSettings.sandbox_extensions.indexed_paths = [...editSettings.sandbox_extensions.indexed_paths, p];
+                            } else {
+                              editSettings.sandbox_extensions.indexed_paths = editSettings.sandbox_extensions.indexed_paths.filter(x => x !== p);
+                            }
+                          }}
+                        />
+                        <span class="index-label">Index</span>
+                      </label>
                       <button
                         type="button"
                         class="btn-path-remove"
@@ -944,7 +960,7 @@
                   <span class="path-label">📖 Read-Only Paths</span>
                   <ul class="path-list">
                     {#each displaySettings.sandbox_extensions.read_only || [] as path}
-                      <li>{path}</li>
+                      <li>{path} {#if (displaySettings.sandbox_extensions.indexed_paths || []).includes(path)}<span class="indexed-badge">📇 Indexed</span>{/if}</li>
                     {/each}
                   </ul>
                 </div>
