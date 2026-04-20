@@ -186,6 +186,9 @@ class ContextFirewall:
             # Session archive tools (v0.22.0+ - read-only access to own history)
             'read_session_archive': True,  # Read session summaries
             'read_session_detail': True,  # Read session messages
+            # Proposal review tools (ADR-013 Selection Layer)
+            'list_proposals': True,  # Read-only: list decision proposals
+            'review_proposal': True,  # Review (approve/reject) a DRAFT proposal
         }
 
         # Parse tool permissions from config, using defaults for missing tools

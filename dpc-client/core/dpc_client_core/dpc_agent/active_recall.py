@@ -86,7 +86,10 @@ def get_recall_block(
 
 
 def _build_access_counts(agent_root: pathlib.Path) -> Dict[str, int]:
-    """Build access frequency map from live JSONL + retroactive tools.jsonl."""
+    """Build access frequency map from live JSONL + retroactive tools.jsonl.
+
+    Sources: S1 live data, retroactive knowledge reads, skill usage (S8).
+    """
     counts: Dict[str, int] = Counter()
 
     # Source 1: live knowledge_access.jsonl (S1 data)
@@ -102,7 +105,7 @@ def _build_access_counts(agent_root: pathlib.Path) -> Dict[str, int]:
         except (json.JSONDecodeError, OSError):
             pass
 
-    # Source 2: retroactive baseline from tools.jsonl
+    # Source 2 + S8: retroactive baseline from tools.jsonl (knowledge reads + skill usage)
     tools_path = agent_root / "logs" / "tools.jsonl"
     if tools_path.exists():
         try:
@@ -115,10 +118,30 @@ def _build_access_counts(agent_root: pathlib.Path) -> Dict[str, int]:
                 path_val = args.get("path", "")
                 if tool == "read_file" and "knowledge" in path_val.lower():
                     counts[os.path.basename(path_val)] += 1
+                elif tool == "execute_skill":
+                    skill_name = args.get("skill_name", args.get("name", ""))
+                    if skill_name:
+                        counts[f"skill:{skill_name}"] += 1
         except (json.JSONDecodeError, OSError):
             pass
 
+    # S9: startup init — if no live data yet, ensure retro baseline is used
+    if not live_path.exists() and counts:
+        log.debug("S9 startup: no live knowledge_access.jsonl, using retroactive baseline only")
+
     return dict(counts)
+
+
+def _check_consciousness_config(agent_root: pathlib.Path) -> bool:
+    """Check if consciousness is enabled (S7 graceful degradation)."""
+    config_path = agent_root / "config.json"
+    if not config_path.exists():
+        return False
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        return bool(config.get("background_consciousness", False))
+    except (json.JSONDecodeError, OSError):
+        return False
 
 
 def _apply_decay(
@@ -127,7 +150,11 @@ def _apply_decay(
     """Re-rank results by access frequency. Unused files sink, used files float.
 
     ADR-013 S4: decay floor 0.1, grace period for new files.
+    S7: consciousness config awareness — log when OFF.
     """
+    if not _check_consciousness_config(agent_root):
+        log.debug("S7: consciousness OFF — suppressed_count signal unavailable for decay")
+
     counts = _build_access_counts(agent_root)
     if not counts:
         return results
