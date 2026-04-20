@@ -246,6 +246,7 @@ class EvolutionManager:
         })
 
         proposals: List[Dict[str, Any]] = []
+        analysis: Dict[str, Any] = {}
         try:
             # Step 1: Analyze state
             log.info(f"Starting evolution cycle {self._cycle_count}")
@@ -263,6 +264,7 @@ class EvolutionManager:
                     continue
 
                 if self.auto_apply:
+                    self._snapshot_baseline(proposal)
                     success = await self._apply_change(proposal)
                     if success:
                         cycle.changes_applied += 1
@@ -316,6 +318,12 @@ class EvolutionManager:
 
         # Log cycle to file
         self._log_cycle(cycle)
+
+        # Record rolling metrics (P2 2B)
+        try:
+            self._record_cycle_metrics(cycle, analysis)
+        except Exception as e:
+            log.debug("Failed to record cycle metrics: %s", e)
 
         return cycle
 
@@ -442,6 +450,12 @@ class EvolutionManager:
                 if preview.strip():
                     recent_thoughts.append(f"[{thought_type}] {preview}")
 
+        # P2 2A: evaluate outcomes of previously applied proposals
+        proposal_outcomes = self._evaluate_outcomes()
+
+        # P2 2B: get rolling metrics trend
+        metrics_trend = self._get_metrics_trend()
+
         return {
             "files_examined": 5,
             "tool_calls_count": len(tools_log),
@@ -460,6 +474,8 @@ class EvolutionManager:
             "recent_thoughts": recent_thoughts,
             "digest_sessions": len(digest_trends),
             "digest_latest": digest_trends[-3:] if digest_trends else [],
+            "proposal_outcomes": proposal_outcomes,
+            "metrics_trend": metrics_trend,
         }
 
     # Maximum size for skill files — beyond this, append proposals are skipped
@@ -547,6 +563,8 @@ class EvolutionManager:
 {tool_quality_section}
 
 {thoughts_section}
+
+{analysis.get('metrics_trend', '')}
 
 {skill_section}
 
@@ -688,6 +706,144 @@ If no improvements are warranted: {{"proposals": []}}
         except Exception as e:
             log.error(f"Failed to apply change to {path}: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # P2: Proposal Outcome Tracking (2A) + Rolling Metrics (2B)
+    # ------------------------------------------------------------------
+
+    def _snapshot_baseline(self, proposal: Dict) -> None:
+        """Save baseline metrics before applying a proposal (2A)."""
+        memory = self.agent.memory
+        tools_log = memory.read_jsonl_since("tools.jsonl", hours=24.0, max_entries=500)
+        if not tools_log:
+            tools_log = memory.read_jsonl_tail("tools.jsonl", 50)
+
+        error_count = sum(1 for e in tools_log if e.get("is_error") or str(e.get("result_preview", "")).startswith("⚠️"))
+        total = len(tools_log) or 1
+
+        entry = {
+            "proposal_id": proposal.get("description", "")[:100],
+            "path": proposal.get("path", ""),
+            "change_type": proposal.get("change_type", ""),
+            "applied_at": utc_now_iso(),
+            "baseline": {
+                "tool_error_rate": round(error_count / total, 3),
+                "tool_calls": total,
+            },
+            "outcome": None,
+        }
+        outcomes_path = self.agent_root / "state" / "proposal_outcomes.jsonl"
+        append_jsonl(outcomes_path, entry)
+
+    def _evaluate_outcomes(self) -> List[Dict[str, Any]]:
+        """Check outcomes of previously applied proposals (2A).
+
+        Compares current metrics against baselines saved at apply time.
+        Returns list of evaluated outcomes for the evolution prompt.
+        """
+        outcomes_path = self.agent_root / "state" / "proposal_outcomes.jsonl"
+        if not outcomes_path.exists():
+            return []
+
+        memory = self.agent.memory
+        tools_log = memory.read_jsonl_since("tools.jsonl", hours=24.0, max_entries=500)
+        if not tools_log:
+            tools_log = memory.read_jsonl_tail("tools.jsonl", 50)
+
+        current_errors = sum(1 for e in tools_log if e.get("is_error") or str(e.get("result_preview", "")).startswith("⚠️"))
+        current_total = len(tools_log) or 1
+        current_error_rate = round(current_errors / current_total, 3)
+
+        evaluated = []
+        lines = []
+        try:
+            with open(outcomes_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+
+                    if entry.get("outcome") is not None:
+                        lines.append(json.dumps(entry, ensure_ascii=False))
+                        continue
+
+                    baseline_rate = entry.get("baseline", {}).get("tool_error_rate", 0)
+                    delta = round(current_error_rate - baseline_rate, 3)
+                    verdict = "improved" if delta < -0.02 else ("regressed" if delta > 0.05 else "neutral")
+                    entry["outcome"] = {
+                        "current_error_rate": current_error_rate,
+                        "delta": delta,
+                        "verdict": verdict,
+                        "evaluated_at": utc_now_iso(),
+                    }
+                    lines.append(json.dumps(entry, ensure_ascii=False))
+                    evaluated.append(entry)
+        except Exception as e:
+            log.debug("Failed to evaluate proposal outcomes: %s", e)
+            return []
+
+        try:
+            outcomes_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except Exception:
+            pass
+
+        return evaluated
+
+    def _record_cycle_metrics(self, cycle: "EvolutionCycle", analysis: Dict) -> None:
+        """Record per-cycle rolling metrics (2B)."""
+        entry = {
+            "cycle_id": cycle.id,
+            "ts": utc_now_iso(),
+            "tool_error_rate": analysis.get("tool_error_rate", 0.0),
+            "tool_calls": analysis.get("tool_calls_count", 0),
+            "proposals_generated": cycle.changes_proposed,
+            "proposals_applied": cycle.changes_applied,
+        }
+
+        outcomes = self._evaluate_outcomes()
+        entry["proposals_regressed"] = sum(1 for o in outcomes if o.get("outcome", {}).get("verdict") == "regressed")
+        entry["proposals_improved"] = sum(1 for o in outcomes if o.get("outcome", {}).get("verdict") == "improved")
+
+        metrics_path = self.agent_root / "state" / "evolution_metrics.jsonl"
+        append_jsonl(metrics_path, entry)
+
+    def _get_metrics_trend(self) -> str:
+        """Get last 5 cycle metrics as a trend summary for the evolution prompt (2B)."""
+        metrics_path = self.agent_root / "state" / "evolution_metrics.jsonl"
+        if not metrics_path.exists():
+            return ""
+
+        entries = []
+        try:
+            with open(metrics_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            entries.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
+        except Exception:
+            return ""
+
+        if not entries:
+            return ""
+
+        last_5 = entries[-5:]
+        lines = ["## Evolution Trend (last cycles)\n"]
+        for e in last_5:
+            lines.append(
+                f"- {e.get('cycle_id', '?')}: error_rate={e.get('tool_error_rate', 0):.1%}, "
+                f"proposals={e.get('proposals_generated', 0)}, "
+                f"applied={e.get('proposals_applied', 0)}, "
+                f"regressed={e.get('proposals_regressed', 0)}, "
+                f"improved={e.get('proposals_improved', 0)}"
+            )
+        return "\n".join(lines)
 
     def _queue_for_approval(self, proposal: Dict) -> str:
         """
