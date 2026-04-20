@@ -228,6 +228,8 @@ CORE_TOOL_NAMES = {
     "list_my_tools", "list_my_skills",
     # Session archive tools (read-only access to conversation history)
     "read_session_archive", "read_session_detail",
+    # Proposal review tools (ADR-013 Selection Layer)
+    "list_proposals", "review_proposal",
 }
 
 # Restricted tools (require explicit enable in config)

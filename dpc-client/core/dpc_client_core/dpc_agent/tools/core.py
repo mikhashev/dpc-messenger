@@ -1731,6 +1731,73 @@ def search_in_file(ctx: ToolContext, pattern: str, file_path: str, context_lines
 
 
 # ---------------------------------------------------------------------------
+# Proposal Review (ADR-013, MEM-4.3)
+# ---------------------------------------------------------------------------
+
+def review_proposal(ctx: ToolContext, batch_index: int, action: str, reason: str = "") -> str:
+    """Review a DRAFT decision proposal — approve or reject (ADR-013 Selection Layer)."""
+    from ..decision_proposals import load_proposals, log_extraction_feedback
+
+    proposals_path = ctx.agent_root / "state" / "decision_proposals.jsonl"
+    proposals = load_proposals(proposals_path)
+
+    if batch_index < 0 or batch_index >= len(proposals):
+        return json.dumps({"error": f"Invalid batch_index {batch_index}, have {len(proposals)} batches"})
+
+    proposal = proposals[batch_index]
+    if proposal.status != "DRAFT":
+        return json.dumps({"error": f"Batch {batch_index} already reviewed (status={proposal.status})"})
+
+    if action not in ("approved", "rejected"):
+        return json.dumps({"error": "action must be 'approved' or 'rejected'"})
+
+    proposal.status = action.upper()
+
+    for entry in proposal.entries:
+        log_extraction_feedback(entry.topic, action, reason, ctx.agent_root)
+
+    lines = []
+    for p in proposals:
+        from dataclasses import asdict
+        lines.append(json.dumps(asdict(p), ensure_ascii=False))
+    proposals_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    draft_count = sum(1 for p in proposals if p.status == "DRAFT")
+    return json.dumps({
+        "status": "ok",
+        "batch_index": batch_index,
+        "action": action,
+        "entries_count": len(proposal.entries),
+        "remaining_drafts": draft_count,
+    })
+
+
+def list_proposals(ctx: ToolContext) -> str:
+    """List all decision proposals with their status."""
+    from ..decision_proposals import load_proposals
+
+    proposals_path = ctx.agent_root / "state" / "decision_proposals.jsonl"
+    proposals = load_proposals(proposals_path)
+
+    if not proposals:
+        return json.dumps({"proposals": [], "total": 0, "drafts": 0})
+
+    result = []
+    for i, p in enumerate(proposals):
+        topics = [e.topic for e in p.entries]
+        result.append({
+            "index": i,
+            "status": p.status,
+            "created_at": p.created_at,
+            "topics": topics,
+            "entry_count": len(p.entries),
+        })
+
+    draft_count = sum(1 for p in proposals if p.status == "DRAFT")
+    return json.dumps({"proposals": result, "total": len(proposals), "drafts": draft_count})
+
+
+# ---------------------------------------------------------------------------
 # Tool Registry Export
 # ---------------------------------------------------------------------------
 
@@ -2394,5 +2461,45 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=memory_search,
             timeout_sec=60,
+        ),
+
+        # Proposal review (ADR-013, MEM-4.3)
+        ToolEntry(
+            name="list_proposals",
+            schema={
+                "name": "list_proposals",
+                "description": "List all decision proposals with status (DRAFT/APPROVED/REJECTED)",
+                "parameters": {"type": "object", "properties": {}}
+            },
+            handler=list_proposals,
+            timeout_sec=5,
+        ),
+        ToolEntry(
+            name="review_proposal",
+            schema={
+                "name": "review_proposal",
+                "description": "Review a DRAFT proposal batch — approve or reject. Writes feedback for Selection Layer prompt adjustment.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "batch_index": {
+                            "type": "integer",
+                            "description": "Index of the proposal batch to review (from list_proposals)"
+                        },
+                        "action": {
+                            "type": "string",
+                            "enum": ["approved", "rejected"],
+                            "description": "Approve or reject the proposal"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Why this proposal was approved/rejected"
+                        }
+                    },
+                    "required": ["batch_index", "action"]
+                }
+            },
+            handler=review_proposal,
+            timeout_sec=10,
         ),
     ]
