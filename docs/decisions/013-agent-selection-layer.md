@@ -112,6 +112,21 @@ Key constraints for Phase 2:
 - **Grace period:** new knowledge files get 5 sessions before decay kicks in
 - **Prompt adjustment:** additive instruction to extraction prompt based on aggregate rejection patterns, not per-rejection modification
 
+### Phase 2.5: Robustness (S7-S9, ~60-80 lines)
+
+Addresses edge cases discovered during S59 runtime verification.
+
+| Step | What | Depends on |
+|---|---|---|
+| **S7** | Consciousness config awareness — decay/rejection check consciousness ON/OFF and interval before relying on consciousness-derived signals | S4, S5 |
+| **S8** | Skills usage as decay signal — execute_skill frequency from tools.jsonl feeds into _build_access_counts() | S4 |
+| **S9** | Startup data initialization — if knowledge_access.jsonl doesn't exist, pre-populate access patterns from tools.jsonl retroactive data | S1 |
+
+Key constraints for Phase 2.5:
+- **S7 graceful degradation:** if consciousness OFF, skip suppressed_count signal, continue with other data sources — not failure, degradation
+- **S8 bonus multiplier:** skills frequency is a bonus multiplier for knowledge file scoring, not a replacement — frequently used skill → related knowledge files float
+- **S9 one-time migration:** runs only when knowledge_access.jsonl is missing or empty, not periodic
+
 ### Phase 3: Full Feedback Loop (future, scope TBD)
 
 Connects all subsystems through shared metrics:
@@ -137,12 +152,15 @@ This phase corresponds to Sleep Consolidation Phase 3 from S8 design. Scope and 
 - **Extraction quality improves over time.** Rejection feedback loop creates the missing selection mechanism identified in S30/S43.
 - **Agent autonomy bounded.** Agent handles routine filtering without human involvement, but cannot make subjective quality judgments — only deterministic operations on data.
 - **Human cognitive load reduced.** Mike sees filtered output, not raw producer noise.
+- **Skills data connected.** Skill usage patterns feed into knowledge decay scoring, reducing blind spot where frequently-used-but-never-recalled knowledge files decay incorrectly.
+- **Graceful degradation under config changes.** Selection Layer continues operating when consciousness is disabled or reconfigured, rather than silently degrading.
 
 ### Negative
 
 - **New log files.** `knowledge_access.jsonl` and `extraction_feedback.jsonl` add data to disk. Mitigated by rotation (cap at 100 entries).
 - **Phase 2 uses dual data sources.** Retroactive baseline from 71+ session archives provides immediate patterns; live S1-S3 data supplements over time. Archive format differs from live format (raw tool calls vs structured JSONL), requiring a parser for each source.
 - **Deterministic rules may miss edge cases.** String similarity dedup won't catch semantic duplicates with different wording. Acceptable for Phase 1 — Phase 3 embedding-based similarity can improve this.
+- **Skills signal coupling.** Connecting skills to decay creates a dependency between Selection Layer and Skills system. Skill renaming or removal may affect decay scoring unexpectedly.
 
 ---
 
@@ -153,6 +171,7 @@ This phase corresponds to Sleep Consolidation Phase 3 from S8 design. Scope and 
 - **Cross-agent selection.** Each agent applies selection to its own subsystems. No coordination mechanism between agents.
 - **Archive cleanup.** 71 session archives grow without bounds. Selection layer does not address this directly — Sleep Consolidation Phase 3 addresses archive analysis.
 - **L3 (CC memory).** CC's auto-memory operates independently. Not in scope.
+- **Adaptive recall thresholds.** Active Recall hint density thresholds (0.5/0.7) are hardcoded per context window. Making these adaptive to model context size is a UX task for Active Recall, not Selection Layer.
 
 ---
 
