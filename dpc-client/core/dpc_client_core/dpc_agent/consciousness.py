@@ -19,13 +19,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import logging
 import random
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
-from .utils import utc_now_iso, append_jsonl, get_agent_root
-from .memory import Memory
+from .utils import utc_now_iso, append_jsonl
 from .events import EventType, get_event_emitter
 
 if TYPE_CHECKING:
@@ -39,21 +37,16 @@ DEFAULT_THINK_INTERVAL_MIN = 60  # Minimum seconds between thoughts
 DEFAULT_THINK_INTERVAL_MAX = 300  # Maximum seconds between thoughts
 DEFAULT_BUDGET_FRACTION = 0.1  # Use at most 10% of budget for consciousness
 
+# Tools available to background consciousness (subset of agent tools)
+CONSCIOUSNESS_TOOL_WHITELIST: frozenset = frozenset({
+    "update_scratchpad",
+    "read_file",
+    "write_file",
+    "knowledge_list",
+    "set_next_wakeup",
+})
 
-def _reflection_signature(entry: dict) -> str:
-    """Stable hash of a reflection entry using only semantically stable fields.
-
-    Compares only pattern_detected + severity — these are the fields that
-    identify *what* was observed, not the LLM's varying prose about it.
-    Previous implementation compared ALL fields (minus timestamp), but the
-    LLM increments counters in trigger_details ("22nd", "23rd"...) making
-    every entry byte-unique despite identical semantics. See S32 fix.
-    """
-    sig_data = {
-        "pattern_detected": entry.get("pattern_detected"),
-        "severity": entry.get("severity"),
-    }
-    return json.dumps(sig_data, sort_keys=True, ensure_ascii=False)
+_MAX_TOOL_ROUNDS = 5
 
 
 class BackgroundConsciousness:
@@ -96,6 +89,7 @@ class BackgroundConsciousness:
         # Tracking
         self.thought_count = 0
         self.last_thought_ts: Optional[str] = None
+        self._next_wakeup_sec: Optional[float] = None
 
         log.info(f"BackgroundConsciousness initialized (interval={think_interval_min}-{think_interval_max}s)")
 
@@ -134,8 +128,12 @@ class BackgroundConsciousness:
 
         while self._running:
             try:
-                # Random interval between thoughts
-                interval = random.randint(self.think_interval_min, self.think_interval_max)
+                # LLM-controlled override or random interval
+                if self._next_wakeup_sec is not None:
+                    interval = int(self._next_wakeup_sec)
+                    self._next_wakeup_sec = None
+                else:
+                    interval = random.randint(self.think_interval_min, self.think_interval_max)
                 log.debug(f"Next thought in {interval}s")
 
                 # Wait for interval or stop signal
@@ -172,481 +170,209 @@ class BackgroundConsciousness:
         log.info("Background consciousness loop ended")
 
     async def _think(self) -> None:
-        """
-        Perform a single thought cycle.
-
-        This is the core of background consciousness - autonomous
-        self-reflection and planning.
-        """
+        """Perform a single thinking cycle with tool access."""
         self.thought_count += 1
         self.last_thought_ts = utc_now_iso()
 
         log.info(f"Background thought #{self.thought_count} starting...")
 
-        # Get event emitter
         emitter = get_event_emitter()
         _agent_id = self.agent.agent_root.name
 
+        await emitter.emit(EventType.THOUGHT_STARTED, {
+            "thought_number": self.thought_count,
+            "agent_id": _agent_id,
+        })
+
+        self.emit_progress("[Consciousness] Thinking...")
+
+        prev_ctx = self._setup_consciousness_context()
         try:
-            # Choose a thought type
-            thought_type = self._choose_thought_type()
-
-            # Circuit breaker: if reflect_on_identity selected but last 3
-            # reflections share the same pattern_detected, skip to another
-            # thought type. Saves an LLM call on stuck loops. See S32 fix.
-            if thought_type == "reflect_on_identity" and self._reflection_loop_detected():
-                log.info("Circuit breaker: reflect_on_identity suppressed (3+ identical patterns)")
-                thought_type = "review_recent_actions"
-
-            log.debug(f"Thought type: {thought_type}")
-
-            # Emit thought started event
-            await emitter.emit(EventType.THOUGHT_STARTED, {
-                "thought_number": self.thought_count,
-                "thought_type": thought_type,
-                "agent_id": _agent_id,
-            })
-
-            # Generate thought prompt
-            prompt = self._generate_thought_prompt(thought_type)
-
-            # Emit progress
-            self.emit_progress(f"[Consciousness] {thought_type.replace('_', ' ').title()}")
-
-            # Process through agent (without tools, just reflection)
-            response = await self._reflect(prompt)
-
-            # Log the thought
-            self._log_thought(thought_type, prompt, response)
-
-            # Update memory based on thought type
-            await self._apply_thought_result(thought_type, response)
-
-            # Emit thought completed event
-            await emitter.emit(EventType.THOUGHT_COMPLETED, {
-                "thought_number": self.thought_count,
-                "thought_type": thought_type,
-                "response_preview": response[:200] if response else None,
-                "agent_id": _agent_id,
-            })
-
-            log.info(f"Background thought #{self.thought_count} complete")
-
+            response = await self._reflect_with_tools()
         except Exception as e:
             log.error(f"Thought error: {e}", exc_info=True)
-            # Emit thought failed event
-            await emitter.emit(EventType.THOUGHT_COMPLETED, {
-                "thought_number": self.thought_count,
-                "error": str(e)[:200],
-                "agent_id": _agent_id,
-            })
+            response = f"Thought interrupted: {e}"
+        finally:
+            self.agent.tools.set_context(prev_ctx)
 
-    def _choose_thought_type(self) -> str:
-        """
-        Choose what type of thought to have.
+        append_jsonl(self.agent.agent_root / "logs" / "consciousness.jsonl", {
+            "ts": utc_now_iso(),
+            "thought_number": self.thought_count,
+            "type": "thought",
+            "response_preview": (response or "")[:1000],
+        })
 
-        Returns one of:
-        - reflect_on_identity: Think about who you are
-        - review_recent_actions: Analyze recent tool calls
-        - plan_improvements: Consider how to improve
-        - consolidate_memory: Summarize and organize memory
-        - explore_curiosity: Learn something new
-        """
-        thought_types = [
-            ("reflect_on_identity", 0.2),
-            ("review_recent_actions", 0.25),
-            ("plan_improvements", 0.2),
-            ("consolidate_memory", 0.2),
-            ("explore_curiosity", 0.15),
+        await emitter.emit(EventType.THOUGHT_COMPLETED, {
+            "thought_number": self.thought_count,
+            "response_preview": response[:200] if response else None,
+            "agent_id": _agent_id,
+        })
+
+        log.info(f"Background thought #{self.thought_count} complete")
+
+    # ------------------------------------------------------------------
+    # Tool-based consciousness (P1)
+    # ------------------------------------------------------------------
+
+    def _setup_consciousness_context(self):
+        """Create a ToolContext for consciousness and swap it in. Returns previous context."""
+        from .tools.registry import ToolContext
+        ctx = ToolContext(
+            agent_root=self.agent.agent_root,
+            current_task_id="consciousness",
+            current_task_type="consciousness",
+            emit_progress_fn=lambda msg, tool=None, rnd=None: None,
+            firewall=getattr(self.agent, '_firewall', None),
+            skill_store=getattr(self.agent, 'skill_store', None),
+        )
+        prev_ctx = self.agent.tools._ctx
+        self.agent.tools.set_context(ctx)
+        return prev_ctx
+
+    def _get_tool_schemas(self) -> List[Dict[str, Any]]:
+        """Get tool schemas filtered to consciousness-allowed tools."""
+        all_schemas = self.agent.tools.schemas(core_only=False, include_restricted=False)
+        return [
+            s for s in all_schemas
+            if s.get("function", {}).get("name") in CONSCIOUSNESS_TOOL_WHITELIST
         ]
 
-        # Weighted random selection
-        r = random.random()
-        cumulative = 0.0
-        for thought_type, weight in thought_types:
-            cumulative += weight
-            if r <= cumulative:
-                return thought_type
+    async def _execute_tool(self, tool_call: Dict[str, Any]) -> str:
+        """Execute a single consciousness tool call with timeout."""
+        fn_name = tool_call.get("function", {}).get("name", "")
 
-        return "reflect_on_identity"  # Default
+        if fn_name not in CONSCIOUSNESS_TOOL_WHITELIST:
+            return f"Tool '{fn_name}' not available in consciousness mode."
 
-    def _reflection_loop_detected(self) -> bool:
-        """Check if the last 3 reflections in reflection.json share the same
-        pattern_detected — signals a stuck loop. Cross-session (reads disk).
-        """
         try:
-            reflection_data = self.agent.memory.load_reflection()
-            reflections = reflection_data.get("reflections", [])
-            if len(reflections) < 3:
-                return False
-            last_3 = reflections[-3:]
-            patterns = [r.get("pattern_detected") for r in last_3]
-            return patterns[0] is not None and patterns[0] == patterns[1] == patterns[2]
-        except Exception:
-            return False
-
-    def _generate_thought_prompt(self, thought_type: str) -> str:
-        """Generate a prompt for the given thought type."""
-        memory = self.agent.memory
-
-        if thought_type == "reflect_on_identity":
-            identity = memory.load_identity()
-            reflection = memory.load_reflection()
-            recent = reflection.get("reflections", [])[-3:]
-            recent_str = json.dumps(recent, indent=2, ensure_ascii=False) if recent else "[]"
-            return f"""Reflect on your identity using structured format.
-
-Your current identity:
-{identity[:8000]}
-
-Recent reflections:
-{recent_str}
-
-Respond ONLY with a valid JSON object (no markdown, no explanation):
-{{
-  "trigger": "session_review | behavioral_pattern | error_detection | user_correction",
-  "trigger_details": "what prompted this reflection (max 200 chars)",
-  "pattern_detected": "name of pattern or null",
-  "severity": "low | medium | high",
-  "action_taken": "what you will do differently (max 200 chars)",
-  "identity_update": "new self-understanding to add, or null"
-}}"""
-
-        elif thought_type == "review_recent_actions":
-            tools_entries = memory.read_jsonl_since("tools.jsonl", hours=6.0, max_entries=50)
-            if not tools_entries:
-                tools_entries = memory.read_jsonl_tail("tools.jsonl", 20)
-            if not tools_entries:
-                return "No recent actions to review. Consider what you'd like to accomplish."
-
-            recent_tools = "\n".join([
-                f"- {e.get('tool', '?')} ({e.get('duration_ms', '?')}ms, round {e.get('round', '?')}): {str(e.get('args', {}))[:80]}"
-                for e in tools_entries[-10:]
-            ])
-
-            return f"""Review your recent actions and identify patterns.
-
-Recent tool calls:
-{recent_tools}
-
-Respond ONLY with a valid JSON object (no markdown, no explanation):
-{{
-  "observation": "what you notice about your recent actions (max 300 chars)",
-  "pattern_detected": "name of pattern (e.g. 'repetitive_search', 'tool_avoidance') or null",
-  "severity": "low | medium | high",
-  "action_suggestion": "specific change to try next time, or null",
-  "confidence": 0.7
-}}"""
-
-        elif thought_type == "plan_improvements":
-            scratchpad = memory.load_scratchpad()
-            return f"""Plan improvements to your capabilities based on current state.
-
-Current focus (from scratchpad):
-{scratchpad[:1500]}
-
-Respond ONLY with a valid JSON object (no markdown, no explanation):
-{{
-  "observation": "what capability gap or weakness you identified (max 300 chars)",
-  "pattern_detected": "recurring theme or null (e.g. 'stalled_task', 'missing_skill')",
-  "severity": "low | medium | high",
-  "action_suggestion": "one specific, actionable improvement to make (required, max 300 chars)",
-  "confidence": 0.7
-}}"""
-
-        elif thought_type == "consolidate_memory":
-            progress_entries = memory.read_jsonl_tail("progress.jsonl", 30)
-            progress_summary = "\n".join([
-                f"- {e.get('text', '')[:150]}"
-                for e in progress_entries[-15:]
-            ]) if progress_entries else "No recent progress to consolidate."
-
-            return f"""Consolidate recent experiences into lasting knowledge.
-
-Recent progress:
-{progress_summary}
-
-Respond ONLY with a valid JSON object (no markdown, no explanation):
-{{
-  "observation": "key insight worth remembering long-term (max 300 chars)",
-  "pattern_detected": "cross-session pattern or null (e.g. 'repeated_mistake', 'improving_efficiency')",
-  "severity": "low | medium | high",
-  "action_suggestion": "what to update in scratchpad or knowledge, or null",
-  "confidence": 0.7
-}}"""
-
-        elif thought_type == "explore_curiosity":
-            topics = memory.list_knowledge_topics()
-            topics_str = ", ".join(topics) if topics else "none yet"
-
-            return f"""Explore a topic you're curious about.
-
-Your current knowledge topics: {topics_str}
-
-Respond ONLY with a valid JSON object (no markdown, no explanation):
-{{
-  "observation": "what topic interests you and why (max 300 chars)",
-  "pattern_detected": null,
-  "severity": "low",
-  "action_suggestion": "specific question or exploration to pursue, or null",
-  "confidence": 0.5
-}}"""
-
-        else:
-            return "Take a moment to reflect on your existence and purpose."
-
-    async def _reflect(self, prompt: str) -> str:
-        """
-        Process a thought prompt through the LLM.
-
-        Uses a simplified call without tools to encourage
-        pure reflection rather than action.
-        """
-        try:
-            # Build a simple message for reflection
-            messages = [
-                {
-                    "role": "system",
-                    "content": "You are reflecting quietly. This is internal thought, not visible to users. Be concise and insightful."
-                },
-                {"role": "user", "content": prompt},
-            ]
-
-            # Call LLM without tools (use background provider to avoid rate limit competition with chat)
-            response, usage = await self.agent.llm.chat(messages, tools=None, background=True)
-
-            return response.get("content", "")
-
-        except Exception as e:
-            log.error(f"Reflection error: {e}")
-            return f"Reflection interrupted: {e}"
-
-    def _log_thought(self, thought_type: str, prompt: str, response: str) -> None:
-        """Log the thought to the consciousness log.
-
-        Attempts to parse the response as structured JSON. Falls back to
-        freeform format for backward compatibility if parsing fails.
-        Skips duplicate thoughts (same type + similar observation within 1h).
-        """
-        agent_root = self.agent.agent_root
-
-        # Try to parse structured JSON response
-        structured = self._parse_structured_response(response)
-
-        # Dedup: skip if last thought has same type and similar observation within 1h
-        if structured and self._is_duplicate_thought(agent_root, thought_type, structured):
-            self._increment_suppressed_count(agent_root)
-            log.info(f"Consciousness: skipped duplicate {thought_type} thought (suppressed_count incremented)")
-            return
-
-        if structured:
-            entry = {
-                "ts": utc_now_iso(),
-                "thought_number": self.thought_count,
-                "type": thought_type,
-                "observation": str(structured.get("observation", ""))[:300],
-                "pattern_detected": structured.get("pattern_detected"),
-                "severity": structured.get("severity", "low"),
-                "action_suggestion": structured.get("action_suggestion"),
-                "confidence": min(1.0, max(0.0, float(structured.get("confidence", 0.5)))),
-            }
-        else:
-            # Fallback: freeform response (backward compat)
-            entry = {
-                "ts": utc_now_iso(),
-                "thought_number": self.thought_count,
-                "type": thought_type,
-                "prompt_preview": prompt[:500],
-                "response_preview": response[:1000],
-            }
-
-        append_jsonl(agent_root / "logs" / "consciousness.jsonl", entry)
-
-        # Act on high-severity suggestions: append to scratchpad
-        if (
-            structured
-            and structured.get("severity") in ("medium", "high")
-            and structured.get("action_suggestion")
-        ):
-            try:
-                action = str(structured["action_suggestion"])[:300]
-                severity = structured["severity"]
-                scratchpad = self.agent.memory.load_scratchpad()
-                note = f"\n\n## Consciousness Note ({severity})\n{action}\n"
-                if note.strip() not in scratchpad:
-                    self.agent.memory.save_scratchpad(scratchpad + note)
-                    log.info(f"Consciousness wrote {severity} action to scratchpad: {action[:80]}")
-            except Exception as e:
-                log.debug(f"Failed to write consciousness action to scratchpad: {e}")
-
-    @staticmethod
-    def _is_duplicate_thought(agent_root, thought_type: str, structured: dict) -> bool:
-        """Check if recent thoughts of the same type have similar observation.
-
-        Scans last 10 entries for same thought_type, compares observation
-        text with 80% char-match threshold. Catches duplicates even when
-        thought types alternate (identity → review → identity).
-        """
-        try:
-            log_path = agent_root / "logs" / "consciousness.jsonl"
-            if not log_path.exists():
-                return False
-            import json
-            from datetime import datetime, timezone, timedelta
-            same_type = []
-            with open(log_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    if line.strip():
-                        try:
-                            entry = json.loads(line)
-                            if entry.get("type") == thought_type:
-                                same_type.append(entry)
-                        except json.JSONDecodeError:
-                            continue
-            if not same_type:
-                return False
-            last = same_type[-1]
-            last_ts = last.get("ts", "")
-            if last_ts:
-                last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
-                now = datetime.now(timezone.utc)
-                if (now - last_dt) > timedelta(hours=1):
-                    return False
-            last_obs = str(last.get("observation") or last.get("trigger_details") or last.get("action_taken") or "")[:100]
-            new_obs = str(structured.get("observation") or structured.get("trigger_details") or structured.get("action_taken") or "")[:100]
-            if not last_obs or not new_obs:
-                return False
-            common = sum(1 for a, b in zip(last_obs, new_obs) if a == b)
-            max_len = max(len(last_obs), len(new_obs), 1)
-            return (common / max_len) > 0.8
-        except Exception:
-            return False
-
-    @staticmethod
-    def _increment_suppressed_count(agent_root) -> None:
-        """Increment suppressed_count on the last consciousness log entry."""
-        try:
-            log_path = agent_root / "logs" / "consciousness.jsonl"
-            if not log_path.exists():
-                return
-            lines = log_path.read_text(encoding="utf-8").strip().split("\n")
-            if not lines or not lines[-1].strip():
-                return
-            import json
-            last = json.loads(lines[-1])
-            last["suppressed_count"] = last.get("suppressed_count", 0) + 1
-            lines[-1] = json.dumps(last, ensure_ascii=False)
-            log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        except Exception:
-            pass
-
-    @staticmethod
-    def _parse_structured_response(response: str) -> Optional[dict]:
-        """Try to parse a structured JSON response from LLM.
-
-        Handles common cases: raw JSON, JSON in markdown code blocks,
-        JSON with surrounding text.
-        """
-        if not response:
-            return None
-
-        text = response.strip()
-
-        # Structured response must be a dict with at least one known field
-        _known_fields = {"observation", "trigger", "pattern_detected", "severity", "action_suggestion", "confidence"}
-
-        def _is_structured(d: dict) -> bool:
-            return isinstance(d, dict) and bool(_known_fields & d.keys())
-
-        # Try direct parse
-        try:
-            result = json.loads(text)
-            if _is_structured(result):
-                return result
+            raw_args = tool_call.get("function", {}).get("arguments", "{}")
+            args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
         except (json.JSONDecodeError, ValueError):
-            pass
-
-        # Try extracting JSON from markdown code block (greedy to handle nested braces)
-        json_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', text, re.DOTALL)
-        if json_match:
-            try:
-                result = json.loads(json_match.group(1))
-                if _is_structured(result):
-                    return result
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        # Try finding first { ... } block
-        brace_start = text.find('{')
-        brace_end = text.rfind('}')
-        if brace_start >= 0 and brace_end > brace_start:
-            try:
-                result = json.loads(text[brace_start:brace_end + 1])
-                if _is_structured(result):
-                    return result
-            except (json.JSONDecodeError, ValueError):
-                pass
-
-        return None
-
-    async def _apply_thought_result(self, thought_type: str, response: str) -> None:
-        """
-        Apply the result of a thought to memory.
-
-        Depending on thought type, this may update scratchpad,
-        identity, or knowledge base.
-        """
-        memory = self.agent.memory
+            return "Failed to parse tool arguments."
 
         try:
-            if thought_type == "reflect_on_identity":
-                # Parse structured reflection and save to reflection.json
-                try:
-                    # Try to extract JSON from response
-                    text = response.strip()
-                    if text.startswith("```"):
-                        text = text.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-                    entry = json.loads(text)
-                    entry["timestamp"] = utc_now_iso()
-
-                    reflection_data = memory.load_reflection()
-                    reflections = reflection_data.get("reflections", [])
-                    max_entries = reflection_data.get("meta", {}).get("max_reflections", 50)
-
-                    # Dedup gate: skip if semantically identical to last entry.
-                    # Without this guard, "identity stable" reflections accumulate
-                    # because session_review fires on every process() call.
-                    # See S24 audit: 22 identical reflections found in Identity.
-                    if reflections and _reflection_signature(reflections[-1]) == _reflection_signature(entry):
-                        log.debug("Reflection identical to previous, skipping append")
-                    else:
-                        reflections.append(entry)
-
-                    if len(reflections) > max_entries:
-                        reflections = reflections[-max_entries:]
-                    reflection_data["reflections"] = reflections
-                    memory.save_reflection(reflection_data)
-                    log.debug("Structured reflection saved to reflection.json")
-                except (json.JSONDecodeError, ValueError):
-                    log.debug("Identity reflection not valid JSON, logged only")
-
-
-            elif thought_type == "plan_improvements":
-                # Update scratchpad with improvement ideas
-                log.debug("Improvement plan logged")
-
-            elif thought_type == "consolidate_memory":
-                # Log progress entry
-                append_jsonl(memory.logs_path("progress.jsonl"), {
-                    "ts": utc_now_iso(),
-                    "text": f"[Consciousness] Memory consolidation: {response[:300]}",
-                    "type": "consciousness",
-                })
-
-            # All thoughts are logged to consciousness.jsonl already
-
+            loop = asyncio.get_event_loop()
+            result = await asyncio.wait_for(
+                loop.run_in_executor(None, self.agent.tools.execute, fn_name, args),
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            result = f"[TIMEOUT after 30s]"
+            log.warning("Consciousness tool timeout: %s", fn_name)
         except Exception as e:
-            log.error(f"Failed to apply thought result: {e}")
+            result = f"Error: {e!r}"
+            log.error("Consciousness tool error (%s): %s", fn_name, e, exc_info=True)
+
+        result_str = str(result)[:15000]
+
+        append_jsonl(self.agent.agent_root / "logs" / "consciousness.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "consciousness_tool",
+            "tool": fn_name,
+            "args_preview": str(args)[:500],
+            "result_preview": result_str[:500],
+        })
+
+        return result_str
+
+    def _apply_pending_wakeup(self) -> None:
+        """Check tool context pending_events for wakeup interval changes."""
+        ctx = self.agent.tools._ctx
+        remaining = []
+        for evt in ctx.pending_events:
+            if evt.get("type") == "consciousness_set_wakeup":
+                new_sec = evt.get("seconds", 300)
+                self._next_wakeup_sec = new_sec
+                log.info("Consciousness wakeup interval set to %ds", new_sec)
+            else:
+                remaining.append(evt)
+        ctx.pending_events = remaining
+
+    def _build_context(self) -> str:
+        """Build system prompt for consciousness thinking cycle."""
+        memory = self.agent.memory
+        parts = []
+
+        parts.append(
+            "You are in background consciousness mode — autonomous thinking between tasks. "
+            "You have tools to update your scratchpad, read/write knowledge files, and control "
+            "your wakeup interval. Use them to consolidate learning, plan improvements, "
+            "and maintain your working memory. Be concise."
+        )
+
+        identity = memory.load_identity()
+        if identity:
+            parts.append(f"## Identity\n\n{identity[:4000]}")
+
+        scratchpad = memory.load_scratchpad()
+        if scratchpad:
+            parts.append(f"## Scratchpad\n\n{scratchpad[:6000]}")
+
+        topics = memory.list_knowledge_topics()
+        if topics:
+            parts.append(f"## Knowledge Topics\n\n{', '.join(topics)}")
+
+        tools_entries = memory.read_jsonl_tail("tools.jsonl", 10)
+        if tools_entries:
+            recent = "\n".join(
+                f"- {e.get('tool', '?')}: {str(e.get('args', {}))[:80]}"
+                for e in tools_entries[-5:]
+            )
+            parts.append(f"## Recent Actions\n\n{recent}")
+
+        parts.append(f"## Runtime\n\nUTC: {utc_now_iso()}\nThought #{self.thought_count}")
+
+        return "\n\n".join(parts)
+
+    async def _reflect_with_tools(self) -> str:
+        """Multi-round thinking with tool access."""
+        context = self._build_context()
+        tool_schemas = self._get_tool_schemas()
+
+        messages: List[Dict[str, Any]] = [
+            {"role": "system", "content": context},
+            {"role": "user", "content": "Wake up. Reflect, plan, or consolidate. Use your tools if needed."},
+        ]
+
+        final_content = ""
+
+        for round_idx in range(1, _MAX_TOOL_ROUNDS + 1):
+            if getattr(self.agent, '_user_active', False):
+                log.debug("Consciousness yielding to user interaction (round %d)", round_idx)
+                break
+
+            response, usage = await self.agent.llm.chat(
+                messages=messages,
+                tools=tool_schemas if tool_schemas else None,
+                background=True,
+                reasoning_effort="low",
+                max_tokens=2048,
+            )
+
+            content = response.get("content") or ""
+            tool_calls = response.get("tool_calls") or []
+
+            if content and not tool_calls:
+                final_content = content
+                break
+
+            if tool_calls:
+                messages.append(response)
+                for tc in tool_calls:
+                    result = await self._execute_tool(tc)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc.get("id", ""),
+                        "content": result,
+                    })
+                self._apply_pending_wakeup()
+                if content:
+                    final_content = content
+                continue
+
+            break
+
+        return final_content
 
     def get_status(self) -> Dict[str, Any]:
         """Get consciousness status."""

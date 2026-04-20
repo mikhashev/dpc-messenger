@@ -899,7 +899,19 @@ class DpcLlmAdapter:
             elif role == "user":
                 parts.append(f"[USER]\n{content}")
             elif role == "assistant":
-                parts.append(f"[ASSISTANT]\n{content}")
+                tool_calls = msg.get("tool_calls") or []
+                if tool_calls:
+                    tc_lines = []
+                    for tc in tool_calls:
+                        fn = tc.get("function", {})
+                        tc_lines.append(f'```tool_call\n{{"name": "{fn.get("name", "")}", "arguments": {fn.get("arguments", "{}")}}}\n```')
+                    tc_text = "\n".join(tc_lines)
+                    if content:
+                        parts.append(f"[ASSISTANT]\n{content}\n{tc_text}")
+                    else:
+                        parts.append(f"[ASSISTANT]\n{tc_text}")
+                elif content:
+                    parts.append(f"[ASSISTANT]\n{content}")
             elif role == "tool":
                 # Include tool results
                 tool_call_id = msg.get("tool_call_id", "unknown")

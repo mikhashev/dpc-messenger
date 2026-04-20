@@ -230,6 +230,8 @@ CORE_TOOL_NAMES = {
     "read_session_archive", "read_session_detail",
     # Proposal review tools (ADR-013 Selection Layer)
     "list_proposals", "review_proposal",
+    # Consciousness-specific
+    "set_next_wakeup",
 }
 
 # Restricted tools (require explicit enable in config)

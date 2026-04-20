@@ -189,6 +189,8 @@ class ContextFirewall:
             # Proposal review tools (ADR-013 Selection Layer)
             'list_proposals': True,  # Read-only: list decision proposals
             'review_proposal': True,  # Review (approve/reject) a DRAFT proposal
+            # Consciousness tools (P1)
+            'set_next_wakeup': True,  # Control consciousness interval
         }
 
         # Parse tool permissions from config, using defaults for missing tools
