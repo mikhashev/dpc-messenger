@@ -299,9 +299,24 @@ class DpcAgentManager:
                                             if f.suffix == ".md" and f.is_file():
                                                 l6_count += index_single_file(f, provider, faiss_idx, bm25_idx, source_layer="L6")
                                         log.info("L6 human knowledge indexed: %d chunks from %s", l6_count, l6_dir)
+                                # MEM-3.10: index extended paths if configured
+                                ext_count = 0
+                                if self.firewall:
+                                    try:
+                                        from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files
+                                        ext_paths = self.firewall.get_extended_paths() if hasattr(self.firewall, 'get_extended_paths') else {}
+                                        indexed_list = self.firewall.rules.get('dpc_agent', {}).get('sandbox_extensions', {}).get('indexed_paths', []) if self.firewall else []
+                                        ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list) if indexed_list else []
+                                        if ext_files:
+                                            for f in ext_files:
+                                                ext_count += index_single_file(f, provider, faiss_idx, bm25_idx, source_layer="EXT")
+                                            log.info("Extended paths indexed: %d chunks from %d files", ext_count, len(ext_files))
+                                    except Exception as e:
+                                        log.debug("Extended paths indexing skipped: %s", e)
                                 faiss_idx.save()
                                 bm25_idx.save()
-                                log.info("Memory index built: %d chunks (L5: %d, L6: %d)", count + l6_count, count, l6_count)
+                                total = count + l6_count + ext_count
+                                log.info("Memory index built: %d chunks (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
                             except Exception as e:
                                 log.warning("Background memory rebuild failed: %s", e)
                         asyncio.get_event_loop().create_task(_background_rebuild())

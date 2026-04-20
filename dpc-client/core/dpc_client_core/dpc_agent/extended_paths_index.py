@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import pathlib
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .text_extract import is_binary
 
@@ -22,12 +22,20 @@ TEXT_EXTENSIONS = frozenset({
 
 
 def collect_extended_files(
-    extended_paths: Dict[str, List[str]],
+    extended_paths: Dict[str, List],
+    indexed_paths: Optional[List[str]] = None,
 ) -> List[pathlib.Path]:
-    """Collect all text files from extended paths."""
+    """Collect text files from extended paths, filtered by indexed flag.
+
+    If indexed_paths is provided, only paths in that list are included.
+    Default: no paths indexed (opt-in via indexed_paths).
+    """
     files: List[pathlib.Path] = []
     for access_level in ("read_only", "read_write"):
-        for path_str in extended_paths.get(access_level, []):
+        for path_entry in extended_paths.get(access_level, []):
+            path_str = path_entry if isinstance(path_entry, str) else str(path_entry)
+            if indexed_paths is not None and path_str not in indexed_paths:
+                continue
             p = pathlib.Path(path_str)
             if not p.exists():
                 continue
