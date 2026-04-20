@@ -480,40 +480,41 @@ Respond ONLY with a valid JSON object (no markdown, no explanation):
 
     @staticmethod
     def _is_duplicate_thought(agent_root, thought_type: str, structured: dict) -> bool:
-        """Check if the last logged thought is a duplicate (same type + similar observation within 1h)."""
+        """Check if recent thoughts of the same type have similar observation.
+
+        Scans last 10 entries for same thought_type, compares observation
+        text with 80% char-match threshold. Catches duplicates even when
+        thought types alternate (identity → review → identity).
+        """
         try:
             log_path = agent_root / "logs" / "consciousness.jsonl"
             if not log_path.exists():
                 return False
-            # Read last line
-            last_line = ""
+            import json
+            from datetime import datetime, timezone, timedelta
+            same_type = []
             with open(log_path, "r", encoding="utf-8") as f:
                 for line in f:
                     if line.strip():
-                        last_line = line
-            if not last_line:
+                        try:
+                            entry = json.loads(line)
+                            if entry.get("type") == thought_type:
+                                same_type.append(entry)
+                        except json.JSONDecodeError:
+                            continue
+            if not same_type:
                 return False
-            import json
-            from datetime import datetime, timezone, timedelta
-            last = json.loads(last_line)
-            # Check same type
-            if last.get("type") != thought_type:
-                return False
-            # Check within 1 hour
+            last = same_type[-1]
             last_ts = last.get("ts", "")
             if last_ts:
                 last_dt = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
                 now = datetime.now(timezone.utc)
                 if (now - last_dt) > timedelta(hours=1):
                     return False
-            # Check observation similarity (simple prefix match)
-            # Identity reflections use trigger_details/action_taken, not observation.
-            # Fallback chain ensures dedup works for all thought types. See S32 fix.
             last_obs = str(last.get("observation") or last.get("trigger_details") or last.get("action_taken") or "")[:100]
             new_obs = str(structured.get("observation") or structured.get("trigger_details") or structured.get("action_taken") or "")[:100]
             if not last_obs or not new_obs:
                 return False
-            # Consider duplicate if first 100 chars match >80%
             common = sum(1 for a, b in zip(last_obs, new_obs) if a == b)
             max_len = max(len(last_obs), len(new_obs), 1)
             return (common / max_len) > 0.8

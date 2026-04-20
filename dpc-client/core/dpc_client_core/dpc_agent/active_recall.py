@@ -7,10 +7,13 @@ Budget-aware: >50% context → hints only, >70% → skip.
 
 from __future__ import annotations
 
+import json
 import logging
+import pathlib
 from typing import List, Optional
 
 from .hybrid_search import SearchResult
+from .utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -61,14 +64,33 @@ def get_recall_block(
     results: List[SearchResult],
     context_usage_ratio: float = 0.0,
     max_results: int = 3,
+    agent_root: Optional[pathlib.Path] = None,
 ) -> str:
     """Get the appropriate recall block based on context budget."""
     mode = should_inject(context_usage_ratio)
     if mode == "skip":
         return ""
+    injected = results[:max_results]
+    if agent_root and injected:
+        _log_knowledge_access(injected, mode, agent_root)
     if mode == "hints":
         return format_hints_only(results, max_results)
     return format_recall_hints(results, max_results)
+
+
+def _log_knowledge_access(
+    results: List[SearchResult], mode: str, agent_root: pathlib.Path
+) -> None:
+    """Log which knowledge files were injected into context (S1 feedback loop)."""
+    access_path = agent_root / "state" / "knowledge_access.jsonl"
+    access_path.parent.mkdir(parents=True, exist_ok=True)
+    files = [r.chunk_meta.get("source_file", "unknown") for r in results]
+    entry = {"ts": utc_now_iso(), "mode": mode, "files": files}
+    try:
+        with open(access_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 def _excerpt(meta: dict, max_chars: int = 200) -> str:

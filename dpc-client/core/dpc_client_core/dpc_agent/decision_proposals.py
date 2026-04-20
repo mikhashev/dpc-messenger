@@ -139,6 +139,24 @@ Conversation:
 MAX_PROPOSALS_PER_SESSION = 5
 
 
+def _dedup_entries(
+    new_entries: List[dict], existing_proposals: List[DecisionProposal]
+) -> tuple:
+    """Remove entries whose topics already exist in prior proposals.
+
+    Returns (unique_entries, suppressed_count).
+    Uses proposal-level topic set matching to catch both individual
+    duplicate entries and fully duplicated proposal batches.
+    """
+    existing_topics: set = set()
+    for p in existing_proposals:
+        for e in p.entries:
+            existing_topics.add(e.topic.lower().strip())
+
+    unique = [e for e in new_entries if e.get("topic", "").lower().strip() not in existing_topics]
+    return unique, len(new_entries) - len(unique)
+
+
 async def extract_decisions(
     llm: "DpcLlmAdapter",
     conversation_messages: List[Dict[str, Any]],
@@ -200,9 +218,17 @@ async def extract_decisions(
             trigger_reasons.extend(te.get("reasons", []))
         trigger_reasons = list(set(trigger_reasons))
 
+        entries, suppressed = _dedup_entries(entries, existing)
+        if not entries:
+            log.info("All %d extracted entries were duplicates, skipping proposal", suppressed)
+            return None
+
         proposal = create_proposal(entries, trigger_reasons, session_id)
         save_proposal(proposal, proposals_path)
-        log.info("Extracted %d decision entries from conversation", len(entries))
+        if suppressed:
+            log.info("Extracted %d entries (%d duplicates suppressed)", len(entries), suppressed)
+        else:
+            log.info("Extracted %d decision entries from conversation", len(entries))
         return proposal
 
     except (json.JSONDecodeError, TypeError) as e:
