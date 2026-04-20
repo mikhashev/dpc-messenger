@@ -139,6 +139,56 @@ Conversation:
 MAX_PROPOSALS_PER_SESSION = 5
 
 
+def _build_rejection_addendum(agent_root: pathlib.Path) -> str:
+    """Build additive prompt instruction from aggregate rejection patterns.
+
+    Reads extraction_feedback.jsonl for rejected topics. If patterns
+    emerge (same topic rejected 3+ times), adds instruction to avoid them.
+    """
+    feedback_path = agent_root / "state" / "extraction_feedback.jsonl"
+    if not feedback_path.exists():
+        return ""
+
+    rejected_topics: dict = {}
+    try:
+        for line in feedback_path.read_text(encoding="utf-8").strip().split("\n"):
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if entry.get("action") == "rejected":
+                topic = entry.get("topic", "").lower().strip()
+                reason = entry.get("reason", "")
+                if topic:
+                    rejected_topics.setdefault(topic, []).append(reason)
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+    # Only include patterns with 3+ rejections (aggregate, not per-rejection)
+    patterns = {t: reasons for t, reasons in rejected_topics.items() if len(reasons) >= 3}
+    if not patterns:
+        return ""
+
+    lines = ["\n\nAdditional guidance from past rejections:"]
+    for topic, reasons in sorted(patterns.items(), key=lambda x: -len(x[1])):
+        top_reason = max(set(reasons), key=reasons.count) if reasons else "low value"
+        lines.append(f"- Avoid extracting decisions about '{topic}' (rejected {len(reasons)} times, reason: {top_reason})")
+    return "\n".join(lines)
+
+
+def log_extraction_feedback(
+    topic: str, action: str, reason: str, agent_root: pathlib.Path
+) -> None:
+    """Log feedback on a decision proposal entry (approved/rejected)."""
+    feedback_path = agent_root / "state" / "extraction_feedback.jsonl"
+    feedback_path.parent.mkdir(parents=True, exist_ok=True)
+    entry = {"ts": utc_now_iso(), "topic": topic, "action": action, "reason": reason}
+    try:
+        with open(feedback_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
+
 def _dedup_entries(
     new_entries: List[dict], existing_proposals: List[DecisionProposal]
 ) -> tuple:
@@ -198,7 +248,8 @@ async def extract_decisions(
     if not conv_text.strip():
         return None
 
-    prompt = EXTRACTION_PROMPT.format(conversation=conv_text)
+    rejection_addendum = _build_rejection_addendum(agent_root)
+    prompt = EXTRACTION_PROMPT.format(conversation=conv_text) + rejection_addendum
 
     try:
         response, _ = await llm.chat(

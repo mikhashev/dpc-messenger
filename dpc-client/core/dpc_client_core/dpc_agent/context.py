@@ -343,7 +343,7 @@ def build_llm_messages(
 
                 _results = reciprocal_rank_fusion(_faiss_results, _bm25_results)
                 _ctx_ratio = (session_state or {}).get("context_usage_percent", 0) / 100.0
-                _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio)
+                _recall = get_recall_block(_results, context_usage_ratio=_ctx_ratio, agent_root=agent_root)
                 if _recall:
                     log.info("Active Recall injected %d hints (mode=%s)",
                              len(_results), "full" if _ctx_ratio < 0.5 else "hints")

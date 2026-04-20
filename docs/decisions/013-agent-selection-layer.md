@@ -100,7 +100,7 @@ Key design decisions:
 - S3 uses proposal-level checksum (`hash(frozenset(topics))`), not entry-level string matching, to catch duplicate proposal sets
 - All new log files (`knowledge_access.jsonl`, `extraction_feedback.jsonl`) are session-scoped with rotation (cap at 100 entries) — no unbounded growth
 
-### Phase 2: Closing Loops (S4-S5, ~70 lines, after 10+ sessions with data)
+### Phase 2: Closing Loops (S4-S5, ~70 lines, immediately with retroactive baseline)
 
 | Step | What | Depends on |
 |---|---|---|
@@ -122,9 +122,9 @@ Connects all subsystems through shared metrics:
 
 This phase corresponds to Sleep Consolidation Phase 3 from S8 design. Scope and decomposition depend on Phase 1-2 data.
 
-### Retroactive Baseline
+### Retroactive Baseline (Primary Data Source for Phase 2)
 
-71 session archives contain historical tool call data. A baseline script can extract knowledge access patterns from archives, providing immediate data for S4 without waiting for live collection. This accelerates Phase 2.
+71+ session archives contain historical tool call data. An archive parser extracts knowledge access patterns (which files were read via `read_file`/`memory_search`), providing immediate baseline for S4 decay scoring. S4-S5 use both archive data and live `knowledge_access.jsonl` — archive data is the primary source until live collection accumulates sufficient volume.
 
 ---
 
@@ -141,7 +141,7 @@ This phase corresponds to Sleep Consolidation Phase 3 from S8 design. Scope and 
 ### Negative
 
 - **New log files.** `knowledge_access.jsonl` and `extraction_feedback.jsonl` add data to disk. Mitigated by rotation (cap at 100 entries).
-- **Phase 2 depends on data.** Decay and prompt adjustment cannot be designed correctly until Phase 1 produces empirical patterns. Acceptable: this is "measure before cutting."
+- **Phase 2 uses dual data sources.** Retroactive baseline from 71+ session archives provides immediate patterns; live S1-S3 data supplements over time. Archive format differs from live format (raw tool calls vs structured JSONL), requiring a parser for each source.
 - **Deterministic rules may miss edge cases.** String similarity dedup won't catch semantic duplicates with different wording. Acceptable for Phase 1 — Phase 3 embedding-based similarity can improve this.
 
 ---
