@@ -132,7 +132,12 @@ backlog.md
 # Moved from sprint-logs/ to repo root alongside backlog.md (S22, v1.9).
 protocol-13.md
 
-# 20. CC bridge internal files (not for public repo)
+# 20. Security analysis (internal threat models, vulnerability tracking)
+# Contains attack surface analysis, key management gaps, persistence audit.
+# Private — not for public repo.
+security/
+
+# 21. CC bridge internal files (not for public repo)
 # Internal cron prompt contains team-specific references (Protocol 13, agent
 # name "Ark", absolute user paths). Public template lives at
 # dpc-client/core/cc_cron_prompt_public.md.
