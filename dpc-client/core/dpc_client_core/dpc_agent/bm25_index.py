@@ -51,6 +51,9 @@ class BM25Index:
         self.index_dir = index_dir
         self._retriever = None
         self._chunk_metas: List[dict] = []
+        self._batching = False
+        self._pending_texts: List[str] = []
+        self._pending_metas: List[dict] = []
 
     def build(self, texts: List[str], chunk_metas: List[dict]) -> None:
         import bm25s
@@ -60,11 +63,35 @@ class BM25Index:
         self._chunk_metas = chunk_metas
 
     def add(self, texts: List[str], chunk_metas: List[dict]) -> None:
-        """Append new documents and rebuild the BM25 index."""
+        """Append new documents and rebuild the BM25 index.
+
+        In batch mode (between begin_batch/end_batch), defers the rebuild.
+        """
+        if self._batching:
+            self._pending_texts.extend(texts)
+            self._pending_metas.extend(chunk_metas)
+            return
         existing_texts = [m.get("text", "") for m in self._chunk_metas]
         all_texts = existing_texts + texts
         all_metas = self._chunk_metas + chunk_metas
         self.build(all_texts, all_metas)
+
+    def begin_batch(self) -> None:
+        """Start accumulating add() calls without rebuilding."""
+        self._batching = True
+        self._pending_texts: List[str] = []
+        self._pending_metas: List[dict] = []
+
+    def end_batch(self) -> None:
+        """Flush accumulated chunks and rebuild BM25 once."""
+        self._batching = False
+        if self._pending_texts:
+            existing_texts = [m.get("text", "") for m in self._chunk_metas]
+            all_texts = existing_texts + self._pending_texts
+            all_metas = self._chunk_metas + self._pending_metas
+            self.build(all_texts, all_metas)
+        self._pending_texts = []
+        self._pending_metas = []
 
     def search(self, query: str, top_k: int = 5) -> List[Tuple[dict, float]]:
         if self._retriever is None or not self._chunk_metas:

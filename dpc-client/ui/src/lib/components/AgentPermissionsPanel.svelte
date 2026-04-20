@@ -920,6 +920,27 @@
                 </div>
               </div>
 
+              <!-- Excluded Directories for Indexing -->
+              {#if (editSettings.sandbox_extensions.indexed_paths || []).length > 0}
+              <div class="path-group-card">
+                <div class="path-group-header">
+                  <span class="path-label">🚫 Excluded Directories</span>
+                </div>
+                <p class="help-text-small">Directories skipped during indexing (one per line). Defaults: node_modules, .git, __pycache__, etc.</p>
+                <textarea
+                  class="excluded-dirs-input"
+                  placeholder="node_modules&#10;.git&#10;__pycache__&#10;dist&#10;build"
+                  value={(editSettings.sandbox_extensions.excluded_dirs || []).join('\n')}
+                  on:input={(e) => {
+                    const val = (e.target as HTMLTextAreaElement).value;
+                    editSettings.sandbox_extensions.excluded_dirs = val.trim() ? val.split('\n').map((s: string) => s.trim()).filter((s: string) => s) : undefined;
+                  }}
+                  rows="4"
+                ></textarea>
+                <p class="help-text-small" style="margin-top: 4px; opacity: 0.6;">Leave empty to use defaults. Custom list replaces defaults entirely.</p>
+              </div>
+              {/if}
+
               <!-- Read-Write Paths -->
               <div class="path-group-card">
                 <div class="path-group-header">
@@ -962,6 +983,16 @@
                   <ul class="path-list">
                     {#each displaySettings.sandbox_extensions.read_only || [] as path}
                       <li>{path} {#if (displaySettings.sandbox_extensions.indexed_paths || []).includes(path)}<span class="indexed-badge">📇 Indexed</span>{/if}</li>
+                    {/each}
+                  </ul>
+                </div>
+              {/if}
+              {#if (displaySettings.sandbox_extensions.excluded_dirs?.length ?? 0) > 0}
+                <div class="path-section">
+                  <span class="path-label">🚫 Excluded Directories</span>
+                  <ul class="path-list">
+                    {#each displaySettings.sandbox_extensions.excluded_dirs || [] as dir}
+                      <li>{dir}</li>
                     {/each}
                   </ul>
                 </div>
@@ -1200,6 +1231,18 @@
     font-size: 0.85rem;
     color: var(--text-primary);
     min-width: 0;
+  }
+
+  .excluded-dirs-input {
+    width: 100%;
+    background: var(--bg-secondary, #1e1e1e);
+    border: 1px solid var(--border-color, #333);
+    border-radius: 4px;
+    padding: 0.4rem;
+    font-family: monospace;
+    font-size: 0.82rem;
+    color: var(--text-primary);
+    resize: vertical;
   }
 
   .btn-path-add {

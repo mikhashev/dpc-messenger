@@ -20,16 +20,27 @@ TEXT_EXTENSIONS = frozenset({
     ".toml", ".ini", ".csv", ".rst", ".html", ".xml", ".cfg",
 })
 
+DEFAULT_EXCLUDED_DIRS = frozenset({
+    "node_modules", ".git", "__pycache__", ".venv", "venv",
+    "target", "dist", "build", ".tox", ".mypy_cache", ".pytest_cache",
+    ".ruff_cache", ".next", ".nuxt", ".svelte-kit", "coverage",
+    "htmlcov", ".eggs", "*.egg-info", "bower_components",
+    ".gradle", ".idea", ".vs", "bin", "obj",
+})
+
 
 def collect_extended_files(
     extended_paths: Dict[str, List],
     indexed_paths: Optional[List[str]] = None,
+    excluded_dirs: Optional[List[str]] = None,
 ) -> List[pathlib.Path]:
     """Collect text files from extended paths, filtered by indexed flag.
 
     If indexed_paths is provided, only paths in that list are included.
     Default: no paths indexed (opt-in via indexed_paths).
+    excluded_dirs overrides DEFAULT_EXCLUDED_DIRS when provided.
     """
+    exclude = frozenset(excluded_dirs) if excluded_dirs is not None else DEFAULT_EXCLUDED_DIRS
     files: List[pathlib.Path] = []
     for access_level in ("read_only", "read_write"):
         for path_entry in extended_paths.get(access_level, []):
@@ -43,8 +54,12 @@ def collect_extended_files(
                 files.append(p)
             elif p.is_dir():
                 for f in p.rglob("*"):
-                    if f.is_file() and _is_text_file(f):
-                        files.append(f)
+                    if not f.is_file() or not _is_text_file(f):
+                        continue
+                    if any(part in exclude for part in f.relative_to(p).parts):
+                        continue
+                    files.append(f)
+    log.info("collect_extended_files: %d files (excluded: %s)", len(files), ", ".join(sorted(exclude)[:5]) + ("..." if len(exclude) > 5 else ""))
     return files
 
 

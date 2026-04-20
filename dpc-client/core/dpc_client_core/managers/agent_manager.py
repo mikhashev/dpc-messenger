@@ -277,12 +277,17 @@ class DpcAgentManager:
                     index_dir = agent_root / "state" / "memory_index"
                     needs_full_rebuild = not (index_dir / "index_meta.json").exists()
 
-                    async def _background_index():
+                    def _sync_index():
+                        """Runs in thread executor to avoid blocking the event loop."""
                         try:
+                            import numpy as np
+                            from pathlib import Path
+                            import os
                             from dpc_client_core.dpc_agent.memory import EmbeddingProvider
                             from dpc_client_core.dpc_agent.faiss_index import FaissIndex
                             from dpc_client_core.dpc_agent.bm25_index import BM25Index
-                            from dpc_client_core.dpc_agent.indexing_pipeline import index_single_file
+                            from dpc_client_core.dpc_agent.text_extract import extract_text
+                            from dpc_client_core.dpc_agent.chunking import chunk_text, batched_chunks
                             provider = self._agent._embedding_provider if self._agent else EmbeddingProvider(model_name=mem_cfg.embedding_model)
                             faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
                             bm25_idx = BM25Index(index_dir)
@@ -293,35 +298,66 @@ class DpcAgentManager:
                                 from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
                                 knowledge_dir = agent_root / "knowledge"
                                 count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
-                                # L6: index human knowledge if firewall allows
-                                if self.firewall and self.firewall.can_agent_access_context('knowledge'):
-                                    from pathlib import Path
-                                    import os
-                                    l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
-                                    if l6_dir.is_dir():
-                                        for f in sorted(l6_dir.iterdir()):
-                                            if f.suffix == ".md" and f.is_file():
-                                                l6_count += index_single_file(f, provider, faiss_idx, bm25_idx, source_layer="L6")
-                                        log.info("L6 human knowledge indexed: %d chunks from %s", l6_count, l6_dir)
 
-                            # MEM-3.10: always re-index extended paths on startup (config is mutable)
+                            # Collect all extra chunks (L6 + EXT) then embed+index in bulk
+                            extra_chunks = []
+                            extra_metas = []
+
+                            # L6: human knowledge
+                            if needs_full_rebuild and self.firewall and self.firewall.can_agent_access_context('knowledge'):
+                                l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
+                                if l6_dir.is_dir():
+                                    for f in sorted(l6_dir.iterdir()):
+                                        if f.suffix == ".md" and f.is_file():
+                                            text = extract_text(f)
+                                            if text:
+                                                chunks = chunk_text(text, source_file=f.name)
+                                                for c in chunks:
+                                                    extra_chunks.append(c)
+                                                    extra_metas.append({"source_file": c.source_file, "chunk_index": c.chunk_index,
+                                                                        "char_start": c.char_start, "char_end": c.char_end,
+                                                                        "source_layer": "L6", "text": c.text[:200]})
+                                                l6_count += len(chunks)
+                                    if l6_count:
+                                        log.info("L6 human knowledge collected: %d chunks from %s", l6_count, l6_dir)
+
+                            # MEM-3.10: always re-index extended paths on startup
                             ext_count = 0
                             if self.firewall:
                                 try:
                                     from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files
                                     ext_paths = self.firewall.get_extended_paths(profile_name=self.agent_id) if hasattr(self.firewall, 'get_extended_paths') else {}
                                     indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
-                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list) if indexed_list else []
+                                    excluded_dirs = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'excluded_dirs', default=None) if self.agent_id else None
+                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list, excluded_dirs=excluded_dirs) if indexed_list else []
                                     if ext_files:
                                         for f in ext_files:
-                                            ext_count += index_single_file(f, provider, faiss_idx, bm25_idx, source_layer="EXT")
-                                        log.info("Extended paths indexed: %d chunks from %d files", ext_count, len(ext_files))
+                                            text = extract_text(f)
+                                            if text:
+                                                chunks = chunk_text(text, source_file=f.name)
+                                                for c in chunks:
+                                                    extra_chunks.append(c)
+                                                    extra_metas.append({"source_file": c.source_file, "chunk_index": c.chunk_index,
+                                                                        "char_start": c.char_start, "char_end": c.char_end,
+                                                                        "source_layer": "EXT", "text": c.text[:200]})
+                                                ext_count += len(chunks)
                                     elif indexed_list:
                                         log.info("Extended paths: %d paths configured but 0 text files found", len(indexed_list))
                                 except Exception as e:
                                     log.debug("Extended paths indexing skipped: %s", e)
 
-                            if needs_full_rebuild or ext_count > 0:
+                            # Bulk embed + index all extra chunks in one pass
+                            if extra_chunks:
+                                pos = 0
+                                for batch in batched_chunks(extra_chunks, mem_cfg.batch_size):
+                                    texts = [c.text for c in batch]
+                                    vectors = np.array(provider.embed_batch(texts), dtype=np.float32)
+                                    faiss_idx.add(vectors, extra_metas[pos:pos + len(batch)])
+                                    pos += len(batch)
+                                bm25_idx.add([c.text for c in extra_chunks], extra_metas)
+                                log.info("Bulk indexed %d extra chunks (L6: %d, EXT: %d)", len(extra_chunks), l6_count, ext_count)
+
+                            if needs_full_rebuild or extra_chunks:
                                 faiss_idx.save()
                                 bm25_idx.save()
                             if needs_full_rebuild:
@@ -333,11 +369,12 @@ class DpcAgentManager:
                             log.warning("Background memory indexing failed: %s", e)
 
                     if needs_full_rebuild or (self.firewall and self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[])):
-                        asyncio.get_event_loop().create_task(_background_index())
+                        loop = asyncio.get_event_loop()
+                        loop.run_in_executor(None, _sync_index)
                         if needs_full_rebuild:
-                            log.info("Memory: first-use index rebuild started in background")
+                            log.info("Memory: first-use index rebuild started in thread")
                         else:
-                            log.info("Memory: extended paths re-index started in background")
+                            log.info("Memory: extended paths re-index started in thread")
                 log.info("Memory system initialized (model=%s, active_recall=%s)", mem_cfg.embedding_model, mem_cfg.active_recall)
         except Exception as e:
             log.warning("Memory system init skipped: %s", e)
