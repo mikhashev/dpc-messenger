@@ -275,52 +275,69 @@ class DpcAgentManager:
                 agent_root = self._agent.agent_root if self._agent else None
                 if agent_root:
                     index_dir = agent_root / "state" / "memory_index"
-                    if not (index_dir / "index_meta.json").exists():
-                        async def _background_rebuild():
-                            try:
-                                from dpc_client_core.dpc_agent.memory import EmbeddingProvider
-                                from dpc_client_core.dpc_agent.faiss_index import FaissIndex
-                                from dpc_client_core.dpc_agent.bm25_index import BM25Index
+                    needs_full_rebuild = not (index_dir / "index_meta.json").exists()
+
+                    async def _background_index():
+                        try:
+                            from dpc_client_core.dpc_agent.memory import EmbeddingProvider
+                            from dpc_client_core.dpc_agent.faiss_index import FaissIndex
+                            from dpc_client_core.dpc_agent.bm25_index import BM25Index
+                            from dpc_client_core.dpc_agent.indexing_pipeline import index_single_file
+                            provider = self._agent._embedding_provider if self._agent else EmbeddingProvider(model_name=mem_cfg.embedding_model)
+                            faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
+                            bm25_idx = BM25Index(index_dir)
+
+                            count = 0
+                            l6_count = 0
+                            if needs_full_rebuild:
                                 from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
-                                provider = self._agent._embedding_provider if self._agent else EmbeddingProvider(model_name=mem_cfg.embedding_model)
-                                faiss_idx = FaissIndex(index_dir, model_name=mem_cfg.embedding_model, dimensions=provider.dimensions)
-                                bm25_idx = BM25Index(index_dir)
                                 knowledge_dir = agent_root / "knowledge"
                                 count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
                                 # L6: index human knowledge if firewall allows
-                                l6_count = 0
                                 if self.firewall and self.firewall.can_agent_access_context('knowledge'):
                                     from pathlib import Path
                                     import os
                                     l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
                                     if l6_dir.is_dir():
-                                        from dpc_client_core.dpc_agent.indexing_pipeline import index_single_file
                                         for f in sorted(l6_dir.iterdir()):
                                             if f.suffix == ".md" and f.is_file():
                                                 l6_count += index_single_file(f, provider, faiss_idx, bm25_idx, source_layer="L6")
                                         log.info("L6 human knowledge indexed: %d chunks from %s", l6_count, l6_dir)
-                                # MEM-3.10: index extended paths if configured
-                                ext_count = 0
-                                if self.firewall:
-                                    try:
-                                        from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files
-                                        ext_paths = self.firewall.get_extended_paths() if hasattr(self.firewall, 'get_extended_paths') else {}
-                                        indexed_list = self.firewall.rules.get('dpc_agent', {}).get('sandbox_extensions', {}).get('indexed_paths', []) if self.firewall else []
-                                        ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list) if indexed_list else []
-                                        if ext_files:
-                                            for f in ext_files:
-                                                ext_count += index_single_file(f, provider, faiss_idx, bm25_idx, source_layer="EXT")
-                                            log.info("Extended paths indexed: %d chunks from %d files", ext_count, len(ext_files))
-                                    except Exception as e:
-                                        log.debug("Extended paths indexing skipped: %s", e)
+
+                            # MEM-3.10: always re-index extended paths on startup (config is mutable)
+                            ext_count = 0
+                            if self.firewall:
+                                try:
+                                    from dpc_client_core.dpc_agent.extended_paths_index import collect_extended_files
+                                    ext_paths = self.firewall.get_extended_paths(profile_name=self.agent_id) if hasattr(self.firewall, 'get_extended_paths') else {}
+                                    indexed_list = self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[]) if self.agent_id else []
+                                    ext_files = collect_extended_files(ext_paths, indexed_paths=indexed_list) if indexed_list else []
+                                    if ext_files:
+                                        for f in ext_files:
+                                            ext_count += index_single_file(f, provider, faiss_idx, bm25_idx, source_layer="EXT")
+                                        log.info("Extended paths indexed: %d chunks from %d files", ext_count, len(ext_files))
+                                    elif indexed_list:
+                                        log.info("Extended paths: %d paths configured but 0 text files found", len(indexed_list))
+                                except Exception as e:
+                                    log.debug("Extended paths indexing skipped: %s", e)
+
+                            if needs_full_rebuild or ext_count > 0:
                                 faiss_idx.save()
                                 bm25_idx.save()
+                            if needs_full_rebuild:
                                 total = count + l6_count + ext_count
                                 log.info("Memory index built: %d chunks (L5: %d, L6: %d, EXT: %d)", total, count, l6_count, ext_count)
-                            except Exception as e:
-                                log.warning("Background memory rebuild failed: %s", e)
-                        asyncio.get_event_loop().create_task(_background_rebuild())
-                        log.info("Memory: first-use index rebuild started in background")
+                            elif ext_count > 0:
+                                log.info("Extended paths re-indexed on startup: %d chunks", ext_count)
+                        except Exception as e:
+                            log.warning("Background memory indexing failed: %s", e)
+
+                    if needs_full_rebuild or (self.firewall and self.firewall._get_profile_or_global(self.agent_id, 'sandbox_extensions', 'indexed_paths', default=[])):
+                        asyncio.get_event_loop().create_task(_background_index())
+                        if needs_full_rebuild:
+                            log.info("Memory: first-use index rebuild started in background")
+                        else:
+                            log.info("Memory: extended paths re-index started in background")
                 log.info("Memory system initialized (model=%s, active_recall=%s)", mem_cfg.embedding_model, mem_cfg.active_recall)
         except Exception as e:
             log.warning("Memory system init skipped: %s", e)

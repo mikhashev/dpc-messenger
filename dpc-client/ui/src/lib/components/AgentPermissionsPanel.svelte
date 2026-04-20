@@ -897,10 +897,11 @@
                           on:change={(e) => {
                             if (!editSettings.sandbox_extensions.indexed_paths) editSettings.sandbox_extensions.indexed_paths = [];
                             const p = editSettings.sandbox_extensions.read_only[i];
-                            if (e.target.checked) {
+                            const checked = (e.target as HTMLInputElement).checked;
+                            if (checked) {
                               if (!editSettings.sandbox_extensions.indexed_paths.includes(p)) editSettings.sandbox_extensions.indexed_paths = [...editSettings.sandbox_extensions.indexed_paths, p];
                             } else {
-                              editSettings.sandbox_extensions.indexed_paths = editSettings.sandbox_extensions.indexed_paths.filter(x => x !== p);
+                              editSettings.sandbox_extensions.indexed_paths = editSettings.sandbox_extensions.indexed_paths.filter((x: string) => x !== p);
                             }
                           }}
                         />

@@ -35,7 +35,7 @@ def test_index_single_file(tmp_path):
     assert count >= 1
     assert provider.embed_batch.called
     assert faiss_idx.add.called
-    assert bm25_idx.build.called
+    assert bm25_idx.add.called
 
 
 def test_index_binary_file_skipped(tmp_path):

@@ -59,6 +59,13 @@ class BM25Index:
         self._retriever.index(corpus_tokens)
         self._chunk_metas = chunk_metas
 
+    def add(self, texts: List[str], chunk_metas: List[dict]) -> None:
+        """Append new documents and rebuild the BM25 index."""
+        existing_texts = [m.get("text", "") for m in self._chunk_metas]
+        all_texts = existing_texts + texts
+        all_metas = self._chunk_metas + chunk_metas
+        self.build(all_texts, all_metas)
+
     def search(self, query: str, top_k: int = 5) -> List[Tuple[dict, float]]:
         if self._retriever is None or not self._chunk_metas:
             return []

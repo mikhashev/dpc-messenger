@@ -63,7 +63,7 @@ def index_single_file(
         batch_metas = chunk_metas[batch[0].chunk_index:batch[0].chunk_index + len(batch)]
         faiss_index.add(vectors, batch_metas)
 
-    bm25_index.build(
+    bm25_index.add(
         [c.text for c in chunks],
         chunk_metas,
     )
