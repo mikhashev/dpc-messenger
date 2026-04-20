@@ -1,6 +1,6 @@
 # ADR-013: Agent Selection Layer
 
-**Status:** Proposed (S58, 2026-04-20)
+**Status:** Testing (S58-S60, 2026-04-20). S1-S9 implemented, runtime verified.
 **Date:** 2026-04-20
 **Authors:** Ark (draft), CC (co-analyst), Mike (direction)
 **Session:** S58 — diagnosis convergence and architectural decision

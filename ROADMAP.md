@@ -106,7 +106,7 @@ North Star: Consciousness observes → Evolution proposes → Verification measu
 | **0** | **Hooks/Middleware** | ~510 lines | ENABLER | HookRegistry + Event Bus in loop.py. Injection points for all subsequent phases. 4 research projects converge on this pattern |
 | **1** | **Consciousness Tools** | ~240 lines | HIGH | Give consciousness ability to act (update scratchpad, read knowledge). Currently 535 thoughts → 0 actions |
 | **2** | **Evolution Verification** | ~280 lines | CRITICAL | Closed-loop feedback: proposal → apply → measure → rollback if harmful. Metric-driven evolution |
-| **3** | **Sleep Consolidation** | ~460 lines | HIGH | Overnight deep analysis of session archives. 5-phase pipeline (internalize → reflect → score → consolidate → commit). L1-2 DONE |
+| **3** | **Sleep Consolidation** | ~460 lines | HIGH | Overnight deep analysis of session archives. 5-phase pipeline (internalize → reflect → score → consolidate → commit). L1 partial, L2 partial, L3 not started |
 | **4** | **Memory Upgrade** | ~240 lines | MEDIUM | Knowledge decay + relevance tracking, scratchpad sections, structured memory schema |
 | **5** | **Skill Rewrite** | ~260 lines | MEDIUM | Break append-only limit. A/B testing for skill rewrites with auto-rollback |
 
