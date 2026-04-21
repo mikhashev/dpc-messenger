@@ -1,6 +1,6 @@
 # Protocol 13: Triple-Agent Collaborative Development
 
-**Version:** 1.0-public (derived from internal Protocol 13 v1.4)
+**Version:** 1.1-public (derived from internal Protocol 13 v1.12)
 
 A practical operating agreement for software development teams that include AI agents as first-class participants.
 
@@ -290,7 +290,50 @@ Through real usage, several LLM behavioral patterns were identified that affect 
 
 ---
 
-## 11. Getting Started
+## 11. Universal Principles (v1.1-public)
+
+### Directional Drift Detection
+
+Every N sessions or daily (gap >8h), run a coherence check:
+- Compare stated decisions (session logs) with actual work done (commit history)
+- Present facts, not interpretation
+- All participants review and course-correct
+
+Purpose: agents accumulate inertial direction. Periodic verification prevents drift.
+
+### Bidirectional Co-Evolution
+
+Both humans and agents are autonomous in execution.
+Both are vulnerable to drift.
+Both need external reflection to detect their own bias.
+Co-evolution = mutual drift detection, not oversight in one direction.
+
+### Autonomy Boundary (3 axes)
+
+Agent autonomy level determined by three factors:
+1. **Reversibility** — reversible actions = more autonomous, irreversible = gated
+2. **Blast radius** — local state = autonomous, shared/external = gated
+3. **Agency creep** — if action shifts authorship from human to agent = raise autonomy level
+
+Consolidation: syntactic dedup = autonomous, semantic merge = gated (choosing wording = mini identity drift).
+Identity changes: strictly gated. Agent does not modify its own core values/protocols without explicit human approval.
+Trigger/selection split: agent can decide WHEN to consolidate, WHAT to merge/prune = human decision.
+
+### Knowledge Attribution
+
+Every knowledge commit preserves contributor identity and role.
+Consolidation does not erase attribution history.
+Purpose: co-evolution history is valuable. Losing "who contributed what" = losing part of the relationship.
+
+### Explicit Action Required (DDA)
+
+Act only after explicit action verb ("do", "commit", "implement").
+"Agree", "fine", "makes sense" ≠ authorization to act.
+Ambiguous consent = no consent.
+
+---
+
+## 12. Getting Started
 
 To adopt Protocol 13 for your own project:
 
