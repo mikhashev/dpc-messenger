@@ -6885,11 +6885,11 @@ class CoreService:
                 logger.warning("Failed to send CC response to Telegram: %s", e)
 
             # If CC's response mentions @agent (by name or ID), trigger agent to respond (subject to chain depth)
-            import re
-            cc_mentions = {m.lower() for m in re.findall(r'@(\w+)\b', text or '', re.IGNORECASE)}
-            _chain_agent_id = self._get_default_agent_id()
-            agent_name = self._get_agent_display_name(_chain_agent_id).lower()
-            if agent_name in cc_mentions or _chain_agent_id in cc_mentions:
+            _chain_agent_id = conversation_id
+            agent_name = self._get_agent_display_name(_chain_agent_id)
+            text_lower = (text or '').lower()
+            agent_mentioned = (f"@{agent_name.lower()}" in text_lower) or (f"@{_chain_agent_id}" in text_lower)
+            if agent_mentioned:
                 chain_depth = getattr(self, '_cc_ark_chain_depth', 0)
                 if chain_depth < 5:
                     self._cc_ark_chain_depth = chain_depth + 1
