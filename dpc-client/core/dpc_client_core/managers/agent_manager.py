@@ -287,10 +287,10 @@ class DpcAgentManager:
 
                             count = 0
                             l6_count = 0
-                            if needs_full_rebuild:
-                                from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
-                                knowledge_dir = agent_root / "knowledge"
-                                count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
+                            # Always rebuild L5 agent knowledge (not just on first init)
+                            from dpc_client_core.dpc_agent.indexing_pipeline import full_rebuild
+                            knowledge_dir = agent_root / "knowledge"
+                            count = full_rebuild(knowledge_dir, provider, faiss_idx, bm25_idx, batch_size=mem_cfg.batch_size)
 
                             # Collect all extra chunks (L6 + EXT) then embed+index in bulk
                             extra_chunks = []
