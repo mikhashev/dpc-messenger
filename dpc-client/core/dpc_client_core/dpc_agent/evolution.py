@@ -727,6 +727,9 @@ If no improvements are warranted: {{"proposals": []}}
         )
         pre_sha = _sha_result.stdout.strip() if _sha_result.returncode == 0 else None
 
+        if not pre_sha:
+            log.warning("Cannot capture pre-apply SHA — rollback will be unavailable for this proposal")
+
         entry = {
             "proposal_id": proposal.get("description", "")[:100],
             "path": proposal.get("path", ""),
