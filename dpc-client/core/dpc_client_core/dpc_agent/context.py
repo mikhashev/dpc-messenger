@@ -112,11 +112,40 @@ def _build_runtime_section(
 
 
 def _build_memory_sections(memory: Memory) -> List[str]:
-    """Build scratchpad, identity, dialogue summary sections."""
+    """Build scratchpad, identity, dialogue summary, morning brief sections."""
     sections = []
 
     scratchpad_raw = memory.load_scratchpad()
     sections.append("## Scratchpad\n\n" + clip_text(scratchpad_raw, 90000))
+
+    # Morning brief injection (ADR-014 Sleep Consolidation)
+    try:
+        import json as _json
+        _conv_dir = memory.agent_root.parent.parent / "conversations" / memory.agent_root.name
+        _brief_path = _conv_dir / "morning_brief.json"
+        if _brief_path.exists():
+            _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
+            if not _brief.get("consumed", False):
+                _summary = _brief.get("summary", "")
+                _decisions = _brief.get("key_decisions", [])
+                _unresolved = _brief.get("unresolved", [])
+                _parts = ["## Morning Brief (Sleep Consolidation)\n"]
+                if _summary:
+                    _parts.append(_summary)
+                if _decisions:
+                    _parts.append("\n**Key decisions:**")
+                    for _d in _decisions[:5]:
+                        _parts.append(f"- {_d.get('decision', '')} ({_d.get('session', '')})")
+                if _unresolved:
+                    _parts.append("\n**Unresolved:**")
+                    for _u in _unresolved[:5]:
+                        _parts.append(f"- {_u.get('topic', '')}")
+                sections.append("\n".join(_parts))
+                _brief["consumed"] = True
+                _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                log.info("Morning brief injected into agent context and marked consumed")
+    except Exception as _e:
+        log.debug("Morning brief injection skipped: %s", _e)
 
     identity_raw = memory.load_identity()
     sections.append("## Identity\n\n" + clip_text(identity_raw, 80000))
