@@ -45,7 +45,6 @@ CONSCIOUSNESS_TOOL_WHITELIST: frozenset = frozenset({
     "read_file",
     "write_file",
     "knowledge_list",
-    "set_next_wakeup",
 })
 
 _MAX_TOOL_ROUNDS = 5
@@ -134,8 +133,13 @@ class BackgroundConsciousness:
         _EMPIRICAL_DEFAULT = 180  # 3 min — conservative default for new agents without archive data
         target_thoughts = 10
         try:
-            archive_dir = self.agent.agent_root.parent / "archive"
+            import os
+            dpc_home = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc"))
+            agent_id = self.agent.agent_root.name
+            archive_dir = dpc_home / "conversations" / agent_id / "archive"
             if not archive_dir.exists():
+                log.info("Adaptive interval: archive dir not found (%s), using fallback %ds",
+                         archive_dir, _EMPIRICAL_DEFAULT)
                 return _EMPIRICAL_DEFAULT
 
             archive_files = sorted(archive_dir.rglob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:10]
