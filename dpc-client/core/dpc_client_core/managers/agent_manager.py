@@ -378,6 +378,22 @@ class DpcAgentManager:
         # Wire Telegram send-back so scheduled tasks can deliver their results
         self._agent._telegram_send_fn = self._deliver_telegram_result
 
+        # Check for unconsumed morning brief from sleep pipeline (ADR-014)
+        try:
+            import json as _json
+            _conv_dir = Path.home() / ".dpc" / "conversations" / self.agent_id
+            _brief_path = _conv_dir / "morning_brief.json"
+            if _brief_path.exists():
+                _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
+                if not _brief.get("consumed", False):
+                    summary = _brief.get("summary", "Sleep analysis complete.")
+                    monitor = self.service.conversation_monitors.get(self.agent_id) if self.service else None
+                    if monitor:
+                        monitor.add_message("assistant", summary, sender_name=self.agent_id)
+                        log.info("Morning brief posted to chat for %s", self.agent_id)
+        except Exception as e:
+            log.debug("Morning brief startup check skipped: %s", e)
+
         log.info("DpcAgent started successfully")
 
     def sync_firewall_settings(self) -> None:
