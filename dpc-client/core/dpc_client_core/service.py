@@ -7628,7 +7628,7 @@ class CoreService:
         if state.get("status") == "sleeping":
             return {"status": "already_sleeping", "state": state}
 
-        self.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "sleeping"})
+        await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "sleeping"})
 
         result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id)
 
@@ -7638,9 +7638,9 @@ class CoreService:
             monitor = self._get_conversation_monitor(agent_id)
             if monitor:
                 monitor.add_message("assistant", summary, sender_name=agent_id)
-            self.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "completed"})
+            await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "completed"})
         else:
-            self.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": result.get("status")})
+            await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": result.get("status")})
 
         return result
 
