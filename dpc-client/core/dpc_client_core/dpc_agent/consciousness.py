@@ -225,6 +225,8 @@ class BackgroundConsciousness:
             firewall=getattr(self.agent, '_firewall', None),
             skill_store=getattr(self.agent, 'skill_store', None),
         )
+        ctx._agent = self.agent
+        self._consciousness_ctx = ctx
         prev_ctx = self.agent.tools._ctx
         self.agent.tools.set_context(ctx)
         return prev_ctx
@@ -252,8 +254,12 @@ class BackgroundConsciousness:
 
         try:
             loop = asyncio.get_event_loop()
+            _ctx = getattr(self, '_consciousness_ctx', None)
             result = await asyncio.wait_for(
-                loop.run_in_executor(None, self.agent.tools.execute, fn_name, args),
+                loop.run_in_executor(
+                    None,
+                    lambda: self.agent.tools.execute(fn_name, args, ctx=_ctx),
+                ),
                 timeout=30,
             )
         except asyncio.TimeoutError:

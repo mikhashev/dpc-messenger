@@ -243,9 +243,14 @@ def _execute_single_tool(
     task_id: str = "",
     round_number: int = 0,
     session_id: str = "",
+    ctx: "Optional[ToolContext]" = None,
 ) -> Dict[str, Any]:
     """
     Execute a single tool call and return result info.
+
+    Args:
+        ctx: Per-call context snapshot — prevents race when consciousness
+             or scheduled tasks swap the shared ToolRegistry._ctx mid-loop.
 
     Returns dict with: tool_call_id, fn_name, result, is_error, args_for_log
     """
@@ -271,7 +276,7 @@ def _execute_single_tool(
     is_error = False
     t0 = time.monotonic()
     try:
-        result = tools.execute(fn_name, args)
+        result = tools.execute(fn_name, args, ctx=ctx)
     except Exception as e:
         is_error = True
         result = f"⚠️ TOOL_ERROR ({fn_name}): {type(e).__name__}: {e}"
@@ -323,6 +328,7 @@ async def _execute_with_timeout(
     task_id: str = "",
     round_number: int = 0,
     session_id: str = "",
+    ctx: "Optional[ToolContext]" = None,
 ) -> Dict[str, Any]:
     """Execute a tool call with a hard timeout using shared executor.
 
@@ -342,8 +348,9 @@ async def _execute_with_timeout(
         result = await asyncio.wait_for(
             loop.run_in_executor(
                 executor,
-                _execute_single_tool,
-                tools, tc, logs_dir, task_id, round_number, session_id
+                lambda: _execute_single_tool(
+                    tools, tc, logs_dir, task_id, round_number, session_id, ctx=ctx,
+                ),
             ),
             timeout=timeout_sec
         )
@@ -456,6 +463,10 @@ async def run_llm_loop(
     """
     logs_dir = agent_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
+
+    # Snapshot the context at loop entry — prevents race when consciousness
+    # or another process() call swaps ToolRegistry._ctx mid-loop.
+    _loop_ctx = tools._ctx
 
     llm_trace: Dict[str, Any] = {
         "assistant_notes": [],
@@ -651,6 +662,7 @@ async def run_llm_loop(
                     tools, tc, logs_dir, timeout, task_id,
                     round_number=round_idx,
                     session_id=conversation_id or "",
+                    ctx=_loop_ctx,
                 )
 
                 truncated_result = _truncate_tool_result(exec_result["result"])

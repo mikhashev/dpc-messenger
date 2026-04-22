@@ -370,12 +370,17 @@ class ToolRegistry:
         entry = self._entries.get(name)
         return entry.timeout_sec if entry is not None else 120
 
-    def execute(self, name: str, args: Dict[str, Any]) -> str:
+    def execute(self, name: str, args: Dict[str, Any], ctx: Optional[ToolContext] = None) -> str:
         """
         Execute a tool by name with the given arguments.
 
         Handles both sync and async handlers. Async handlers are awaited
         using a properly managed event loop to prevent memory leaks.
+
+        Args:
+            ctx: Explicit context for this call. When provided, avoids reading
+                 the shared self._ctx — prevents race conditions when multiple
+                 loops (consciousness, scheduled tasks) run concurrently.
 
         Returns:
             Tool result as string (errors prefixed with ⚠️)
@@ -385,12 +390,14 @@ class ToolRegistry:
             available = ", ".join(sorted(self._entries.keys()))
             return f"⚠️ Unknown tool: {name}. Available: {available}"
 
+        _ctx = ctx or self._ctx
+
         # Check whitelist
-        if self._ctx.tool_whitelist and name not in self._ctx.tool_whitelist:
+        if _ctx.tool_whitelist and name not in _ctx.tool_whitelist:
             return f"⚠️ Tool '{name}' is not in the allowed tools list"
 
         try:
-            result = entry.handler(self._ctx, **args)
+            result = entry.handler(_ctx, **args)
             # Handle async handlers
             if asyncio.iscoroutine(result):
                 # Run the coroutine in a properly managed event loop
