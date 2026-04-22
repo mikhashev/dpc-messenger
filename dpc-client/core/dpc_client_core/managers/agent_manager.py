@@ -296,8 +296,8 @@ class DpcAgentManager:
                             extra_chunks = []
                             extra_metas = []
 
-                            # L6: human knowledge
-                            if needs_full_rebuild and self.firewall and self.firewall.can_agent_access_context('knowledge'):
+                            # L6: human knowledge (always re-index, not just on full rebuild)
+                            if self.firewall and self.firewall.can_agent_access_context('knowledge'):
                                 l6_dir = Path(os.environ.get("DPC_HOME", Path.home() / ".dpc")) / "knowledge"
                                 if l6_dir.is_dir():
                                     for f in sorted(l6_dir.iterdir()):
