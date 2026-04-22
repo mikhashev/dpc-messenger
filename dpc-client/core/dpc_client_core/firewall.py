@@ -236,8 +236,6 @@ class ContextFirewall:
         # Parse consciousness settings (v0.23.0+)
         consciousness = dpc_agent.get('consciousness', {})
         self.consciousness_enabled = consciousness.get('enabled', False)
-        self.consciousness_think_interval_min = consciousness.get('think_interval_min', 60)
-        self.consciousness_think_interval_max = consciousness.get('think_interval_max', 300)
         self.consciousness_budget_fraction = consciousness.get('budget_fraction', 0.1)
 
         # Parse history settings (v0.22.0+)
@@ -1701,14 +1699,6 @@ class ContextFirewall:
                         else:
                             if 'enabled' in consciousness and not isinstance(consciousness['enabled'], bool):
                                 errors.append("'dpc_agent.consciousness.enabled' must be a boolean")
-                            if 'think_interval_min' in consciousness:
-                                if not isinstance(consciousness['think_interval_min'], int):
-                                    errors.append("'dpc_agent.consciousness.think_interval_min' must be an integer")
-                                elif consciousness['think_interval_min'] < 10:
-                                    errors.append("'dpc_agent.consciousness.think_interval_min' must be at least 10")
-                            if 'think_interval_max' in consciousness:
-                                if not isinstance(consciousness['think_interval_max'], int):
-                                    errors.append("'dpc_agent.consciousness.think_interval_max' must be an integer")
                             if 'budget_fraction' in consciousness:
                                 val = consciousness['budget_fraction']
                                 if not isinstance(val, (int, float)) or val <= 0 or val > 1:

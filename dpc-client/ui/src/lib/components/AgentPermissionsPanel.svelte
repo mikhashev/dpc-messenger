@@ -194,8 +194,6 @@
     if (!editSettings.consciousness) {
       editSettings.consciousness = {
         enabled: false,
-        think_interval_min: 60,
-        think_interval_max: 300,
         budget_fraction: 0.1
       };
     }

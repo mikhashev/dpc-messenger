@@ -165,7 +165,7 @@ class BackgroundConsciousness:
 
             median_dur = statistics.median(durations)
             computed = int(median_dur / target_thoughts)
-            result = max(self.think_interval_min, computed)
+            result = max(DEFAULT_THINK_INTERVAL_MIN, computed)
             log.info("Adaptive consciousness interval: %ds (median session %ds, %d archives)",
                      result, int(median_dur), len(durations))
             return result
