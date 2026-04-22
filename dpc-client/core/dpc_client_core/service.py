@@ -7632,7 +7632,7 @@ class CoreService:
 
         async def _run_sleep_background():
             try:
-                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id)
+                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=True)
                 if result.get("status") == "completed":
                     brief = result.get("morning_brief", {})
                     summary = brief.get("summary", "Sleep analysis complete.")

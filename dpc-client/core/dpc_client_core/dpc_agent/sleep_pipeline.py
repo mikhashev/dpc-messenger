@@ -184,7 +184,7 @@ async def _analyze_single_session(
     return finding
 
 
-async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "") -> Dict[str, Any]:
+async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "", force: bool = False) -> Dict[str, Any]:
     state = _read_sleep_state(conversation_dir)
     if state.get("status") == "sleeping":
         return {"status": "already_sleeping"}
@@ -195,7 +195,7 @@ async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "") -> 
     })
 
     try:
-        since = _get_last_sleep_timestamp(conversation_dir)
+        since = None if force else _get_last_sleep_timestamp(conversation_dir)
         digests = _find_unprocessed_archives(conversation_dir, since)
 
         if not digests:
