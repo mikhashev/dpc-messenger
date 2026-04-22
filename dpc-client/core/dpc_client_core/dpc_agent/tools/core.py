@@ -204,6 +204,7 @@ def write_file(ctx: ToolContext, path: str, content: str) -> str:
                         faiss_idx = FaissIndex(index_dir)
                         bm25_idx = BM25Index(index_dir)
                         if faiss_idx.load():
+                            bm25_idx.load()
                             index_single_file(file_path, provider, faiss_idx, bm25_idx, source_layer="L5")
                             faiss_idx.save()
                             bm25_idx.save()

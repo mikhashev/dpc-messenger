@@ -829,6 +829,7 @@ Respond in JSON format:
                                     faiss_idx = FaissIndex(index_dir)
                                     bm25_idx = BM25Index(index_dir)
                                     if faiss_idx.load():
+                                        bm25_idx.load()
                                         index_single_file(commit_path, agent._embedding_provider, faiss_idx, bm25_idx, source_layer="L6")
                                         faiss_idx.save()
                                         bm25_idx.save()
