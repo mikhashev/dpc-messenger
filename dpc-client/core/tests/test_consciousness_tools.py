@@ -9,7 +9,6 @@ from dpc_client_core.dpc_agent.consciousness import (
     CONSCIOUSNESS_TOOL_WHITELIST,
     _MAX_TOOL_ROUNDS,
 )
-from dpc_client_core.dpc_agent.tools.core import set_next_wakeup
 from dpc_client_core.dpc_agent.tools.registry import ToolContext, CORE_TOOL_NAMES
 
 
@@ -38,42 +37,21 @@ def test_whitelist_has_expected_tools():
     assert "read_file" in CONSCIOUSNESS_TOOL_WHITELIST
     assert "write_file" in CONSCIOUSNESS_TOOL_WHITELIST
     assert "knowledge_list" in CONSCIOUSNESS_TOOL_WHITELIST
-    assert "set_next_wakeup" in CONSCIOUSNESS_TOOL_WHITELIST
+    assert "set_next_wakeup" not in CONSCIOUSNESS_TOOL_WHITELIST
     assert "run_shell" not in CONSCIOUSNESS_TOOL_WHITELIST
     assert "browse_page" not in CONSCIOUSNESS_TOOL_WHITELIST
 
 
 def test_whitelist_size():
-    assert len(CONSCIOUSNESS_TOOL_WHITELIST) == 5
+    assert len(CONSCIOUSNESS_TOOL_WHITELIST) == 4
 
 
-def test_set_next_wakeup_in_core_tool_names():
-    assert "set_next_wakeup" in CORE_TOOL_NAMES
+def test_set_next_wakeup_not_in_core_tool_names():
+    assert "set_next_wakeup" not in CORE_TOOL_NAMES
 
 
 def test_max_tool_rounds():
     assert _MAX_TOOL_ROUNDS == 5
-
-
-def test_set_next_wakeup_clamping():
-    ctx = ToolContext(agent_root=pathlib.Path("/tmp/test"))
-    result = set_next_wakeup(ctx, seconds=10)
-    assert "60s" in result
-    assert len(ctx.pending_events) == 1
-    assert ctx.pending_events[0]["seconds"] == 60
-
-    ctx2 = ToolContext(agent_root=pathlib.Path("/tmp/test"))
-    result = set_next_wakeup(ctx2, seconds=9999)
-    assert "3600s" in result
-    assert ctx2.pending_events[0]["seconds"] == 3600
-
-
-def test_set_next_wakeup_normal():
-    ctx = ToolContext(agent_root=pathlib.Path("/tmp/test"))
-    result = set_next_wakeup(ctx, seconds=120)
-    assert "120s" in result
-    assert ctx.pending_events[0]["type"] == "consciousness_set_wakeup"
-    assert ctx.pending_events[0]["seconds"] == 120
 
 
 def test_build_context(mock_agent):
@@ -99,28 +77,14 @@ def test_get_tool_schemas_filters(mock_agent):
     mock_agent.tools.schemas.return_value = [
         {"function": {"name": "update_scratchpad", "description": "test"}},
         {"function": {"name": "run_shell", "description": "dangerous"}},
-        {"function": {"name": "set_next_wakeup", "description": "wakeup"}},
+        {"function": {"name": "knowledge_list", "description": "list knowledge"}},
     ]
     bc = BackgroundConsciousness(agent=mock_agent)
     schemas = bc._get_tool_schemas()
     names = [s["function"]["name"] for s in schemas]
     assert "update_scratchpad" in names
-    assert "set_next_wakeup" in names
+    assert "knowledge_list" in names
     assert "run_shell" not in names
-
-
-def test_apply_pending_wakeup(mock_agent):
-    bc = BackgroundConsciousness(agent=mock_agent)
-    mock_ctx = MagicMock()
-    mock_ctx.pending_events = [
-        {"type": "consciousness_set_wakeup", "seconds": 180},
-        {"type": "other_event", "data": "keep"},
-    ]
-    mock_agent.tools._ctx = mock_ctx
-    bc._apply_pending_wakeup()
-    assert bc._next_wakeup_sec == 180
-    assert len(mock_ctx.pending_events) == 1
-    assert mock_ctx.pending_events[0]["type"] == "other_event"
 
 
 @pytest.mark.asyncio
@@ -179,7 +143,7 @@ async def test_reflect_with_tools_uses_tool(mock_agent):
 async def test_user_active_breaks_loop(mock_agent):
     """Tool loop exits when user becomes active."""
     mock_agent.tools.schemas.return_value = [
-        {"function": {"name": "set_next_wakeup", "description": "test"}},
+        {"function": {"name": "update_scratchpad", "description": "test"}},
     ]
     mock_agent._user_active = True
     mock_agent.llm.chat = AsyncMock()

@@ -709,13 +709,6 @@ def memory_search(ctx: ToolContext, query: str, top_k: int = 5) -> str:
         return f"⚠️ Memory search error: {e}"
 
 
-def set_next_wakeup(ctx: ToolContext, seconds: int = 300) -> str:
-    """Set the interval until the next consciousness thinking cycle."""
-    clamped = max(60, min(3600, int(seconds)))
-    ctx.emit_event("consciousness_set_wakeup", {"seconds": clamped})
-    return f"OK: next wakeup scheduled in {clamped}s"
-
-
 def knowledge_list(ctx: ToolContext) -> str:
     """
     List all knowledge base topics.
@@ -2055,31 +2048,6 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=chat_history,
             timeout_sec=10,
-        ),
-
-        # Consciousness-specific tools
-        ToolEntry(
-            name="set_next_wakeup",
-            schema={
-                "name": "set_next_wakeup",
-                "description": (
-                    "Set how many seconds until your next thinking cycle. "
-                    "Range: 60-3600. Use shorter intervals when actively "
-                    "consolidating knowledge, longer when idle."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "seconds": {
-                            "type": "integer",
-                            "description": "Seconds until next wakeup (60-3600)",
-                        }
-                    },
-                    "required": ["seconds"],
-                },
-            },
-            handler=set_next_wakeup,
-            timeout_sec=5,
         ),
 
         # Knowledge tools (knowledge_read/knowledge_write removed — use read_file/write_file)

@@ -90,7 +90,6 @@ class BackgroundConsciousness:
         # Tracking
         self.thought_count = 0
         self.last_thought_ts: Optional[str] = None
-        self._next_wakeup_sec: Optional[float] = None
 
         log.info(f"BackgroundConsciousness initialized (interval={think_interval_min}-{think_interval_max}s)")
 
@@ -184,12 +183,7 @@ class BackgroundConsciousness:
 
         while self._running:
             try:
-                # LLM-controlled override or adaptive interval
-                if self._next_wakeup_sec is not None:
-                    interval = int(self._next_wakeup_sec)
-                    self._next_wakeup_sec = None
-                else:
-                    interval = self._compute_adaptive_interval()
+                interval = self._compute_adaptive_interval()
                 log.debug(f"Next thought in {interval}s")
 
                 # Wait for interval or stop signal
@@ -337,19 +331,6 @@ class BackgroundConsciousness:
 
         return result_str
 
-    def _apply_pending_wakeup(self) -> None:
-        """Check tool context pending_events for wakeup interval changes."""
-        ctx = self.agent.tools._ctx
-        remaining = []
-        for evt in ctx.pending_events:
-            if evt.get("type") == "consciousness_set_wakeup":
-                new_sec = evt.get("seconds", 300)
-                self._next_wakeup_sec = new_sec
-                log.info("Consciousness wakeup interval set to %ds", new_sec)
-            else:
-                remaining.append(evt)
-        ctx.pending_events = remaining
-
     def _build_context(self) -> str:
         """Build system prompt for consciousness thinking cycle."""
         memory = self.agent.memory
@@ -427,7 +408,6 @@ class BackgroundConsciousness:
                         "tool_call_id": tc.get("id", ""),
                         "content": result,
                     })
-                self._apply_pending_wakeup()
                 if content:
                     final_content = content
                 continue
