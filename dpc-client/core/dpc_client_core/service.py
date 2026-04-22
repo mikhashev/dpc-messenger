@@ -7630,19 +7630,26 @@ class CoreService:
 
         await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "sleeping"})
 
-        result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id)
+        async def _run_sleep_background():
+            try:
+                result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id)
+                if result.get("status") == "completed":
+                    brief = result.get("morning_brief", {})
+                    summary = brief.get("summary", "Sleep analysis complete.")
+                    monitor = self.conversation_monitors.get(agent_id)
+                    if monitor:
+                        monitor.add_message("assistant", summary, sender_name=agent_id)
+                    await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0)})
+                else:
+                    await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": result.get("status")})
+            except Exception as e:
+                logger.error("Sleep pipeline background error: %s", e, exc_info=True)
+                await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "error", "error": str(e)})
 
-        if result.get("status") == "completed":
-            brief = result.get("morning_brief", {})
-            summary = brief.get("summary", "Sleep analysis complete.")
-            monitor = self.conversation_monitors.get(agent_id)
-            if monitor:
-                monitor.add_message("assistant", summary, sender_name=agent_id)
-            await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "completed"})
-        else:
-            await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": result.get("status")})
+        import asyncio
+        asyncio.create_task(_run_sleep_background())
 
-        return result
+        return {"status": "sleeping", "message": "Sleep pipeline started in background"}
 
     # --- Hub Methods ---
 
