@@ -321,6 +321,10 @@ class ZaiProvider(AIProvider):
         }
         if system:
             api_params["system"] = system
+            if isinstance(system, list):
+                logger.info("Z.AI system param: list of %d blocks (cache_control present)", len(system))
+            else:
+                logger.info("Z.AI system param: plain str (%d chars, no cache_control)", len(system))
 
         # Enable extended thinking if configured (test: Z.AI may support interleaved thinking + tools)
         if self.thinking_enabled:
