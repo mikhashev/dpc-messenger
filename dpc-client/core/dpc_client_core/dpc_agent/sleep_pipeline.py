@@ -21,42 +21,62 @@ LAST_SLEEP_FILE = "last_sleep.json"
 MORNING_BRIEF_FILE = "morning_brief.json"
 SLEEP_FINDINGS_FILE = "sleep_findings.json"
 
-RETROSPECTIVE_PROMPT = """\
-You are performing a retrospective analysis of recent conversation sessions \
-for an AI agent. You have access to structured session data below.
+PER_SESSION_PROMPT = """\
+Analyze this single conversation session and extract key information. \
+Respond with ONLY a JSON object, no markdown fences.
 
-For each session you receive:
-- Digest (metadata: duration, message count, tools used, participants)
-- Full session archive (all messages including tool calls and decisions)
+{{
+  "date": "session date",
+  "decisions": ["decision 1", "decision 2"],
+  "topics": ["topic 1", "topic 2"],
+  "unresolved": ["open question 1"],
+  "lessons": ["lesson learned"],
+  "notable_events": ["anything surprising or important"],
+  "productivity": "high|medium|low",
+  "summary": "2-3 sentence summary of the session"
+}}
 
-Analyze these sessions and produce a JSON object with two top-level keys:
+Guidelines:
+- Be factual, not flattering.
+- Focus on decisions, lessons, and unresolved items.
+- Language: match the language of the session.
+
+--- SESSION ---
+Date: {date}
+Messages: {message_count}, Duration: {duration_mins} min
+Tools used: {tools}
+
+{messages}
+"""
+
+SYNTHESIS_PROMPT = """\
+You have per-session analysis results from {n} recent sessions. \
+Synthesize them into a retrospective report.
+
+Respond with ONLY a JSON object with two keys:
 
 "morning_brief": {{
-  "sessions_analyzed": N,
-  "period": "DATE to DATE",
-  "key_decisions": [{{"decision": "...", "session": "S##", "rationale": "..."}}],
-  "patterns_noticed": [{{"pattern": "...", "evidence": "S##, S##"}}],
-  "unresolved": [{{"topic": "...", "context": "...", "session": "S##"}}],
-  "summary": "2-3 sentence human-readable summary"
+  "sessions_analyzed": {n},
+  "period": "{period}",
+  "key_decisions": [{{"decision": "...", "session": "...", "rationale": "..."}}],
+  "patterns_noticed": [{{"pattern": "...", "evidence": "..."}}],
+  "unresolved": [{{"topic": "...", "context": "..."}}],
+  "summary": "2-3 sentence human-readable summary of what happened"
 }}
 
 "sleep_findings": {{
-  "behavioral_observations": [{{"observation": "...", "frequency": "...", "significance": "low|medium|high"}}],
-  "tool_usage_patterns": [{{"tool": "...", "observation": "..."}}],
-  "recurring_topics": [{{"topic": "...", "sessions": ["S##"], "progress": "advancing|stalled|repeating"}}],
+  "behavioral_observations": [{{"observation": "...", "significance": "low|medium|high"}}],
+  "recurring_topics": [{{"topic": "...", "progress": "advancing|stalled|repeating"}}],
   "suggested_focus": ["area1", "area2"]
 }}
 
 Guidelines:
-- Be factual, not flattering. If sessions were unproductive, say so.
-- Reference session IDs for traceability.
-- Focus on CHANGE: what is new, what shifted, what was decided differently.
-- If a decision was reversed in a later session, flag it.
+- Focus on CROSS-SESSION patterns: what changed, what reversed, what repeated.
+- Be factual. If sessions were unproductive, say so.
 - Language: match the language of the sessions.
-- Respond with ONLY the JSON object, no markdown fences.
 
---- SESSION DATA ---
-{session_data}
+--- PER-SESSION FINDINGS ---
+{findings}
 """
 
 
@@ -117,33 +137,51 @@ def _load_archive(conversation_dir: Path, archive_filename: str) -> Optional[Dic
     return None
 
 
-def _build_session_data(digests: List[Dict], conversation_dir: Path) -> str:
+def _format_archive_messages(archive: Dict[str, Any]) -> str:
+    messages = archive.get("messages", [])
     parts = []
-    for i, digest in enumerate(digests):
-        archive_file = digest.get("archive_file", "")
-        archive = _load_archive(conversation_dir, archive_file) if archive_file else None
-
-        part = f"\n=== Session {i+1} ===\n"
-        part += f"Date: {digest.get('date', 'unknown')}\n"
-        part += f"Messages: {digest.get('message_count', 0)}, Duration: {digest.get('duration_mins', 0)} min\n"
-        part += f"Tools: {', '.join(digest.get('tool_stats', {}).keys()) or 'none'}\n"
-
-        if archive:
-            messages = archive.get("messages", [])
-            for msg in messages[:100]:
-                role = msg.get("role", "")
-                sender = msg.get("sender_name", role)
-                content = msg.get("content", "")[:500]
-                if content:
-                    part += f"[{sender}]: {content}\n"
-        else:
-            previews = digest.get("user_message_previews", [])
-            if previews:
-                part += f"Previews: {'; '.join(previews[:3])}\n"
-
-        parts.append(part)
-
+    for msg in messages:
+        sender = msg.get("sender_name", msg.get("role", ""))
+        content = msg.get("content", "")
+        if content:
+            parts.append(f"[{sender}]: {content}")
     return "\n".join(parts)
+
+
+def _parse_llm_json(response: str) -> Dict[str, Any]:
+    try:
+        return json.loads(response)
+    except json.JSONDecodeError:
+        cleaned = response.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
+        return json.loads(cleaned)
+
+
+async def _analyze_single_session(
+    digest: Dict, conversation_dir: Path, llm_manager
+) -> Optional[Dict[str, Any]]:
+    archive_file = digest.get("archive_file", "")
+    archive = _load_archive(conversation_dir, archive_file) if archive_file else None
+    if not archive:
+        return None
+
+    messages_text = _format_archive_messages(archive)
+    tools = ", ".join(digest.get("tool_stats", {}).keys()) or "none"
+
+    prompt = PER_SESSION_PROMPT.format(
+        date=digest.get("date", "unknown"),
+        message_count=digest.get("message_count", 0),
+        duration_mins=digest.get("duration_mins", 0),
+        tools=tools,
+        messages=messages_text,
+    )
+
+    response = await llm_manager.query(prompt)
+    finding = _parse_llm_json(response)
+    finding["archive_file"] = archive_file
+    finding["digest_date"] = digest.get("date", "")
+    return finding
 
 
 async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "") -> Dict[str, Any]:
@@ -166,18 +204,42 @@ async def run_sleep(conversation_dir: Path, llm_manager, agent_id: str = "") -> 
 
         log.info("Sleep pipeline: analyzing %d sessions for %s", len(digests), agent_id or conversation_dir.name)
 
-        session_data = _build_session_data(digests, conversation_dir)
-        prompt = RETROSPECTIVE_PROMPT.format(session_data=session_data)
+        results_dir = conversation_dir / "sleep_results"
+        results_dir.mkdir(exist_ok=True)
 
-        response = await llm_manager.query(prompt)
+        per_session_findings = []
+        for i, digest in enumerate(digests):
+            log.info("Sleep: analyzing session %d/%d (%s)", i + 1, len(digests), digest.get("archive_file", ""))
+            try:
+                finding = await _analyze_single_session(digest, conversation_dir, llm_manager)
+                if finding:
+                    per_session_findings.append(finding)
+                    result_path = results_dir / f"session_{i}.json"
+                    result_path.write_text(json.dumps(finding, ensure_ascii=False, indent=2), encoding="utf-8")
+            except Exception as e:
+                log.warning("Sleep: failed to analyze session %d: %s", i + 1, e)
+                per_session_findings.append({"error": str(e), "archive_file": digest.get("archive_file", "")})
 
-        try:
-            result = json.loads(response)
-        except json.JSONDecodeError:
-            cleaned = response.strip()
-            if cleaned.startswith("```"):
-                cleaned = cleaned.split("\n", 1)[-1].rsplit("```", 1)[0]
-            result = json.loads(cleaned)
+        if not per_session_findings:
+            _write_sleep_state(conversation_dir, {"status": "awake"})
+            return {"status": "no_analyzable_sessions", "sessions_analyzed": 0}
+
+        dates = [d.get("date", "") for d in digests if d.get("date")]
+        period = f"{dates[0][:10]} to {dates[-1][:10]}" if len(dates) >= 2 else dates[0][:10] if dates else "unknown"
+
+        findings_text = "\n\n".join(
+            f"Session {i+1} ({f.get('digest_date', '')[:10]}):\n{json.dumps(f, ensure_ascii=False, indent=2)}"
+            for i, f in enumerate(per_session_findings) if "error" not in f
+        )
+
+        synthesis_prompt = SYNTHESIS_PROMPT.format(
+            n=len(per_session_findings),
+            period=period,
+            findings=findings_text,
+        )
+
+        response = await llm_manager.query(synthesis_prompt)
+        result = _parse_llm_json(response)
 
         morning_brief = result.get("morning_brief", {})
         sleep_findings = result.get("sleep_findings", {})

@@ -26,9 +26,14 @@ User-initiated, not automated. Toggle button in sidebar following the Markdown/T
 
 **Guard:** Sleep button disabled when chat has active session (messages > 0). User must End Session first.
 
-### Pipeline: Python-side via llm_manager
+### Pipeline: Per-Session Processing via llm_manager (S66 amendment)
 
-Sleep pipeline is a single LLM call, not a multi-round agent conversation. Uses `llm_manager.execute_query()` directly — already has retry and provider routing. Agent loop (process_message) is overkill for input→output transformation.
+Pipeline processes archives one session at a time — no truncation, full content analysis:
+
+1. **Per-session pass (N calls):** For each unprocessed session, load full archive (no char limit), one `llm_manager.query()` call per session, write per-session finding to `sleep_results/` directory. Crash-safe — completed sessions are preserved if pipeline fails mid-cycle.
+2. **Synthesis pass (1 call):** Read all per-session findings (~2KB each), one final LLM call to produce cross-session patterns, morning brief, and sleep findings.
+
+Total: N+1 LLM calls per sleep cycle. Cost ~$0.10 for 5 sessions (vs $0.05 for single-call with truncation). No truncation = decisions and patterns captured fully.
 
 Hooks/middleware (ADR-007) not applicable — they operate inside agent loop between LLM rounds. Sleep is a separate process.
 
