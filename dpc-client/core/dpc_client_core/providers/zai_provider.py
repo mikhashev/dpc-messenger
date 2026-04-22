@@ -4,7 +4,7 @@ import os
 import base64
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Union
 
 from anthropic import AsyncAnthropic
 
@@ -301,7 +301,7 @@ class ZaiProvider(AIProvider):
         self,
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
-        system: str = "",
+        system: Union[str, List[Dict[str, Any]]] = "",
         on_chunk: Optional[callable] = None,
         conversation_id: Optional[str] = None,
     ) -> Dict[str, Any]:
