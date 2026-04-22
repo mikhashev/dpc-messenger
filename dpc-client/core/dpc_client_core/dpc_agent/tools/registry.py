@@ -392,6 +392,13 @@ class ToolRegistry:
 
         _ctx = ctx or self._ctx
 
+        _ctx_id = id(_ctx)
+        _shared_id = id(self._ctx)
+        if _ctx_id != _shared_id:
+            log.debug("Tool %s: using isolated ctx %x (shared=%x)", name, _ctx_id, _shared_id)
+        elif ctx is None:
+            log.warning("Tool %s: using shared ctx %x (no isolation — potential race)", name, _ctx_id)
+
         # Check whitelist
         if _ctx.tool_whitelist and name not in _ctx.tool_whitelist:
             return f"⚠️ Tool '{name}' is not in the allowed tools list"
