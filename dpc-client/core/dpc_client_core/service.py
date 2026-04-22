@@ -7602,6 +7602,48 @@ class CoreService:
             agent_id = self._get_default_agent_id()
         return await self.agent_service.cancel_agent_task(agent_id, task_id)
 
+    # --- Sleep Consolidation (ADR-014) ---
+
+    async def toggle_sleep(self, agent_id: str = None) -> Dict[str, Any]:
+        """Toggle sleep/wakeup for an agent. If awake, starts sleep pipeline. If sleeping, returns current state."""
+        if agent_id is None:
+            agent_id = self._get_default_agent_id()
+
+        conversation_dir = Path.home() / ".dpc" / "conversations" / agent_id
+        if not conversation_dir.exists():
+            return {"status": "error", "message": f"Agent {agent_id} not found"}
+
+        history_path = conversation_dir / "history.json"
+        if history_path.exists():
+            try:
+                data = json.loads(history_path.read_text(encoding="utf-8"))
+                if data.get("messages"):
+                    return {"status": "error", "message": "End session first — chat must be empty to sleep"}
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        from dpc_client_core.dpc_agent.sleep_pipeline import run_sleep, _read_sleep_state
+
+        state = _read_sleep_state(conversation_dir)
+        if state.get("status") == "sleeping":
+            return {"status": "already_sleeping", "state": state}
+
+        self.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "sleeping"})
+
+        result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id)
+
+        if result.get("status") == "completed":
+            brief = result.get("morning_brief", {})
+            summary = brief.get("summary", "Sleep analysis complete.")
+            monitor = self._get_conversation_monitor(agent_id)
+            if monitor:
+                monitor.add_message("assistant", summary, sender_name=agent_id)
+            self.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "completed"})
+        else:
+            self.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": result.get("status")})
+
+        return result
+
     # --- Hub Methods ---
 
     async def login_to_hub(self, provider: str = "google"):

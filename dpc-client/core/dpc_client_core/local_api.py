@@ -141,6 +141,8 @@ ALLOWED_COMMANDS: frozenset = frozenset({
     "cancel_agent_task",
     # Frontend logging relay
     "ui_log",
+    # Sleep Consolidation (ADR-014)
+    "toggle_sleep",
     # Memory system (ADR-010)
     "get_memory_status",
     "memory_search",
