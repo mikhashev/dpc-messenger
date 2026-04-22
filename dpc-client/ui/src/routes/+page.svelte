@@ -213,6 +213,7 @@
   let isSleeping = $state(false);
 
   function handleToggleSleep() {
+    isSleeping = !isSleeping;
     sendCommand('toggle_sleep', { agent_id: activeChatId });
   }
 
