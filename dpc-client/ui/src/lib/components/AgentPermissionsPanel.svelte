@@ -614,38 +614,11 @@
             <p class="help-text-small" style="color: #d32f2f; margin-top: 0.25rem;">⚠ When disabled: knowledge deduplication stops, decay accuracy reduced, evolution feedback limited</p>
           </div>
 
-          {#if (editMode ? editSettings?.consciousness?.enabled : displaySettings.consciousness?.enabled)}
-            <div class="setting-item" style="margin-top: 0.75rem;">
-              <span><strong>Think interval (sec):</strong></span>
-              {#if editMode && editSettings?.consciousness}
-                <input
-                  type="number"
-                  id="agent-consciousness-interval-min"
-                  min="10"
-                  max="600"
-                  bind:value={editSettings.consciousness.think_interval_min}
-                  style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
-                />
-                <span style="margin: 0 0.25rem;">to</span>
-                <input
-                  type="number"
-                  id="agent-consciousness-interval-max"
-                  min="10"
-                  max="600"
-                  bind:value={editSettings.consciousness.think_interval_max}
-                  style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
-                />
-              {:else}
-                <span class="value">{displaySettings.consciousness?.think_interval_min || 60} — {displaySettings.consciousness?.think_interval_max || 300}</span>
-              {/if}
-              <span class="help-text-small" style="margin-left: 0.5rem;">Random interval range between thoughts</span>
-            </div>
-          {/if}
-
           {#if !editMode}
             <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
               <strong>Consciousness</strong> enables the agent to think autonomously between user messages —
               self-reflection, planning, memory consolidation, and knowledge quality maintenance.
+              Think interval is adaptive (computed from session archive durations).
               Budget-capped at 10% of agent budget.
               <span style="color: #d32f2f;">When disabled: deduplication stops, knowledge decay loses one signal source, evolution feedback is reduced.</span>
             </div>
