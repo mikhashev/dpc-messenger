@@ -370,6 +370,11 @@ class ZaiProvider(AIProvider):
                 full_text, tool_calls_raw = _extract_blocks(final_message.content)
                 usage_obj = final_message.usage
 
+            _cache_create = getattr(usage_obj, "cache_creation_input_tokens", 0) or 0
+            _cache_read = getattr(usage_obj, "cache_read_input_tokens", 0) or 0
+            logger.info("Z.AI usage: prompt=%d, completion=%d, cache_create=%d, cache_read=%d",
+                        usage_obj.input_tokens, usage_obj.output_tokens, _cache_create, _cache_read)
+
             return {
                 "content": full_text,
                 "tool_calls_raw": tool_calls_raw,
