@@ -378,6 +378,8 @@ class ZaiProvider(AIProvider):
                     "prompt_tokens": usage_obj.input_tokens,
                     "completion_tokens": usage_obj.output_tokens,
                     "total_tokens": usage_obj.input_tokens + usage_obj.output_tokens,
+                    "cache_creation_input_tokens": getattr(usage_obj, "cache_creation_input_tokens", 0) or 0,
+                    "cache_read_input_tokens": getattr(usage_obj, "cache_read_input_tokens", 0) or 0,
                 },
             }
 
