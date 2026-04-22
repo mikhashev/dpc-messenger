@@ -668,11 +668,6 @@ If no improvements are warranted: {{"proposals": []}}
         full_path = self.agent_root / path
 
         try:
-            # Backup current state
-            if full_path.exists():
-                backup_path = full_path.with_suffix(full_path.suffix + ".bak")
-                backup_path.write_text(full_path.read_text(encoding="utf-8"), encoding="utf-8")
-
             # Ensure parent directory exists
             full_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -701,6 +696,10 @@ If no improvements are warranted: {{"proposals": []}}
                 return False
 
             log.info(f"Applied change to {path}: {description}")
+
+            from .utils import auto_commit_agent_change
+            auto_commit_agent_change(self.agent_root, f"evolution: {description[:80]}")
+
             return True
 
         except Exception as e:
@@ -721,11 +720,19 @@ If no improvements are warranted: {{"proposals": []}}
         error_count = sum(1 for e in tools_log if e.get("is_error") or str(e.get("result_preview", "")).startswith("⚠️"))
         total = len(tools_log) or 1
 
+        import subprocess as _sp
+        _sha_result = _sp.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(self.agent_root), capture_output=True, text=True, timeout=10,
+        )
+        pre_sha = _sha_result.stdout.strip() if _sha_result.returncode == 0 else None
+
         entry = {
             "proposal_id": proposal.get("description", "")[:100],
             "path": proposal.get("path", ""),
             "change_type": proposal.get("change_type", ""),
             "applied_at": utc_now_iso(),
+            "_pre_apply_sha": pre_sha,
             "baseline": {
                 "tool_error_rate": round(error_count / total, 3),
                 "tool_calls": total,
@@ -780,6 +787,21 @@ If no improvements are warranted: {{"proposals": []}}
                         "verdict": verdict,
                         "evaluated_at": utc_now_iso(),
                     }
+
+                    if verdict == "regressed":
+                        pre_sha = entry.get("_pre_apply_sha")
+                        evo_path = entry.get("path", "")
+                        if pre_sha and evo_path:
+                            import subprocess as _sp
+                            _sp.run(
+                                ["git", "checkout", pre_sha, "--", evo_path],
+                                cwd=str(self.agent_root), capture_output=True, timeout=10,
+                            )
+                            from .utils import auto_commit_agent_change
+                            auto_commit_agent_change(self.agent_root, f"rollback: evolution regressed on {evo_path}")
+                            entry["outcome"]["rolled_back"] = True
+                            log.info("Rolled back %s to pre-apply state %s (regressed)", evo_path, pre_sha[:8])
+
                     lines.append(json.dumps(entry, ensure_ascii=False))
                     evaluated.append(entry)
         except Exception as e:
