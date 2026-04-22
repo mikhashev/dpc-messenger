@@ -17,8 +17,10 @@
     messageCount = 0,
     enableMarkdown = $bindable(true),
     isExtracting = false,
+    isSleeping = false,
     onNewSession,
-    onEndSession
+    onEndSession,
+    onToggleSleep
   }: {
     showForChatId: string;
     isAIChat: boolean;
@@ -33,8 +35,10 @@
     messageCount?: number;
     enableMarkdown?: boolean;
     isExtracting?: boolean;
+    isSleeping?: boolean;
     onNewSession: (chatId: string) => void;
     onEndSession: (chatId: string) => void;
+    onToggleSleep?: () => void;
   } = $props();
 
   // Computed properties
@@ -161,6 +165,17 @@
       title={enableMarkdown ? 'Disable markdown rendering' : 'Enable markdown rendering'}
     >
       {enableMarkdown ? 'Markdown' : 'Text'}
+    </button>
+  {/if}
+  {#if showForChatId?.startsWith('agent_') && onToggleSleep}
+    <button
+      class="btn-sleep-toggle"
+      class:active={isSleeping}
+      onclick={() => onToggleSleep?.()}
+      disabled={messageCount > 0 && !isSleeping}
+      title={isSleeping ? 'Wake up agent' : messageCount > 0 ? 'End session first' : 'Put agent to sleep'}
+    >
+      {isSleeping ? '☀️ Wakeup' : '🌙 Sleep'}
     </button>
   {/if}
 </div>
@@ -349,5 +364,35 @@
   .btn-markdown-toggle:active {
     transform: translateY(0);
     box-shadow: 0 1px 4px rgba(108, 117, 125, 0.2);
+  }
+
+  .btn-sleep-toggle {
+    padding: 0.6rem 1rem;
+    background: #6c5ce7;
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 0.9rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+    box-shadow: 0 2px 8px rgba(108, 92, 231, 0.3);
+  }
+
+  .btn-sleep-toggle.active {
+    background: #fdcb6e;
+    color: #2d3436;
+    box-shadow: 0 2px 8px rgba(253, 203, 110, 0.4);
+  }
+
+  .btn-sleep-toggle:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(108, 92, 231, 0.4);
+  }
+
+  .btn-sleep-toggle:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
   }
 </style>

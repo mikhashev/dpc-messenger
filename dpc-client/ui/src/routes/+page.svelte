@@ -4,7 +4,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { writable } from "svelte/store";
-  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList } from "$lib/coreService";
+  import { connectionStatus, nodeStatus, sendCommand, resetReconnection, connectToCoreService, knowledgeCommitProposal, personalContext, tokenWarning, extractionFailure, availableProviders, peerProviders, unreadMessageCounts, resetUnreadCount, setActiveChat, newSessionProposal, proposeNewSession, voteNewSession, defaultProviders, providersList, groupChats, loadGroups, listAgents, agentsList, sleepStateChanged } from "$lib/coreService";
   import KnowledgeCommitDialog from "$lib/components/KnowledgeCommitDialog.svelte";
   import NewSessionDialog from "$lib/components/NewSessionDialog.svelte";
   import VoteResultDialog from "$lib/components/VoteResultDialog.svelte";
@@ -207,6 +207,21 @@
   // Save markdown preference to localStorage when changed
   $effect(() => {
     localStorage.setItem('enableMarkdown', enableMarkdown.toString());
+  });
+
+  // Sleep state (ADR-014)
+  let isSleeping = $state(false);
+
+  function handleToggleSleep() {
+    sendCommand('toggle_sleep', { agent_id: activeChatId });
+  }
+
+  // Update sleep state from backend events
+  $effect(() => {
+    const state = $sleepStateChanged;
+    if (state && state.agent_id === activeChatId) {
+      isSleeping = state.status === 'sleeping';
+    }
   });
 
   // Save auto-knowledge detection preference to localStorage when changed
@@ -946,8 +961,10 @@
             messageCount={$chatHistories.get(activeChatId)?.length ?? 0}
             bind:enableMarkdown
             isExtracting={isExtractingKnowledge}
+            {isSleeping}
             onNewSession={handleNewChat}
             onEndSession={handleEndSession}
+            onToggleSleep={handleToggleSleep}
           />
         {/if}
       </div>

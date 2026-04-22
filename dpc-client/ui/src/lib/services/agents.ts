@@ -24,6 +24,9 @@ export const agentTextChunk = writable<AgentTextChunkEvent | null>(null);
 // CC agent chat message (injected by CC via send_cc_agent_response)
 export const agentChatMessage = writable<any>(null);
 
+// Sleep state (ADR-014)
+export const sleepStateChanged = writable<{ agent_id: string; status: string; result?: string } | null>(null);
+
 // --- Command functions ---
 type SendCommandFn = (command: string, payload?: any) => Promise<any> | boolean;
 
