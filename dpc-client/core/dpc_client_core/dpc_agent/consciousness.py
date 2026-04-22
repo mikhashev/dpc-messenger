@@ -20,7 +20,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import random
+import statistics
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 from .utils import utc_now_iso, append_jsonl
@@ -122,18 +123,69 @@ class BackgroundConsciousness:
         """Check if consciousness loop is running."""
         return self._running
 
+    def _compute_adaptive_interval(self) -> int:
+        """Compute consciousness interval from session archive durations.
+
+        Reads last N session archives, extracts duration of each,
+        returns median_duration / target_thoughts_per_session, clamped to [min, max].
+        Falls back to empirical default (1200s) if archives unavailable.
+        """
+        _EMPIRICAL_DEFAULT = 180  # 3 min — conservative default for new agents without archive data
+        target_thoughts = 10
+        try:
+            archive_dir = self.agent.agent_root.parent / "archive"
+            if not archive_dir.exists():
+                return _EMPIRICAL_DEFAULT
+
+            archive_files = sorted(archive_dir.rglob("*.json"), key=lambda f: f.stat().st_mtime, reverse=True)[:10]
+            if len(archive_files) < 3:
+                return _EMPIRICAL_DEFAULT
+
+            durations = []
+            for f in archive_files:
+                try:
+                    data = json.loads(f.read_text(encoding="utf-8"))
+                    msgs = data.get("messages", [])
+                    if len(msgs) < 2:
+                        continue
+                    first_ts = msgs[0].get("timestamp", "")
+                    last_ts = msgs[-1].get("timestamp", "")
+                    if first_ts and last_ts:
+                        from datetime import datetime
+                        t0 = datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
+                        t1 = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
+                        dur = (t1 - t0).total_seconds()
+                        if dur > 60:
+                            durations.append(dur)
+                except Exception:
+                    continue
+
+            if len(durations) < 3:
+                return _EMPIRICAL_DEFAULT
+
+            median_dur = statistics.median(durations)
+            computed = int(median_dur / target_thoughts)
+            result = max(self.think_interval_min, min(computed, self.think_interval_max))
+            log.info("Adaptive consciousness interval: %ds (median session %ds, %d archives)",
+                     result, int(median_dur), len(durations))
+            return result
+
+        except Exception as e:
+            log.warning("Adaptive interval failed, using empirical default: %s", e)
+            return _EMPIRICAL_DEFAULT
+
     async def _consciousness_loop(self) -> None:
         """Main background consciousness loop."""
         log.info("Background consciousness loop started")
 
         while self._running:
             try:
-                # LLM-controlled override or random interval
+                # LLM-controlled override or adaptive interval
                 if self._next_wakeup_sec is not None:
                     interval = int(self._next_wakeup_sec)
                     self._next_wakeup_sec = None
                 else:
-                    interval = random.randint(self.think_interval_min, self.think_interval_max)
+                    interval = self._compute_adaptive_interval()
                 log.debug(f"Next thought in {interval}s")
 
                 # Wait for interval or stop signal

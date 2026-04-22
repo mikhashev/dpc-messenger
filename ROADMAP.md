@@ -1,6 +1,6 @@
 # D-PC Messenger Development Roadmap
 
-> **Status:** Alpha | **Last Updated:** April 2026 | **Current Version:** 0.21.0 | **Current Phase:** Phase 2 - Team Collaboration + Agent Evolution
+> **Status:** Alpha | **Last Updated:** April 2026 | **Current Version:** 0.22.0-dev | **Current Phase:** Phase 2 - Agent Evolution (Track 1 focus, Track 2 deferred)
 
 ---
 
@@ -101,16 +101,17 @@ Two parallel tracks. Agent Maturity is research-backed (9 independent sources co
 
 North Star: Consciousness observes → Evolution proposes → Verification measures → Cycle repeats with real learning. Phase 0 (Hooks) unlocks the cycle.
 
-| Phase | Feature | Scope | Priority | Description |
-|-------|---------|-------|----------|-------------|
-| **0** | **Hooks/Middleware** | ~510 lines | ENABLER | HookRegistry + Event Bus in loop.py. Injection points for all subsequent phases. 4 research projects converge on this pattern |
-| **1** | **Consciousness Tools** | ~240 lines | HIGH | Give consciousness ability to act (update scratchpad, read knowledge). Currently 535 thoughts → 0 actions |
-| **2** | **Evolution Verification** | ~280 lines | CRITICAL | Closed-loop feedback: proposal → apply → measure → rollback if harmful. Metric-driven evolution |
-| **3** | **Sleep Consolidation** | ~460 lines | HIGH | Overnight deep analysis of session archives. 5-phase pipeline (internalize → reflect → score → consolidate → commit). L1 partial, L2 partial, L3 not started |
-| **4** | **Memory Upgrade** | ~240 lines | MEDIUM | Knowledge decay + relevance tracking, scratchpad sections, structured memory schema |
-| **5** | **Skill Rewrite** | ~260 lines | MEDIUM | Break append-only limit. A/B testing for skill rewrites with auto-rollback |
+| Phase | Feature | Scope | Priority | Status | Description |
+|-------|---------|-------|----------|--------|-------------|
+| **0** | **Hooks/Middleware** | ~510 lines | ENABLER | **DONE** (S47) | HookRegistry + Event Bus in loop.py. 6 commits, 21 tests pass |
+| **0.5** | **Selection Layer (ADR-013)** | ~200 lines | HIGH | **DONE** (S58-S59) | S1-S9 data collection, dedup, decay, rejection feedback, robustness |
+| **1** | **Consciousness Tools** | ~240 lines | HIGH | **PARTIAL** (S61) | Multi-round tool access implemented. Remaining: adaptive timing |
+| **2** | **Evolution Verification** | ~280 lines | CRITICAL | **PARTIAL** (S61) | Outcome tracking + rolling metrics (2A+2B). Remaining: rollback, metric gating |
+| **3** | **Sleep Consolidation** | ~460 lines | HIGH | **PARTIAL** | L1 partial, L2 partial, L3 not started. Depends on P1+P2 completion |
+| **4** | **Memory Upgrade** | ~240 lines | MEDIUM | **PARTIAL** (ADR-010) | Phase 1-3 DONE+WIRED (14/19 tasks). Phase 4 wiring incomplete |
+| **5** | **Skill Rewrite** | ~260 lines | MEDIUM | NOT STARTED | Break append-only limit. A/B testing for skill rewrites with auto-rollback |
 
-**Dependencies:** Phase 0 → unblocks all. Phases 1+2 parallel after Phase 0. Phase 3 needs 1+2. Phases 4+5 parallel after Phase 3.
+**Dependencies:** Phase 0 DONE → unblocked all. Phases 1+2 in progress (parallel). Phase 3 needs 1+2 completion. Phases 4+5 parallel after Phase 3.
 **Research basis:** See `ideas/cc-mike-research/README.md` (consolidated from 9 sources) and `ideas/cc-mike-research/enumerated-strolling-seahorse.md` (detailed implementation plan).
 
 #### Track 2: Team Collaboration
