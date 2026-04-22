@@ -1010,6 +1010,7 @@
         {autoTranscribeEnabled}
         {whisperModelLoading}
         {groupPanelRef}
+        {isSleeping}
         bind:chatPanelHeight
         bind:showAgentBoard
         bind:currentInput
