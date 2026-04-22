@@ -21,6 +21,7 @@ import asyncio
 import json
 import logging
 import statistics
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
@@ -127,8 +128,8 @@ class BackgroundConsciousness:
         """Compute consciousness interval from session archive durations.
 
         Reads last N session archives, extracts duration of each,
-        returns median_duration / target_thoughts_per_session, clamped to [min, max].
-        Falls back to empirical default (1200s) if archives unavailable.
+        returns median_duration / target_thoughts_per_session with min guard.
+        Falls back to empirical default if archives unavailable.
         """
         _EMPIRICAL_DEFAULT = 180  # 3 min — conservative default for new agents without archive data
         target_thoughts = 10
@@ -151,7 +152,6 @@ class BackgroundConsciousness:
                     first_ts = msgs[0].get("timestamp", "")
                     last_ts = msgs[-1].get("timestamp", "")
                     if first_ts and last_ts:
-                        from datetime import datetime
                         t0 = datetime.fromisoformat(first_ts.replace("Z", "+00:00"))
                         t1 = datetime.fromisoformat(last_ts.replace("Z", "+00:00"))
                         dur = (t1 - t0).total_seconds()
@@ -165,7 +165,7 @@ class BackgroundConsciousness:
 
             median_dur = statistics.median(durations)
             computed = int(median_dur / target_thoughts)
-            result = max(self.think_interval_min, min(computed, self.think_interval_max))
+            result = max(self.think_interval_min, computed)
             log.info("Adaptive consciousness interval: %ds (median session %ds, %d archives)",
                      result, int(median_dur), len(durations))
             return result
