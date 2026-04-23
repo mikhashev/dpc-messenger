@@ -200,7 +200,35 @@ def _browse_sync(url: str) -> Dict[str, Any]:
             text = _extract_text(content)
 
     result["text"] = text
+    result["needs_js"] = not is_clean_text and len(text or "") < 200
     return result
+
+
+def _browse_with_camoufox(url: str) -> Optional[str]:
+    try:
+        from camoufox.sync_api import Camoufox
+    except ImportError:
+        return None
+
+    try:
+        with Camoufox(headless=True) as browser:
+            page = browser.new_page()
+            page.goto(url, wait_until="networkidle", timeout=30000)
+            html = page.content()
+
+        import trafilatura
+        text = trafilatura.extract(
+            html,
+            output_format="markdown",
+            include_formatting=True,
+            include_links=True,
+            include_tables=True,
+            favor_recall=True,
+        )
+        return text
+    except Exception as e:
+        log.warning(f"Camoufox fallback failed for {url}: {e}")
+        return None
 
 
 async def browse_page(ctx: ToolContext, url: str, size: str = "m") -> str:
@@ -231,6 +259,11 @@ async def browse_page(ctx: ToolContext, url: str, size: str = "m") -> str:
         return f"⚠️ Failed to fetch page: {result['error']}"
 
     text = result.get("text", "")
+
+    if result.get("needs_js"):
+        js_text = await asyncio.to_thread(_browse_with_camoufox, url)
+        if js_text and len(js_text) > len(text or ""):
+            text = js_text
     max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
     total = len(text)
     if max_chars and total > max_chars:
