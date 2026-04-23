@@ -125,7 +125,7 @@ class LLMManager:
         self.default_provider: str | None = None
         self.vision_provider: str | None = None  # Vision-specific provider for auto-selection
         self.voice_provider: str | None = None  # v0.13.0+: Voice transcription provider for auto-selection
-        self.background_provider: str | None = None  # v0.21.0+: Background tasks provider (consciousness/evolution)
+        self.background_provider: str | None = None  # v0.21.0+: Background tasks provider (evolution/sleep)
 
         # Callback for re-injecting CoreService after providers reload (v0.18.0+)
         self._on_providers_reload_callback: Optional[Callable[[], None]] = None

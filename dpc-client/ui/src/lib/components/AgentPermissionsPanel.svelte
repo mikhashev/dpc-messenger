@@ -189,20 +189,6 @@
     }
   }
 
-  function ensureConsciousnessSettings() {
-    if (!editSettings) return;
-    if (!editSettings.consciousness) {
-      editSettings.consciousness = {
-        enabled: false,
-        budget_fraction: 0.1
-      };
-    }
-  }
-
-  // Auto-initialize consciousness settings when entering edit mode
-  $: if (editMode && editSettings && !editSettings.consciousness) {
-    ensureConsciousnessSettings();
-  }
 
   // Auto-initialize skills when entering edit mode so bind:checked doesn't crash
   $: if (editMode && editSettings && !editSettings.skills) {
@@ -585,43 +571,7 @@
       {/if}
 
       {#if !isGlobal}
-        <!-- Consciousness Settings Section (per-agent) -->
-        <div class="subsection">
-          <h4>Consciousness Settings</h4>
-          <p class="help-text-small">Background thinking between user messages</p>
-
-          <div class="setting-item">
-            <label>
-              {#if editMode && editSettings?.consciousness}
-                <input
-                  type="checkbox"
-                  id="agent-consciousness-enabled"
-                  bind:checked={editSettings.consciousness.enabled}
-                />
-              {:else}
-                <input
-                  type="checkbox"
-                  id="agent-consciousness-enabled-display"
-                  checked={displaySettings.consciousness?.enabled || false}
-                  disabled
-                />
-              {/if}
-              <span>Enable Consciousness</span>
-            </label>
-            <p class="help-text-small">Agent reflects, plans, and maintains memory quality between conversations (uses up to 10% of budget)</p>
-            <p class="help-text-small" style="color: #d32f2f; margin-top: 0.25rem;">⚠ When disabled: knowledge deduplication stops, decay accuracy reduced, evolution feedback limited</p>
-          </div>
-
-          {#if !editMode}
-            <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
-              <strong>Consciousness</strong> enables the agent to think autonomously between user messages —
-              self-reflection, planning, memory consolidation, and knowledge quality maintenance.
-              Think interval is adaptive (computed from session archive durations).
-              Budget-capped at 10% of agent budget.
-              <span style="color: #d32f2f;">When disabled: deduplication stops, knowledge decay loses one signal source, evolution feedback is reduced.</span>
-            </div>
-          {/if}
-        </div>
+        <!-- Consciousness removed — replaced by Sleep Consolidation (ADR-014) -->
       {/if}
 
       {#if !isGlobal}

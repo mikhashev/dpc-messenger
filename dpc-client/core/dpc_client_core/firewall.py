@@ -189,8 +189,6 @@ class ContextFirewall:
             # Proposal review tools (ADR-013 Selection Layer)
             'list_proposals': True,  # Read-only: list decision proposals
             'review_proposal': True,  # Review (approve/reject) a DRAFT proposal
-            # Consciousness tools (P1)
-            'set_next_wakeup': True,  # Control consciousness interval
         }
 
         # Parse tool permissions from config, using defaults for missing tools
@@ -233,26 +231,20 @@ class ContextFirewall:
         self.evolution_interval_minutes = evolution.get('interval_minutes', 60)
         self.evolution_auto_apply = evolution.get('auto_apply', False)
 
-        # Parse consciousness settings (v0.23.0+)
-        consciousness = dpc_agent.get('consciousness', {})
-        self.consciousness_enabled = consciousness.get('enabled', False)
-        self.consciousness_budget_fraction = consciousness.get('budget_fraction', 0.1)
-
         # Parse history settings (v0.22.0+)
         history = dpc_agent.get('history', {})
         self.history_preserve_on_reset = history.get('preserve_on_reset', True)
         # 0 = unlimited (keep all archives), >0 = cap.
         self.history_max_archived_sessions = max(0, int(history.get('max_archived_sessions', 0)))
 
-        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s, consciousness=%s",
+        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s",
                      self.dpc_agent_enabled,
                      self.dpc_agent_personal_context_access,
                      self.dpc_agent_device_context_access,
                      self.dpc_agent_human_knowledge_access,
                      len([t for t in self.dpc_agent_tools.values() if t]),
                      len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths),
-                     self.evolution_enabled,
-                     self.consciousness_enabled)
+                     self.evolution_enabled)
 
     def _normalize_path(self, path_str: str) -> str:
         """Normalize a path string for comparison."""
@@ -508,7 +500,6 @@ class ContextFirewall:
                 "device_context_access": self.dpc_agent_device_context_access,
                 "human_knowledge_access": self.dpc_agent_human_knowledge_access,
                 "evolution_enabled": self.evolution_enabled,
-                "consciousness_enabled": self.consciousness_enabled,
             },
             "archive_access": True,  # read_session_archive is a core tool, always available
         }
@@ -1690,19 +1681,6 @@ class ContextFirewall:
                                     errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
                             if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
                                 errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
-
-                    # Validate consciousness settings (v0.23.0+)
-                    if 'consciousness' in dpc_agent:
-                        consciousness = dpc_agent['consciousness']
-                        if not isinstance(consciousness, dict):
-                            errors.append("'dpc_agent.consciousness' must be a dictionary")
-                        else:
-                            if 'enabled' in consciousness and not isinstance(consciousness['enabled'], bool):
-                                errors.append("'dpc_agent.consciousness.enabled' must be a boolean")
-                            if 'budget_fraction' in consciousness:
-                                val = consciousness['budget_fraction']
-                                if not isinstance(val, (int, float)) or val <= 0 or val > 1:
-                                    errors.append("'dpc_agent.consciousness.budget_fraction' must be a number between 0 and 1")
 
                     # Validate skills settings (v0.20.0+)
                     if 'skills' in dpc_agent:
