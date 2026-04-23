@@ -137,7 +137,7 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 - **Schedule System** — daily autonomous Ark sessions with autonomy rules
 - **Agent Starter Pack** — skills bundle for open source first-run experience
 - **Tool registry ↔ Firewall sync** — legacy knowledge tools removed (S55), remaining: invisible/unclassified tools audit (ARCH-1 partial)
-- **Agent Web Pipeline (TOOL-1)** — ADR-016 accepted (S67): ddgs multi-engine search + trafilatura extraction. Replaces fragile DDG HTML scrape. Stage 3 (JS/browser) deferred. Tasks decomposed, ready for implementation
+- **Agent Web Pipeline (TOOL-1)** — ADR-016 accepted + implemented (S67): ddgs multi-engine search + trafilatura markdown extraction + Camoufox JS rendering. All 3 stages complete. 6 commits, runtime verified
 
 ### Success Metrics
 
