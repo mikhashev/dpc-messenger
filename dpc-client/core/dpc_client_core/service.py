@@ -7636,7 +7636,9 @@ class CoreService:
                 if result.get("status") == "completed":
                     brief = result.get("morning_brief", {})
                     summary = brief.get("summary", "Sleep analysis complete.")
-                    monitor = self.conversation_monitors.get(agent_id)
+                    dpc_agent_prov = self.llm_manager.providers.get("dpc_agent") if self.llm_manager else None
+                    mgr = dpc_agent_prov.get_manager(agent_id) if dpc_agent_prov else None
+                    monitor = mgr._get_or_create_agent_monitor(agent_id) if mgr else None
                     if monitor:
                         monitor.add_message("assistant", summary, sender_name=agent_id)
                     await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0)})

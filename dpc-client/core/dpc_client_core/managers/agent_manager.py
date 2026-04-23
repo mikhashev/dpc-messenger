@@ -387,7 +387,7 @@ class DpcAgentManager:
                 _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
                 if not _brief.get("consumed", False):
                     summary = _brief.get("summary", "Sleep analysis complete.")
-                    monitor = self.service.conversation_monitors.get(self.agent_id) if self.service else None
+                    monitor = self._get_or_create_agent_monitor(self.agent_id)
                     if monitor:
                         monitor.add_message("assistant", summary, sender_name=self.agent_id)
                         log.info("Morning brief posted to chat for %s", self.agent_id)
