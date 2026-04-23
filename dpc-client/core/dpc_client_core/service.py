@@ -7663,9 +7663,9 @@ class CoreService:
                     monitor = mgr._get_or_create_agent_monitor(agent_id) if mgr else None
                     if monitor:
                         monitor.add_message("assistant", chat_text, sender_name=agent_id)
-                    brief["consumed"] = True
-                    brief_path = Path.home() / ".dpc" / "conversations" / agent_id / "morning_brief.json"
-                    brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
+                        brief["consumed"] = True
+                        brief_path = Path.home() / ".dpc" / "conversations" / agent_id / "morning_brief.json"
+                        brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
                     await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0)})
                 else:
                     await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": result.get("status")})
