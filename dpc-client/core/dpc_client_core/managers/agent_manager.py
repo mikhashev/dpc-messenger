@@ -391,6 +391,7 @@ class DpcAgentManager:
                     monitor = self._get_or_create_agent_monitor(self.agent_id)
                     if monitor:
                         monitor.add_message("assistant", chat_text, sender_name=self.agent_id)
+                        monitor.save_history()
                         _brief["consumed"] = True
                         _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
                         log.info("Morning brief posted to chat for %s", self.agent_id)
