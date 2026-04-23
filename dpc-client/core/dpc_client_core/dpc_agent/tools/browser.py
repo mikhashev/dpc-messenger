@@ -12,6 +12,7 @@ to keep dependencies minimal. These tools use simple HTTP requests.
 
 from __future__ import annotations
 
+import asyncio
 import html as html_module
 import logging
 import re
@@ -160,32 +161,10 @@ _SIZE_PRESETS = {
 }
 
 
-def browse_page(ctx: ToolContext, url: str, size: str = "m") -> str:
-    """
-    Fetch a web page and extract content as structured markdown.
-
-    Uses trafilatura for high-quality extraction that preserves headings,
-    lists, tables, and links. Falls back to basic text extraction if
-    trafilatura fails.
-
-    Size presets control output length:
-      s = 5K chars (quick summary)
-      m = 10K chars (default)
-      l = 25K chars (deep reading)
-      f = full content (no truncation)
-
-    Args:
-        ctx: Tool context (unused, but required for tool interface)
-        url: URL to fetch
-        size: Size preset (s/m/l/f)
-
-    Returns:
-        Page content as markdown
-    """
+def _browse_sync(url: str) -> Dict[str, Any]:
     result = _fetch_url(url)
-
     if not result["success"]:
-        return f"⚠️ Failed to fetch page: {result['error']}"
+        return result
 
     content = result["content"]
     content_type = result.get("content_type", "")
@@ -220,6 +199,38 @@ def browse_page(ctx: ToolContext, url: str, size: str = "m") -> str:
         if not text:
             text = _extract_text(content)
 
+    result["text"] = text
+    return result
+
+
+async def browse_page(ctx: ToolContext, url: str, size: str = "m") -> str:
+    """
+    Fetch a web page and extract content as structured markdown.
+
+    Uses trafilatura for high-quality extraction that preserves headings,
+    lists, tables, and links. Falls back to basic text extraction if
+    trafilatura fails.
+
+    Size presets control output length:
+      s = 5K chars (quick summary)
+      m = 10K chars (default)
+      l = 25K chars (deep reading)
+      f = full content (no truncation)
+
+    Args:
+        ctx: Tool context (unused, but required for tool interface)
+        url: URL to fetch
+        size: Size preset (s/m/l/f)
+
+    Returns:
+        Page content as markdown
+    """
+    result = await asyncio.to_thread(_browse_sync, url)
+
+    if not result.get("success", False) and "error" in result:
+        return f"⚠️ Failed to fetch page: {result['error']}"
+
+    text = result.get("text", "")
     max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
     total = len(text)
     if max_chars and total > max_chars:
@@ -289,7 +300,13 @@ def check_url(ctx: ToolContext, url: str) -> str:
                f"  Time: {elapsed:.2f}s"
 
 
-def search_web_ddgs(ctx: ToolContext, query: str, max_results: int = 5, backend: str = "auto") -> str:
+def _search_ddgs_sync(query: str, max_results: int, backend: str) -> list:
+    from ddgs import DDGS
+    with DDGS() as ddgs:
+        return list(ddgs.text(query, max_results=max_results, backend=backend))
+
+
+async def search_web_ddgs(ctx: ToolContext, query: str, max_results: int = 5, backend: str = "auto") -> str:
     """
     Search the web using multiple engines via ddgs (no API key required).
 
@@ -305,16 +322,12 @@ def search_web_ddgs(ctx: ToolContext, query: str, max_results: int = 5, backend:
     Returns:
         Search results with snippets
     """
-    try:
-        from ddgs import DDGS
-    except ImportError:
-        return "⚠️ ddgs package not installed. Run: pip install ddgs"
-
     max_results = max(1, min(max_results, 20))
 
     try:
-        with DDGS() as ddgs:
-            results = list(ddgs.text(query, max_results=max_results, backend=backend))
+        results = await asyncio.to_thread(_search_ddgs_sync, query, max_results, backend)
+    except ImportError:
+        return "⚠️ ddgs package not installed. Run: pip install ddgs"
     except Exception as e:
         return f"⚠️ Search failed: {e}"
 
