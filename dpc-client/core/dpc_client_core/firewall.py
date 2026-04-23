@@ -141,7 +141,6 @@ class ContextFirewall:
             # Web tools
             'browse_page': True,
             'fetch_json': True,
-            'extract_links': True,
             'check_url': True,
             'search_web': True,
             # Review tools (safe, analysis only)
@@ -751,7 +750,6 @@ class ContextFirewall:
                         "get_dpc_context": True,
                         "browse_page": True,
                         "fetch_json": True,
-                        "extract_links": True,
                         "check_url": True,
                         "search_web": True,
                         "self_review": True,
@@ -1621,7 +1619,7 @@ class ContextFirewall:
                                 # DPC integration
                                 'get_dpc_context',
                                 # Web tools
-                                'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
+                                'browse_page', 'fetch_json', 'check_url', 'search_web',
                                 # Review tools
                                 'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                 # Git tools
@@ -1729,7 +1727,7 @@ class ContextFirewall:
                                         'knowledge_list',
                                         'get_task_board',
                                         'get_dpc_context',
-                                        'browse_page', 'fetch_json', 'extract_links', 'check_url', 'search_web',
+                                        'browse_page', 'fetch_json', 'check_url', 'search_web',
                                         'self_review', 'request_critique', 'compare_approaches', 'quality_checklist', 'consensus_check',
                                         'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
                                         'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',

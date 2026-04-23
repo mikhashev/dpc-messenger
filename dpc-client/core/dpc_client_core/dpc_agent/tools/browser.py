@@ -259,52 +259,6 @@ def fetch_json(ctx: ToolContext, url: str) -> str:
         return f"⚠️ Invalid JSON: {e}"
 
 
-def extract_links(ctx: ToolContext, url: str) -> str:
-    """
-    Extract all links from a web page.
-
-    Args:
-        ctx: Tool context (unused)
-        url: URL to fetch
-
-    Returns:
-        List of links found on the page
-    """
-    result = _fetch_url(url)
-
-    if not result["success"]:
-        return f"⚠️ Failed to fetch page: {result['error']}"
-
-    html = result["content"]
-
-    # Extract links
-    link_pattern = r'<a[^>]+href=["\']([^"\']+)["\']'
-    links = re.findall(link_pattern, html, re.IGNORECASE)
-
-    # Filter and deduplicate
-    seen = set()
-    unique_links = []
-    for link in links:
-        # Skip anchors and javascript
-        if link.startswith(("#", "javascript:", "mailto:")):
-            continue
-        if link not in seen:
-            seen.add(link)
-            unique_links.append(link)
-
-    if not unique_links:
-        return f"No links found on {url}"
-
-    # Format output
-    output_lines = [f"Links from {url} ({len(unique_links)} found):\n"]
-    for i, link in enumerate(unique_links[:50], 1):
-        output_lines.append(f"  {i}. {link}")
-
-    if len(unique_links) > 50:
-        output_lines.append(f"\n  ... and {len(unique_links) - 50} more")
-
-    return "\n".join(output_lines)
-
 
 def check_url(ctx: ToolContext, url: str) -> str:
     """
@@ -426,25 +380,6 @@ def get_tools() -> List[ToolEntry]:
             timeout_sec=30,
         ),
 
-        ToolEntry(
-            name="extract_links",
-            schema={
-                "name": "extract_links",
-                "description": "Extract all links from a web page",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "url": {
-                            "type": "string",
-                            "description": "URL to extract links from"
-                        }
-                    },
-                    "required": ["url"]
-                }
-            },
-            handler=extract_links,
-            timeout_sec=30,
-        ),
 
         ToolEntry(
             name="check_url",
