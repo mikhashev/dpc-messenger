@@ -107,7 +107,7 @@ North Star: Sleep analyzes → Evolution proposes → Verification measures → 
 | **0.5** | **Selection Layer (ADR-013)** | ~200 lines | HIGH | **DONE** (S58-S59) | S1-S9 data collection, dedup, decay, rejection feedback, robustness |
 | **1** | **Sleep Consolidation** | ~460 lines | HIGH | **VERIFIED** (S66) | On-demand session digests, morning brief pipeline. Supersedes P1 Consciousness |
 | **2** | **Evolution Verification** | ~280 lines | CRITICAL | **PARTIAL** (S61) | Outcome tracking + rolling metrics (2A+2B). Remaining: rollback, metric gating |
-| **3** | **Sleep Consolidation** | ~460 lines | HIGH | **PARTIAL** | L1 partial, L2 partial, L3 not started. Depends on P1+P2 completion |
+| **3** | ~~Sleep Consolidation~~ | — | — | **DONE** (S66) | Merged into P1 above. Old L1/L2/L3 levels superseded by per-session pipeline |
 | **4** | **Memory Upgrade** | ~240 lines | MEDIUM | **PARTIAL** (ADR-010) | Phase 1-3 DONE+WIRED (14/19 tasks). Phase 4 wiring incomplete |
 | **5** | **Skill Rewrite** | ~260 lines | MEDIUM | NOT STARTED | Break append-only limit. A/B testing for skill rewrites with auto-rollback |
 
