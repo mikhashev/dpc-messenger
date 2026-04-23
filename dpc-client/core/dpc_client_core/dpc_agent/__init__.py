@@ -28,7 +28,6 @@ from .llm_adapter import DpcLlmAdapter
 from .agent import DpcAgent, AgentConfig
 from .memory import Memory
 from .tools import ToolRegistry, ToolContext, ToolEntry
-from .consciousness import BackgroundConsciousness
 from .task_queue import TaskQueue, Task, TaskPriority, TaskStatus
 from .events import (
     AgentEventEmitter, AgentEvent, EventType,

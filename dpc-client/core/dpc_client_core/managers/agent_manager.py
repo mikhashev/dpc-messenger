@@ -134,7 +134,7 @@ class DpcAgentManager:
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
-            background_consciousness=False,  # Per-provider agents don't run background tasks
+            # Per-provider agents don't run background tasks
             enable_task_queue=False,  # Per-provider agents don't run task queue
             evolution_enabled=evolution_enabled,
             evolution_interval_minutes=evolution_interval,
@@ -196,22 +196,13 @@ class DpcAgentManager:
         evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
         evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
 
-        # Consciousness settings: firewall global → per-agent profile override
-        _con_global_enabled = self.firewall.consciousness_enabled if self.firewall else False
-        _con_global_budget = getattr(self.firewall, 'consciousness_budget_fraction', 0.1) if self.firewall else 0.1
-        _per_agent_con = _per_agent_profile.get('consciousness', {}) if _per_agent_profile else {}
-        consciousness_enabled = _per_agent_con.get('enabled', _con_global_enabled)
-        consciousness_budget = _per_agent_con.get('budget_fraction', _con_global_budget)
-
-        if _per_agent_evo or _per_agent_con:
-            log.debug("Agent %s: per-agent overrides (evolution=%s, consciousness=%s)",
-                      self.agent_id, evolution_enabled, consciousness_enabled)
+        if _per_agent_evo:
+            log.debug("Agent %s: per-agent overrides (evolution=%s)",
+                      self.agent_id, evolution_enabled)
 
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
-            background_consciousness=consciousness_enabled,
-            consciousness_budget_fraction=consciousness_budget,
             enable_task_queue=self.config.get("enable_task_queue", True),
             evolution_enabled=evolution_enabled,
             evolution_interval_minutes=evolution_interval,
@@ -234,11 +225,6 @@ class DpcAgentManager:
             service=self.service,             # For tools that need firewall access
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
-
-        # Start background consciousness if enabled
-        if agent_config.background_consciousness:
-            self._agent.start_consciousness(emit_progress=self._emit_progress)
-            log.info("Background consciousness started")
 
         # Start evolution if enabled
         if agent_config.evolution_enabled:
@@ -402,7 +388,7 @@ class DpcAgentManager:
         log.info("DpcAgent started successfully")
 
     def sync_firewall_settings(self) -> None:
-        """Re-read evolution/consciousness settings from firewall and start/stop accordingly.
+        """Re-read evolution settings from firewall and start/stop accordingly.
 
         Called after firewall rules are saved via UI to apply changes without restart.
         """
@@ -439,22 +425,6 @@ class DpcAgentManager:
             self._agent._evolution_enabled = False
             self._agent.config.evolution_enabled = False
             log.info("Evolution stopped via firewall sync")
-
-        # Consciousness
-        _con_global = self.firewall.consciousness_enabled if self.firewall else False
-        _per_con = (_per_agent_profile or {}).get('consciousness', {})
-        con_enabled = _per_con.get('enabled', _con_global)
-
-        if con_enabled and not self._agent.is_consciousness_running():
-            self._agent._consciousness_enabled = True
-            self._agent.config.background_consciousness = True
-            self._agent.start_consciousness(emit_progress=self._emit_progress)
-            log.info("Consciousness started via firewall sync")
-        elif not con_enabled and self._agent.is_consciousness_running():
-            self._agent.stop_consciousness()
-            self._agent._consciousness_enabled = False
-            self._agent.config.background_consciousness = False
-            log.info("Consciousness stopped via firewall sync")
 
     async def ensure_started(self) -> "DpcAgentManager":
         """
@@ -641,8 +611,6 @@ class DpcAgentManager:
             self._telegram_bridge = None
 
         if self._agent is not None:
-            # Stop all background loops in proper order
-            self._agent.stop_consciousness()
             self._agent.stop_task_processor()
             self._agent.stop_evolution()
             self._agent = None
@@ -1159,16 +1127,3 @@ class DpcAgentManager:
         """Check if agent is running."""
         return self._agent is not None
 
-    def is_consciousness_running(self) -> bool:
-        """Check if background consciousness is running."""
-        return self._agent is not None and self._agent.is_consciousness_running()
-
-    def start_consciousness(self) -> None:
-        """Start background consciousness manually."""
-        if self._agent is not None:
-            self._agent.start_consciousness(emit_progress=self._emit_progress)
-
-    def stop_consciousness(self) -> None:
-        """Stop background consciousness."""
-        if self._agent is not None:
-            self._agent.stop_consciousness()

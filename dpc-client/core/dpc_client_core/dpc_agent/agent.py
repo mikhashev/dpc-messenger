@@ -42,8 +42,6 @@ from .budget import BillingModel, HybridBudget
 
 if TYPE_CHECKING:
     from ..llm_manager import LLMManager
-    from .consciousness import BackgroundConsciousness
-
 log = logging.getLogger(__name__)
 
 
@@ -53,9 +51,6 @@ class AgentConfig:
     budget_usd: float = 50.0
     max_rounds: int = 200
     # Tool control is via firewall (privacy_rules.json), not config
-    background_consciousness: bool = False
-    consciousness_budget_fraction: float = 0.1
-
     # Task queue settings
     enable_task_queue: bool = True
 
@@ -155,12 +150,8 @@ class DpcAgent:
         # Callback set by agent_manager to deliver scheduled task results to Telegram
         self._telegram_send_fn: Optional[Any] = None
 
-        # Flag: user interaction in progress — consciousness/evolution should yield
+        # Flag: user interaction in progress — evolution should yield
         self._user_active = False
-
-        # Background consciousness (optional)
-        self._consciousness: Optional["BackgroundConsciousness"] = None
-        self._consciousness_enabled = self.config.background_consciousness
 
         # Track last usage for session state access by agent_manager
         self._last_usage: Optional[Dict[str, Any]] = None
@@ -461,42 +452,6 @@ class DpcAgent:
         self.memory.save_scratchpad(self.memory._default_scratchpad())
         self.memory.save_identity(self.memory._default_identity())
         log.info("Agent memory reset to defaults")
-
-    def start_consciousness(self, emit_progress: Optional[Callable[[str], None]] = None) -> None:
-        """
-        Start background consciousness if enabled.
-
-        Args:
-            emit_progress: Optional callback for consciousness events
-        """
-        if not self._consciousness_enabled:
-            log.debug("Background consciousness not enabled")
-            return
-
-        if self._consciousness is not None:
-            log.warning("Consciousness already running")
-            return
-
-        from .consciousness import BackgroundConsciousness
-
-        self._consciousness = BackgroundConsciousness(
-            agent=self,
-            budget_fraction=self.config.consciousness_budget_fraction,
-            emit_progress=emit_progress,
-        )
-        self._consciousness.start()
-        log.info("Background consciousness started")
-
-    def stop_consciousness(self) -> None:
-        """Stop background consciousness."""
-        if self._consciousness is not None:
-            self._consciousness.stop()
-            self._consciousness = None
-            log.info("Background consciousness stopped")
-
-    def is_consciousness_running(self) -> bool:
-        """Check if consciousness is running."""
-        return self._consciousness is not None and self._consciousness.is_running()
 
     def archive_old_task_results(self, max_age_hours: int = 24) -> int:
         """Archive task_results older than max_age_hours into daily JSONL files.
@@ -1114,11 +1069,7 @@ class DpcAgent:
                 "running": self.queue.is_running(),
                 "stats": self.queue.get_stats(),
             },
-            "consciousness": {
-                "enabled": self._consciousness_enabled,
-                "running": self.is_consciousness_running(),
-                "status": self._consciousness.get_status() if self._consciousness else None,
-            },
+            "consciousness": {"enabled": False, "running": False, "status": None},
             "evolution": {
                 "enabled": self._evolution_enabled,
                 "running": self.is_evolution_running(),
