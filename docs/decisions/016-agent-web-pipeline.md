@@ -1,6 +1,6 @@
 # ADR-016: Agent Web Pipeline — Multi-Engine Search & Extraction
 
-**Status:** Draft
+**Status:** Accepted
 **Date:** 2026-04-23
 **Authors:** Ark (analysis + draft), CC (code audit + ddgs research), Mike (direction)
 **Session:** S67
