@@ -152,17 +152,35 @@ def _extract_text(html: str) -> str:
     return text
 
 
-def browse_page(ctx: ToolContext, url: str, extract_text: bool = True) -> str:
+_SIZE_PRESETS = {
+    "s": 5000,
+    "m": 10000,
+    "l": 25000,
+    "f": None,
+}
+
+
+def browse_page(ctx: ToolContext, url: str, size: str = "m") -> str:
     """
-    Fetch and optionally parse a web page.
+    Fetch a web page and extract content as structured markdown.
+
+    Uses trafilatura for high-quality extraction that preserves headings,
+    lists, tables, and links. Falls back to basic text extraction if
+    trafilatura fails.
+
+    Size presets control output length:
+      s = 5K chars (quick summary)
+      m = 10K chars (default)
+      l = 25K chars (deep reading)
+      f = full content (no truncation)
 
     Args:
         ctx: Tool context (unused, but required for tool interface)
         url: URL to fetch
-        extract_text: Whether to extract text from HTML
+        size: Size preset (s/m/l/f)
 
     Returns:
-        Page content or extracted text
+        Page content as markdown
     """
     result = _fetch_url(url)
 
@@ -173,19 +191,41 @@ def browse_page(ctx: ToolContext, url: str, extract_text: bool = True) -> str:
     content_type = result.get("content_type", "")
     is_clean_text = any(ct in content_type for ct in ("text/markdown", "text/plain"))
 
-    if extract_text and not is_clean_text:
-        # Server returned HTML — strip tags and extract readable text
-        text = _extract_text(content)
-        if len(text) > 10000:
-            text = text[:10000] + f"\n\n... (truncated, {len(text)} total chars)"
-        return f"Content from {url}:\n\n{text}"
+    if is_clean_text:
+        text = content
     else:
-        # Server returned markdown/plain (or raw HTML was requested) — use as-is
-        limit = 10000 if is_clean_text else 15000
-        label = "raw HTML" if not extract_text else "content"
-        if len(content) > limit:
-            content = content[:limit] + f"\n\n... (truncated, {len(content)} total chars)"
-        return f"{label.capitalize()} from {url}:\n\n{content}"
+        try:
+            import trafilatura
+            text = trafilatura.extract(
+                content,
+                output_format="markdown",
+                include_formatting=True,
+                include_links=True,
+                include_tables=True,
+                favor_recall=True,
+            )
+        except Exception:
+            text = None
+
+        if not text:
+            try:
+                from ddgs import DDGS
+                with DDGS() as ddgs:
+                    extracts = list(ddgs.extract([url]))
+                    if extracts and extracts[0].get("content"):
+                        text = extracts[0]["content"]
+            except Exception:
+                pass
+
+        if not text:
+            text = _extract_text(content)
+
+    max_chars = _SIZE_PRESETS.get(size, _SIZE_PRESETS["m"])
+    total = len(text)
+    if max_chars and total > max_chars:
+        text = text[:max_chars] + f"\n\n... (truncated, {total} total chars, use size='l' or 'f' for more)"
+
+    return f"Content from {url} (markdown, {total} chars):\n\n{text}"
 
 
 def fetch_json(ctx: ToolContext, url: str) -> str:
@@ -344,7 +384,7 @@ def get_tools() -> List[ToolEntry]:
             name="browse_page",
             schema={
                 "name": "browse_page",
-                "description": "Fetch and parse a web page to extract text content",
+                "description": "Fetch a web page and extract content as structured markdown. Preserves headings, lists, tables, and links. Use size presets to control output length: s=5K, m=10K (default), l=25K, f=full.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -352,10 +392,11 @@ def get_tools() -> List[ToolEntry]:
                             "type": "string",
                             "description": "URL to fetch"
                         },
-                        "extract_text": {
-                            "type": "boolean",
-                            "description": "Extract text from HTML (true) or return raw HTML (false)",
-                            "default": True
+                        "size": {
+                            "type": "string",
+                            "description": "Output size preset: s (5K summary), m (10K default), l (25K deep), f (full)",
+                            "default": "m",
+                            "enum": ["s", "m", "l", "f"]
                         }
                     },
                     "required": ["url"]
