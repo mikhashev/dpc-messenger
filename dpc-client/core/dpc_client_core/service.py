@@ -7604,6 +7604,28 @@ class CoreService:
 
     # --- Sleep Consolidation (ADR-014) ---
 
+    @staticmethod
+    def _format_morning_brief(brief: dict) -> str:
+        parts = ["**Morning Brief (Sleep Consolidation)**\n"]
+        summary = brief.get("summary", "")
+        if summary:
+            parts.append(summary)
+        decisions = brief.get("key_decisions", [])
+        if decisions:
+            parts.append("\n**Key decisions:**")
+            for d in decisions[:5]:
+                parts.append(f"- {d.get('decision', d) if isinstance(d, dict) else d}")
+        unresolved = brief.get("unresolved", [])
+        if unresolved:
+            parts.append("\n**Unresolved:**")
+            for u in unresolved[:5]:
+                parts.append(f"- {u.get('topic', u) if isinstance(u, dict) else u}")
+        n = brief.get("sessions_analyzed", 0)
+        period = brief.get("period", "")
+        if n or period:
+            parts.append(f"\n*{n} sessions analyzed ({period})*")
+        return "\n".join(parts)
+
     async def toggle_sleep(self, agent_id: str = None) -> Dict[str, Any]:
         """Toggle sleep/wakeup for an agent. If awake, starts sleep pipeline. If sleeping, returns current state."""
         if agent_id is None:
@@ -7635,12 +7657,15 @@ class CoreService:
                 result = await run_sleep(conversation_dir, self.llm_manager, agent_id=agent_id, force=True)
                 if result.get("status") == "completed":
                     brief = result.get("morning_brief", {})
-                    summary = brief.get("summary", "Sleep analysis complete.")
+                    chat_text = self._format_morning_brief(brief)
                     dpc_agent_prov = self.llm_manager.providers.get("dpc_agent") if self.llm_manager else None
                     mgr = dpc_agent_prov.get_manager(agent_id) if dpc_agent_prov else None
                     monitor = mgr._get_or_create_agent_monitor(agent_id) if mgr else None
                     if monitor:
-                        monitor.add_message("assistant", summary, sender_name=agent_id)
+                        monitor.add_message("assistant", chat_text, sender_name=agent_id)
+                    brief["consumed"] = True
+                    brief_path = Path.home() / ".dpc" / "conversations" / agent_id / "morning_brief.json"
+                    brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
                     await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0)})
                 else:
                     await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": result.get("status")})

@@ -386,10 +386,13 @@ class DpcAgentManager:
             if _brief_path.exists():
                 _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
                 if not _brief.get("consumed", False):
-                    summary = _brief.get("summary", "Sleep analysis complete.")
+                    from dpc_client_core.service import CoreService
+                    chat_text = CoreService._format_morning_brief(_brief)
                     monitor = self._get_or_create_agent_monitor(self.agent_id)
                     if monitor:
-                        monitor.add_message("assistant", summary, sender_name=self.agent_id)
+                        monitor.add_message("assistant", chat_text, sender_name=self.agent_id)
+                        _brief["consumed"] = True
+                        _brief_path.write_text(_json.dumps(_brief, ensure_ascii=False, indent=2), encoding="utf-8")
                         log.info("Morning brief posted to chat for %s", self.agent_id)
         except Exception as e:
             log.debug("Morning brief startup check skipped: %s", e)
