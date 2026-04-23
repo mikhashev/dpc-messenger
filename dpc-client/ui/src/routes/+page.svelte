@@ -223,7 +223,8 @@
     if (state && state.agent_id === activeChatId) {
       isSleeping = state.status === 'sleeping';
       if (state.status === 'awake') {
-        sendCommand('get_conversation_history', { conversation_id: state.agent_id }).then((result: any) => {
+        const cmd = sendCommand('get_conversation_history', { conversation_id: state.agent_id });
+        if (cmd && typeof cmd === 'object' && 'then' in cmd) (cmd as Promise<any>).then((result: any) => {
           if (result?.status === 'success' && result.messages?.length > 0) {
             chatHistories.update(map => {
               const newMap = new Map(map);
