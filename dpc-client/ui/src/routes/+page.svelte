@@ -235,7 +235,7 @@
                 const isAgent = msg.role === 'assistant' || msg.sender_name === state.agent_id;
                 return {
                   id: stableId,
-                  sender: isAgent ? 'peer' : 'self',
+                  sender: isAgent ? state.agent_id : 'user',
                   senderName: msg.sender_name || (isAgent ? agentName : 'You'),
                   text: msg.content,
                   timestamp: ts,
