@@ -381,7 +381,7 @@ class DpcAgentManager:
         # Check for unconsumed morning brief from sleep pipeline (ADR-014)
         try:
             import json as _json
-            _conv_dir = Path.home() / ".dpc" / "conversations" / self.agent_id
+            _conv_dir = pathlib.Path.home() / ".dpc" / "conversations" / self.agent_id
             _brief_path = _conv_dir / "morning_brief.json"
             if _brief_path.exists():
                 _brief = _json.loads(_brief_path.read_text(encoding="utf-8"))
