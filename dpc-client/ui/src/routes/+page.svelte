@@ -222,6 +222,33 @@
     const state = $sleepStateChanged;
     if (state && state.agent_id === activeChatId) {
       isSleeping = state.status === 'sleeping';
+      if (state.status === 'awake') {
+        sendCommand('get_conversation_history', { conversation_id: state.agent_id }).then((result: any) => {
+          if (result?.status === 'success' && result.messages?.length > 0) {
+            chatHistories.update(map => {
+              const newMap = new Map(map);
+              const agentName = $agentsList?.find((a: any) => a.agent_id === state.agent_id)?.name || state.agent_id;
+              const msgs = result.messages.map((msg: any, index: number) => {
+                const ts = msg.timestamp ? new Date(msg.timestamp).getTime() : Date.now() - (result.messages.length - index) * 1000;
+                const stableId = msg.id || `${state.agent_id}-${ts}`;
+                const isAgent = msg.role === 'assistant' || msg.sender_name === state.agent_id;
+                return {
+                  id: stableId,
+                  sender: isAgent ? 'peer' : 'self',
+                  senderName: msg.sender_name || (isAgent ? agentName : 'You'),
+                  text: msg.content,
+                  timestamp: ts,
+                  attachments: msg.attachments || [],
+                  thinking: msg.thinking,
+                  streamingRaw: msg.streaming_raw,
+                };
+              });
+              newMap.set(state.agent_id, msgs);
+              return newMap;
+            });
+          }
+        });
+      }
     }
   });
 
