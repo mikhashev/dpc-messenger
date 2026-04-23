@@ -7662,7 +7662,8 @@ class CoreService:
                     mgr = dpc_agent_prov.get_manager(agent_id) if dpc_agent_prov else None
                     monitor = mgr._get_or_create_agent_monitor(agent_id) if mgr else None
                     if monitor:
-                        monitor.add_message("assistant", chat_text, sender_name=agent_id)
+                        from datetime import datetime, timezone
+                        monitor.add_message("assistant", chat_text, sender_name=agent_id, timestamp=datetime.now(timezone.utc).isoformat())
                         monitor.save_history()
                         brief["consumed"] = True
                         brief_path = Path.home() / ".dpc" / "conversations" / agent_id / "morning_brief.json"
