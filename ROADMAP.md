@@ -64,7 +64,7 @@ These features were developed organically as the product matured, significantly 
 
 | Feature | Version | Status | Description |
 |---------|---------|--------|-------------|
-| **Embedded AI Agent** | v0.18.0 | Complete | 40+ tools, background consciousness, evolution system |
+| **Embedded AI Agent** | v0.18.0 | Complete | 40+ tools, sleep consolidation, evolution system |
 | **Agent Telegram Bridge** | v0.18.0 | Complete | Two-way messaging, voice transcription, event notifications |
 | **Reasoning Models** | v0.18.0 | Complete | DeepSeek R1, Claude Extended Thinking, OpenAI o1/o3 |
 | **Real-time Streaming** | v0.18.0 | Complete | Token-by-token AI response display |
@@ -85,10 +85,10 @@ These features were developed organically as the product matured, significantly 
 |---|---------|---------|--------|-------------|
 | 1 | **Group Chat** | v0.19.0 | Complete | Multi-participant chat with text, files, voice, screenshots, transcription, knowledge commits, session management |
 | 2 | **DPC Agent** | v0.18.0 | Complete | Embedded autonomous AI with 40+ tools (now 59), persistent memory, task queue |
-| 3 | **Agent Consciousness** | v0.20.0 | Complete | Background self-reflection, structured thoughts, scratchpad writes |
+| 3 | **Sleep Consolidation** | v0.20.0 | Complete | On-demand session analysis, morning brief, per-session findings |
 | 4 | **Agent Evolution** | v0.20.0 | Complete | Periodic self-improvement proposals (identity, skills, knowledge) |
 | 5 | **Agent Skills** | v0.20.0 | Complete | 10 skills (code-analysis, memory-hygiene, web-research, etc.), skill reflection |
-| 6 | **Agent Progress Board** | v0.20.0 | Complete | UI for evolution proposals, consciousness logs, task history |
+| 6 | **Agent Progress Board** | v0.20.0 | Complete | UI for evolution proposals, sleep state, task history |
 | 7 | **Protocol 13** | v0.21.0 | Complete | Human-AI team coordination protocol (Mike=approve, CC=execute, Ark=review) |
 | 8 | **Agent Telegram Bridge** | v0.18.0 | Complete | Two-way messaging with agent via Telegram |
 | 9 | **External Agent Bridge** | v0.20.0 | Complete | External AI integration pattern (CC ↔ DPC via cc_agent_bridge.py, cron monitoring, Protocol 13 coordination) |
@@ -99,13 +99,13 @@ Two parallel tracks. Agent Maturity is research-backed (9 independent sources co
 
 #### Track 1: Agent Maturity (~1,990 lines)
 
-North Star: Consciousness observes → Evolution proposes → Verification measures → Cycle repeats with real learning. Phase 0 (Hooks) unlocks the cycle.
+North Star: Sleep analyzes → Evolution proposes → Verification measures → Cycle repeats with real learning. Phase 0 (Hooks) unlocks the cycle.
 
 | Phase | Feature | Scope | Priority | Status | Description |
 |-------|---------|-------|----------|--------|-------------|
 | **0** | **Hooks/Middleware** | ~510 lines | ENABLER | **DONE** (S47) | HookRegistry + Event Bus in loop.py. 6 commits, 21 tests pass |
 | **0.5** | **Selection Layer (ADR-013)** | ~200 lines | HIGH | **DONE** (S58-S59) | S1-S9 data collection, dedup, decay, rejection feedback, robustness |
-| **1** | **Consciousness Tools** | ~240 lines | HIGH | **PARTIAL** (S61) | Multi-round tool access implemented. Remaining: adaptive timing |
+| **1** | **Sleep Consolidation** | ~460 lines | HIGH | **VERIFIED** (S66) | On-demand session digests, morning brief pipeline. Supersedes P1 Consciousness |
 | **2** | **Evolution Verification** | ~280 lines | CRITICAL | **PARTIAL** (S61) | Outcome tracking + rolling metrics (2A+2B). Remaining: rollback, metric gating |
 | **3** | **Sleep Consolidation** | ~460 lines | HIGH | **PARTIAL** | L1 partial, L2 partial, L3 not started. Depends on P1+P2 completion |
 | **4** | **Memory Upgrade** | ~240 lines | MEDIUM | **PARTIAL** (ADR-010) | Phase 1-3 DONE+WIRED (14/19 tasks). Phase 4 wiring incomplete |
@@ -133,7 +133,6 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 
 #### Smaller Improvements (not in tracks)
 
-- **Consciousness dedup** — skip duplicate observations within 1h (~15 lines)
 - **Chain depth increase** — 3 → 5-6 for complex multi-agent discussions (P13 external review)
 - **Schedule System** — daily autonomous Ark sessions with autonomy rules
 - **Agent Starter Pack** — skills bundle for open source first-run experience
@@ -143,7 +142,7 @@ External Agent Bridge (CC) validates that non-embedded AI can participate as a f
 
 **Operational Metrics:**
 - All 6 connection tiers tested and operational
-- Agent consciousness uptime (thoughts per session, no recursive loops)
+- Agent sleep cycle stats (briefs per week, coverage)
 - Evolution proposal success rate (applied vs regressed)
 - Knowledge commits per session (extraction + voting pipeline)
 - P2P mesh stability over 24h (2+ nodes)

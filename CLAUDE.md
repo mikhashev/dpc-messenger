@@ -355,7 +355,7 @@ D-PC Messenger uses an intelligent 6-tier connection fallback hierarchy for near
 - `dpc_agent/loop.py` - Autonomous agent run loop
 - `dpc_agent/memory.py` - Per-agent persistent memory
 - `dpc_agent/evolution.py` - Agent skill evolution and self-improvement
-- `dpc_agent/consciousness.py` - Agent self-awareness and introspection
+- `dpc_agent/sleep_pipeline.py` - Sleep consolidation, morning brief generation
 - `dpc_agent/task_queue.py` - Async task queue with priority scheduling
 - `dpc_agent/budget.py` - Token/compute budget enforcement
 - `dpc_agent/skill_store.py` - Dynamic skill registry and versioning
