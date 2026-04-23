@@ -19,7 +19,6 @@ import ssl
 from html.parser import HTMLParser
 from io import StringIO
 from typing import Any, Dict, List, Optional
-from urllib.parse import parse_qs, quote_plus, unquote, urlparse
 
 from .registry import ToolEntry, ToolContext
 
@@ -296,48 +295,46 @@ def check_url(ctx: ToolContext, url: str) -> str:
                f"  Time: {elapsed:.2f}s"
 
 
-def search_duckduckgo(ctx: ToolContext, query: str, max_results: int = 5) -> str:
+def search_web_ddgs(ctx: ToolContext, query: str, max_results: int = 5, backend: str = "auto") -> str:
     """
-    Search the web using DuckDuckGo (no API key required).
+    Search the web using multiple engines via ddgs (no API key required).
+
+    Supports 8+ backends: duckduckgo, bing, brave, google, yandex, mojeek, yahoo, wikipedia.
+    Returns title + URL + snippet for each result, reducing need to browse each page.
 
     Args:
         ctx: Tool context (unused)
         query: Search query
-        max_results: Maximum number of results
+        max_results: Maximum number of results (1-20)
+        backend: Search backend ("auto", "duckduckgo", "bing", "brave", "google", "yandex", "mojeek", "yahoo", "wikipedia")
 
     Returns:
-        Search results
+        Search results with snippets
     """
-    # Use DuckDuckGo HTML version for scraping (query must be URL-encoded)
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return "⚠️ ddgs package not installed. Run: pip install ddgs"
 
-    result = _fetch_url(url)
+    max_results = max(1, min(max_results, 20))
 
-    if not result["success"]:
-        return f"⚠️ Search failed: {result['error']}"
-
-    html_content = result["content"]
-
-    # Extract search results from DDG HTML.
-    # DDG wraps destination URLs in redirect links: /l/?uddg=<percent-encoded-url>
-    # Use DOTALL so titles spanning multiple lines are captured correctly.
-    results = []
-    result_pattern = r'<a[^>]+class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>'
-    matches = re.findall(result_pattern, html_content, re.IGNORECASE | re.DOTALL)
-
-    for raw_href, raw_title in matches[:max_results]:
-        # Decode DDG redirect to get the real destination URL
-        parsed = urlparse(raw_href)
-        qs = parse_qs(parsed.query)
-        real_url = unquote(qs["uddg"][0]) if "uddg" in qs else raw_href
-        # Strip any residual HTML tags and decode entities in the title
-        title = html_module.unescape(re.sub(r"<[^>]+>", "", raw_title).strip())
-        results.append(f"  • {title}\n    {real_url}")
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results, backend=backend))
+    except Exception as e:
+        return f"⚠️ Search failed: {e}"
 
     if not results:
         return f"No results found for: {query}"
 
-    return f"Search results for '{query}':\n\n" + "\n\n".join(results)
+    output_lines = [f"Search results for '{query}' ({len(results)} found, backend={backend}):\n"]
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "")
+        url = r.get("href", "")
+        snippet = r.get("body", "")
+        output_lines.append(f"  {i}. {title}\n     {url}\n     {snippet}")
+
+    return "\n\n".join(output_lines)
 
 
 def get_tools() -> List[ToolEntry]:
@@ -432,7 +429,7 @@ def get_tools() -> List[ToolEntry]:
             name="search_web",
             schema={
                 "name": "search_web",
-                "description": "Search the web using DuckDuckGo (no API key required)",
+                "description": "Search the web using multiple engines (duckduckgo, bing, brave, google, yandex, mojeek, yahoo, wikipedia). Returns title + URL + snippet for each result. Use backend='auto' for automatic fallback across engines.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -446,12 +443,17 @@ def get_tools() -> List[ToolEntry]:
                             "default": 5,
                             "minimum": 1,
                             "maximum": 20
+                        },
+                        "backend": {
+                            "type": "string",
+                            "description": "Search backend: auto, duckduckgo, bing, brave, google, yandex, mojeek, yahoo, wikipedia",
+                            "default": "auto"
                         }
                     },
                     "required": ["query"]
                 }
             },
-            handler=search_duckduckgo,
+            handler=search_web_ddgs,
             timeout_sec=30,
         ),
     ]
