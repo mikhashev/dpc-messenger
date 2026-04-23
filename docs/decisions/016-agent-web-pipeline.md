@@ -72,17 +72,29 @@ Agent web tools are implemented in `browser.py` (~458 lines):
 - Size presets (s/m/l/f) inspired by Searcharvester approach
 - ddgs.extract for quick reads, trafilatura for deep extraction — both available
 
-### Stage 3: Browser (JS rendering) — DEFERRED
+### Stage 3: Browser (JS rendering) — `camoufox` (optional, pip install dpc-client-core[browser])
 
-SPA/Cloudflare sites remain uncovered. Will be addressed separately when need is demonstrated. Not blocking for TOOL-1.
+**Camoufox** — Firefox-based browser with anti-fingerprint at C++ level. Playwright-compatible API. Chosen over pure Playwright for privacy alignment (agent browses with Mike's IP — stealth protects user).
+
+**Lazy fallback in browse_page:** triggers only when tiers 1-3 return <200 chars (likely JS-heavy SPA). Not a separate tool — transparent to the agent.
+
+**4-tier fallback chain:**
+1. trafilatura (markdown extraction)
+2. ddgs.extract (quick content extraction)
+3. HTMLParser (legacy last resort)
+4. Camoufox (JS render → trafilatura) — only if content suspiciously short
+
+**Verified on Windows:** React.dev SPA → 13K+ chars rendered. X.com → auth wall (not JS issue — separate problem).
+
+**Optional dependency:** without camoufox installed, fallback chain stops at tier 3. +530MB Firefox binary on first run.
 
 ### What changes
 
 | Current | Replacement | Status |
 |---|---|---|
-| `search_web` (DDG regex) | `ddgs.text()` multi-engine | Replace |
-| `browse_page` (HTMLParser) | `trafilatura` → markdown | Replace |
-| `extract_links` (regex) | Superset of Stage 2 output | Remove (merged into browse_page) |
+| `search_web` (DDG regex) | `ddgs.text()` multi-engine | **Done** (commit `5079928`) |
+| `browse_page` (HTMLParser) | `trafilatura` → markdown + Camoufox fallback | **Done** (commits `91e9967`, `8db1d10`) |
+| `extract_links` (regex) | Superset of Stage 2 output | **Removed** (commit `53b7668`) |
 | `fetch_json` | Unchanged | Keep |
 | `check_url` | Unchanged | Keep |
 
@@ -94,22 +106,27 @@ Tavily-compatible response format across all search backends. De-facto standard 
 
 ## Scope
 
-### Dependencies to add
-- `ddgs` (MIT, ~zero native deps)
-- `trafilatura` (Apache 2.0)
+### Dependencies added
+- `ddgs` (MIT, v9.14.1) — Stage 1 search
+- `trafilatura` (Apache 2.0, v2.0.0) — Stage 2 extraction
+- `camoufox` (v0.4.11, optional `[browser]` extra) — Stage 3 JS rendering
 
-### Files to modify
-- `dpc_agent/browser.py` — rewrite search + extract, keep fetch_json/check_url
-- `dpc_agent/settings.py` — search provider config section
-- `pyproject.toml` / `requirements.txt` — add dependencies
+### Files modified
+- `dpc_agent/tools/browser.py` — search_web replaced (ddgs), browse_page replaced (trafilatura + Camoufox fallback), extract_links removed, async wrappers added
+- `dpc_agent/tools/registry.py` — extract_links removed from CORE_TOOL_NAMES
+- `firewall.py` — extract_links removed from 4 default lists
+- `pyproject.toml` — ddgs + trafilatura added, camoufox as optional `[browser]` extra
+- `ROADMAP.md` — TOOL-1 entry added
+- `backlog.md` — TOOL-1 status updated
 
-### Files to create
-- Provider ABC for search (inside browser.py or separate module — CC decides)
-
-### Documentation updates
-- CLAUDE.md — updated file manifest
-- backlog.md — TOOL-1 status update
-- ROADMAP.md — TOOL-1 progress
+### Implementation (S67, 7 commits)
+1. `5079928` — deps + ddgs search replace
+2. `91e9967` — trafilatura browse_page replace
+3. `53b7668` — extract_links removal + firewall/registry cleanup
+4. `b2b7e31` — ADR-016 Draft → Accepted
+5. `0616c56` — async wrappers (asyncio.to_thread)
+6. `8db1d10` — Camoufox Stage 3 lazy fallback
+7. `075aa37` — ROADMAP final update
 
 ---
 
@@ -164,7 +181,9 @@ TOOL-1 addresses **Context A: Internet Search** — agent finding information in
 
 ### Negative
 - **HTML scrape fragility.** ddgs scrapes like current DDG, just with more fallbacks. Individual engine breakages still happen — compensated but not eliminated.
-- **No JS rendering.** SPA/Cloudflare sites still inaccessible until Stage 3 implemented.
+- **JS rendering = heavy.** Camoufox downloads 530MB Firefox binary on first run. Optional dependency mitigates: users who don't need JS skip it.
+- **Camoufox experimental.** v0.4.11 with "highly experimental" warning. Accepted risk for alpha project. Bus factor = 1 (daijro). Mitigated: MIT license, Playwright underneath as fallback option.
+- **Auth-gated sites unsolved.** X.com, Instagram etc. require login even with Camoufox. Separate problem from JS rendering.
 - **ddgs single dependency.** If ddgs maintainer abandons project, we maintain a fork or find alternative. Mitigated: MIT license, can vendor if needed.
 - **Rate limits.** DDG rate-limits after ~50 requests. Mitigated: auto-fallback to other backends.
 
