@@ -30,7 +30,7 @@ dependencies = [
     "gigachat>=0.2.0",
     "dpc-protocol",
     "sentence-transformers>=5.4.1",
-    "faiss-cpu>=1.13; python_version >= '3.12' and python_version < '3.15'",
+    "faiss-cpu",
     "bm25s>=0.3.3",
     "ddgs>=9.14",
     "trafilatura>=1.12,<3.0",
