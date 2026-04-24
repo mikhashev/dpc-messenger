@@ -170,7 +170,6 @@ class ContextFirewall:
             # Task queue tools (v0.16.0+)
             'schedule_task': True,  # Safe, just scheduling
             'get_task_status': True,  # Read-only
-            # Evolution tools (v0.16.0+)
             # Messaging tools (v0.18.0+)
             'send_user_message': True,  # Agent-initiated Telegram messages
             # Task type management tools (v0.18.0+)
@@ -244,7 +243,7 @@ class ContextFirewall:
 
         Args:
             profile_name: Agent profile key (typically agent_id), or None for global-only
-            *keys: Sequence of dict keys to traverse (e.g. 'evolution', 'enabled')
+            *keys: Sequence of dict keys to traverse (e.g. 'history', 'preserve_on_reset')
             default: Value returned when key is absent everywhere
         """
         # Try per-agent profile first
@@ -482,7 +481,6 @@ class ContextFirewall:
                 "personal_context_access": self.dpc_agent_personal_context_access,
                 "device_context_access": self.dpc_agent_device_context_access,
                 "human_knowledge_access": self.dpc_agent_human_knowledge_access,
-                "evolution_enabled": self.evolution_enabled,
             },
             "archive_access": True,  # read_session_archive is a core tool, always available
         }
@@ -574,11 +572,6 @@ class ContextFirewall:
                     'search_web': True,
                     'search_files': True,
                     'search_in_file': True,
-                },
-                'evolution': {
-                    'enabled': False,
-                    'interval_minutes': 60,
-                    'auto_apply': False,
                 },
             }
 
@@ -713,12 +706,6 @@ class ContextFirewall:
                     "personal_context_access": True,
                     "device_context_access": True,
                     "human_knowledge_access": True,
-                    "evolution": {
-                        "_comment": "Evolution settings - autonomous self-modification within sandbox",
-                        "enabled": False,
-                        "interval_minutes": 60,
-                        "auto_apply": False
-                    },
                     "tools": {
                         "_comment": "Enable/disable individual tools. True=allowed, False=blocked",
                         "read_file": True,
@@ -759,12 +746,6 @@ class ContextFirewall:
                         "_comment_task": "Task queue tools - safe scheduling and status checks",
                         "schedule_task": True,
                         "get_task_status": True,
-                        "_comment_evolution": "Evolution tools - control agent self-modification",
-                        "pause_evolution": True,
-                        "resume_evolution": True,
-                        "get_evolution_stats": True,
-                        "approve_evolution_change": False,
-                        "reject_evolution_change": True,
                         "_comment_skills": "Skill and introspection tools",
                         "execute_skill": True,
                         "list_local_agents": True,
@@ -1614,9 +1595,6 @@ class ContextFirewall:
                                 'run_shell', 'claude_code_edit',
                                 # Task queue tools (v0.16.0+)
                                 'schedule_task', 'get_task_status',
-                                # Evolution tools (v0.16.0+)
-                                'pause_evolution', 'resume_evolution', 'get_evolution_stats',
-                                'approve_evolution_change', 'reject_evolution_change',
                                 # Search tools (v0.16.0+)
                                 'search_files', 'search_in_file',
                                 # Extended sandbox tools (v0.16.0+ — read/write merged into read_file/write_file S31)
@@ -1647,22 +1625,6 @@ class ContextFirewall:
                                     logger.warning("Unknown tool in dpc_agent.tools: '%s' (ignored — may be from older config)", tool_name)
                                 if not isinstance(tool_enabled, bool):
                                     errors.append(f"'dpc_agent.tools.{tool_name}' must be a boolean")
-
-                    # Validate evolution settings (v0.17.0+)
-                    if 'evolution' in dpc_agent:
-                        evolution = dpc_agent['evolution']
-                        if not isinstance(evolution, dict):
-                            errors.append("'dpc_agent.evolution' must be a dictionary")
-                        else:
-                            if 'enabled' in evolution and not isinstance(evolution['enabled'], bool):
-                                errors.append("'dpc_agent.evolution.enabled' must be a boolean")
-                            if 'interval_minutes' in evolution:
-                                if not isinstance(evolution['interval_minutes'], int):
-                                    errors.append("'dpc_agent.evolution.interval_minutes' must be an integer")
-                                elif evolution['interval_minutes'] < 1:
-                                    errors.append("'dpc_agent.evolution.interval_minutes' must be at least 1")
-                            if 'auto_apply' in evolution and not isinstance(evolution['auto_apply'], bool):
-                                errors.append("'dpc_agent.evolution.auto_apply' must be a boolean")
 
                     # Validate skills settings (v0.20.0+)
                     if 'skills' in dpc_agent:
@@ -1718,8 +1680,6 @@ class ContextFirewall:
                                         'repo_commit_push',
                                         'run_shell', 'claude_code_edit',
                                         'schedule_task', 'get_task_status',
-                                        'pause_evolution', 'resume_evolution', 'get_evolution_stats',
-                                        'approve_evolution_change', 'reject_evolution_change',
                                         'search_files', 'search_in_file',
                                         'extended_path_list',
                                         'list_extended_sandbox_paths',

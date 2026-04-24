@@ -43,12 +43,6 @@
         read_only?: string[];
         read_write?: string[];
       };
-      evolution?: {
-        _comment?: string;
-        enabled: boolean;
-        interval_minutes: number;
-        auto_apply: boolean;
-      };
       history?: {
         preserve_on_reset: boolean;
         max_archived_sessions: number;
@@ -66,11 +60,6 @@
       sandbox_extensions?: {
         read_only?: string[];
         read_write?: string[];
-      };
-      evolution?: {
-        enabled: boolean;
-        interval_minutes: number;
-        auto_apply: boolean;
       };
       history?: {
         preserve_on_reset: boolean;
@@ -269,15 +258,6 @@
     // Deep copy the rules for editing
     editedRules = JSON.parse(JSON.stringify(rules));
 
-    // Initialize evolution settings if missing
-    if (editedRules && editedRules.dpc_agent && !editedRules.dpc_agent.evolution) {
-      editedRules.dpc_agent.evolution = {
-        enabled: false,
-        interval_minutes: 60,
-        auto_apply: false
-      };
-    }
-
     // Initialize agent_profiles if missing (Phase 4)
     if (editedRules && !editedRules.agent_profiles) {
       editedRules.agent_profiles = {
@@ -293,11 +273,6 @@
             update_scratchpad: true,
             browse_page: true,
             search_web: true,
-          },
-          evolution: {
-            enabled: false,
-            interval_minutes: 60,
-            auto_apply: false,
           },
         },
       };
@@ -623,11 +598,6 @@
       sandbox_extensions: {
         read_only: [],
         read_write: [],
-      },
-      evolution: {
-        enabled: false,
-        interval_minutes: 60,
-        auto_apply: false,
       },
     };
 

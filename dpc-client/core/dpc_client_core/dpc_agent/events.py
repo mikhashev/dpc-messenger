@@ -45,9 +45,6 @@ class EventType(Enum):
     # Tools
     TOOL_EXECUTED = "tool_executed"
 
-    # Evolution
-    EVOLUTION_CYCLE_STARTED = "evolution_cycle_started"
-    EVOLUTION_CYCLE_COMPLETED = "evolution_cycle_completed"
     CODE_MODIFIED = "code_modified"
 
     # Memory
@@ -92,8 +89,7 @@ EVENT_CATEGORIES = {
     "streaming": [EventType.TEXT_CHUNK],
     "consciousness": [EventType.THOUGHT_STARTED, EventType.THOUGHT_COMPLETED],
     "tools": [EventType.TOOL_EXECUTED],
-    "evolution": [EventType.EVOLUTION_CYCLE_STARTED, EventType.EVOLUTION_CYCLE_COMPLETED,
-                  EventType.CODE_MODIFIED],
+    "tools_extended": [EventType.CODE_MODIFIED],
     "memory": [EventType.IDENTITY_UPDATED, EventType.SCRATCHPAD_UPDATED,
                EventType.KNOWLEDGE_UPDATED],
     "budget": [EventType.BUDGET_WARNING, EventType.RATE_LIMIT_HIT],
@@ -301,7 +297,7 @@ class AgentEventEmitter:
         Get recent events by category.
 
         Args:
-            category: Category name (lifecycle, tasks, consciousness, tools, evolution, memory, budget)
+            category: Category name (lifecycle, tasks, tools, tools_extended, memory, budget)
             count: Maximum number of events to return
 
         Returns:
@@ -373,24 +369,6 @@ async def emit_thought_completed(thought_type: str, thought_number: int, **kwarg
     return await get_event_emitter().emit(
         EventType.THOUGHT_COMPLETED,
         {"thought_type": thought_type, "thought_number": thought_number, **kwargs}
-    )
-
-
-async def emit_evolution_cycle(
-    cycle_id: str,
-    files_modified: int = 0,
-    changes_applied: int = 0,
-    **kwargs
-) -> AgentEvent:
-    """Emit an evolution cycle completed event."""
-    return await get_event_emitter().emit(
-        EventType.EVOLUTION_CYCLE_COMPLETED,
-        {
-            "cycle_id": cycle_id,
-            "files_modified": files_modified,
-            "changes_applied": changes_applied,
-            **kwargs
-        }
     )
 
 

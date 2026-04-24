@@ -113,16 +113,6 @@
       ]
     },
     {
-      name: 'Evolution Tools (agent self-modification)',
-      tools: [
-        { key: 'pause_evolution', label: 'Pause Evolution', desc: 'Pause automatic evolution cycles' },
-        { key: 'resume_evolution', label: 'Resume Evolution', desc: 'Resume paused evolution' },
-        { key: 'get_evolution_stats', label: 'Evolution Stats', desc: 'Get evolution statistics' },
-        { key: 'approve_evolution_change', label: 'Approve Change', desc: 'Approve pending self-modification (dangerous)', isDanger: true },
-        { key: 'reject_evolution_change', label: 'Reject Change', desc: 'Reject pending changes' },
-      ]
-    },
-    {
       name: 'Messaging Tools (user communication)',
       tools: [
         { key: 'send_user_message', label: 'Send User Message', desc: 'Send Telegram messages to user (agent-initiated)' },
@@ -176,19 +166,6 @@
       };
     }
   }
-
-  // Initialize evolution object if missing
-  function ensureEvolutionSettings() {
-    if (!editSettings) return;
-    if (!editSettings.evolution) {
-      editSettings.evolution = {
-        enabled: false,
-        interval_minutes: 60,
-        auto_apply: false
-      };
-    }
-  }
-
 
   // Auto-initialize skills when entering edit mode so bind:checked doesn't crash
   $: if (editMode && editSettings && !editSettings.skills) {
@@ -482,97 +459,6 @@
             <p class="help-text-small">Inject relevant memory hints into agent context automatically</p>
           </div>
         </div>
-
-        <!-- Evolution Settings Section (per-agent) -->
-        <div class="subsection">
-          <h4>Evolution Settings</h4>
-          <p class="help-text-small">Configure autonomous self-modification behavior</p>
-
-          <div class="setting-item">
-            <label>
-              {#if editMode && editSettings?.evolution}
-                <input
-                  type="checkbox"
-                  id="agent-evolution-enabled"
-                  bind:checked={editSettings.evolution.enabled}
-                />
-              {:else}
-                <input
-                  type="checkbox"
-                  id="agent-evolution-enabled-display"
-                  checked={displaySettings.evolution?.enabled || false}
-                  disabled
-                />
-              {/if}
-              <span>Enable Evolution</span>
-            </label>
-            <p class="help-text-small">Allow agent to autonomously improve itself within sandbox</p>
-          </div>
-
-          {#if (editMode ? editSettings?.evolution?.enabled : displaySettings.evolution?.enabled)}
-            <div class="setting-item" style="margin-top: 0.75rem;">
-              <span><strong>Interval (minutes):</strong></span>
-              {#if editMode && editSettings?.evolution}
-                {#if !editSettings.evolution}
-                  {@html ''}
-                {/if}
-                <input
-                  type="number"
-                  id="agent-evolution-interval"
-                  min="1"
-                  max="1440"
-                  bind:value={editSettings.evolution.interval_minutes}
-                  style="width: 80px; padding: 0.25rem 0.5rem; border: 1px solid #ccc; border-radius: 4px;"
-                />
-              {:else}
-                <span class="value">{displaySettings.eolution?.interval_minutes || 60}</span>
-              {/if}
-              <span class="help-text-small" style="margin-left: 0.5rem;">Time between evolution cycles</span>
-            </div>
-
-            <div class="setting-item" style="margin-top: 0.5rem;">
-              <label>
-                {#if editMode && editSettings?.evolution}
-                  <input
-                    type="checkbox"
-                    id="agent-evolution-auto-apply"
-                    bind:checked={editSettings.evolution.auto_apply}
-                  />
-                {:else}
-                  <input
-                    type="checkbox"
-                    id="agent-evolution-auto-apply-display"
-                    checked={displaySettings.evolution?.auto_apply || false}
-                    disabled
-                  />
-                {/if}
-                <span>Auto-Apply Changes</span>
-              </label>
-              <p class="help-text-small">If disabled, changes require manual approval</p>
-            </div>
-          {:else if editMode && editSettings}
-            <!-- Initialize evolution object when user enables it -->
-            <button
-              type="button"
-              class="add-path-btn"
-              on:click={() => { ensureEvolutionSettings(); ensureMemorySettings(); }}
-              style="display: none;"
-            >Initialize Evolution</button>
-          {/if}
-
-          {#if !editMode}
-            <div class="info-box" style="margin-top: 0.75rem; padding: 0.5rem;">
-              <strong>Evolution</strong> allows the agent to modify its own memory files
-              (identity.md, scratchpad.md, knowledge/*.md) within the ~/.dpc/agents/AGENT_ID/ sandbox.
-              When auto-apply is disabled, you must manually approve each change.
-            </div>
-          {/if}
-        </div>
-      {/if}
-
-      {#if !isGlobal}
-        <!-- Consciousness removed — replaced by Sleep Consolidation (ADR-014) -->
-      {/if}
 
       {#if !isGlobal}
         <!-- Skills Settings Section (per-agent) -->
@@ -953,7 +839,7 @@
     {:else if hasCustomProfile}
       <strong>Info:</strong> These are <strong>custom settings</strong> for agent <strong>{agentName || 'this agent'}</strong>.
       This agent overrides the global defaults with its own profile.
-      Evolution and sandbox paths are configured individually for this agent.
+      Sandbox paths are configured individually for this agent.
       File operations are always sandboxed to ~/.dpc/agents/AGENT_ID/
     {:else}
       <strong>Info:</strong> Agent <strong>{agentName || 'this agent'}</strong> is <strong>inheriting global settings</strong>.
