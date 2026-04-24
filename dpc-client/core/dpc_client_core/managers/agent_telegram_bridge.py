@@ -54,8 +54,7 @@ EVENT_EMOJIS = {
     "task_started": "▶️",
     "task_completed": "✅",
     "task_failed": "❌",
-    "thought_started": "💭",
-    "thought_completed": "🧠",
+    "sleep_state_changed": "😴",
     "tool_executed": "🔧",
     "code_modified": "📝",
     "identity_updated": "👤",
@@ -1390,16 +1389,22 @@ Send a voice message and it will be transcribed and processed\\.
         if "tool" in data:
             lines.append(f"🔧 Tool: `{escape_markdown(str(data['tool']))}`")
 
-        # Thought events
-        if "thought_type" in data:
-            lines.append(f"💭 Thought: {escape_markdown(str(data['thought_type']))}")
-        if "thought_number" in data:
-            lines.append(f"#️⃣ Number: {data['thought_number']}")
+        # Sleep events — custom formatting
+        if event.type == EventType.SLEEP_STATE_CHANGED:
+            status = data.get("status", "unknown")
+            agent_id = data.get("agent_id", "Agent")
+            if status == "sleeping":
+                lines = [f"😴 *{escape_markdown(agent_id)} went to sleep*"]
+            elif status == "awake" and data.get("result") == "completed":
+                n = data.get("sessions_analyzed", 0)
+                lines = [f"☀️ *{escape_markdown(agent_id)} woke up* — {n} sessions analyzed"]
+            elif status == "awake" and data.get("result") == "error":
+                err = escape_markdown(str(data.get("error", "unknown"))[:200])
+                lines = [f"❌ *{escape_markdown(agent_id)} sleep error:* {err}"]
+            else:
+                lines = [f"😴 *{escape_markdown(agent_id)}* — {escape_markdown(status)}"]
+            return "\n".join(lines)
 
-        if "cycle_id" in data:
-            lines.append(f"🔄 Cycle: `{escape_markdown(str(data['cycle_id']))}`")
-        if "cycle_number" in data:
-            lines.append(f"#️⃣ Cycle #: {data['cycle_number']}")
         if "files_modified" in data:
             lines.append(f"📄 Files: {data['files_modified']}")
         if "changes_applied" in data:

@@ -1018,7 +1018,7 @@ class Settings:
     def get_dpc_agent_telegram_event_filter(self) -> list[str]:
         """Get list of event types to forward to Telegram."""
         filter_str = self.get('dpc_agent_telegram', 'event_filter',
-                              'task_completed,task_failed,code_modified,agent_message')
+                              'task_completed,task_failed,code_modified,agent_message,sleep_state_changed')
         return [e.strip() for e in filter_str.split(',') if e.strip()]
 
     def get_dpc_agent_telegram_transcription_enabled(self) -> bool:

@@ -38,9 +38,8 @@ class EventType(Enum):
     # Streaming
     TEXT_CHUNK = "text_chunk"
 
-    # Consciousness
-    THOUGHT_STARTED = "thought_started"
-    THOUGHT_COMPLETED = "thought_completed"
+    # Sleep Consolidation
+    SLEEP_STATE_CHANGED = "sleep_state_changed"
 
     # Tools
     TOOL_EXECUTED = "tool_executed"
@@ -87,7 +86,7 @@ EVENT_CATEGORIES = {
     "tasks": [EventType.TASK_SCHEDULED, EventType.TASK_STARTED,
               EventType.TASK_COMPLETED, EventType.TASK_FAILED],
     "streaming": [EventType.TEXT_CHUNK],
-    "thoughts": [EventType.THOUGHT_STARTED, EventType.THOUGHT_COMPLETED],
+    "sleep": [EventType.SLEEP_STATE_CHANGED],
     "tools": [EventType.TOOL_EXECUTED],
     "tools_extended": [EventType.CODE_MODIFIED],
     "memory": [EventType.IDENTITY_UPDATED, EventType.SCRATCHPAD_UPDATED,
@@ -361,14 +360,6 @@ async def emit_task_failed(task_id: str, error: str, **kwargs) -> AgentEvent:
     return await get_event_emitter().emit(
         EventType.TASK_FAILED,
         {"task_id": task_id, "error": error[:500], **kwargs}
-    )
-
-
-async def emit_thought_completed(thought_type: str, thought_number: int, **kwargs) -> AgentEvent:
-    """Emit a thought completed event."""
-    return await get_event_emitter().emit(
-        EventType.THOUGHT_COMPLETED,
-        {"thought_type": thought_type, "thought_number": thought_number, **kwargs}
     )
 
 

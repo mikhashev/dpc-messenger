@@ -7650,7 +7650,9 @@ class CoreService:
         if state.get("status") == "sleeping":
             return {"status": "already_sleeping", "state": state}
 
-        await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "sleeping"})
+        sleep_data = {"agent_id": agent_id, "status": "sleeping"}
+        await self.local_api.broadcast_event("sleep_state_changed", sleep_data)
+        await self._emit_sleep_event(agent_id, sleep_data)
 
         async def _run_sleep_background():
             try:
@@ -7668,17 +7670,31 @@ class CoreService:
                         brief["consumed"] = True
                         brief_path = Path.home() / ".dpc" / "conversations" / agent_id / "morning_brief.json"
                         brief_path.write_text(json.dumps(brief, ensure_ascii=False, indent=2), encoding="utf-8")
-                    await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0)})
+                    done_data = {"agent_id": agent_id, "status": "awake", "result": "completed", "sessions_analyzed": result.get("sessions_analyzed", 0)}
+                    await self.local_api.broadcast_event("sleep_state_changed", done_data)
+                    await self._emit_sleep_event(agent_id, done_data)
                 else:
-                    await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": result.get("status")})
+                    other_data = {"agent_id": agent_id, "status": "awake", "result": result.get("status")}
+                    await self.local_api.broadcast_event("sleep_state_changed", other_data)
+                    await self._emit_sleep_event(agent_id, other_data)
             except Exception as e:
                 logger.error("Sleep pipeline background error: %s", e, exc_info=True)
-                await self.local_api.broadcast_event("sleep_state_changed", {"agent_id": agent_id, "status": "awake", "result": "error", "error": str(e)})
+                err_data = {"agent_id": agent_id, "status": "awake", "result": "error", "error": str(e)}
+                await self.local_api.broadcast_event("sleep_state_changed", err_data)
+                await self._emit_sleep_event(agent_id, err_data)
 
         import asyncio
         asyncio.create_task(_run_sleep_background())
 
         return {"status": "sleeping", "message": "Sleep pipeline started in background"}
+
+    async def _emit_sleep_event(self, agent_id: str, data: dict) -> None:
+        """Emit sleep event via agent event system so Telegram bridge picks it up."""
+        try:
+            from dpc_client_core.dpc_agent.events import EventType, get_event_emitter
+            await get_event_emitter().emit(EventType.SLEEP_STATE_CHANGED, data)
+        except Exception as e:
+            logger.debug("Failed to emit sleep event: %s", e)
 
     # --- Hub Methods ---
 
