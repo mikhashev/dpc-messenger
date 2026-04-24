@@ -227,7 +227,8 @@ class AgentTelegramBridge:
             self._application.add_handler(CommandHandler("status", self._handle_status_command))
             self._application.add_handler(CommandHandler("clear", self._handle_clear_command))
             self._application.add_handler(CommandHandler("newsession", self._handle_newsession_command))
-            self._application.add_handler(CommandHandler("endsession", self._handle_endsession_command))
+            self._application.add_handler(CommandHandler("extract_knowledge", self._handle_extract_knowledge_command))
+            self._application.add_handler(CommandHandler("sleep", self._handle_sleep_command))
 
             # Add handler for inline keyboard votes on knowledge commit proposals
             self._application.add_handler(CallbackQueryHandler(self._handle_vote_callback, pattern=r"^vote:"))
@@ -308,7 +309,8 @@ Welcome\\! You can send messages to the DPC Agent\\.
 /help \\- Show available commands
 /status \\- Check agent status
 /newsession \\- Start a new session
-/endsession \\- End session and save knowledge
+/extract\\_knowledge \\- Extract knowledge from conversation
+/sleep \\- Start sleep consolidation
 
 *Usage:*
 Just send any message and the agent will process it\\.
@@ -333,7 +335,8 @@ Configure event types in `~/.dpc/config.ini` \\[dpc\\_agent\\_telegram\\] sectio
 /status \\- Check agent status
 /clear \\- Clear conversation history and start fresh
 /newsession \\- Start a new session \\(clears history\\)
-/endsession \\- End session and extract knowledge to personal context
+/extract\\_knowledge \\- Extract knowledge from conversation
+/sleep \\- Start sleep consolidation
 
 *Sending Tasks:*
 Just type a message and the agent will process it\\.
@@ -351,7 +354,8 @@ Send a voice message and it will be transcribed and processed\\.
 *Session Management:*
 • /clear — instant history reset \\(no knowledge saved\\)
 • /newsession — same as /clear
-• /endsession — extracts knowledge, shows inline approve/reject buttons
+• /extract\\_knowledge — extracts knowledge, shows inline approve/reject buttons
+• /sleep — starts sleep consolidation \\(requires empty chat\\)
 • You can approve or reject the knowledge proposal directly here
 
 *Tips:*
@@ -493,8 +497,8 @@ Send a voice message and it will be transcribed and processed\\.
         ])
         return text, keyboard
 
-    async def _handle_endsession_command(self, update, context):
-        """Handle /endsession command — end session and trigger knowledge extraction."""
+    async def _handle_extract_knowledge_command(self, update, context):
+        """Handle /extract_knowledge command — trigger knowledge extraction."""
         chat_id = str(update.effective_chat.id)
 
         if chat_id not in self.allowed_chat_ids:
@@ -508,7 +512,7 @@ Send a voice message and it will be transcribed and processed\\.
             return
 
         await update.message.reply_text(
-            "🧠 *Ending Session\\.\\.\\.*\n\nAnalyzing conversation for knowledge\\.\\.\\.",
+            "🧠 *Extracting Knowledge\\.\\.\\.*\n\nAnalyzing conversation\\.\\.\\.",
             parse_mode="MarkdownV2"
         )
 
@@ -543,19 +547,50 @@ Send a voice message and it will be transcribed and processed\\.
                         ]])
 
                     await update.message.reply_text(
-                        f"✅ *Session Ended*\n\n{text}",
+                        f"✅ *Knowledge Extracted*\n\n{text}",
                         parse_mode="MarkdownV2",
                         reply_markup=keyboard,
                     )
                 else:
                     await update.message.reply_text(
-                        "✅ *Session Ended*\n\n"
+                        "✅ *Knowledge Extraction Complete*\n\n"
                         "No new knowledge found in this conversation\\.",
                         parse_mode="MarkdownV2"
                     )
             else:
                 msg = escape_markdown(result.get("message", "Unknown error"))
-                await update.message.reply_text(f"❌ Failed to end session: {msg}", parse_mode="MarkdownV2")
+                await update.message.reply_text(f"❌ Failed to extract knowledge: {msg}", parse_mode="MarkdownV2")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
+
+    async def _handle_sleep_command(self, update, context):
+        """Handle /sleep command — trigger sleep consolidation."""
+        chat_id = str(update.effective_chat.id)
+
+        if chat_id not in self.allowed_chat_ids:
+            return
+
+        service = getattr(self._agent_manager, 'service', None) if self._agent_manager else None
+        if not service:
+            await update.message.reply_text("⚠️ Service not available\\.", parse_mode="MarkdownV2")
+            return
+
+        agent_id = self._agent_id or self._agent_manager.agent_id
+        try:
+            result = await service.toggle_sleep(agent_id)
+            status = result.get("status", "unknown")
+            if status == "sleeping":
+                await update.message.reply_text(
+                    "😴 *Sleep Consolidation Started*\n\n"
+                    "Analyzing session archives\\.\\.\\. "
+                    "You'll get a notification when it's done\\.",
+                    parse_mode="MarkdownV2"
+                )
+            elif status == "already_sleeping":
+                await update.message.reply_text("😴 Already sleeping\\.", parse_mode="MarkdownV2")
+            else:
+                msg = escape_markdown(result.get("message", status))
+                await update.message.reply_text(f"⚠️ {msg}", parse_mode="MarkdownV2")
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {escape_markdown(str(e)[:200])}", parse_mode="MarkdownV2")
 
