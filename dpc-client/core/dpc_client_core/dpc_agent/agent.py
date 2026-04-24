@@ -54,11 +54,6 @@ class AgentConfig:
     # Task queue settings
     enable_task_queue: bool = True
 
-    # Evolution settings
-    evolution_enabled: bool = False
-    evolution_interval_minutes: int = 60
-    evolution_auto_apply: bool = False  # Require approval
-
     # Budget settings
     billing_model: str = "subscription"  # or "pay_per_use"
 
@@ -143,15 +138,8 @@ class DpcAgent:
             budget_usd=self.config.budget_usd,
         )
 
-        # Evolution manager (optional)
-        self._evolution: Optional[Any] = None  # EvolutionManager
-        self._evolution_enabled = self.config.evolution_enabled
-
         # Callback set by agent_manager to deliver scheduled task results to Telegram
         self._telegram_send_fn: Optional[Any] = None
-
-        # Flag: user interaction in progress — evolution should yield
-        self._user_active = False
 
         # Track last usage for session state access by agent_manager
         self._last_usage: Optional[Dict[str, Any]] = None
@@ -871,12 +859,6 @@ class DpcAgent:
 
             log.info("Reminder delivered for task %s: %s", task.id, message[:80])
             return f"Reminder sent: {message}"
-        elif task.task_type == "improvement":
-            # Execute planned improvement via evolution
-            if self._evolution:
-                cycle = await self._evolution.run_evolution_cycle()
-                return cycle.description
-            return "Evolution not enabled"
         elif task.task_type == "review":
             # Run code review
             return await self._execute_review(task.data)
@@ -963,60 +945,6 @@ class DpcAgent:
 
         return task
 
-    # -------------------------------------------------------------------------
-    # Evolution Methods
-    # -------------------------------------------------------------------------
-
-    def start_evolution(self) -> None:
-        """Start automatic evolution cycles."""
-        if not self._evolution_enabled:
-            log.debug("Evolution not enabled")
-            return
-
-        if self._evolution is not None:
-            log.warning("Evolution already running")
-            return
-
-        from .evolution import EvolutionManager
-
-        self._evolution = EvolutionManager(
-            agent=self,
-            enabled=self._evolution_enabled,
-            interval_minutes=self.config.evolution_interval_minutes,
-            auto_apply=self.config.evolution_auto_apply,
-        )
-        self._evolution.start_automatic_evolution()
-        log.info("Evolution started")
-
-    def stop_evolution(self) -> None:
-        """Stop automatic evolution."""
-        if self._evolution is not None:
-            self._evolution.stop_automatic_evolution()
-            self._evolution = None
-            log.info("Evolution stopped")
-
-    def is_evolution_running(self) -> bool:
-        """Check if evolution is running."""
-        return self._evolution is not None and self._evolution.is_running()
-
-    def get_pending_evolution_changes(self) -> List[Dict[str, Any]]:
-        """Get pending evolution changes awaiting approval."""
-        if self._evolution:
-            return self._evolution.get_pending_changes()
-        return []
-
-    async def approve_evolution_change(self, change_id: str) -> bool:
-        """Approve a pending evolution change."""
-        if self._evolution:
-            return await self._evolution.approve_change(change_id)
-        return False
-
-    def reject_evolution_change(self, change_id: str) -> bool:
-        """Reject a pending evolution change."""
-        if self._evolution:
-            return self._evolution.reject_change(change_id)
-        return False
-
     def get_status(self) -> Dict[str, Any]:
         """Get agent status info."""
         state_path = self.agent_root / "state" / "state.json"
@@ -1044,12 +972,5 @@ class DpcAgent:
                 "enabled": self._queue_enabled,
                 "running": self.queue.is_running(),
                 "stats": self.queue.get_stats(),
-            },
-            "consciousness": {"enabled": False, "running": False, "status": None},
-            "evolution": {
-                "enabled": self._evolution_enabled,
-                "running": self.is_evolution_running(),
-                "status": self._evolution.get_status() if self._evolution else None,
-                "pending_changes": len(self.get_pending_evolution_changes()),
             },
         }

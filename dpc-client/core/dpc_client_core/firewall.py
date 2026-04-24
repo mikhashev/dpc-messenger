@@ -171,11 +171,6 @@ class ContextFirewall:
             'schedule_task': True,  # Safe, just scheduling
             'get_task_status': True,  # Read-only
             # Evolution tools (v0.16.0+)
-            'pause_evolution': True,  # Control, doesn't modify files
-            'resume_evolution': True,  # Control, doesn't modify files
-            'get_evolution_stats': True,  # Read-only
-            'approve_evolution_change': False,  # Modifies files
-            'reject_evolution_change': True,  # Safe, just removes pending change
             # Messaging tools (v0.18.0+)
             'send_user_message': True,  # Agent-initiated Telegram messages
             # Task type management tools (v0.18.0+)
@@ -221,26 +216,18 @@ class ContextFirewall:
         self.sandbox_read_only_paths = [self._normalize_path(p) for p in self.sandbox_read_only_paths if p]
         self.sandbox_read_write_paths = [self._normalize_path(p) for p in self.sandbox_read_write_paths if p]
 
-        # Parse evolution settings (v0.17.0+)
-        evolution = dpc_agent.get('evolution', {})
-        self.evolution_enabled = evolution.get('enabled', False)
-        self.evolution_interval_minutes = evolution.get('interval_minutes', 60)
-        self.evolution_auto_apply = evolution.get('auto_apply', False)
-
         # Parse history settings (v0.22.0+)
         history = dpc_agent.get('history', {})
         self.history_preserve_on_reset = history.get('preserve_on_reset', True)
-        # 0 = unlimited (keep all archives), >0 = cap.
         self.history_max_archived_sessions = max(0, int(history.get('max_archived_sessions', 0)))
 
-        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d, evolution=%s",
+        logger.debug("DPC Agent settings updated: enabled=%s, personal=%s, device=%s, knowledge=%s, tools_count=%d, sandbox_extensions=%d",
                      self.dpc_agent_enabled,
                      self.dpc_agent_personal_context_access,
                      self.dpc_agent_device_context_access,
                      self.dpc_agent_human_knowledge_access,
                      len([t for t in self.dpc_agent_tools.values() if t]),
-                     len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths),
-                     self.evolution_enabled)
+                     len(self.sandbox_read_only_paths) + len(self.sandbox_read_write_paths))
 
     def _normalize_path(self, path_str: str) -> str:
         """Normalize a path string for comparison."""

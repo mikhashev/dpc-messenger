@@ -116,29 +116,11 @@ class DpcAgentManager:
         if llm_manager is None:
             raise RuntimeError("CoreService does not have llm_manager")
 
-        # Build agent config (same as default but with different provider)
-        # Evolution settings: per-agent profile overrides global dpc_agent settings
-        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
-        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
-        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
-        _per_agent_profile = (
-            self.firewall.get_agent_profile_settings(self.agent_id)
-            if (self.firewall and self.agent_id)
-            else None
-        )
-        _per_agent_evo = _per_agent_profile.get('evolution', {}) if _per_agent_profile else {}
-        evolution_enabled = _per_agent_evo.get('enabled', _evo_global_enabled)
-        evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
-        evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
-
+        # Build agent config
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
-            # Per-provider agents don't run background tasks
-            enable_task_queue=False,  # Per-provider agents don't run task queue
-            evolution_enabled=evolution_enabled,
-            evolution_interval_minutes=evolution_interval,
-            evolution_auto_apply=evolution_auto,
+            enable_task_queue=False,
             billing_model=self.config.get("billing_model", "subscription"),
         )
 
@@ -187,26 +169,10 @@ class DpcAgentManager:
             else None
         )
 
-        # Evolution settings: firewall global → per-agent profile override
-        _evo_global_enabled = self.firewall.evolution_enabled if self.firewall else False
-        _evo_global_interval = self.firewall.evolution_interval_minutes if self.firewall else 60
-        _evo_global_auto = self.firewall.evolution_auto_apply if self.firewall else False
-        _per_agent_evo = _per_agent_profile.get('evolution', {}) if _per_agent_profile else {}
-        evolution_enabled = _per_agent_evo.get('enabled', _evo_global_enabled)
-        evolution_interval = _per_agent_evo.get('interval_minutes', _evo_global_interval)
-        evolution_auto = _per_agent_evo.get('auto_apply', _evo_global_auto)
-
-        if _per_agent_evo:
-            log.debug("Agent %s: per-agent overrides (evolution=%s)",
-                      self.agent_id, evolution_enabled)
-
         agent_config = AgentConfig(
             budget_usd=self.config.get("budget_usd", 50.0),
             max_rounds=self.config.get("max_rounds", 200),
             enable_task_queue=self.config.get("enable_task_queue", True),
-            evolution_enabled=evolution_enabled,
-            evolution_interval_minutes=evolution_interval,
-            evolution_auto_apply=evolution_auto,
             billing_model=self.config.get("billing_model", "subscription"),
         )
 
@@ -225,11 +191,6 @@ class DpcAgentManager:
             service=self.service,             # For tools that need firewall access
             compute_host=self.config.get("compute_host", ""),  # Remote peer for LLM inference
         )
-
-        # Start evolution if enabled
-        if agent_config.evolution_enabled:
-            self._agent.start_evolution()
-            log.info(f"Evolution started (interval={agent_config.evolution_interval_minutes}min, auto_apply={agent_config.evolution_auto_apply})")
 
         # Start task processor if enabled
         if agent_config.enable_task_queue:
@@ -388,43 +349,8 @@ class DpcAgentManager:
         log.info("DpcAgent started successfully")
 
     def sync_firewall_settings(self) -> None:
-        """Re-read evolution settings from firewall and start/stop accordingly.
-
-        Called after firewall rules are saved via UI to apply changes without restart.
-        """
-        if self._agent is None:
-            return
-
-        # Read current settings from firewall (same logic as start())
-        _per_agent_profile = (
-            self.firewall.get_agent_profile_settings(self.agent_id)
-            if (self.firewall and self.agent_id)
-            else None
-        )
-
-        # Evolution
-        _evo_global = self.firewall.evolution_enabled if self.firewall else False
-        _per_evo = (_per_agent_profile or {}).get('evolution', {})
-        evo_enabled = _per_evo.get('enabled', _evo_global)
-
-        if evo_enabled and not self._agent.is_evolution_running():
-            self._agent._evolution_enabled = True
-            self._agent.config.evolution_enabled = True
-            self._agent.config.evolution_interval_minutes = _per_evo.get(
-                'interval_minutes',
-                self.firewall.evolution_interval_minutes if self.firewall else 60,
-            )
-            self._agent.config.evolution_auto_apply = _per_evo.get(
-                'auto_apply',
-                self.firewall.evolution_auto_apply if self.firewall else False,
-            )
-            self._agent.start_evolution()
-            log.info("Evolution started via firewall sync")
-        elif not evo_enabled and self._agent.is_evolution_running():
-            self._agent.stop_evolution()
-            self._agent._evolution_enabled = False
-            self._agent.config.evolution_enabled = False
-            log.info("Evolution stopped via firewall sync")
+        """Re-read settings from firewall after UI save. No-op after evolution removal."""
+        pass
 
     async def ensure_started(self) -> "DpcAgentManager":
         """
@@ -612,7 +538,6 @@ class DpcAgentManager:
 
         if self._agent is not None:
             self._agent.stop_task_processor()
-            self._agent.stop_evolution()
             self._agent = None
         log.info("DpcAgent stopped")
 
@@ -728,8 +653,6 @@ class DpcAgentManager:
             # Phase 3: Get provider-specific agent if agent_llm_provider is specified
             agent = self._get_or_create_agent_for_provider(agent_llm_provider) if agent_llm_provider else self.agent
 
-            # Signal consciousness/evolution to yield while user interaction runs
-            agent._user_active = True
             try:
                 response = await agent.process(
                     message=message,
@@ -747,7 +670,7 @@ class DpcAgentManager:
                     reply_telegram_chat_id=telegram_chat_id,
                 )
             finally:
-                agent._user_active = False
+                pass
 
             # Track agent response in monitor.
             # Always save if there's content, thinking, or streaming_raw — the UI
