@@ -343,11 +343,10 @@ The agent registry tracks all created agents in `~/.dpc/agents/_registry.json`:
 
 | Tool | Description |
 |------|-------------|
-| `browse_page` | Fetch and parse web page content |
+| `browse_page` | Fetch web page, extract as markdown (trafilatura) |
 | `fetch_json` | Fetch JSON from API endpoints |
-| `extract_links` | Extract links from web pages |
 | `check_url` | Check URL accessibility |
-| `search_web` | Search via DuckDuckGo (no API key) |
+| `search_web` | Multi-engine search via ddgs |
 
 ### Review Tools
 
