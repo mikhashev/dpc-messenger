@@ -82,9 +82,9 @@ logs/
 .ruff_cache/
 
 # 10. uv / Lock Files
-# We DO commit our lock files, so we ensure they are NOT ignored.
-# The '!' prefix negates a pattern.
-!uv.lock
+# Lock files are platform-specific (CUDA vs CPU vs Metal) — each platform
+# generates its own via `uv sync`. pyproject.toml is the source of truth.
+uv.lock
 # !pdm.lock
 # !Pipfile.lock
 
