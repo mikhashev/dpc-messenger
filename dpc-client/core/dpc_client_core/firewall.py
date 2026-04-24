@@ -166,7 +166,6 @@ class ContextFirewall:
             'repo_commit_push': False,  # Can push to remote
             # Restricted tools (security sensitive)
             'run_shell': False,
-            'claude_code_edit': False,
             # Task queue tools (v0.16.0+)
             'schedule_task': True,  # Safe, just scheduling
             'get_task_status': True,  # Read-only
@@ -179,6 +178,9 @@ class ContextFirewall:
             # Session archive tools (v0.22.0+ - read-only access to own history)
             'read_session_archive': True,  # Read session summaries
             'read_session_detail': True,  # Read session messages
+            'search_session_archives': True,  # Search across session archives
+            # Memory search (ADR-010)
+            'memory_search': True,  # Hybrid BM25 + semantic search across agent knowledge
         }
 
         # Parse tool permissions from config, using defaults for missing tools
@@ -742,7 +744,6 @@ class ContextFirewall:
                         "git_snapshot": False,
                         "repo_commit_push": False,
                         "run_shell": False,
-                        "claude_code_edit": False,
                         "_comment_task": "Task queue tools - safe scheduling and status checks",
                         "schedule_task": True,
                         "get_task_status": True,
@@ -1592,7 +1593,7 @@ class ContextFirewall:
                                 'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
                                 'repo_commit_push',
                                 # Restricted tools
-                                'run_shell', 'claude_code_edit',
+                                'run_shell',
                                 # Task queue tools (v0.16.0+)
                                 'schedule_task', 'get_task_status',
                                 # Search tools (v0.16.0+)
@@ -1678,7 +1679,7 @@ class ContextFirewall:
                                         'git_status', 'git_diff', 'git_log', 'git_add', 'git_commit', 'git_branch', 'git_init',
                                         'git_checkout', 'git_merge', 'git_tag', 'git_reset', 'git_snapshot',
                                         'repo_commit_push',
-                                        'run_shell', 'claude_code_edit',
+                                        'run_shell',
                                         'schedule_task', 'get_task_status',
                                         'search_files', 'search_in_file',
                                         'extended_path_list',
