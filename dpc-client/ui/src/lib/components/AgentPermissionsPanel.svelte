@@ -459,6 +459,7 @@
             <p class="help-text-small">Inject relevant memory hints into agent context automatically</p>
           </div>
         </div>
+      {/if}
 
       {#if !isGlobal}
         <!-- Skills Settings Section (per-agent) -->
