@@ -55,6 +55,13 @@ dev = [
 
 [tool.uv.sources]
 dpc-protocol = { path = "../../dpc-protocol", editable = true }
+torch = { index = "pytorch-cu124", marker = "sys_platform != 'darwin'" }
+torchvision = { index = "pytorch-cu124", marker = "sys_platform != 'darwin'" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]
