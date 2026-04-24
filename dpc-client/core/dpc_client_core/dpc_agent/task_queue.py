@@ -33,7 +33,7 @@ class TaskPriority(Enum):
     """Task priority levels."""
     CRITICAL = 0   # User-initiated, immediate
     HIGH = 1       # Scheduled tasks
-    NORMAL = 2     # Background consciousness
+    NORMAL = 2     # Background tasks
     LOW = 3        # Cleanup, maintenance
 
 

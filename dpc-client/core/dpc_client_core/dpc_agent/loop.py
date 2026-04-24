@@ -249,7 +249,7 @@ def _execute_single_tool(
     Execute a single tool call and return result info.
 
     Args:
-        ctx: Per-call context snapshot — prevents race when consciousness
+        ctx: Per-call context snapshot — prevents race when another process()
              or scheduled tasks swap the shared ToolRegistry._ctx mid-loop.
 
     Returns dict with: tool_call_id, fn_name, result, is_error, args_for_log
@@ -464,7 +464,7 @@ async def run_llm_loop(
     logs_dir = agent_root / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    # Snapshot the context at loop entry — prevents race when consciousness
+    # Snapshot the context at loop entry — prevents race when another process()
     # or another process() call swaps ToolRegistry._ctx mid-loop.
     _loop_ctx = tools._ctx
 

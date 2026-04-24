@@ -39,7 +39,6 @@ class DpcAgentProvider(AIProvider):
 
         # Agent configuration
         self.enabled_tools = config.get("tools", [])  # Tool whitelist
-        self.background_consciousness = config.get("background_consciousness", False)
         self.budget_usd = config.get("budget_usd", 50.0)
         self.max_rounds = config.get("max_rounds", 200)
 
@@ -60,7 +59,7 @@ class DpcAgentProvider(AIProvider):
         self._service = None  # Injected by LLMManager during initialization
 
         logger.info(f"DpcAgentProvider '{alias}' initialized (tools={len(self.enabled_tools)}, "
-                   f"budget=${self.budget_usd}, consciousness={self.background_consciousness})")
+                   f"budget=${self.budget_usd})")
 
     def set_service(self, service: "CoreService") -> None:
         """
@@ -110,7 +109,6 @@ class DpcAgentProvider(AIProvider):
         logger.debug(f"DpcAgentProvider '{self.alias}': Creating new manager for agent '{agent_id}'")
         manager_config = {
             "tools": self.enabled_tools,
-            "background_consciousness": self.background_consciousness,
             "budget_usd": self.budget_usd,
             "max_rounds": self.max_rounds,
             "compute_host": compute_host,
@@ -164,7 +162,6 @@ class DpcAgentProvider(AIProvider):
         # Create manager with configuration
         self._manager = DpcAgentManager(self._service, {
             "tools": self.enabled_tools,
-            "background_consciousness": self.background_consciousness,
             "budget_usd": self.budget_usd,
             "max_rounds": self.max_rounds,
         }, agent_id=None)  # No agent_id for singleton manager
@@ -324,25 +321,10 @@ class DpcAgentProvider(AIProvider):
         return await self.generate_response(enhanced_prompt)
 
     def supports_thinking(self) -> bool:
-        """
-        The agent supports extended thinking via background consciousness.
-
-        Returns:
-            True if background_consciousness is enabled
-        """
-        return self.background_consciousness
+        return False
 
     def get_thinking_params(self) -> Dict[str, Any]:
-        """
-        Return agent-specific thinking parameters.
-
-        Returns:
-            Dict with consciousness configuration
-        """
-        return {
-            "consciousness_mode": "background" if self.background_consciousness else "disabled",
-            "enabled": self.background_consciousness,
-        }
+        return {"enabled": False}
 
     def get_status(self) -> Dict[str, Any]:
         """

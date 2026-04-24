@@ -266,7 +266,6 @@ class Settings:
         # DPC Agent runtime settings (security/permission settings are in privacy_rules.json)
         # Note: enabled and tools settings are configured via Firewall Rules UI
         self._config['dpc_agent'] = {
-            'background_consciousness': 'false',  # Enable background thinking between tasks (optional)
             'budget_usd': '50',  # Maximum budget per task in USD
             'max_rounds': '200',  # Maximum LLM rounds before stopping
             'context_window': '200000',  # Agent context window size (tokens)
@@ -972,11 +971,6 @@ class Settings:
     # Note: Security/permission settings (enabled, tools) are in privacy_rules.json
     # Configure via Firewall Rules UI in the desktop app.
 
-    def get_dpc_agent_background_consciousness(self) -> bool:
-        """Check if background consciousness (thinking between tasks) is enabled."""
-        value = self.get('dpc_agent', 'background_consciousness', 'false')
-        return value.lower() in ('true', '1', 'yes')
-
     # NOTE: Tool control is now handled via privacy_rules.json firewall only
     # See: dpc_agent.tools in ~/.dpc/privacy_rules.json
 
@@ -1040,7 +1034,6 @@ class Settings:
         """
         return {
             # Runtime settings from config.ini
-            'background_consciousness': self.get_dpc_agent_background_consciousness(),
             'budget_usd': self.get_dpc_agent_budget_usd(),
             'max_rounds': self.get_dpc_agent_max_rounds(),
             'context_window': self.get_dpc_agent_context_window(),

@@ -132,47 +132,13 @@ def _build_access_counts(agent_root: pathlib.Path) -> Dict[str, int]:
     return dict(counts)
 
 
-def _check_consciousness_config(agent_root: pathlib.Path) -> bool:
-    """Check if consciousness is enabled (S7 graceful degradation).
-
-    Reads from firewall per-agent profile (privacy_rules.json), falling back
-    to agent config.json. Consciousness is managed through the firewall UI.
-    """
-    # Primary: firewall per-agent profile (where UI saves consciousness settings)
-    try:
-        dpc_home = pathlib.Path(os.environ.get("DPC_HOME", pathlib.Path.home() / ".dpc"))
-        rules_path = dpc_home / "privacy_rules.json"
-        if rules_path.exists():
-            rules = json.loads(rules_path.read_text(encoding="utf-8"))
-            agent_id = agent_root.name
-            profile = rules.get("agent_profiles", {}).get(agent_id, {})
-            if profile:
-                return bool(profile.get("consciousness", {}).get("enabled", False))
-            return bool(rules.get("dpc_agent", {}).get("consciousness", {}).get("enabled", False))
-    except (json.JSONDecodeError, OSError):
-        pass
-    # Fallback: agent config.json
-    config_path = agent_root / "config.json"
-    if not config_path.exists():
-        return False
-    try:
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        return bool(config.get("background_consciousness", False))
-    except (json.JSONDecodeError, OSError):
-        return False
-
-
 def _apply_decay(
     results: List[SearchResult], agent_root: pathlib.Path
 ) -> List[SearchResult]:
     """Re-rank results by access frequency. Unused files sink, used files float.
 
     ADR-013 S4: decay floor 0.1, grace period for new files.
-    S7: consciousness config awareness — log when OFF.
     """
-    if not _check_consciousness_config(agent_root):
-        log.debug("S7: consciousness OFF — suppressed_count signal unavailable for decay")
-
     counts = _build_access_counts(agent_root)
     if not counts:
         return results

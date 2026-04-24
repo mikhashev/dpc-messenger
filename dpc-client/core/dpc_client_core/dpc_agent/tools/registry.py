@@ -376,7 +376,7 @@ class ToolRegistry:
         Args:
             ctx: Explicit context for this call. When provided, avoids reading
                  the shared self._ctx — prevents race conditions when multiple
-                 loops (consciousness, scheduled tasks) run concurrently.
+                 loops (sleep, scheduled tasks) run concurrently.
 
         Returns:
             Tool result as string (errors prefixed with ⚠️)

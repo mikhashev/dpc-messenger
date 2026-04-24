@@ -87,7 +87,7 @@ EVENT_CATEGORIES = {
     "tasks": [EventType.TASK_SCHEDULED, EventType.TASK_STARTED,
               EventType.TASK_COMPLETED, EventType.TASK_FAILED],
     "streaming": [EventType.TEXT_CHUNK],
-    "consciousness": [EventType.THOUGHT_STARTED, EventType.THOUGHT_COMPLETED],
+    "thoughts": [EventType.THOUGHT_STARTED, EventType.THOUGHT_COMPLETED],
     "tools": [EventType.TOOL_EXECUTED],
     "tools_extended": [EventType.CODE_MODIFIED],
     "memory": [EventType.IDENTITY_UPDATED, EventType.SCRATCHPAD_UPDATED,

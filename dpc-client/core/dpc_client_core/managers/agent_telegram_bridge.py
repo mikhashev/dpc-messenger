@@ -378,7 +378,6 @@ Send a voice message and it will be transcribed and processed\\.
                 status_lines.append(f"📊 Initialized: `{status.get('initialized', False)}`")
                 if "agent" in status:
                     agent_status = status["agent"]
-                    status_lines.append(f"🧠 Consciousness: `{agent_status.get('consciousness_running', False)}`")
                     status_lines.append(f"📋 Task Queue: `{agent_status.get('queue_enabled', False)}`")
             except Exception as e:
                 status_lines.append(f"❌ Error getting status: {escape_markdown(str(e))}")
