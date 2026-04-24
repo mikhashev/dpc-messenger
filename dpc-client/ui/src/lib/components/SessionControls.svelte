@@ -88,7 +88,7 @@
   let endSessionTitle = $derived(
     endSessionDisabled
       ? "Peer must be online to extract knowledge (requires voting)"
-      : "Extract knowledge from this conversation"
+      : "Extract reusable knowledge from current conversation"
   );
 </script>
 
@@ -141,7 +141,7 @@
 {/if}
 
 <div class="chat-actions">
-  <button class="btn-new-chat" onclick={() => onNewSession(showForChatId)}>
+  <button class="btn-new-chat" onclick={() => onNewSession(showForChatId)} title="Start fresh conversation (current history archived)">
     New Session
   </button>
   <button
@@ -162,7 +162,7 @@
       class="btn-markdown-toggle"
       class:active={enableMarkdown}
       onclick={() => enableMarkdown = !enableMarkdown}
-      title={enableMarkdown ? 'Disable markdown rendering' : 'Enable markdown rendering'}
+      title={enableMarkdown ? 'Disable markdown rendering in chat messages' : 'Enable markdown rendering in chat messages'}
     >
       {enableMarkdown ? 'Markdown' : 'Text'}
     </button>
@@ -173,7 +173,7 @@
       class:active={isSleeping}
       onclick={() => onToggleSleep?.()}
       disabled={messageCount > 0 && !isSleeping}
-      title={isSleeping ? 'Wake up agent' : messageCount > 0 ? 'End session first' : 'Put agent to sleep'}
+      title={isSleeping ? 'Wake up agent' : messageCount > 0 ? 'End session first' : 'Analyze past sessions, prepare morning brief'}
     >
       {isSleeping ? '☀️ Wakeup' : '🌙 Sleep'}
     </button>
