@@ -137,21 +137,27 @@ def setup_logging(settings):
 
 
 def dependency_setup():
-    """Check GPU status and warn if torch lacks CUDA support (ADR-012)."""
+    """Check GPU/torch status at startup (ADR-012).
+
+    CUDA/ROCm torch is configured via platform markers in pyproject.toml
+    [tool.uv.sources]. This function only verifies the result and warns
+    if there's a mismatch.
+    """
     try:
         import torch
-        if not torch.cuda.is_available():
-            try:
-                result = subprocess.run(
-                    ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                    capture_output=True, text=True, timeout=5
-                )
-                if result.returncode == 0:
-                    gpu_name = result.stdout.strip()
-                    print(f"\n[DPC] NVIDIA GPU detected ({gpu_name}) but torch lacks CUDA.")
-                    print("[DPC] Check pyproject.toml [tool.uv.sources] torch index, then run 'uv sync'.\n")
-            except (FileNotFoundError, subprocess.TimeoutExpired):
-                pass
+        if torch.cuda.is_available():
+            return
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                gpu_name = result.stdout.strip()
+                print(f"\n[DPC] NVIDIA GPU detected ({gpu_name}) but torch lacks CUDA.")
+                print("[DPC] Try: rm -rf .venv && uv sync\n")
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
     except ImportError:
         pass
 
