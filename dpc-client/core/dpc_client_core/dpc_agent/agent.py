@@ -256,6 +256,20 @@ class DpcAgent:
                 "Context size: estimated %d / %d tokens (%.0f%%)",
                 _estimated, _ctx_window, _estimated / _ctx_window * 100,
             )
+
+        # Hard block: refuse to call LLM if context window is nearly full.
+        # Without this guard the LLM call hangs silently (AGENT-CTX-1).
+        if _estimated > _ctx_window * 0.95:
+            _pct = _estimated / _ctx_window * 100
+            log.error(
+                "Context window overflow blocked: %d / %d tokens (%.0f%%)",
+                _estimated, _ctx_window, _pct,
+            )
+            return (
+                f"⚠️ Context window full ({_estimated:,} / {_ctx_window:,} tokens, "
+                f"{_pct:.0f}%). End session to continue."
+            )
+
         ctx = ToolContext(
             agent_root=self.agent_root,
             current_task_id=conversation_id,

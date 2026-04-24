@@ -682,8 +682,8 @@ class DpcAgentManager:
             _has_content = response and response.strip() != _THINKING_FALLBACK
             _has_extras = _thinking or _streaming_raw
 
-            # Skip saving LLM errors to history — they pollute context for future requests
-            _is_llm_error = response and response.startswith("⚠️ LLM error:")
+            # Skip saving agent errors to history — they pollute context for future requests
+            _is_llm_error = response and response.startswith("⚠️")
 
             if (_has_content or _has_extras) and not _is_llm_error:
                 monitor.add_message(
