@@ -133,7 +133,7 @@ git clone https://github.com/mikhashev/dpc-messenger.git
 cd dpc-messenger
 
 cd dpc-client/core
-uv sync
+uv sync          # NVIDIA GPU: installs CUDA torch automatically
 
 cd ../ui
 npm install
@@ -159,7 +159,14 @@ npm run tauri dev
 
 A desktop window will open — that's the app. 
 
-Your private data is stored in `~/.dpc/`. 
+Your private data is stored in `~/.dpc/`.
+
+**AMD GPU (ROCm):** If you have an AMD GPU and want GPU-accelerated inference:
+```bash
+cd dpc-client/core
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+```
+
 ---
 
 ## What's in `.dpc`?

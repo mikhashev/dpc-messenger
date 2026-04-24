@@ -1,9 +1,9 @@
 # ADR-012: Device-Aware Dependency Resolution
 
-**Status:** Accepted
-**Date:** 2026-04-18
+**Status:** Accepted (Revised S69)
+**Date:** 2026-04-18 (revised 2026-04-24)
 **Authors:** CC (draft), Ark (architecture proposal), Mike (direction + original idea)
-**Session:** S51
+**Session:** S51, revised S69
 **Depends on:** ADR-011 (Poetry to uv migration)
 
 ---
@@ -18,115 +18,87 @@ After ADR-011, uv handles the package management side cleanly. But uv's index co
 
 ## Decision
 
-Implement a device-aware dependency resolution layer that reads `device_context.json` and generates a `.env` file with the correct `UV_EXTRA_INDEX_URL`. uv natively reads `.env` files during `uv sync`, completing the automation chain.
+~~Original (S51): `.env` with `UV_EXTRA_INDEX_URL` approach — abandoned.~~
 
-### Architecture
+**Revised (S69):** Use uv platform markers in `pyproject.toml` `[tool.uv.sources]` with `explicit = true` indexes. This is the [officially recommended approach](https://docs.astral.sh/uv/guides/integration/pytorch/) for cross-platform PyTorch with `uv sync`.
 
+### Why `.env` Was Abandoned
+
+The original ADR proposed generating a `.env` file with `UV_EXTRA_INDEX_URL` for per-GPU torch resolution. Testing in S69 proved this **does not work**: uv resolves torch from PyPI (CPU) first regardless of `UV_EXTRA_INDEX_URL`, even with `--index-strategy unsafe-best-match`. The `explicit = true` flag in `[tool.uv.sources]` is the only mechanism that forces uv to use a specific index for a specific package.
+
+### Current Implementation
+
+```toml
+[tool.uv.sources]
+torch = { index = "pytorch-cu124", marker = "sys_platform != 'darwin'" }
+torchvision = { index = "pytorch-cu124", marker = "sys_platform != 'darwin'" }
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
 ```
-device_context_collector.py (existing, runs at DPC startup)
-         ↓
-    device_context.json (GPU type, CUDA version, OS)
-         ↓
-    dependency_setup() (new, in run_service.py)
-      - reads device_context.json
-      - maps GPU type → PyTorch index URL
-      - writes .env with UV_EXTRA_INDEX_URL
-         ↓
-    uv sync (reads .env automatically)
-         ↓
-    correct torch variant installed
-```
 
-### GPU → Index Mapping
+### Platform Coverage
 
-| GPU Type | CUDA Version | UV_EXTRA_INDEX_URL |
-|----------|-------------|-------------------|
-| nvidia | 11.x | `https://download.pytorch.org/whl/cu118` |
-| nvidia | 12.0-12.3 | `https://download.pytorch.org/whl/cu121` |
-| nvidia | 12.4+ | `https://download.pytorch.org/whl/cu124` |
-| amd (ROCm) | any | `https://download.pytorch.org/whl/rocm6.2` (update URL when new ROCm versions ship) |
-| apple (MPS) | n/a | (not set — PyPI default, MPS built-in) |
-| none | n/a | (not set — PyPI default, CPU torch) |
+| Platform | torch variant | Automatic? |
+|----------|--------------|------------|
+| Windows + NVIDIA | CUDA cu124 | Yes (marker) |
+| Linux + NVIDIA | CUDA cu124 | Yes (marker) |
+| macOS (Intel/Apple) | CPU (PyPI) | Yes (marker excludes darwin) |
+| Linux without GPU | CUDA cu124 (works, larger download) | Yes |
+| Linux + AMD (ROCm) | CPU (PyPI) | No — manual: `uv pip install torch --torch-backend=auto` |
 
-This mapping reuses the logic already in `setup_gpu_support.py:map_cuda_to_pytorch()`, but reads from `device_context.json` instead of running nvidia-smi independently.
+### What Was Removed
 
-### What Gets Removed
+- **`setup_gpu_support.py`** (279 lines) — deleted in S51
+- **`uv.lock` from git** — lockfiles are platform-specific, generated locally (S69)
 
-- **`setup_gpu_support.py`** (279 lines) — entire file deleted; functionality replaced by dependency_setup() + .env
-- **`check_gpu_support()`** in `run_service.py` (55 lines) — replaced by dependency_setup() which both detects and fixes
-- **Duplicate GPU detection** — `device_context_collector.py` becomes the single source of truth
+### What Remains
 
-### What Gets Added
-
-- **`dependency_setup()`** function (~40 lines) in `run_service.py`:
-  - Reads `~/.dpc/device_context.json`
-  - Extracts `hardware.gpu.type` and `hardware.gpu.cuda_version`
-  - Maps to index URL using table above
-  - Writes/updates `.env` in workspace root (`dpc-messenger/.env`) with `UV_EXTRA_INDEX_URL`
-  - Staleness check: hashes `device_context.json` content, compares with hash stored in `.env` comment line; regenerates if mismatch
-  - After generating/updating `.env`, calls `subprocess.run(["uv", "sync"])` to install correct torch variant automatically
-  - Runs on first startup (no `.env` exists) and on subsequent startups if device context hash changed
-
-- **`.env` file** in workspace root (`dpc-messenger/.env`, gitignored, device-specific):
-  ```
-  # device_context_hash: a1b2c3d4e5f6
-  UV_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu124
-  ```
-
-### Extensibility
-
-The `.env` approach scales to future hardware-dependent packages. If a new package needs a device-specific index, add another line to the mapping and another env var. The pattern is: device context → mapping table → env var → uv reads it.
-
-The mapping table can later be externalized to a JSON config file (`hardware_packages.json`) if the number of hardware-dependent packages grows beyond torch.
+- **`dependency_setup()`** in `run_service.py` — status check only (warns if NVIDIA detected but torch lacks CUDA)
+- **Platform markers** in `pyproject.toml` — the actual resolution mechanism
 
 ## Consequences
 
 ### Positive
 
-- Zero manual steps for GPU setup — fully automatic on first DPC startup
-- Single source of hardware detection (device_context_collector.py)
-- Cross-platform: works on Windows/Linux/macOS with NVIDIA/AMD/Apple/CPU
-- `.env` is a standard mechanism — uv, pip, and other tools understand it
-- Net code reduction: delete 279 + 55 lines, add ~40 lines
+- Zero manual steps on Windows/Linux (NVIDIA) and macOS — `uv sync` resolves correct torch automatically
+- Platform markers are a standard uv mechanism, not a custom workaround
+- `uv.lock` removed from git — each platform generates its own lockfile
 
 ### Negative
 
-- `.env` is per-machine, not committed to git — new contributors need first startup to generate it
-- If device context is stale (hardware changed between startups), wrong index may persist until restart
-- uv must be installed before `.env` is useful (ordering: install uv → first startup generates .env → uv sync uses it)
-
-### Risks
-
-- CUDA wheels from pytorch index install successfully on CPU-only machines (just larger ~2GB vs ~200MB) — no install failure, but wasted bandwidth if .env generation fails to detect missing GPU
+- CUDA wheels install on Linux without GPU (~2GB vs ~200MB CPU) — no failure, just wasted bandwidth
+- AMD ROCm requires manual step (`uv pip install torch --torch-backend=auto`)
+- `--torch-backend=auto` not available in `uv sync` (only `uv pip`) — limits full automation
 
 ## User Experience
 
-### New User Setup (after ADR-011 + ADR-012)
+### New User Setup
 
 ```bash
 # 1. Install uv
 powershell -c "irm https://astral.sh/uv/install.ps1 | iex"  # Windows
 curl -LsSf https://astral.sh/uv/install.sh | sh              # Linux/macOS
 
-# 2. Clone and install
+# 2. Clone and install — automatic GPU detection
 git clone https://github.com/mikhashev/dpc-messenger
 cd dpc-messenger/dpc-client/core
-uv sync                    # installs CPU torch by default
+uv sync                    # CUDA on Windows/Linux, CPU on macOS
 
-# 3. First run — fully automatic
+# 3. Run
 uv run python run_service.py
-# → device_context.json generated
-# → .env generated with UV_EXTRA_INDEX_URL=.../cu124
-# → dependency_setup() calls "uv sync" automatically
-# → CUDA torch installed, service starts with GPU acceleration
-```
 
-No manual re-sync needed — `dependency_setup()` handles it programmatically.
+# AMD ROCm users (manual):
+uv pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.2
+```
 
 ## References
 
 - ADR-011: Poetry to uv migration (prerequisite)
-- `device_context_collector.py`: existing hardware detection
+- [uv PyTorch guide](https://docs.astral.sh/uv/guides/integration/pytorch/) — official documentation
+- S69 testing: confirmed `.env` approach does not work for per-package index override
 - `setup_gpu_support.py`: current workaround being replaced
 - uv .env support: docs.astral.sh/uv/configuration/environment/
 - S51 discussion: messages [8]-[50] in agent chat
