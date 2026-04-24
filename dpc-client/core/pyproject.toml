@@ -1,6 +1,6 @@
 [project]
 name = "dpc-client-core"
-version = "0.21.0"
+version = "0.22.0"
 description = ""
 authors = [{name = "Mike Shevchenko", email = "legoogmiha@gmail.com"}]
 readme = "README.md"

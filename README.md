@@ -1,6 +1,6 @@
 # D-PC Messenger: Privacy-First Platform for Human-AI Co-Evolution
 
-> **Status:** Alpha | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.21.0
+> **Status:** Alpha | **License:** Multi-License (GPL/LGPL/AGPL/CC0) | **Version:** 0.22.0
 > **Platforms:** Windows | Linux | macOS
 
 ---
